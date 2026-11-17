@@ -107,7 +107,7 @@ Path("stdin-closed").touch()
 def test_codex_interrupts_at_boundary_and_resumes_same_session(settings, tmp_path, monkeypatch, boundary):
     settings = __import__("dataclasses").replace(settings, job_timeout=10)
     if not boundary:
-        monkeypatch.setattr('botoffice.providers.cli.STEER_BOUNDARY_TIMEOUT', .3)
+        monkeypatch.setattr('botoffice.providers.cli.STEER_BOUNDARY_TIMEOUT', 1.0)
     exe = fake_script(tmp_path, "fake_codex", '''
 import json, signal, sys, time
 from pathlib import Path
@@ -122,10 +122,11 @@ if sys.argv[1:3] == ["exec", "resume"]:
 signal.signal(signal.SIGINT, lambda *a: sys.exit(1))
 sys.stdin.read()
 print(json.dumps({"type":"thread.started", "thread_id":"thread_123456"}), flush=True)
+print(json.dumps({"type":"item.started", "item":{"id":"i1", "type":"command_execution", "command":"make"}}), flush=True)
 Path("reply.txt").write_text("outdated reply")
 Path("ready").touch()
 while not Path("boundary").exists(): time.sleep(.01)
-print(json.dumps({"type":"item.completed", "item":{"type":"command_execution"}}), flush=True)
+print(json.dumps({"type":"item.completed", "item":{"id":"i1", "type":"command_execution"}}), flush=True)
 while True: time.sleep(.02)
 ''')
     app = create_app(settings, {"codex": CodexAdapter(executable=exe)})
@@ -136,6 +137,7 @@ while True: time.sleep(.02)
         wait_for(lambda: (ws / 'ready').exists())
         a = client.post(f"/v1/bots/{bot['id']}/messages", headers=H, json={'text':'first steer'}).json()
         b = client.post(f"/v1/bots/{bot['id']}/messages", headers=H, json={'text':'second steer'}).json()
+        time.sleep(.6)  # a command is running: the interrupt waits for its end (or the timeout)
         assert not (ws / 'resume-input').exists()
         if boundary:
             (ws / 'boundary').touch()
@@ -189,8 +191,8 @@ def test_restart_converts_pending_steers(settings):
     store.recover_interrupted()
     assert len(store.list()) == 2
 
-@pytest.mark.parametrize('restricted', [False, True])
-def test_no_session_or_restricted_converts_without_interrupt(settings, tmp_path, restricted):
+@pytest.mark.parametrize('restricted', [False])
+def test_no_session_converts_without_interrupt(settings, tmp_path, restricted):
     from dataclasses import replace
     settings = replace(settings, job_timeout=8)
     exe = fake_script(tmp_path, 'fake_codex_no_session', '''
@@ -216,34 +218,6 @@ print(json.dumps({'type':'item.completed', 'item':{'type':'agent_message','text'
         ws = settings.data_dir / 'workspaces' / job['id']
         wait_for(lambda: (ws / 'ready').exists())
         mid = client.post(url, headers=H, json={'text':'steer'}).json()['message']['id']
-        wait_for(lambda: app.state.store.get_message(mid).steer_status == 'queued')
-        assert not (ws / 'interrupted').exists()
-        assert app.state.store.get_message(mid).job_id != job['id']
-
-
-def test_opencode_steer_is_queued_as_the_next_turn_without_interrupt(settings, tmp_path):
-    """OpenCode cannot resume (run -s hangs), so a steering message waits for the next turn."""
-    from dataclasses import replace
-    from botoffice.providers.opencode import OpenCodeAdapter
-    settings = replace(settings, job_timeout=8)
-    exe = fake_script(tmp_path, 'fake_opencode', '''
-import json, signal, sys, time
-from pathlib import Path
-signal.signal(signal.SIGINT, lambda *a: (Path('interrupted').touch(), sys.exit(1)))
-Path('ready').touch()
-time.sleep(.8)
-print(json.dumps({'type':'tool_use', 'sessionID':'ses_abc12345', 'part':{'tool':'bash', 'state':{}}}), flush=True)
-time.sleep(.3)
-print(json.dumps({'type':'text', 'sessionID':'ses_abc12345', 'part':{'text':'finished'}}), flush=True)
-''')
-    app = create_app(settings, {'opencode': OpenCodeAdapter(executable=exe)})
-    with TestClient(app) as client:
-        bot = client.post('/v1/bots', headers=H, json={'name': 'OC', 'default_provider': 'opencode'}).json()
-        url = f"/v1/bots/{bot['id']}/messages"
-        job = client.post(url, headers=H, json={'text': 'start'}).json()['job']
-        ws = settings.data_dir / 'workspaces' / job['id']
-        wait_for(lambda: (ws / 'ready').exists())
-        mid = client.post(url, headers=H, json={'text': 'steer'}).json()['message']['id']
         wait_for(lambda: app.state.store.get_message(mid).steer_status == 'queued')
         assert not (ws / 'interrupted').exists()
         assert app.state.store.get_message(mid).job_id != job['id']

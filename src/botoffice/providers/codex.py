@@ -43,10 +43,22 @@ class CodexAdapter(CliAdapter):
         return {"CODEX_HOME": os.path.join(isolation.bots_home(), ".codex")}
 
     supports_resume = True
+    tracks_tools = True
 
     def _can_resume(self, job) -> bool:
-        # `codex exec resume` has no --approve-for-me/--sandbox, so restricted bots stay fresh
+        # `codex exec resume` has no --approve-for-me/--sandbox, so restricted bots stay fresh. A message
+        # to a restricted bot still steers it (0.11.7): the interrupted run is started again with the
+        # same restricted flags (CliAdapter.steering "restart"), never resumed under other ones.
         return super()._can_resume(job) and self._full_access(job)
+
+    def _tool_signal(self, obj):
+        item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+        kind, itype, key = obj.get("type"), item.get("type"), str(item.get("id") or "")
+        if kind == "item.started" and itype in ("command_execution", "mcp_tool_call", "web_search", "file_change"):
+            return "start", key
+        if kind == "item.completed" and itype not in ("agent_message", "reasoning"):
+            return "end", key
+        return None
 
     def _access_args(self, job) -> list[str]:
         """Sandbox/approval flags: full = the bypass flag (as 0.10.x); strict-profile full =
