@@ -25,6 +25,10 @@ class OpenCodeAdapter(CliAdapter):
     # first directory), so every turn is a fresh session carrying the compact handoff context
     # (scheduler: engines that cannot resume). No session id is saved.
     supports_resume = False
+    # A message sent while OpenCode works steers it by restart (0.11.7, CliAdapter.steering "restart"):
+    # the run is interrupted and started again as the same job with the same flags, the job's prompt,
+    # a note of the steps it had taken (text and tool calls from its stream) and the message. Because
+    # `run -s` cannot be used, no session is resumed and the model keeps only that note, not its context.
     # a hung run prints nothing at all: stop it instead of waiting for the job timeout
     idle_timeout: float | None = 60.0
 

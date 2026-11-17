@@ -73,6 +73,29 @@ class StreamParser:
         self.error_text: str | None = None
         self.api_status: int | None = None
         self.usage: dict[str, Any] | None = None
+        # 0.11.7: short lines of what this invocation did ("said ...", "ran ..."), kept so that a
+        # steering restart can tell the new invocation where the interrupted one got to
+        self.progress: list[str] = []
+        self._said = ""
+
+    def record(self, kind: str, data: dict[str, Any]) -> None:
+        """Remember a normalized event for :attr:`progress` (text is merged into one narration line)."""
+        if kind == "text":
+            text = str(data.get("text") or "")
+            self._said = text if data.get("replace") else self._said + text
+            return
+        if kind == "tool":
+            self.flush_said()
+            line = "ran " + str(data.get("name") or "tool")
+            if data.get("summary"):
+                line += ": " + str(data["summary"])
+            self.progress.append(_clip(line, 240))
+
+    def flush_said(self) -> None:
+        said = " ".join(self._said.split())
+        self._said = ""
+        if said:
+            self.progress.append("said: " + _clip(said, 600))
 
     def feed(self, obj: Any) -> list[Event]:
         return []

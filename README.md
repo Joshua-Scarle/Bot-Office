@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.6. What changed is recorded below: [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.7. What changed is recorded below: [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -116,7 +116,7 @@ Other routes include `POST/GET /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/{i
 
 ## Providers
 
-OpenCode uses the official `opencode` executable on the service PATH. On the server, run `opencode auth login` or configure a provider API key in the service environment. Choose a `provider/model` ID; effort is passed as an OpenCode variant and availability depends on the model. OpenCode 1.19.5 `run -s` resume hangs (and a session stays bound to its first directory), so Bot-Office starts every OpenCode turn fresh with the compact handoff context (WORKING.md and the last 12 messages); a message sent while an OpenCode turn runs is queued as the next turn, and the chat says so at once ("OpenCode cannot take a message while it works, so yours is queued as the next turn."). A run that prints nothing at all (stdout or stderr) in its first 60 s is killed and fails as a provider error (retried by the normal rules); after its first output the guard is off and only the turn timeout applies, so a long silent tool call is never killed; a job with an open `desk ask` question is not killed either. Provider credentials remain under the CLI’s control.
+OpenCode uses the official `opencode` executable on the service PATH. On the server, run `opencode auth login` or configure a provider API key in the service environment. Choose a `provider/model` ID; effort is passed as an OpenCode variant and availability depends on the model. OpenCode 1.19.5 `run -s` resume hangs (and a session stays bound to its first directory), so Bot-Office starts every OpenCode turn fresh with the compact handoff context (WORKING.md and the last 12 messages); a message sent while an OpenCode turn runs steers that turn by a restart (0.11.7, see [Real-time steering](#real-time-steering-091)): the run is interrupted and started again as the same job with the same prompt, a note of the steps it had taken and your message. A run that prints nothing at all (stdout or stderr) in its first 60 s is killed and fails as a provider error (retried by the normal rules); after its first output the guard is off and only the turn timeout applies, so a long silent tool call is never killed; a job with an open `desk ask` question is not killed either. Provider credentials remain under the CLI’s control.
 
 Enabled by default: `codex`, `claude`, `cursor`, `antigravity`, `opencode`. `grok` stays disabled. `BOT_OFFICE_PROVIDERS` (or `AGENTDESK_PROVIDERS`) restricts the set.
 
@@ -138,6 +138,27 @@ Restricted-mode command lines:
 **Claude reason rule:** a job or chat turn may use `claude` only with a non-empty `reason` (request, or the bot's stored default reason); otherwise the API returns 400. The reason is stored on the job and one line (timestamp, job id, reason) is appended to `data/claude-use-log.tsv` (mode 0600). Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.11.7
+
+**A message sent while any engine works steers that turn; it is never the next turn** (except when the turn ends before the message could be delivered, as before). 0.11.6 still queued the message for OpenCode and for restricted Codex, Cursor and Antigravity bots, and made the other engines wait up to 15 seconds for a step boundary. Now:
+
+| Engine and access | How the message reaches the turn | Expected delay (estimates, not measured with real CLIs) |
+| --- | --- | --- |
+| Claude (any access) | written to the open stream-json stdin and acknowledged by its echo (unchanged, `live`) | about 0.1 s |
+| Codex, Cursor, Antigravity, full access | the CLI is interrupted (SIGINT) and the same session is resumed with the message (`interrupt`) | 0.3 s plus the CLI's own stop and restart, roughly 1 to 5 s in total |
+| Codex, Cursor, Antigravity, restricted access | the CLI is interrupted and the same job is run again by a new invocation with the same restricted flags, its prompt, a note of what the first one did and the message (`restart`) | same |
+| OpenCode (any access) | same restart; OpenCode cannot resume a session (`run -s` hangs on 1.19.5), so none is used | up to about 1.5 s plus start-up |
+
+*Timing.* An idle moment (the model is thinking or writing) is interrupted 0.3 s after the message arrives, which also lets messages sent in quick succession travel together. A tool step that Codex, Cursor or Antigravity announce as running (a command, an MCP call, a file change) gets up to 5 s (`STEER_BOUNDARY_TIMEOUT`) to finish first, so a half-done command is not cut if it is nearly done. OpenCode announces only finished tool calls, so it waits up to 1.5 s (`STEER_UNKNOWN_WAIT`) for one and otherwise interrupts mid-step. If the CLI ignores the SIGINT it is stopped after 5 s (2 s for a restart). The constants are at the top of `providers/cli.py`.
+
+*Why restricted access restarts instead of resuming.* `codex exec resume` takes no `--approve-for-me` or sandbox flag and Cursor needs the per-bot workspace to resume, so a resumed segment of a restricted bot would run under different limits from the first. The restart reuses exactly the flags of the interrupted invocation, so the limits cannot change mid-turn. A restart does not keep the model's own earlier reasoning: the new run gets the job's prompt, the interrupted run's narration and tool calls (up to 60 lines, newest kept, within the 128 KiB argument limit) and your message, and works in the same workspace, so files, git state and `reply.txt` carry over. A command that was running is cut and may need re-running; the note tells the bot to re-check the last step. Token usage is the sum of the invocations.
+
+*Chat.* The hint under the composer says which of the four applies; a message not yet taken shows "Delivering in a moment" and then the usual "Delivered to <bot>". `GET /v1/bots` reports `steering` as `live`, `interrupt`, `restart` or `queue`; `queue` is now only for an engine whose adapter sets `restart_steering = False`, and no built-in engine does. The queue-with-a-reason path of 0.11.6 (`delivery: "queue"`, `delivery_note`, `steer_note`) is unchanged for that case, for `mode: "queue"` and for a bot answering another bot.
+
+**Not verified here.** Only fake CLIs were run (tests/test_steer_all_engines.py and tests/test_steering.py): they prove the message is delivered into the same job and session or prompt, the flags are kept, the timing, batching, and several restarts in a row. Real OpenCode, Codex, Cursor and Antigravity were not run, so how each one reacts to a SIGINT in the middle of a step, whether Codex and Cursor resume cleanly after it, and the quality of an OpenCode restart from the note are unconfirmed. Codex's `app-server` `turn/steer` RPC and OpenCode's server mode were not used: neither is in the adapters or documented in this repository, and nothing here was invented for them. First real test after deploy: send a steering message to a working bot of each engine and check that the chat shows "Delivered" within a few seconds and that the job's log has a "resuming after steering" or "restarting after steering" line.
+
+Roll back by deploying 0.11.6 (git tag and a database copy first, and no job running). 0.11.7 makes no data change (`steering` is computed, not stored), so there is nothing to restore; a 0.11.6 page talking to a 0.11.7 server would only show its generic hint for the new `restart` value.
 
 ## What changed in 0.11.6
 
@@ -569,11 +590,13 @@ show `pending`, `delivered` (with a delivery time), or `queued` when converted
 to a next turn, with the reason (0.11.6). The POST response says which happened in `delivery` and `delivery_note`. Images remain in the bot's persistent attachment directory.
 
 Claude receives a user message on its open stream-json stdin and acknowledges
-it through the replayed user message. Codex, Cursor, Antigravity and OpenCode
-interrupt at a completed step (or after 15 seconds) and resume the same session;
-the interrupted step may need re-checking. OpenCode, and restricted Codex and Cursor, cannot
-resume and their steering messages are queued at once, with the reason. When a session ID has not yet
-arrived, interruption waits for it; if the job ends without an ID, the message
+it through the replayed user message. Codex, Cursor and Antigravity with full access
+interrupt within a second or two (a running command gets up to 5 seconds to finish)
+and resume the same session; the interrupted step may need re-checking. OpenCode, and restricted
+Codex, Cursor and Antigravity, cannot resume, so since 0.11.7 they are interrupted just as promptly
+and the same job runs again with the same flags, its prompt, a note of what it had done and the
+message (see [0.11.7](#what-changed-in-0117)). When a session ID has not yet
+arrived, a resumable engine's interruption waits for it; if the job ends without an ID, the message
 is queued. Pending messages also become queued turns after a job ends or is
 recovered following a restart. Codex app-server's `turn/steer` RPC could enable
 true mid-turn steering in a future upgrade.

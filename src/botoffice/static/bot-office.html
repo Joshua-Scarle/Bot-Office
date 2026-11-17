@@ -705,7 +705,8 @@ function steerHint(bot, queueing) {
   if (queueing && bot.steering === "queue" && bot.activity === "running") return bot.name + "'s engine cannot take a message while it works, so yours runs as the next turn.";
   if (queueing) return "Your message waits until the current turn is finished.";
   if (bot.steering === "live") return "Live: " + bot.name + " gets your message right away and carries on.";
-  if (bot.steering === "interrupt") return bot.name + " gets your message at the end of its current step: it pauses, reads it and carries on (up to 15 s).";
+  if (bot.steering === "interrupt") return bot.name + " pauses within a second or two (a running command gets up to 5 s to finish), reads your message in the same conversation and carries on.";
+  if (bot.steering === "restart") return bot.name + " cannot take a message mid-run, so its step is stopped within a second or two and the same task starts again with your message and a note of what it had done. Files already changed are kept; its earlier reasoning is not.";
   return "Your message goes to " + bot.name + " as soon as it can take it.";
 }
 $("queue-next").onchange = renderHeader;
@@ -1375,7 +1376,7 @@ function steerMark(m, bot) {
   if (m.steer_status === "delivered")
     return { cls: "delivered", text: "✓ Delivered to " + bot.name + (m.steer_delivered_at ? " " + new Date(m.steer_delivered_at).toLocaleTimeString([], { timeStyle: "short" }) : "") };
   if (m.steer_status === "queued") return { cls: "queued", text: "Queued, runs next" };
-  return { cls: "pending", text: bot.steering === "interrupt" ? "Delivering at the next step" : "Delivering" };
+  return { cls: "pending", text: bot.steering === "interrupt" || bot.steering === "restart" ? "Delivering in a moment" : "Delivering" };
 }
 
 async function loadMessages() {
