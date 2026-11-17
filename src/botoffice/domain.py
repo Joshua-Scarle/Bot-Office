@@ -47,8 +47,9 @@ class Slot(StrEnum):
 
 class Job(BaseModel):
     self_extra: str | None = Field(default=None, exclude=True)
-    # 0.11.9: the baseline text this turn's prompt carried (its snapshot is saved once the turn succeeds)
-    baseline_text: str | None = Field(default=None, exclude=True)
+    # 0.11.10: the owner-side layers this turn's prompt carried, by layer key (snapshots are saved once
+    # the turn succeeds)
+    layer_texts: dict[str, str] | None = Field(default=None, exclude=True)
     id: UUID
     prompt: str
     status: JobStatus
@@ -85,6 +86,9 @@ class Job(BaseModel):
     origin_job_id: UUID | None = None
     # 0.11.0: the watcher that started this turn
     watcher_id: str | None = None
+    # 0.11.10: automatic continuation number (0 = not one) and the turn its chain started from
+    continue_count: int = 0
+    continued_from: UUID | None = None
     bot_name: str | None = Field(default=None, exclude=True)
     api_url: str | None = Field(default=None, exclude=True)
     agent_token: str | None = Field(default=None, exclude=True)
@@ -329,6 +333,17 @@ class Message(BaseModel):
     edit_of: int | None = None
     # the reply's job succeeded but the bot gave no BOT-OFFICE-STATUS line (shown as a subtle label)
     unverified: bool = False
+    # 0.11.10: who wrote it, so only the owner's own typed messages look like the owner's.
+    # owner: typed by the owner; bot: this bot's reply; bot_out: this bot's message to another bot;
+    # bot_in: another bot's (or a bridge sender's) message to this bot; bot_reply: the other bot's
+    # reply copied back; office: written by Bot-Office (routine, wake-up, watcher, assignment step,
+    # automatic continuation); system: a notice. peer names the other bot where there is one.
+    author: Literal["owner", "bot", "bot_out", "bot_in", "bot_reply", "office", "system"] = "owner"
+    peer: str | None = None
+    # 0.11.10: Bot-Office machinery, listed only with ?archived=true (debugging)
+    hidden: bool = False
+    # 0.11.10: on the live placeholder of an automatic continuation, e.g. "3 of 10"
+    continuing: str | None = None
 
 
 class MessagePosted(BaseModel):

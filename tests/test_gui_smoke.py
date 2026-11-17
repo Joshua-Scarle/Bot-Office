@@ -259,7 +259,8 @@ def test_edit_gui_smoke():
     assert "are NOT undone" in page
     assert 'setAttribute("aria-label", "archived")' in page
     # only the owner's own, completed, visible messages are editable
-    assert '!m.sender && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending' in page
+    assert 'isOwnerMessage(m) && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending' in page
+    assert 'function isOwnerMessage(m) { return m.author === "owner" && m.role === "user"; }' in page
 
 
 def test_dictation_gui_smoke():

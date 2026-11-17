@@ -51,6 +51,7 @@ READS_MIGRATION = "reads-seeded-v1"
 BRIDGE_IMPORT = "bridge_json_import"
 BRIDGE_JSON = ("grok_bridge_rate.json", "grok_bridge_threads.json")
 # roles that count as unread: what the bot (or the system) said, never the prompts it received
+# (0.11.10: plus the bot's own messages to other bots, see _UNREAD_WHERE)
 UNREAD_ROLES = ("assistant", "system")
 LEGACY_RENAMES = {("Cursor Bot", "cursor"): "Scout"}
 # A rewound turn is seeded with the complete remaining chat. These bound that seed
@@ -326,10 +327,34 @@ def _minute(moment: datetime) -> datetime:
     return moment.astimezone(UTC).replace(second=0, microsecond=0)
 
 
+def message_author(values: dict) -> tuple[str, str | None]:
+    """(author, peer) of a messages row; see Message.author. ``agent_from`` is the sending bot of the
+    row's job when that job is a bot-to-bot message (agent_messages.from_bot), else None."""
+    role, sender, source = values.get("role"), values.get("sender"), values.get("source")
+    if role == "system":
+        return "system", None
+    if role == "assistant":
+        if source == "inbox" and sender and sender.startswith("from "):
+            return "bot_reply", sender[5:]
+        return "bot", None
+    if sender is None and source in EDITABLE_SOURCES:
+        return "owner", None
+    if source == "assignment" and sender and sender.startswith(("to ", "bot ")):
+        # a hand-off between bots (assignments.Assignments.create): only code sets these senders
+        return ("bot_out", sender[3:]) if sender.startswith("to ") else ("bot_in", sender[4:])
+    if source == "inbox" and sender:
+        if values.get("agent_from") and values["agent_from"] == str(values.get("bot_id")):
+            return "bot_out", sender[3:] if sender.startswith("to ") else sender
+        return "bot_in", sender[4:] if sender.startswith("bot ") else sender
+    return "office", None
+
+
 def _model(cls, row: sqlite3.Row | None, dates: tuple[str, ...]):
     if row is None:
         return None
     values = dict(row)
+    if cls is Message:
+        values["author"], values["peer"] = message_author(values)
     for field in dates:
         if values[field]:
             values[field] = datetime.fromisoformat(values[field])
@@ -413,6 +438,9 @@ class JobStore:
                 ("origin_job_id", "TEXT"),
                 # 0.11.0: the watcher that started this turn (source trigger)
                 ("watcher_id", "TEXT"),
+                # 0.11.10: automatic continuation number (0 = not one) and the turn the chain started from
+                ("continue_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("continued_from", "TEXT"),
             ):
                 if column not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
@@ -490,6 +518,9 @@ class JobStore:
                 ("steer_delivered_at", "TEXT"),
                 ("steer_reason", "TEXT"),  # the API reason, used if the steer becomes a queued turn
                 ("steer_note", "TEXT"),  # 0.11.6: why a steer became a queued turn (shown in the chat)
+                # 0.11.10: Bot-Office machinery (automatic continuations, assignment "Continue" steps,
+                # wake-up prompts, "Not done (continuing)" lines): kept, but not shown in the chat
+                ("hidden", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if column not in message_columns:
                     db.execute(f"ALTER TABLE messages ADD COLUMN {column} {ddl}")
@@ -900,6 +931,23 @@ class JobStore:
             rows = db.execute("SELECT * FROM messages WHERE steer_job_id=? AND steer_status='pending' "
                               "AND archived_at IS NULL ORDER BY id", (str(job_id),)).fetchall()
         return [_model(Message, row, ("created_at",)) for row in rows]
+
+    def delivered_steers(self, job_id: UUID | str) -> int:
+        """How many owner messages were steered into *job_id* while it ran."""
+        with closing(self._connect()) as db:
+            return db.execute("SELECT COUNT(*) FROM messages WHERE steer_job_id=? AND steer_status='delivered'",
+                              (str(job_id),)).fetchone()[0]
+
+    def user_turn_waiting(self, bot_id: UUID | str) -> bool:
+        """A chat or API turn of the owner is queued for this bot (it runs next and decides)."""
+        with closing(self._connect()) as db:
+            return db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='queued' AND source IN ('chat','api') "
+                              "LIMIT 1", (str(bot_id),)).fetchone() is not None
+
+    def pending_approval(self, job_id: UUID | str) -> bool:
+        with closing(self._connect()) as db:
+            return db.execute("SELECT 1 FROM approvals WHERE job_id=? AND status='pending' LIMIT 1",
+                              (str(job_id),)).fetchone() is not None
 
     def has_open_question(self, job_id: UUID | str) -> bool:
         """The job is waiting on an unanswered blocking ``desk ask`` question."""
@@ -1510,7 +1558,10 @@ class JobStore:
     # unread = bot-originated, not archived, newer than the read watermark; a usage-limit notice
     # whose job is no longer parked is hidden from the chat (list_messages), so it never counts
     _UNREAD_WHERE = (
-        "m.bot_id = bots.id AND m.role IN ('assistant','system') AND m.archived_at IS NULL"
+        "m.bot_id = bots.id AND (m.role IN ('assistant','system') OR (m.role='user' AND m.source='inbox'"
+        " AND EXISTS (SELECT 1 FROM agent_messages a WHERE a.job_id=m.job_id AND a.from_bot=m.bot_id))"
+        " OR (m.role='user' AND m.source='assignment' AND m.sender LIKE 'to %'))"
+        " AND m.archived_at IS NULL AND m.hidden=0"
         " AND m.id > COALESCE(r.last_read_message_id, 0)"
         " AND NOT EXISTS (SELECT 1 FROM usage_notices n JOIN jobs j ON j.id=n.job_id WHERE n.message_id=m.id"
         f" AND NOT ({PARKED_SQL} AND n.attempt=j.attempts))"
@@ -1866,9 +1917,12 @@ class JobStore:
 
     def list_messages(
         self, bot_id: UUID | str, limit: int | None = None, *, include_archived: bool = False,
-        up_to: int | None = None, include_progress: bool = True,
+        up_to: int | None = None, include_progress: bool = True, include_hidden: bool | None = None,
     ) -> list[Message]:
+        """*include_hidden* (default: same as *include_archived*) also returns Bot-Office machinery rows."""
         where = "bot_id=?" + ("" if include_archived else " AND archived_at IS NULL")
+        if not (include_archived if include_hidden is None else include_hidden):
+            where += " AND hidden=0"
         if not include_progress:
             where += " AND kind!='say'"
         args: tuple = (str(bot_id),)
@@ -1877,7 +1931,8 @@ class JobStore:
         with closing(self._connect()) as db:
             # a succeeded reply without a BOT-OFFICE-STATUS line is marked "unverified" (subtle label)
             rows = db.execute(
-                f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified"
+                f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified,"
+                " (SELECT a.from_bot FROM agent_messages a WHERE a.job_id=m.job_id LIMIT 1) AS agent_from"
                 f" FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) AS m"
                 " LEFT JOIN jobs AS j ON j.id=m.job_id ORDER BY m.id",
                 (*args, limit if limit is not None else -1),
@@ -2168,6 +2223,7 @@ class JobStore:
     def publish_outcome(
         self, bot_id: UUID | str, job_id: UUID | str, role: str, text: str, *,
         sender: str | None = None, source: str = "chat", attachments: list[str] | None = None,
+        hidden: bool = False,
     ) -> Message | None:
         """Add a job's result to *bot_id*'s chat unless the turn that asked for it has been
         archived by an edit (checked and inserted in one transaction). Returns None if
@@ -2188,9 +2244,9 @@ class JobStore:
                     db.rollback()
                     return None
                 cursor = db.execute(
-                    "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
-                    (key, role, sender, source, text, job_key, now().isoformat(), json.dumps(ids)),
+                    "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments,hidden)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (key, role, sender, source, text, job_key, now().isoformat(), json.dumps(ids), int(hidden)),
                 )
                 row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
                 db.commit()
