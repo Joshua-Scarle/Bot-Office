@@ -1,0 +1,236 @@
+#!/usr/bin/python3 -IS
+"""Bot-Office launcher: the one program the controller (user botoffice) may run as the bots user.
+
+Installed root-owned (0755) at /usr/local/libexec/bot-office-run by deploy/install-isolation.sh,
+with exactly one sudoers rule:
+    botoffice ALL=(ubuntu) NOPASSWD: /usr/local/libexec/bot-office-run
+
+Usage (argv is parsed by hand: fixed options, no shell, nothing interpolated):
+    bot-office-run [--allow-sudo] [--cwd DIR] [--env-stdin] [--runtime-dir] -- PROGRAM [ARG...]
+    bot-office-run --stop-job JOB_ID
+    bot-office-run --which NAME SEARCH_PATH
+    bot-office-run --check
+
+Run mode: sets no_new_privs (so sudo and setuid programs stop working for the bot) unless the
+controller passed --allow-sudo for a bot Joshua allowed; umask 007 (the shared tree is group
+bo-share with setgid dirs); an environment built from scratch: the bots user's HOME, USER,
+LOGNAME, SHELL (XDG_RUNTIME_DIR and the user-bus address only with --runtime-dir, which the
+controller passes for its own rootless podman calls, never for a bot CLI), plus an allowlist of
+the variables the controller sent as one JSON line on stdin (--env-stdin; never on the command line, where other users could read
+the job token). Then it execs PROGRAM, which must be an absolute path to an executable file.
+
+--stop-job: SIGTERM, then SIGKILL, every process of the bots user whose environment carries
+BOT_OFFICE_JOB_ID=<JOB_ID> (the controller cannot signal another user's processes); exit 0 when
+none is left. Best effort: a process that cleared its environment or re-execs faster than the
+scan is missed (the cgroup scope, when there is one, is the reliable stop). --which: the
+absolute path of executable NAME on SEARCH_PATH as the bots user sees it (the controller cannot
+look inside the bots user's home). --check: prints the uid and the no_new_privs state (used by
+isolation-status).
+Stdlib only.
+"""
+import ctypes
+import json
+import os
+import pwd
+import re
+import signal
+import sys
+import time
+
+PR_SET_NO_NEW_PRIVS = 38
+PR_GET_NO_NEW_PRIVS = 39
+HEADER_LIMIT = 64 * 1024
+ALLOWED = frozenset({
+    "PATH", "LANG", "LC_ALL", "TERM", "NO_COLOR", "CODEX_HOME",
+    "BOT_OFFICE_AGENT_TOKEN", "BOT_OFFICE_API_URL", "BOT_OFFICE_JOB_ID", "BOT_OFFICE_BOT_NAME",
+    "BOT_OFFICE_BOT_ID", "BOT_OFFICE_SLOT", "BOT_OFFICE_ASSIGNMENT_ID", "BOT_OFFICE_INBOX_DIR",
+    "BOT_OFFICE_GATE_FILE", "BOT_OFFICE_WORKSPACE", "AGENTDESK_INBOX_DIR", "AGENTDESK_SLOT", "AGENTDESK_BOT_ID",
+})
+API_KEY = re.compile(r"^[A-Z][A-Z0-9_]{0,60}_API_KEY$")
+NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+JOB_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def fail(message, code=126):
+    sys.stderr.write(f"bot-office-run: {message}\n")
+    return code
+
+
+def parse(argv):
+    """(options, program argv) or raises ValueError."""
+    options = {"allow_sudo": False, "cwd": None, "env_stdin": False, "runtime_dir": False}
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--":
+            program = argv[index + 1:]
+            if not program:
+                raise ValueError("no program after --")
+            return options, program
+        if arg == "--allow-sudo":
+            options["allow_sudo"] = True
+        elif arg == "--env-stdin":
+            options["env_stdin"] = True
+        elif arg == "--runtime-dir":
+            options["runtime_dir"] = True
+        elif arg == "--cwd" and index + 1 < len(argv):
+            index += 1
+            options["cwd"] = argv[index]
+        else:
+            raise ValueError(f"unknown option {arg[:40]!r}")
+        index += 1
+    raise ValueError("missing -- PROGRAM")
+
+
+def read_header(fd=0):
+    """One JSON line from stdin, read byte by byte so the rest of stdin stays for the program."""
+    data = bytearray()
+    while len(data) <= HEADER_LIMIT:
+        byte = os.read(fd, 1)
+        if not byte or byte == b"\n":
+            break
+        data += byte
+    else:
+        raise ValueError("environment header too long")
+    value = json.loads(data.decode("utf-8") or "{}")
+    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        raise ValueError("environment header must be a JSON object of strings")
+    return value
+
+
+def _inside(value, base):
+    """True when *value* resolves to *base* or below it (no `..` or link escapes)."""
+    value, base = os.path.realpath(value), os.path.realpath(base)
+    return value == base or value.startswith(base.rstrip("/") + "/")
+
+
+def build_env(sent, user, cwd, runtime_dir=False):
+    """The program's environment: fixed facts about the bots user plus allowlisted variables.
+    XDG_RUNTIME_DIR and the user-bus address only with --runtime-dir (the controller's rootless
+    podman calls); bot CLIs never get them."""
+    env = {"HOME": user.pw_dir, "USER": user.pw_name, "LOGNAME": user.pw_name, "SHELL": user.pw_shell or "/bin/sh",
+           "PATH": "/usr/local/bin:/usr/bin:/bin"}
+    runtime = f"/run/user/{user.pw_uid}"
+    if runtime_dir and os.path.isdir(runtime):
+        env["XDG_RUNTIME_DIR"] = runtime
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={runtime}/bus"
+    for key, value in sent.items():
+        if "\x00" in value:
+            continue
+        if key in ALLOWED or API_KEY.match(key):
+            env[key] = value
+        elif key == "HOME" and cwd and os.path.isabs(value) and _inside(value, cwd):
+            env["HOME"] = os.path.realpath(value)  # restricted runs confine HOME to the job workspace
+    if "PATH" in sent:
+        env["PATH"] = ":".join(part for part in sent["PATH"].split(":") if part.startswith("/")) or env["PATH"]
+    if env.get("CODEX_HOME"):
+        home = env["CODEX_HOME"]
+        if os.path.isabs(home) and _inside(home, user.pw_dir) and os.path.realpath(home) != os.path.realpath(user.pw_dir):
+            env["CODEX_HOME"] = os.path.realpath(home)
+        else:
+            env["CODEX_HOME"] = os.path.join(user.pw_dir, ".codex")
+    return env
+
+
+def no_new_privs():
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) failed")
+
+
+def nnp_state():
+    libc = ctypes.CDLL(None, use_errno=True)
+    return libc.prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
+
+
+def job_pids(job_id, uid, proc="/proc"):
+    marker = f"BOT_OFFICE_JOB_ID={job_id}".encode()
+    found = []
+    for name in os.listdir(proc):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            if os.stat(f"{proc}/{name}").st_uid != uid:
+                continue
+            with open(f"{proc}/{name}/environ", "rb") as handle:
+                if marker in handle.read().split(b"\x00"):
+                    found.append(int(name))
+        except OSError:
+            continue
+    return found
+
+
+def stop_job(job_id, uid):
+    for sig, wait in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
+        pids = job_pids(job_id, uid)
+        if not pids:
+            return 0
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and job_pids(job_id, uid):
+            time.sleep(0.1)
+    return 0 if not job_pids(job_id, uid) else 1
+
+
+def which(name, search_path):
+    for part in search_path.split(":"):
+        candidate = os.path.join(part, name)
+        if part.startswith("/") and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return os.path.realpath(candidate)
+    return None
+
+
+def main(argv):
+    user = pwd.getpwuid(os.getuid())
+    if os.getuid() == 0:
+        return fail("refusing to run as root")
+    if argv[:1] == ["--check"] and len(argv) == 1:
+        print(f"ok uid={os.getuid()} user={user.pw_name} no_new_privs={nnp_state()}")
+        return 0
+    if argv[:1] == ["--which"]:
+        if len(argv) != 3 or not NAME.match(argv[1]):
+            return fail("--which needs NAME SEARCH_PATH", 2)
+        found = which(argv[1], argv[2])
+        if found is None:
+            return 1
+        print(found)
+        return 0
+    if argv[:1] == ["--stop-job"]:
+        if len(argv) != 2 or not JOB_ID.match(argv[1]):
+            return fail("--stop-job needs one job id", 2)
+        return stop_job(argv[1], os.getuid())
+    try:
+        options, program = parse(argv)
+        sent = read_header() if options["env_stdin"] else {}
+    except ValueError as exc:
+        return fail(str(exc), 2)
+    if not os.path.isabs(program[0]) or not os.path.isfile(program[0]) or not os.access(program[0], os.X_OK):
+        return fail("PROGRAM must be an absolute path to an executable file", 2)
+    cwd = options["cwd"]
+    if cwd is not None:
+        if not os.path.isabs(cwd):
+            return fail("--cwd must be absolute", 2)
+        try:
+            os.chdir(cwd)
+        except OSError as exc:
+            return fail(f"cannot enter {cwd}: {exc.strerror}")
+    os.umask(0o007)
+    if not options["allow_sudo"]:
+        try:
+            no_new_privs()
+        except OSError as exc:
+            return fail(str(exc))
+    env = build_env(sent, user, cwd, options["runtime_dir"])
+    try:
+        os.execve(program[0], program, env)
+    except OSError as exc:
+        return fail(f"cannot run {program[0]}: {exc.strerror}")
+    return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

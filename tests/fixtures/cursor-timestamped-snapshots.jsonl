@@ -1,0 +1,83 @@
+{"type": "system", "subtype": "init"}
+{"type": "thinking", "subtype": "completed"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll"}]}, "timestamp_ms": 1700000000001}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " read"}]}, "timestamp_ms": 1700000000002}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " the"}]}, "timestamp_ms": 1700000000003}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " job"}]}, "timestamp_ms": 1700000000004}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " prompt"}]}, "timestamp_ms": 1700000000005}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " and"}]}, "timestamp_ms": 1700000000006}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " follow"}]}, "timestamp_ms": 1700000000007}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " it"}]}, "timestamp_ms": 1700000000008}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " from"}]}, "timestamp_ms": 1700000000009}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " the"}]}, "timestamp_ms": 1700000000010}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " job"}]}, "timestamp_ms": 1700000000011}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " directory."}]}, "timestamp_ms": 1700000000012}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll read the job prompt and follow it from the job directory."}]}, "model_call_id": "00000000-0000-0000-0000-000000000000-0-test", "timestamp_ms": 1700000000013}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll"}]}, "timestamp_ms": 1700000000014}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " read"}]}, "timestamp_ms": 1700000000015}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " the"}]}, "timestamp_ms": 1700000000016}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " session"}]}, "timestamp_ms": 1700000000017}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " files"}]}, "timestamp_ms": 1700000000018}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " and"}]}, "timestamp_ms": 1700000000019}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " standing"}]}, "timestamp_ms": 1700000000020}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " rules"}]}, "timestamp_ms": 1700000000021}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " first,"}]}, "timestamp_ms": 1700000000022}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " then"}]}, "timestamp_ms": 1700000000023}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " run"}]}, "timestamp_ms": 1700000000024}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " the"}]}, "timestamp_ms": 1700000000025}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " date"}]}, "timestamp_ms": 1700000000026}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " and"}]}, "timestamp_ms": 1700000000027}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " hostname"}]}, "timestamp_ms": 1700000000028}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " check"}]}, "timestamp_ms": 1700000000029}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " the"}]}, "timestamp_ms": 1700000000030}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " message"}]}, "timestamp_ms": 1700000000031}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " asks"}]}, "timestamp_ms": 1700000000032}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " for."}]}, "timestamp_ms": 1700000000033}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll read the session files and standing rules first, then run the date and hostname check the message asks for."}]}, "model_call_id": "00000000-0000-0000-0000-000000000000-1-test", "timestamp_ms": 1700000000034}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll"}]}, "timestamp_ms": 1700000000035}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " check"}]}, "timestamp_ms": 1700000000036}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " the"}]}, "timestamp_ms": 1700000000037}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " date."}]}, "timestamp_ms": 1700000000038}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll check the date."}]}, "model_call_id": "00000000-0000-0000-0000-000000000000-2-test", "timestamp_ms": 1700000000039}
+{"type": "tool_call", "subtype": "started", "tool_call": {"shellToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"shellToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll"}]}, "timestamp_ms": 1700000000040}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " check"}]}, "timestamp_ms": 1700000000041}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " the"}]}, "timestamp_ms": 1700000000042}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " hostname"}]}, "timestamp_ms": 1700000000043}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " next."}]}, "timestamp_ms": 1700000000044}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll check the hostname next."}]}, "model_call_id": "00000000-0000-0000-0000-000000000000-3-test", "timestamp_ms": 1700000000045}
+{"type": "tool_call", "subtype": "started", "tool_call": {"shellToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"shellToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "The"}]}, "timestamp_ms": 1700000000046}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " date"}]}, "timestamp_ms": 1700000000047}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " is"}]}, "timestamp_ms": 1700000000048}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " Mon"}]}, "timestamp_ms": 1700000000049}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " Jan"}]}, "timestamp_ms": 1700000000050}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " 5"}]}, "timestamp_ms": 1700000000051}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " 09:00:00"}]}, "timestamp_ms": 1700000000052}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " UTC"}]}, "timestamp_ms": 1700000000053}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " 2026"}]}, "timestamp_ms": 1700000000054}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " and"}]}, "timestamp_ms": 1700000000055}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " the"}]}, "timestamp_ms": 1700000000056}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " hostname"}]}, "timestamp_ms": 1700000000057}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " is"}]}, "timestamp_ms": 1700000000058}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " example-host."}]}, "timestamp_ms": 1700000000059}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "The date is Mon Jan 5 09:00:00 UTC 2026 and the hostname is example-host."}]}}
+{"type": "result", "subtype": "success", "duration_ms": 51471, "duration_api_ms": 51471, "is_error": false, "result": "I'll read the job prompt and follow it from the job directory.I'll read the session files and standing rules first, then run the date and hostname check the message asks for.I'll check the date.I'll check the hostname next.The date is Mon Jan 5 09:00:00 UTC 2026 and the hostname is example-host.", "usage": {"inputTokens": 23315, "outputTokens": 3392, "cacheReadTokens": 94848, "cacheWriteTokens": 0, "reasoningTokens": 2987}}

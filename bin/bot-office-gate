@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Bot-Office action gate: a CLI hook that asks the controller before a tool runs.
+
+Usage (set by Bot-Office per invocation, never globally):
+    bot-office-gate <claude|codex|cursor|antigravity|opencode> [--mode attended|unattended]
+
+Reads the hook JSON on stdin, POSTs it to $BOT_OFFICE_API_URL/v1/agent/gate with the job's
+$BOT_OFFICE_AGENT_TOKEN and answers in the CLI's own hook format. The controller decides; the
+mode (written by the controller before launch) only says how to fail when it cannot be asked:
+- unattended: no token or controller unreachable -> deny (fail closed);
+- attended: protected paths are still denied locally; anything else is allowed (fail open);
+- no token and no mode (Joshua's own CLI): no-op.
+Stdlib only. Never prints the token.
+"""
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+PROVIDERS = ("claude", "codex", "cursor", "antigravity", "opencode")
+# kept in sync with botoffice.rules.SECRET_MARKERS (a test checks)
+SECRET_MARKERS = ("agentdesk.sqlite3", "grok_webhook.json", "/data/token", "bot-office/private",
+                  ".config/bot-office/token", "gate-capabilities.json")
+# kept in sync with botoffice.rules.CONTENT_KEYS: file content and search text are not locations
+CONTENT_KEYS = frozenset({"content", "contents", "new_string", "old_string", "new_source", "text", "pattern",
+                          "prompt", "description", "query", "message", "body", "edits", "todos"})
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+STDIN_LIMIT = 1024 * 1024
+TIMEOUT = 20
+
+
+def _answer(provider, allow, reason=""):
+    """Print the CLI's hook answer; return the exit code."""
+    if provider == "cursor":
+        if allow:
+            print(json.dumps({"permission": "allow"}))
+            return 0
+        print(json.dumps({"permission": "deny", "user_message": reason, "agent_message": reason,
+                          "userMessage": reason, "agentMessage": reason}))
+        return 2
+    if allow:
+        return 0
+    if provider == "antigravity":
+        print(json.dumps({"decision": "deny", "reason": reason}))
+    elif provider in ("claude", "codex"):
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                 "permissionDecisionReason": reason}}))
+    # exit 2 blocks the tool call and feeds stderr back to the model (Claude, Codex, agy hooks)
+    sys.stderr.write(reason + "\n")
+    return 2
+
+
+def _strings(value, out, depth=0):
+    if depth > 6:
+        return
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if key not in CONTENT_KEYS:
+                _strings(item, out, depth + 1)
+    elif isinstance(value, list):
+        for item in value:
+            _strings(item, out, depth + 1)
+
+
+def _secret(event):
+    found = []
+    _strings(event, found)
+    blob = "\n".join(found)
+    for marker in SECRET_MARKERS:
+        # a whole name only, as botoffice.rules.marker_in (`/data/token` is not `/data/tokenizer.json`)
+        before = r"(?<![\w-])" if marker[:1].isalnum() else ""
+        after = r"(?!\w)" if marker[-1:].isalnum() else ""
+        if marker in blob and re.search(before + re.escape(marker) + after, blob):
+            return marker
+    return None
+
+
+def _loopback(url):
+    """http://127.0.0.1:<port> or http://localhost:<port>, judged by the parsed host (Sec 9:
+    `http://127.0.0.1:1@evil/` has host evil)."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (parsed.scheme == "http" and parsed.hostname in LOOPBACK_HOSTS and port is not None
+            and not parsed.username and not parsed.password)
+
+
+def _mode(argv):
+    if "--mode" in argv:
+        index = argv.index("--mode")
+        if index + 1 < len(argv) and argv[index + 1] in ("attended", "unattended"):
+            return argv[index + 1]
+    path = os.environ.get("BOT_OFFICE_GATE_FILE")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = json.load(handle).get("mode")
+            if value in ("attended", "unattended"):
+                return value
+        except (OSError, ValueError, AttributeError):
+            return "unattended"
+    return None
+
+
+def main(argv):
+    provider = argv[1] if len(argv) > 1 and argv[1] in PROVIDERS else "claude"
+    mode = _mode(argv)
+    raw = sys.stdin.buffer.read(STDIN_LIMIT + 1)
+    try:
+        event = json.loads(raw[:STDIN_LIMIT].decode("utf-8", "replace") or "{}")
+    except ValueError:
+        event = {"unparsed": raw[:STDIN_LIMIT].decode("utf-8", "replace")}
+    token = os.environ.get("BOT_OFFICE_AGENT_TOKEN", "")
+    url = os.environ.get("BOT_OFFICE_API_URL", "")
+    marker = _secret(event)
+    if not token or not url:
+        if mode is None:
+            return 0  # not a Bot-Office job (e.g. Joshua's own CLI): no-op
+        if mode == "unattended":
+            return _answer(provider, False, "Bot-Office gate: no job token in an unattended run; action refused.")
+        if marker:
+            return _answer(provider, False, f"Bot-Office gate: protected path ({marker}); action refused.")
+        return _answer(provider, True)
+    if not _loopback(url):
+        return _answer(provider, False, "Bot-Office gate: the controller URL is not loopback; action refused.")
+    body = json.dumps({"provider": provider, "event": event}).encode()
+    request = urllib.request.Request(url.rstrip("/") + "/v1/agent/gate", data=body, method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=TIMEOUT) as response:
+            answer = json.loads(response.read(65536).decode() or "{}")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        if mode != "attended" or marker:
+            why = f"protected path ({marker})" if marker else f"controller unreachable ({type(exc).__name__})"
+            return _answer(provider, False, f"Bot-Office gate: {why}; action refused.")
+        return _answer(provider, True)
+    if answer.get("decision") == "allow":
+        return _answer(provider, True)
+    return _answer(provider, False, str(answer.get("reason") or "Bot-Office gate: action refused."))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

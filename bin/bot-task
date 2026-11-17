@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Assignments, wake-ups and routines of the bot whose turn is running (job-scoped token only)."""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+HELP = """bot-task: your assignments, wake-ups and routines (works only inside a Bot-Office turn)
+
+  bot-task list                                   your open assignments and the children you created
+  bot-task show [<id>|current]                    one assignment with its recent events
+  bot-task status <id>|current <state> [--note TEXT]
+        state: done | continue | blocked | waiting_on_user | waiting_on_bot
+  bot-task checkpoint <id>|current <file>|-      save a checkpoint (at most 4 kB) for your next turns
+  bot-task note <id> TEXT                         add a note to your own assignment or to a child you created
+  bot-task create --title T [--goal G] [--done-when D] [--for BOT --parent <id>|current] [--no-start]
+
+  bot-task wake <id>|current|- (--at ISO | --in 2h | --on-change <id>) [--note TEXT]
+        wake yourself later (5 min .. 30 days ahead; at most 5 pending, 24 a day); "-" = no assignment
+  bot-task wakes                                  your pending wake-ups
+  bot-task unwake <wake-up id>
+  bot-task routine add --cron "0 9 * * 1-5" --prompt TEXT [--name N]   (at most 10, at least 15 min apart)
+  bot-task routine list | edit <id> [--cron C] [--prompt P] [--name N] [--on|--off] | rm <id>
+"""
+
+UNITS = {"m": 1, "h": 60, "d": 24 * 60}
+
+
+def call(method, path, body=None):
+    url = os.environ["BOT_OFFICE_API_URL"] + path
+    token = os.environ["BOT_OFFICE_AGENT_TOKEN"]
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read()).get("detail")
+        except ValueError:
+            detail = exc.reason
+        raise SystemExit(f"bot-task: {exc.code} {detail}") from None
+    return json.loads(raw) if raw else None
+
+
+def quote(ref):
+    return urllib.parse.quote(ref or "current", safe="")
+
+
+def show(item):
+    meter = f"{item['turns_used']}/{item['budget_turns']} turns, {round(item['minutes_used'])}/{item['budget_minutes']} min"
+    print(f"{item['id']}  [{item['status']}]  {item['title']}  ({meter})")
+    if item.get("status_note"):
+        print(f"  note: {item['status_note']}")
+    for event in item.get("events", []):
+        print(f"  {event['created_at'][:16]} {event['kind']}: {event['note']}")
+
+
+def main(argv):
+    if not argv or argv[0] in ("help", "-h", "--help"):
+        print(HELP)
+        return 0
+    command, rest = argv[0], argv[1:]
+    parser = argparse.ArgumentParser(prog=f"bot-task {command}")
+    if command == "list":
+        for item in call("GET", "/v1/agent/assignments"):
+            show(item)
+    elif command == "show":
+        parser.add_argument("id", nargs="?", default="current")
+        args = parser.parse_args(rest)
+        show(call("GET", f"/v1/agent/assignments/{quote(args.id)}"))
+    elif command == "status":
+        parser.add_argument("id")
+        parser.add_argument("state")
+        parser.add_argument("--note", default="")
+        args = parser.parse_args(rest)
+        show(call("POST", f"/v1/agent/assignments/{quote(args.id)}/status", {"state": args.state, "note": args.note}))
+    elif command == "checkpoint":
+        parser.add_argument("id")
+        parser.add_argument("file")
+        args = parser.parse_args(rest)
+        if args.file == "-":
+            text = sys.stdin.read()
+        else:
+            with open(args.file, encoding="utf-8") as stream:
+                text = stream.read()
+        show(call("POST", f"/v1/agent/assignments/{quote(args.id)}/checkpoint", {"text": text}))
+    elif command == "note":
+        parser.add_argument("id")
+        parser.add_argument("text")
+        args = parser.parse_args(rest)
+        call("POST", f"/v1/agent/assignments/{quote(args.id)}/note", {"text": args.text})
+        print("noted")
+    elif command == "create":
+        parser.add_argument("--title", required=True)
+        parser.add_argument("--goal", default="")
+        parser.add_argument("--done-when", default="")
+        parser.add_argument("--for", dest="for_bot")
+        parser.add_argument("--parent")
+        parser.add_argument("--no-start", action="store_true")
+        args = parser.parse_args(rest)
+        body = {"title": args.title, "goal": args.goal, "done_when": args.done_when, "start": not args.no_start}
+        if args.for_bot:
+            body["for_bot"] = args.for_bot
+        if args.parent:
+            body["parent_id"] = args.parent
+        show(call("POST", "/v1/agent/assignments", body))
+    elif command == "wake":
+        parser.add_argument("id")
+        when = parser.add_mutually_exclusive_group()
+        when.add_argument("--at")
+        when.add_argument("--in", dest="within")
+        parser.add_argument("--on-change")
+        parser.add_argument("--note", default="")
+        args = parser.parse_args(rest)
+        body = {"note": args.note}
+        if args.id != "-":
+            body["assignment_id"] = args.id
+        if args.at:
+            body["due_at"] = args.at
+        if args.within:
+            amount, unit = args.within[:-1], args.within[-1:].lower()
+            if not amount.isdigit() or unit not in UNITS:
+                raise SystemExit("bot-task: --in takes a number and m, h or d, e.g. 90m, 2h, 3d")
+            body["in_minutes"] = int(amount) * UNITS[unit]
+        if args.on_change:
+            body["on_assignment"] = args.on_change
+        show_wakeup(call("POST", "/v1/agent/wakeups", body))
+    elif command == "wakes":
+        for wakeup in call("GET", "/v1/agent/wakeups"):
+            show_wakeup(wakeup)
+    elif command == "unwake":
+        parser.add_argument("id")
+        call("DELETE", f"/v1/agent/wakeups/{quote(parser.parse_args(rest).id)}")
+        print("cancelled")
+    elif command == "routine":
+        return routine(rest)
+    else:
+        print(HELP, file=sys.stderr)
+        return 2
+    return 0
+
+
+def show_wakeup(item):
+    when = item.get("due_at") or ""
+    if item.get("on_assignment"):
+        when = (when + " or " if when else "") + f"when {item['on_assignment']} changes"
+    print(f"{item['id']}  [{item['status']}]  {when}  {item.get('note', '')}")
+
+
+def show_routine(item):
+    state = "on" if item["enabled"] else "off"
+    print(f"{item['id']}  [{state}, {item['created_by']}]  {item['cron']}  {item.get('name') or item['prompt'][:60]}")
+
+
+def routine(argv):
+    action, rest = (argv[0], argv[1:]) if argv else ("list", [])
+    parser = argparse.ArgumentParser(prog=f"bot-task routine {action}")
+    if action == "list":
+        for item in call("GET", "/v1/agent/routines"):
+            show_routine(item)
+    elif action == "add":
+        parser.add_argument("--cron", required=True)
+        parser.add_argument("--prompt", required=True)
+        parser.add_argument("--name")
+        args = parser.parse_args(rest)
+        show_routine(call("POST", "/v1/agent/routines", {"cron": args.cron, "prompt": args.prompt, "name": args.name}))
+    elif action == "edit":
+        parser.add_argument("id")
+        parser.add_argument("--cron")
+        parser.add_argument("--prompt")
+        parser.add_argument("--name")
+        parser.add_argument("--on", dest="enabled", action="store_true", default=None)
+        parser.add_argument("--off", dest="enabled", action="store_false")
+        args = parser.parse_args(rest)
+        body = {k: v for k, v in vars(args).items() if k != "id" and v is not None}
+        show_routine(call("PATCH", f"/v1/agent/routines/{quote(args.id)}", body))
+    elif action == "rm":
+        parser.add_argument("id")
+        call("DELETE", f"/v1/agent/routines/{quote(parser.parse_args(rest).id)}")
+        print("removed")
+    else:
+        print(HELP, file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except KeyError as exc:
+        print(f"bot-task: {exc} is not set (bot-task works only inside a Bot-Office turn)", file=sys.stderr)
+        raise SystemExit(1) from None
+    except OSError as exc:
+        print(f"bot-task failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None

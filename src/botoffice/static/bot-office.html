@@ -1,0 +1,2408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Bot-Office</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0f1115; --side: #14171c; --panel: #1a1e25; --raised: #222731;
+  --line: #2a303b; --text: #e4e7ec; --muted: #8b94a3; --accent: #8ab4f8;
+  --accent-ink: #0f1115; --danger: #f28b82; --ok: #81c995; --warn: #fdd663;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: 1px solid var(--line); background: var(--raised); border-radius: 8px; padding: 6px 12px; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button.danger { color: var(--danger); border-color: #5b2f2c; background: transparent; }
+button.danger.solid { background: var(--danger); color: var(--accent-ink); border-color: var(--danger); }
+button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+button.ghost:hover { color: var(--text); }
+input, select, textarea { width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+[hidden] { display: none !important; }
+.muted { color: var(--muted); }
+.flush { margin: 0; }
+.pad { padding: 8px; }
+.actions.start { justify-content: flex-start; }
+.error { color: var(--danger); min-height: 1.5em; margin: 6px 0 0; }
+
+/* Lock screen */
+.lock { min-height: 100%; display: grid; place-items: center; padding: 24px; }
+.lock form { width: min(360px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; display: grid; gap: 12px; }
+.lock h1 { margin: 0; font-size: 22px; }
+
+/* App layout */
+.app { display: grid; grid-template-columns: 272px minmax(0, 1fr); height: 100vh; }
+.sidebar { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.brand { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 8px; font-weight: 700; font-size: 17px; letter-spacing: .2px; }
+.new-bot { margin: 4px 12px 10px; text-align: left; }
+.bot-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 2px; }
+.bot-item { display: grid; grid-template-columns: 36px 1fr auto auto; gap: 10px; align-items: center; width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 8px; }
+.bot-item:hover { background: var(--panel); border-color: transparent; }
+.bot-item.active { background: var(--raised); border-color: var(--line); }
+.bot-item .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-item .sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-item .meta { min-width: 0; }
+.dot { background: #718096; width: 8px; height: 8px; border-radius: 50%; background: #718096; }
+.dot.queued { background: var(--warn); }
+.dot.running { background: var(--ok); }
+.dot.error { background: var(--danger); }
+.dot.offline { background: #56606e; }
+.unread { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); white-space: nowrap; }
+.bot-item.has-unread .name { font-weight: 800; }
+.msg.inbox .body { border: 1px solid #6385ad; }
+#desktop-screen { height: min(65vh, 650px); min-height: 260px; background: #080a0e; }
+#tools-dialog { width: min(900px, calc(100vw - 24px)); }
+.tools-content { padding: 18px; display: grid; gap: 10px; max-height: 90vh; overflow: auto; }
+.tools-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.tools-bar select { width: auto; max-width: 100%; }
+/* bounded: many items scroll inside the panel and never push the bot list or the footer off-screen */
+.needs-you { margin: 0 8px 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; flex: none; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
+.needs-toggle { all: unset; font-weight: 700; }
+.needs-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.needs-item { padding: 4px 0; border-top: 1px solid var(--line); }
+.needs-item .tools-bar { gap: 4px; flex-wrap: wrap; }
+.needs-ask { all: unset; cursor: pointer; display: block; }
+.needs-command { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18em; overflow: auto; margin: 4px 0;
+  padding: 6px; font: 12px/1.4 ui-monospace, monospace; background: rgba(127, 127, 127, 0.12); border-radius: 4px; }
+.sidebar-foot { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+.avatar { width: 36px; height: 36px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); display: grid; place-items: center; font-size: 20px; overflow: hidden; flex: none; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.avatar.lg { width: 40px; height: 40px; font-size: 22px; }
+
+.chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* the header controls wrap onto further rows rather than pushing any off-screen */
+.chat-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+.chat-head h2 { margin: 0; font-size: 16px; }
+.chat-head .grow { flex: 1 1 180px; min-width: 0; }
+.chat-head > button, .chat-head > .model-pill { flex: none; }
+.chat-head .desc { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-pill { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.messages { flex: 1; overflow-y: auto; padding: 20px; }
+.thread { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.msg { display: flex; flex-direction: column; max-width: 85%; }
+.msg .who { font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+.msg .body { white-space: pre-wrap; overflow-wrap: anywhere; padding: 10px 14px; border-radius: 14px; }
+.msg.user { align-self: flex-end; align-items: flex-end; }
+.msg.user .body { background: #263248; border-bottom-right-radius: 4px; }
+.msg.assistant { align-self: flex-start; }
+.msg.assistant .body { background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.msg.system { align-self: center; max-width: 95%; }
+.msg.system .body { font-size: 13px; color: var(--muted); background: transparent; border: 1px dashed var(--line); padding: 6px 12px; }
+.msg .who button.mini { font-size: 12px; padding: 0 6px; margin-left: 6px; background: transparent; border-color: transparent; color: var(--muted); }
+.msg .who button.mini:hover { color: var(--text); border-color: var(--line); }
+.msg .tag { margin-left: 6px; font-style: italic; }
+.msg .tag.unverified { font-size: 11px; color: var(--muted); font-style: normal; opacity: .8; }
+.msg.archived { opacity: .5; }
+.msg.archived .who::after { content: " · archived"; }
+.edit-box { display: grid; gap: 6px; width: min(640px, 80vw); }
+.edit-box textarea { min-height: 80px; resize: vertical; }
+.edit-box .note { font-size: 12px; color: var(--muted); margin: 0; }
+.edit-box .imgs { display: flex; flex-wrap: wrap; gap: 6px; }
+.edit-box .actions { justify-content: flex-end; }
+.msg.live .body.waiting { color: var(--muted); font-style: italic; }
+.msg.live .who::after { content: " · live"; color: var(--ok); }
+.steps { margin: 0 0 6px; font-size: 12px; color: var(--muted); max-width: 100%; }
+.steps > summary { cursor: pointer; user-select: none; padding: 2px 0; }
+.steps > summary:hover { color: var(--text); }
+.step-list { border-left: 2px solid var(--line); margin: 4px 0 0 4px; padding: 2px 0 2px 10px; display: grid; gap: 3px; max-height: 240px; overflow-y: auto; }
+.step { white-space: pre-wrap; overflow-wrap: anywhere; }
+.step.bad { color: var(--danger); }
+.tier { text-transform: capitalize; }
+.typing { align-self: flex-start; color: var(--muted); font-size: 13px; padding: 4px 2px; }
+.empty { margin: auto; text-align: center; color: var(--muted); max-width: 420px; padding: 40px 20px; }
+.empty .avatar { margin: 0 auto 12px; width: 56px; height: 56px; font-size: 30px; border-radius: 16px; }
+
+.composer { padding: 12px 20px 16px; border-top: 1px solid var(--line); }
+.attachment-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.attachment-item { position: relative; font-size: 12px; }
+.attachment-item img, .chat-image { max-width: 120px; max-height: 90px; border-radius: 8px; object-fit: contain; cursor: pointer; }
+.attachment-item button { position: absolute; top: 0; right: 0; padding: 1px 5px; }
+#image-view img { max-width: 85vw; max-height: 80vh; }
+.composer-inner { max-width: 820px; margin: 0 auto; display: grid; gap: 8px; }
+.composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.composer textarea { resize: none; min-height: 46px; max-height: 220px; border-radius: 12px; }
+.status { font-size: 12px; color: var(--muted); min-height: 1.2em; }
+.status.bad { color: var(--danger); }
+#mic[aria-pressed="true"] { background: var(--danger); color: #fff; }
+#mic.busy { opacity: .6; cursor: progress; }
+#read-aloud[aria-pressed="true"] { background: var(--accent, #3b82f6); color: #fff; }
+.msg .play { margin-left: 6px; }
+#voice-panel { display: grid; gap: 10px; }
+#voice-panel .check { display: flex; gap: 8px; align-items: flex-start; }
+
+/* Settings dialog */
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(520px, calc(100vw - 24px)); }
+dialog::backdrop { background: rgba(0, 0, 0, .6); }
+dialog form { display: grid; gap: 12px; padding: 20px; max-height: calc(100vh - 48px); overflow-y: auto; }
+dialog h2 { margin: 0; font-size: 18px; }
+dialog label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+dialog label > input, dialog label > select, dialog label > textarea { color: var(--text); font-size: 15px; }
+dialog textarea { min-height: 90px; resize: vertical; }
+.icon-row { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: end; }
+.icon-row .avatar { width: 56px; height: 56px; font-size: 30px; border-radius: 14px; }
+.icon-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
+.icon-tools label { flex: 0 0 110px; }
+.file-btn { position: relative; overflow: hidden; display: inline-block; }
+.file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.hint { font-size: 12px; color: var(--muted); margin: -6px 0 0; }
+.danger-zone { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 8px; }
+.danger-zone p { margin: 0; font-size: 13px; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+@media (max-width: 1100px) {
+  .chat-head { gap: 6px 8px; padding: 10px 14px; }
+  .chat-head > button { padding: 6px 9px; }
+}
+@media (max-width: 720px) {
+  .app { grid-template-columns: 76px minmax(0, 1fr); }
+  .brand span, .bot-item .meta, .bot-item .dot, .sidebar-foot .muted { display: none; }
+  .bot-item .unread { grid-row: 1; grid-column: 1; justify-self: end; align-self: start; font-size: 10px; padding: 0 5px; }
+  .bot-item { grid-template-columns: 36px; justify-content: center; }
+  .new-bot { text-align: center; padding: 6px; }
+  .new-bot span { display: none; }
+  .msg { max-width: 100%; }
+  .chat-head { flex-wrap: wrap; gap: 5px; padding: 8px; }
+  .chat-head .grow { min-width: 55%; }
+  .chat-head button { font-size: 12px; padding: 5px; }
+  .model-pill { display: none; }
+  /* the narrow sidebar shows only "Needs you (n)"; tapping it opens the list as a bounded overlay */
+  .needs-you { margin: 0 4px 6px; padding: 4px; max-height: none; overflow: visible; text-align: center; }
+  .needs-head { justify-content: center; margin: 0; }
+  .needs-toggle { cursor: pointer; font-size: 11px; }
+  #notify-enable { display: none; }
+  .needs-you:not(.open) #needs-list { display: none; }
+  .needs-you.open #needs-list { position: fixed; left: 80px; top: 8px; z-index: 30; width: min(320px, calc(100vw - 88px)); max-height: 60vh; overflow-y: auto; padding: 8px; text-align: left; background: var(--side); border: 1px solid var(--line); border-radius: 8px; }
+}
+.question-card { margin-top: 8px; padding: 12px; border: 1px solid #465063; border-radius: 10px; background: #1b202a; display: grid; gap: 8px; }
+.question-card button, .question-card input { max-width: 100%; }
+.question-option { display: block; text-align: left; }
+.question-option small { display: block; opacity: .75; }
+.question-prompt { white-space: pre-wrap; }
+.msg.progress { opacity: .72; font-size: .88em; }
+</style>
+</head>
+<body>
+<section id="lock" class="lock" hidden>
+  <form id="lock-form" autocomplete="off">
+    <h1>Bot-Office</h1>
+    <p class="muted flush">Enter the API token. It stays in this tab only.</p>
+    <input id="token" type="password" placeholder="API token" autocomplete="off" aria-label="API token" required>
+    <button class="primary">Connect</button>
+    <p id="lock-error" class="error" role="alert"></p>
+  </form>
+</section>
+
+<div id="app" class="app" hidden>
+  <aside class="sidebar" aria-label="Bots">
+    <div class="brand"><span>Bot-Office</span></div>
+    <button id="new-bot" class="new-bot" title="New bot">+ <span>New bot</span></button>
+    <section id="needs-you" class="needs-you" aria-label="Needs you" hidden>
+      <div class="needs-head"><button id="needs-toggle" class="needs-toggle" type="button" aria-expanded="false" aria-controls="needs-list">Needs you</button><button id="notify-enable" class="ghost" type="button" hidden>Turn on notifications</button></div>
+      <div id="needs-list"></div>
+    </section>
+    <nav id="bot-list" class="bot-list"></nav>
+    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
+  </aside>
+
+  <main class="chat">
+    <header class="chat-head" id="chat-head" hidden>
+      <span id="head-icon" class="avatar lg"></span>
+      <div class="grow">
+        <h2 id="head-name"></h2>
+        <div id="head-desc" class="desc"></div>
+      </div>
+      <span id="head-model" class="model-pill"></span>
+      <span id="head-effort" class="model-pill" title="Thinking effort" hidden></span>
+      <span id="head-tier" class="model-pill tier" title="Capability tier, derived from the model"></span>
+      <button id="mark-unread" type="button" title="Mark as unread (Alt+U)">Unread</button>
+      <button id="read-aloud" type="button" aria-pressed="false" title="Read new replies aloud" aria-label="Read new replies aloud" hidden>🔈</button>
+      <button id="voice-open" type="button" title="Voice settings">Voice</button>
+      <button id="show-archived" type="button" aria-pressed="false" title="Show messages archived by edits">Show archived</button>
+      <button id="desktop-open" title="Live desktops">Desktop</button>
+      <button id="agent-open" title="Agent messages">Agents</button>
+      <button id="memory-open">Memory</button>
+      <button id="routines-open">Routines</button>
+      <button id="watchers-open" title="Wake this bot when something changes">Watchers</button>
+      <button id="assignments-open" title="Goals this bot works on until done">Assignments</button>
+      <button id="edit-bot" title="Bot settings">Settings</button>
+    </header>
+    <div id="messages" class="messages" role="log" aria-live="polite">
+      <div id="thread" class="thread"></div>
+    </div>
+    <form id="composer" class="composer" hidden>
+      <div class="composer-inner">
+        <input id="send-reason" maxlength="1000" placeholder="Reason for using Claude (required for this bot)" hidden>
+        <div id="attachment-list" class="attachment-list"></div>
+        <label id="queue-option" hidden><input id="queue-next" type="checkbox"> Queue as next turn</label>
+        <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+        <div class="composer-row">
+          <button id="attach" type="button" title="Attach images" aria-label="Attach images">📎</button>
+          <textarea id="text" rows="1" placeholder="Message (Ctrl+V to paste images)" aria-label="Message"></textarea>
+          <button id="mic" type="button" title="Dictate (Ctrl+Shift+M)" aria-label="Dictate" aria-pressed="false" hidden>🎤</button>
+          <button id="send" class="primary">Send</button>
+        </div>
+        <div id="status" class="status" role="status"></div>
+      </div>
+    </form>
+  </main>
+</div>
+
+<dialog id="tools-dialog" aria-labelledby="tools-title">
+  <div class="tools-content">
+    <div class="tools-bar"><h2 id="tools-title">Desktop</h2><button id="tools-close">Close</button></div>
+    <div id="desktop-panel">
+      <div class="tools-bar"><label for="desktop-select">Desktop</label><select id="desktop-select"></select><button id="desktop-connect">Connect / Reconnect</button><button id="desktop-take" disabled>Take over</button><button id="desktop-hand-back" title="Tell the bot that used this desktop last that you are done">Hand back</button></div>
+      <p id="desktop-status" role="status"></p><div id="desktop-screen" tabindex="0" aria-label="Remote desktop"></div>
+    </div>
+    <div id="agent-panel" hidden></div>
+    <div id="memory-panel" hidden><label for="memory-text">Bot memory</label><textarea id="memory-text" rows="12"></textarea><button id="memory-save">Save memory</button></div>
+    <div id="voice-panel" hidden>
+      <p id="voice-stt-status" class="muted"></p>
+      <p id="voice-tts-status" class="muted"></p>
+      <label>Voice<select id="voice-select"></select></label>
+      <label>Speed <span id="voice-speed-value"></span><input id="voice-speed" type="range" min="0.8" max="1.2" step="0.05"></label>
+      <div class="tools-bar"><button id="voice-preview" type="button">Preview</button><label class="check"><input id="voice-auto" type="checkbox"> Read new replies aloud</label></div>
+      <label class="check"><input id="voice-browser-stt" type="checkbox"> Allow the browser's own dictation when local speech-to-text is not installed (some browsers, such as Chrome, send the audio to their vendor's servers)</label>
+      <p class="muted">Speech is generated and recognised on this server. Audio is never stored. Voices: Kokoro-82M (Apache-2.0).</p>
+    </div>
+    <div id="assignments-panel" hidden>
+      <div id="assignments-list"></div>
+<div id="wakeups-list"></div>
+      <form id="assignment-form">
+        <label>Title<input id="assignment-title" maxlength="200" required></label>
+        <label>Goal<textarea id="assignment-goal" rows="3"></textarea></label>
+        <label>Done when<textarea id="assignment-done" rows="2" placeholder="How you and the bot will know it is finished"></textarea></label>
+        <div class="tools-bar"><label>Turns<input id="assignment-turns" type="number" min="1" max="200" value="20"></label><label>Minutes<input id="assignment-minutes" type="number" min="1" max="1440" value="120"></label>
+        <label>Ask me<select id="assignment-escalate"><option value="on_block">when blocked or waiting on me</option><option value="always">also when waiting on another bot</option><option value="never">never</option></select></label></div>
+        <div class="tools-bar"><label class="check"><input id="assignment-verify" type="checkbox"> One check turn against "done when" before closing</label><label class="check"><input id="assignment-start" type="checkbox" checked> Start now</label></div>
+        <div class="tools-bar"><button>Create assignment</button><button type="button" id="assignment-propose" title="Asks the bot in chat to propose a 'done when' (one normal turn)">Ask bot to propose</button></div>
+      </form>
+    </div>
+    <div id="watchers-panel" hidden><div id="watchers-list"></div><pre id="watcher-runs" class="muted" hidden></pre><form id="watcher-form"><label>Name<input id="watcher-name" required maxlength="80"></label><label>Kind<select id="watcher-kind"><option value="webhook">Webhook (POST with a secret)</option><option value="path">Folder (new or changed files)</option><option value="poll">gh poll (read-only, every 5+ min)</option><option value="assignment">Another bot's assignment</option></select></label><label id="watcher-target-label">Target<input id="watcher-target" placeholder="folder path, gh command, or assignment id"></label><label>When it fires, the bot should<textarea id="watcher-prompt" required maxlength="4000"></textarea></label><p class="muted">Runs are unattended: outbound actions need your approval, at most 6 runs/hour per watcher (then it pauses), and only for engines whose action gate is proven.</p><button>Create watcher</button></form></div>
+    <div id="routines-panel" hidden><div id="routines-list"></div><form id="routine-form"><label>Schedule (cron, New York time)<input id="routine-cron" placeholder="0 9 * * *" required></label><label>Prompt<textarea id="routine-prompt" required></textarea></label><label>If runs were missed while Bot-Office was down<select id="routine-catchup"><option value="once">Run once when back</option><option value="skip">Skip them</option></select></label><button>Create routine</button></form></div>
+  </div>
+</dialog>
+
+<dialog id="bot-dialog" aria-labelledby="dialog-title">
+  <form id="bot-form" autocomplete="off">
+    <h2 id="dialog-title">Bot settings</h2>
+    <label>Name<input id="f-name" maxlength="80" required></label>
+    <div class="icon-row">
+      <span id="f-icon-preview" class="avatar"></span>
+      <div class="icon-tools">
+        <label>Emoji<input id="f-icon" maxlength="16" placeholder="🤖"></label>
+        <span class="file-btn"><button type="button" tabindex="-1">Upload image…</button><input id="f-image" type="file" accept="image/png,image/jpeg,image/gif,image/webp" aria-label="Upload icon image"></span>
+        <button type="button" id="f-image-remove" class="ghost">Remove image</button>
+      </div>
+    </div>
+    <label>Description<input id="f-desc" maxlength="500" placeholder="What this bot is for"></label>
+    <label>Model<select id="f-model"></select></label>
+    <label id="f-custom-row" hidden>OpenCode model (pick above or type any provider/model)<input id="f-custom" maxlength="100" placeholder="provider/model" list="f-custom-list"><datalist id="f-custom-list"></datalist><button type="button" id="f-models-refresh" class="ghost">Refresh model list</button></label>
+    <p class="hint" id="f-tier"></p>
+    <label id="f-effort-row">Thinking effort<select id="f-effort"></select></label>
+    <p class="hint" id="f-effort-hint">Applies from the next turn. Past jobs keep the effort they ran with.</p>
+    <div id="session-zone" hidden><button type="button" id="session-reset">Reset session</button>
+    <p class="hint">Starts a new provider session on the next turn (cheaper context; chat history, memory and WORKING.md are kept).</p></div>
+    <label>Command-line access<select id="f-cli-access"><option value="full">Full (shell, files, network, no prompts)</option><option value="restricted">Restricted (edits only, sandboxed)</option></select></label>
+    <p class="hint">Full lets the bot run any command as the server user. Applies from the next turn.</p>
+    <div id="loop-zone" hidden>
+      <label>Turn time limit in minutes<input id="f-timeout" type="number" min="1" max="60" placeholder="default"></label>
+      <label class="check"><input id="f-notify" type="checkbox"> Notify me when this bot needs me</label>
+      <p class="hint" id="f-gate">Action gate: checking…</p>
+      <p class="hint" id="f-isolation">Isolation: checking…</p>
+      <label class="check"><input id="f-allow-sudo" type="checkbox"> Allow sudo for this bot</label>
+      <p class="hint">Off by default. When on, this bot's commands may use sudo, so it can read the controller's token, database and bridge key. Only for a bot you fully trust.</p>
+      <label>Scheduled runs (routines, wake-ups, assignments, bot messages)<select id="f-scheduled-runs"><option value="full">Full (as before 0.11.0: same access, no approvals)</option><option value="gated">Gated (like watcher runs: proven gate, outbound and destructive actions need approval, daily budget)</option></select></label>
+      <p class="hint">Watcher runs are always gated. The protected-files tripwire applies to every run.</p>
+      <label>Daily budget for gated unattended turns (watchers; scheduled runs when gated)<span class="budget-row"><input id="f-budget-turns" type="number" min="0" placeholder="turns"> turns · <input id="f-budget-minutes" type="number" min="0" placeholder="minutes"> min · <input id="f-budget-tokens" type="number" min="0" placeholder="no cap"> tokens</span></label>
+      <p class="hint" id="f-usage">Your own chat turns are never held. Over budget, gated turns wait until midnight (New York) unless you allow more in Needs-you. Empty = no cap.</p>
+      <label class="check"><input id="f-digest" type="checkbox"> Post the daily digest in this chat (built without a model call)</label>
+    </div>
+    <p class="hint" id="f-model-hint">Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.</p>
+    <label id="f-reason-row">Reason for using Claude<input id="f-reason" maxlength="1000" placeholder="Required for Claude models"></label>
+    <label>Instructions<textarea id="f-instructions" maxlength="50000" placeholder="Profile and standing instructions"></textarea></label>
+    <div class="danger-zone" id="delete-zone">
+      <div><button type="button" id="delete-start" class="danger">Delete bot…</button></div>
+      <div id="delete-confirm" hidden>
+        <p>This permanently deletes <strong id="del-name"></strong>: its chat history, routines, memory and icon. Shared memory and other bots are kept.</p>
+        <label>Type the bot's name to confirm<input id="del-typed"></label>
+        <div class="actions start">
+          <button type="button" id="delete-go" class="danger solid" disabled>Delete permanently</button>
+          <button type="button" id="delete-cancel">Keep bot</button>
+        </div>
+      </div>
+    </div>
+    <p id="dialog-error" class="error" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="dialog-cancel">Cancel</button>
+      <button id="dialog-save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="image-view"><button type="button" id="image-close">Close</button><div><img id="image-full" alt="Attached image"></div></dialog>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const TOKEN_KEY = "bot-office-token";
+const LEGACY_TOKEN_KEYS = ["crewdeck-token", "agentdesk-token"];
+const BOT_KEY = "bot-office-bot";
+const LEGACY_BOT_KEYS = ["crewdeck-bot"];
+const ENGINE_LABELS = { codex: "Codex", claude: "Claude", cursor: "Cursor", antigravity: "Antigravity" };
+const MAX_ICON_BYTES = 256 * 1024;
+
+const state = {
+  bots: [], choices: null, selected: sessionStorage.getItem(BOT_KEY) || sessionStorage.getItem("crewdeck-bot"),
+  msgSig: "", iconUrls: new Map(), editing: null, pendingImage: null, removeImage: false,
+  timer: null, tick: 0, live: new Map(),
+  // newest message ids rendered for the selected bot (all / counted as unread)
+  shown: { bot: null, max: 0, counted: 0 }, readSent: new Map(),
+  showArchived: false, editingMsg: null,
+};
+// mirrors the server's catalog; /v1/model-choices is authoritative once loaded
+const FALLBACK_EFFORTS = {
+  codex: ["low", "medium", "high", "xhigh"],
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  antigravity: ["low", "medium", "high", "xhigh", "max"],
+};
+const FALLBACK_DEFAULT_EFFORT = { codex: "high", claude: "medium", antigravity: "medium" };
+
+function getToken() {
+  let token = sessionStorage.getItem(TOKEN_KEY);
+  if (!token) {
+    for (const key of LEGACY_TOKEN_KEYS) {
+      const legacy = sessionStorage.getItem(key);
+      if (legacy) { sessionStorage.setItem(TOKEN_KEY, legacy); token = legacy; break; }
+    }
+  }
+  for (const key of LEGACY_TOKEN_KEYS) sessionStorage.removeItem(key);
+  return token || "";
+}
+
+function rememberBot(id) {
+  if (id) sessionStorage.setItem(BOT_KEY, id);
+  else sessionStorage.removeItem(BOT_KEY);
+  for (const key of LEGACY_BOT_KEYS) sessionStorage.removeItem(key);
+}
+
+class AuthError extends Error {}
+
+async function api(path, options = {}) {
+  const headers = { "Authorization": "Bearer " + getToken() };
+  if (options.body !== undefined && !(options.body instanceof Blob)) headers["Content-Type"] = "application/json";
+  if (options.body instanceof Blob) headers["Content-Type"] = options.body.type || "application/octet-stream";
+  const response = await fetch(path, { ...options, headers, cache: "no-store", credentials: "omit" });
+  if (response.status === 401) throw new AuthError("Token rejected");
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    let detail = body.detail;
+    if (Array.isArray(detail)) detail = detail.map((d) => d.msg).join("; ");
+    const error = new Error(detail || response.statusText || ("HTTP " + response.status));
+    error.status = response.status;
+    error.body = body;
+    throw error;
+  }
+  if (response.status === 204) return null;
+  const type = response.headers.get("content-type") || "";
+  return type.includes("application/json") ? response.json() : response.blob();
+}
+
+function handleError(err, where) {
+  if (err instanceof AuthError) { lock("Token rejected. Enter it again."); return; }
+  const target = where || $("status");
+  target.textContent = err.message;
+  target.classList.add("bad");
+}
+
+function setStatus(text) { $("status").textContent = text || ""; $("status").classList.remove("bad"); }
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/* ---- models ---- */
+function modelLabel(engine, model) {
+  for (const choice of state.choices || []) {
+    if (choice.engine !== engine) continue;
+    const found = choice.models.find((m) => m.id === model);
+    if (found) return found.display;
+  }
+  return (ENGINE_LABELS[engine] || engine) + " · " + (model || "default");
+}
+
+async function loadChoices() {
+  try {
+    state.choices = await api("/v1/model-choices");
+    const n = state.choices.length;
+    $("engine-note").textContent = n + (n === 1 ? " engine signed in" : " engines signed in");
+    renderBots();
+    renderHeader();
+    if ($("bot-dialog").open) fillModelSelect(state.editing);
+  } catch (err) { if (err instanceof AuthError) handleError(err); else state.choices = state.choices || []; }
+}
+
+/* ---- icons ---- */
+async function iconUrl(bot) {
+  if (!bot.icon_image) return null;
+  const key = bot.id + "|" + bot.updated_at;
+  const cached = state.iconUrls.get(bot.id);
+  if (cached && cached.key === key) return cached.url;
+  if (cached && cached.pending) return cached.pending;
+  const pending = api("/v1/bots/" + bot.id + "/icon").then((blob) => {
+    const url = URL.createObjectURL(blob);
+    const old = state.iconUrls.get(bot.id);
+    if (old && old.url) URL.revokeObjectURL(old.url);
+    state.iconUrls.set(bot.id, { key, url });
+    return url;
+  }).catch(() => { state.iconUrls.set(bot.id, { key, url: null }); return null; });
+  state.iconUrls.set(bot.id, { key: cached ? cached.key : "", url: cached ? cached.url : null, pending });
+  return pending;
+}
+
+function fillAvatar(node, bot, override) {
+  node.replaceChildren();
+  const fallback = (override && override.icon) || bot.icon || (bot.name || "?").slice(0, 1).toUpperCase();
+  const src = override ? override.url : null;
+  if (src) { const img = el("img"); img.alt = ""; img.src = src; node.append(img); return; }
+  if (!override && bot.icon_image) {
+    const cached = state.iconUrls.get(bot.id);
+    if (cached && cached.url && cached.key === bot.id + "|" + bot.updated_at) {
+      const img = el("img"); img.alt = ""; img.src = cached.url; node.append(img); return;
+    }
+    iconUrl(bot).then((url) => {
+      if (url && node.isConnected) { const img = el("img"); img.alt = ""; img.src = url; node.replaceChildren(img); }
+    });
+  }
+  node.textContent = fallback;
+}
+
+/* ---- sidebar ---- */
+function currentBot() { return state.bots.find((b) => b.id === state.selected) || null; }
+
+function renderBots() {
+  const list = $("bot-list");
+  if (!state.bots.length) {
+    list.replaceChildren(el("p", "muted pad", "No bots yet. Create one to start."));
+    return;
+  }
+  list.replaceChildren(...state.bots.map((bot) => {
+    const item = el("button", "bot-item" + (bot.id === state.selected ? " active" : ""));
+    item.type = "button";
+    item.title = bot.name;
+    if (bot.id === state.selected) item.setAttribute("aria-current", "true");
+    const avatar = el("span", "avatar");
+    fillAvatar(avatar, bot);
+    const meta = el("span", "meta");
+    meta.append(el("div", "name", bot.name), el("div", "sub", modelLabel(bot.engine, bot.model) + " · " + (bot.capability_tier || "")));
+    const dot = el("span", "dot " + (bot.status === "working" ? "running" : bot.status));
+    dot.title = bot.status || "idle";
+    dot.setAttribute("aria-label", dot.title);
+    const badge = unreadBadge(bot);
+    if (badge) item.classList.add("has-unread");
+    item.append(avatar, meta, badge || el("span"), dot);
+    item.onclick = () => selectBot(bot.id);
+    item.oncontextmenu = (event) => { event.preventDefault(); markUnread(bot.id); };
+    return item;
+  }));
+}
+
+async function loadBots() {
+  state.bots = await api("/v1/bots");
+  if (!currentBot()) state.selected = state.bots.length ? state.bots[0].id : null;
+  renderBots();
+  renderHeader();
+  updateTitle();
+}
+
+/* ---- unread ---- */
+function ageText(since) {
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(since).getTime()) / 60000));
+  if (minutes < 1) return ["<1m", "less than a minute"];
+  if (minutes < 60) return [minutes + "m", minutes + (minutes === 1 ? " minute" : " minutes")];
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return [hours + "h", hours + (hours === 1 ? " hour" : " hours")];
+  const days = Math.floor(hours / 24);
+  return [days + "d", days + (days === 1 ? " day" : " days")];
+}
+function unreadBadge(bot) {
+  if (!bot.unread_count && !bot.marked_unread) return null;
+  const [short, long] = bot.unread_since ? ageText(bot.unread_since) : ["", ""];
+  const count = bot.unread_count ? String(bot.unread_count) : "●";
+  const badge = el("span", "unread", short ? count + " · " + short : count);
+  const what = bot.unread_count ? bot.unread_count + (bot.unread_count === 1 ? " unread message" : " unread messages") : "marked as unread";
+  badge.setAttribute("aria-label", what + (long ? ", oldest " + long + " ago" : ""));
+  badge.title = badge.getAttribute("aria-label");
+  return badge;
+}
+function updateTitle() {
+  const total = state.bots.reduce((n, b) => n + (b.unread_count || (b.marked_unread ? 1 : 0)), 0);
+  document.title = total ? "(" + total + ") Bot-Office" : "Bot-Office";
+}
+function applyUnread(fresh) {
+  const bot = state.bots.find((b) => b.id === fresh.id);
+  if (!bot) return;
+  for (const key of ["unread_count", "unread_since", "marked_unread", "read_revision"]) bot[key] = fresh[key];
+  renderBots();
+  updateTitle();
+}
+// Mark the selected bot read up to the newest message actually shown. Background reads
+// (polling, tab becoming visible) never clear a manual "unread"; only an explicit open
+// does. A click sends the revision it saw when it happened (click.revision), so a "mark
+// as unread" made later in another tab makes the request stale and the server ignores
+// it. If the click's cached revision was already stale (an unread from another tab
+// since the last poll), the click is retried once with the copy fetched at click time
+// (click.synced), unless the server has moved on again since then.
+function shownBot(botId) {
+  return state.selected === botId && state.shown.bot === botId && document.visibilityState === "visible";
+}
+async function markRead(botId, explicit, click) {
+  const bot = state.bots.find((b) => b.id === botId);
+  if (!bot || !shownBot(botId)) return;
+  if (!explicit && bot.marked_unread) return;
+  const newer = state.shown.counted > (state.readSent.get(botId) || 0);
+  const pending = newer || bot.unread_count || (explicit && bot.marked_unread);
+  if (!pending && !click) return;
+  let revision = click ? click.revision : bot.read_revision || 0;
+  if (!pending) {
+    // nothing unread as far as this tab knew: check the state fetched at click time
+    const synced = await click.synced;
+    if (!synced || !(synced.marked_unread || synced.unread_count) || !shownBot(botId)) return;
+    revision = synced.read_revision || 0;
+    click = null;
+  }
+  state.readSent.set(botId, state.shown.counted);
+  try {
+    let fresh = await sendRead(botId, revision, explicit);
+    if (click && (fresh.read_revision || 0) !== revision) {
+      const synced = await click.synced;
+      const now = synced ? synced.read_revision || 0 : revision;
+      if (now !== revision && now === (fresh.read_revision || 0) && shownBot(botId)) fresh = await sendRead(botId, now, explicit);
+    }
+    applyUnread(fresh);
+  } catch (err) { state.readSent.delete(botId); if (err instanceof AuthError) handleError(err); }
+}
+function sendRead(botId, revision, explicit) {
+  return api("/v1/bots/" + botId + "/read", { method: "POST",
+    body: JSON.stringify({ up_to: state.shown.max, revision, explicit: !!explicit }) });
+}
+async function markUnread(botId) {
+  try {
+    applyUnread(await api("/v1/bots/" + botId + "/unread", { method: "POST" }));
+    setStatus("Marked as unread");
+  } catch (err) { handleError(err); }
+}
+$("mark-unread").onclick = () => { if (state.selected) markUnread(state.selected); };
+document.addEventListener("keydown", (event) => {
+  if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === "u" || event.key === "U") && state.selected) {
+    event.preventDefault(); markUnread(state.selected);
+  }
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && state.selected) markRead(state.selected, false);
+});
+
+function renderHeader() {
+  const bot = currentBot();
+  $("chat-head").hidden = !bot;
+  $("composer").hidden = !bot;
+  if (!bot) {
+    const box = el("div", "empty");
+    box.append(el("p", "", state.bots.length ? "Select a bot." : "Create your first bot with + New bot."));
+    $("thread").replaceChildren(box);
+    state.msgSig = "";
+    return;
+  }
+  fillAvatar($("head-icon"), bot);
+  $("head-name").textContent = bot.name;
+  $("head-desc").textContent = bot.description || "";
+  $("head-model").textContent = modelLabel(bot.engine, bot.model);
+  $("head-effort").hidden = !bot.effort;
+  $("head-effort").textContent = bot.effort ? "effort: " + bot.effort : "";
+  $("head-tier").textContent = bot.capability_tier || "";
+  const needsReason = bot.engine === "claude" && !(bot.reason || "").trim();
+  $("send-reason").hidden = !needsReason;
+  $("send-reason").required = needsReason;
+  const busy = bot.activity === "running" || bot.activity === "queued";
+  $("queue-option").hidden = !busy;
+  if (!busy) $("queue-next").checked = false;
+  const steering = busy && !$("queue-next").checked;
+  $("send").textContent = steering ? "Steer" : "Send";
+  $("text").placeholder = steering ? "Steer the current task, running or queued (Ctrl+V to paste images)" : "Message (Ctrl+V to paste images)";
+}
+$("queue-next").onchange = renderHeader;
+
+async function selectBot(id) {
+  // the read revision this click saw, plus a fresh copy requested right now (see markRead)
+  const clicked = state.bots.find((b) => b.id === id);
+  const click = { revision: clicked ? clicked.read_revision || 0 : 0,
+                  synced: api("/v1/bots/" + id).catch(() => null) };
+  if (state.selected !== id) { draftRevision++; clearImages(); clearImageCache(); state.editingMsg = null; $("queue-next").checked = false; stopDictation(); stopPlayback(); }
+  state.selected = id;
+  rememberBot(id);
+  state.msgSig = "";
+  stopStreams();
+  setStatus("");
+  renderBots();
+  renderHeader();
+  $("thread").replaceChildren();
+  await loadMessages().catch(handleError);
+  markRead(id, true, click);
+  $("text").focus();
+}
+
+/* ---- messages ---- */
+function senderLabel(m, bot) {
+  if (m.sender) return m.sender;
+  if (m.role === "assistant") return bot.name;
+  if (m.role === "system") return "System";
+  return m.source === "routine" ? "Routine" : "You";
+}
+
+/* ---- live streaming (fetch + ReadableStream; the bearer token is only ever a header) ---- */
+function stopStreams() {
+  for (const view of state.live.values()) { view.stopped = true; if (view.ctrl) view.ctrl.abort(); }
+  state.live.clear();
+}
+
+function clip(text, n) { return text.length > n ? text.slice(0, n - 1) + "…" : text; }
+
+function newView(m) {
+  const wrap = el("div", "msg assistant live");
+  const who = el("div", "who");
+  const steps = document.createElement("details");
+  steps.className = "steps";
+  steps.hidden = true;
+  const summary = el("summary", "", "");
+  const list = el("div", "step-list");
+  steps.append(summary, list);
+  const body = el("div", "body", "");
+  const cancel = el("button", "ghost", "Cancel job");
+  cancel.onclick = async () => {
+    try { await api("/v1/jobs/" + m.job_id + "/cancel", {method: "POST"}); cancel.disabled = true; }
+    catch (e) { setStatus(e.message, true); }
+  };
+  wrap.append(who, steps, body, cancel);
+  return { jobId: m.job_id, wrap, who, steps, summary, list, body, text: m.text || "", status: m.job_status,
+           notBefore: m.not_before || null, attempt: 0,
+           tools: 0, thinks: 0, errors: 0, lastStep: null, after: 0, ctrl: null, done: false, stopped: false };
+}
+
+function refreshView(view) {
+  const waiting = view.status === "queued" && view.notBefore && new Date(view.notBefore) > new Date();
+  view.body.textContent = view.text || (waiting
+    ? "Waiting to retry until " + new Date(view.notBefore).toLocaleTimeString([], { timeStyle: "short" }) + "…"
+    : view.status === "queued" ? "Queued…" : "Working…");
+  view.body.classList.toggle("waiting", !view.text);
+  const parts = [];
+  if (view.thinks) parts.push("thinking");
+  if (view.tools) parts.push(view.tools + (view.tools === 1 ? " tool call" : " tool calls"));
+  if (view.errors) parts.push(view.errors + (view.errors === 1 ? " error" : " errors"));
+  view.steps.hidden = !parts.length;
+  view.summary.textContent = parts.join(" · ");
+}
+
+function addStep(view, kind, text, cls) {
+  if (kind === "thinking" && view.lastStep && view.lastStep.kind === "thinking") {
+    view.lastStep.text += text;
+    view.lastStep.node.textContent = "💭 " + clip(view.lastStep.text, 600);
+    return;
+  }
+  const node = el("div", "step" + (cls ? " " + cls : ""), (kind === "thinking" ? "💭 " : "") + clip(text, 600));
+  view.list.append(node);
+  view.lastStep = { kind, node, text };
+}
+
+function applyEvent(view, ev) {
+  const box = $("messages");
+  const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  if (typeof ev.attempt === "number" && ev.attempt < view.attempt) return; // an earlier run's leftovers
+  // a newer execution starts clean even if its retry event was missed (reconnect, crash)
+  const newer = typeof ev.attempt === "number" && ev.attempt > view.attempt;
+  if (newer) view.attempt = ev.attempt;
+  if (ev.kind === "retry" || newer) {
+    // the same job runs again: drop the old attempt's draft and steps
+    Object.assign(view, { text: "", tools: 0, thinks: 0, errors: 0, lastStep: null, done: false });
+    view.list.replaceChildren();
+  }
+  if (ev.kind === "retry") {
+    Object.assign(view, { status: "queued", notBefore: ev.not_before || null });
+    state.msgSig = "";
+    loadMessages().catch(() => {});
+  }
+  else if (ev.kind === "start") view.status = "running";
+  else if (ev.kind === "text") view.text = ev.replace ? (ev.text || "") : view.text + (ev.text || "");
+  else if (ev.kind === "final") { if (ev.text) view.text = ev.text; }
+  else if (ev.kind === "thinking") { view.thinks += 1; addStep(view, "thinking", ev.text || ""); }
+  else if (ev.kind === "tool") { view.tools += 1; addStep(view, "tool", "🔧 " + (ev.name || "tool") + (ev.summary ? ": " + ev.summary : "")); }
+  else if (ev.kind === "error") { view.errors += 1; addStep(view, "error", "⚠ " + (ev.message || "error"), "bad"); }
+  else if (ev.kind === "steer") { state.msgSig = ""; loadMessages().catch(() => {}); }
+  else if (ev.kind === "done") view.done = (ev.attempt ?? view.attempt) >= view.attempt;
+  if (ev.kind === "tool" || ev.kind === "error") view.lastStep = null;
+  refreshView(view);
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+function handleFrame(view, frame) {
+  const data = [];
+  for (const line of frame.split("\n")) if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+  if (!data.length) return;
+  let ev;
+  try { ev = JSON.parse(data.join("\n")); } catch (e) { return; }
+  if (typeof ev.seq === "number") view.after = Math.max(view.after, ev.seq);
+  applyEvent(view, ev);
+}
+
+async function runStream(view) {
+  if (view.stopped) return;
+  view.ctrl = new AbortController();
+  try {
+    const response = await fetch("/v1/jobs/" + view.jobId + "/events?after=" + view.after, {
+      headers: { "Authorization": "Bearer " + getToken(), "Accept": "text/event-stream" },
+      cache: "no-store", credentials: "omit", signal: view.ctrl.signal,
+    });
+    if (response.status === 401) throw new AuthError("Token rejected");
+    if (!response.ok || !response.body) throw new Error("stream HTTP " + response.status);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 2);
+        handleFrame(view, frame);
+      }
+    }
+  } catch (err) {
+    if (view.stopped) return;
+    if (err instanceof AuthError) { handleError(err); return; }
+  } finally { view.ctrl = null; }
+  if (view.stopped) return;
+  if (view.done) {
+    // freeze: the finished reply is now a normal history entry
+    state.live.delete(view.jobId);
+    state.msgSig = "";
+    await loadBots().catch(() => {});
+    await loadMessages().catch(handleError);
+  } else {
+    setTimeout(() => runStream(view), 1500); // dropped connection: resume after the last seq
+  }
+}
+
+const pendingImages = [];
+const imageCache = new Map();
+let sendingImages = false;
+let draftRevision = 0;
+function updateImages() {
+  $("attachment-list").replaceChildren(...pendingImages.map((item) => {
+    const box = el("div", "attachment-item");
+    const img = document.createElement("img"); img.src = item.preview; img.alt = "Selected image";
+    const remove = el("button", "", "×"); remove.type = "button"; remove.setAttribute("aria-label", "Remove image");
+    remove.onclick = () => { removeImage(item); updateImages(); };
+    box.append(img, remove, el("div", item.error ? "bad" : "", item.error || (item.id ? "Ready" : "Uploading…")));
+    return box;
+  }));
+  $("send").disabled = sendingImages || pendingImages.some((item) => !item.id);
+}
+function deleteUpload(item) {
+  if (item.id && !item.sending) api("/v1/bots/" + item.bot + "/attachments/" + encodeURIComponent(item.id), {method: "DELETE"}).catch(() => {});
+}
+function removeImage(item, sent = false) {
+  const i = pendingImages.indexOf(item); if (i >= 0) pendingImages.splice(i, 1);
+  item.removed = true; if (!sent) deleteUpload(item);
+  URL.revokeObjectURL(item.preview);
+}
+function clearImages() { for (const item of [...pendingImages]) removeImage(item); updateImages(); }
+function clearImageCache() { for (const url of imageCache.values()) URL.revokeObjectURL(url); imageCache.clear(); }
+async function addImages(files) {
+  const bot = currentBot(); if (!bot) return 0;
+  let added = 0;
+  for (const file of files) {
+    if (pendingImages.length >= 6) { setStatus("Maximum 6 images per message.", true); break; }
+    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)) { setStatus("Choose a PNG, JPEG, GIF or WebP image.", true); continue; }
+    if (file.size > 10 * 1024 * 1024) { setStatus("Images must be at most 10 MiB.", true); continue; }
+    const item = { preview: URL.createObjectURL(file), bot: bot.id }; pendingImages.push(item); added++; updateImages();
+    api("/v1/bots/" + bot.id + "/attachments", {method: "POST", body: file}).then((result) => { item.id = result.id; if (item.removed) deleteUpload(item); }).catch((error) => { item.error = error.message; }).finally(updateImages);
+  }
+  return added;
+}
+$("attach").onclick = () => $("image-file").click();
+$("image-file").onchange = (event) => { addImages(event.target.files); event.target.value = ""; };
+// Clipboard access and cancellation must happen synchronously during the paste event.
+const pasteImageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+function pasteFocusAllowed() {
+  const focus = document.activeElement;
+  if (!focus || focus === document.body) return true;
+  if (focus !== $("text") && (focus.matches("input, textarea, select") || focus.isContentEditable)) return false;
+  return focus === $("text") || $("composer").contains(focus) || $("messages").contains(focus);
+}
+const pasteMaxBytes = 10 * 1024 * 1024;
+function clipboardImageFiles(clipboard, hasText) {
+  const result = [], seen = new Set();
+  function add(file) {
+    if (!file) return;
+    const type = file.type.toLowerCase();
+    if (!pasteImageTypes.includes(type) && (hasText || (type && type !== "application/octet-stream"))) return;
+    const key = [file.name, file.size, file.lastModified, file.type].join("|");
+    if (!seen.has(key)) { seen.add(key); result.push(file); }
+  }
+  // Chrome exposes the same image in both files and items, with a different lastModified,
+  // so read files when present and only fall back to items.
+  const files = Array.from(clipboard.files || []);
+  if (files.length) for (const file of files) add(file);
+  else for (const item of Array.from(clipboard.items || [])) {
+    if (item.kind === "file") add(item.getAsFile());
+  }
+  return result;
+}
+async function normalizePastedImage(file) {
+  const type = file.type.toLowerCase();
+  if (pasteImageTypes.includes(type)) return file;
+  const bytes = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  let detected = "";
+  if (bytes.length >= 8 && [137,80,78,71,13,10,26,10].every((v, i) => bytes[i] === v)) detected = "image/png";
+  else if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) detected = "image/jpeg";
+  else if (bytes.length >= 6 && ["GIF87a", "GIF89a"].includes(String.fromCharCode(...bytes.slice(0, 6)))) detected = "image/gif";
+  else if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") detected = "image/webp";
+  return detected ? new File([file], file.name || "pasted-image", {type: detected}) : null;
+}
+function clipboardHtmlImages(html, hasText) {
+  if (!html) return [];
+  const images = [];
+  for (const image of new DOMParser().parseFromString(html, "text/html").querySelectorAll("img[src]")) {
+    const src = image.getAttribute("src");
+    const data = /^data:(image\/(?:png|jpeg|gif|webp));base64,([a-z0-9+/=\s]+)$/i.exec(src);
+    if (data) images.push({type: data[1].toLowerCase(), base64: data[2]});
+    else if (!hasText) {
+      try {
+        const url = new URL(src, location.href);
+        if (url.origin === location.origin && ["http:", "https:"].includes(url.protocol)) images.push(url);
+      } catch (_) { /* Ignore invalid URLs. */ }
+    }
+    if (images.length >= 6) break;
+  }
+  return images;
+}
+async function fetchPastedImage(url) {
+  const attachment = /^\/v1\/bots\/[^/]+\/attachments\/[^/]+\/?$/.test(url.pathname);
+  const options = attachment
+    ? {headers: {Authorization: "Bearer " + getToken()}, cache: "no-store", credentials: "omit"}
+    : {credentials: "same-origin"};
+  const response = await fetch(attachment ? url.pathname + url.search : url.href, options);
+  if (!response.ok) throw new Error("Could not fetch pasted image.");
+  const length = response.headers.get("content-length");
+  if (length !== null && Number(length) > pasteMaxBytes) {
+    if (response.body) await response.body.cancel();
+    throw new Error("Images must be at most 10 MiB.");
+  }
+  if (!response.body) throw new Error("Could not read pasted image.");
+  const reader = response.body.getReader(), chunks = [];
+  let size = 0;
+  while (true) {
+    const {done, value} = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > pasteMaxBytes) {
+      await reader.cancel();
+      throw new Error("Images must be at most 10 MiB.");
+    }
+    chunks.push(value);
+  }
+  return new File(chunks, "pasted-image", {type: response.headers.get("content-type") || ""});
+}
+function clipboardHasFileManagerImages(clipboard) {
+  return ["text/uri-list", "x-special/gnome-copied-files"].some((type) =>
+    clipboard.getData(type).split(/\r?\n/).some((line) => /^file:\/\//i.test(line.trim()) && /\.(png|jpe?g|gif|webp)(?:[?#].*)?$/i.test(line.trim())));
+}
+async function resolvePastedImages(candidates, botId, text) {
+  const files = [];
+  for (const candidate of candidates.slice(0, 6)) {
+    try {
+      let file = candidate;
+      if (candidate instanceof URL) file = await fetchPastedImage(candidate);
+      else if (candidate.base64 !== undefined) {
+        const base64 = candidate.base64.replace(/\s/g, "");
+        if (base64.length * 3 / 4 > pasteMaxBytes) throw new Error("Images must be at most 10 MiB.");
+        const binary = atob(base64);
+        const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+        file = new File([bytes], "pasted-image", {type: candidate.type});
+      }
+      if (file.size > pasteMaxBytes) throw new Error("Images must be at most 10 MiB.");
+      const image = await normalizePastedImage(file);
+      if (image) files.push(image);
+    } catch (error) { setStatus(error.message === "Images must be at most 10 MiB." ? error.message : "Could not read pasted image."); }
+  }
+  const added = files.length && currentBot()?.id === botId ? await addImages(files) : 0;
+  if (!added && text) {
+    const input = $("text");
+    input.setRangeText(text, input.selectionStart, input.selectionEnd, "end");
+    input.dispatchEvent(new Event("input", {bubbles: true}));
+  }
+}
+document.addEventListener("paste", (event) => {
+  const bot = currentBot(), clipboard = event.clipboardData;
+  if (!bot || !clipboard || !pasteFocusAllowed()) return;
+  const text = clipboard.getData("text/plain");
+  const files = clipboardImageFiles(clipboard, !!text);
+  const images = files.length ? files : clipboardHtmlImages(clipboard.getData("text/html"), !!text);
+  if (images.length) {
+    event.preventDefault();
+    resolvePastedImages(images, bot.id, text);
+  } else if (!Array.from(clipboard.files || []).length && clipboardHasFileManagerImages(clipboard)) {
+    event.preventDefault(); // do not paste the copied file's path or name as text
+    setStatus("The browser can't read files copied from the file manager - drag the file in or use the attach button.");
+  }
+});
+for (const zone of [$("composer"), $("messages")]) {
+  zone.addEventListener("dragover", (event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); });
+  zone.addEventListener("drop", (event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addImages(event.dataTransfer.files); } });
+}
+$("image-close").onclick = () => $("image-view").close();
+async function imageUrl(botId, id) {
+  const key = botId + "/" + id;
+  if (imageCache.has(key)) {
+    const url = imageCache.get(key); imageCache.delete(key); imageCache.set(key, url); return url;
+  }
+  const blob = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id));
+  const url = URL.createObjectURL(blob);
+  if (state.selected !== botId) { URL.revokeObjectURL(url); throw new Error("Bot changed"); }
+  if (imageCache.has(key)) { URL.revokeObjectURL(url); return imageCache.get(key); }
+  imageCache.set(key, url);
+  if (imageCache.size > 100) { const oldest = imageCache.keys().next().value; URL.revokeObjectURL(imageCache.get(oldest)); imageCache.delete(oldest); }
+  return url;
+}
+function showAttachment(wrap, botId, id) {
+  const img = document.createElement("img"); img.className = "chat-image"; img.alt = "Attached image";
+  imageUrl(botId, id).then((url) => { img.src = url; }).catch(() => { img.alt = "Image unavailable"; });
+  img.onclick = () => { imageUrl(botId, id).then((url) => { img.src = url; $("image-full").src = url; $("image-view").showModal(); }).catch(() => { img.alt = "Image unavailable"; }); };
+  wrap.append(img);
+}
+
+/* #10: a job parked on a usage limit; the owner may run it on another provider now (never automatic) */
+async function switchProvider(jobId, provider) {
+  const body = {provider};
+  if (provider === "claude") {
+    const reason = prompt("Reason for using Claude for this turn");
+    if (!reason || !reason.trim()) return false;
+    body.reason = reason.trim();
+  }
+  await api("/v1/jobs/" + jobId + "/switch-provider", {method: "POST", body: JSON.stringify(body)});
+  return true;
+}
+function renderUsageNotice(notice) {
+  const bar = el("div", "tools-bar");
+  const keep = el("button", "ghost", "Keep waiting");
+  keep.type = "button";
+  keep.onclick = async () => {
+    try { await api("/v1/jobs/" + notice.job_id + "/keep-waiting", {method: "POST"}); }
+    catch (e) { setStatus(e.message, true); return; }
+    state.msgSig = ""; await loadMessages(); loadNeedsYou().catch(() => {});
+  };
+  api("/v1/jobs/" + notice.job_id + "/switch-options").then((options) => {
+    for (const option of options) {
+      const button = el("button", "ghost", "Retry on " + option.label);
+      button.type = "button";
+      button.onclick = async () => {
+        button.disabled = true;
+        try { if (!(await switchProvider(notice.job_id, option.provider))) { button.disabled = false; return; } }
+        catch (e) { button.disabled = false; setStatus(e.message, true); return; }
+        state.msgSig = ""; await loadMessages(); loadNeedsYou().catch(() => {});
+      };
+      bar.insertBefore(button, keep);
+    }
+  }).catch(() => {});
+  bar.append(keep);
+  return bar;
+}
+
+const questionUi = new Map();  // open card id -> {index, answers, selected, custom}; survives re-renders
+
+function renderQuestion(question, botId) {
+  const card = el("div", "question-card");
+  const steps = question.payload.steps;
+  if (question.status !== "open") {
+    const answer = question.answer;
+    card.append(el("strong", "", question.status === "skipped" ? "Skipped" : "Answered"));
+    if (!answer || answer.skip) steps.forEach((step) => card.append(el("div", "", step.prompt)));
+    if (answer && !answer.skip) answer.steps.forEach((choice, i) => {
+      card.append(el("div", "", steps[i].prompt + ": " +
+        [...choice.selected, ...(choice.custom ? [choice.custom] : [])].join(", ")));
+    });
+    questionUi.delete(question.id);
+    return card;
+  }
+  if (!questionUi.has(question.id)) questionUi.set(question.id, {index: 0, answers: [], selected: new Set(), custom: ""});
+  const ui = questionUi.get(question.id);
+  const answers = ui.answers;
+  async function send(body) {
+    try {
+      await api("/v1/bots/" + botId + "/questions/" + question.id + "/answer", {
+        method: "POST", body: JSON.stringify(body)
+      });
+      questionUi.delete(question.id);
+      state.msgSig = ""; await loadMessages();
+    } catch (err) { setStatus(err.message, true); }
+  }
+  function draw() {
+    const step = steps[ui.index];
+    card.replaceChildren();
+    if (step.header) card.append(el("strong", "", step.header));
+    card.append(el("div", "question-prompt", step.prompt));
+    if (steps.length > 1) card.append(el("small", "", (ui.index + 1) + " / " + steps.length));
+    const selected = ui.selected;
+    let custom;
+    function next() {
+      const value = custom ? custom.value.trim() : "";
+      if (!selected.size && !value) { setStatus("Choose or enter an answer", true); return; }
+      if (!step.multiSelect && selected.size && value) { setStatus("Choose one answer", true); return; }
+      answers.push({selected: [...selected], custom: value});
+      ui.selected = new Set(); ui.custom = "";
+      if (++ui.index < steps.length) draw(); else send({steps: answers});
+    }
+    for (const option of step.options) {
+      if (step.multiSelect) {
+        const label = el("label", "question-option");
+        const check = document.createElement("input"); check.type = "checkbox"; check.checked = selected.has(option.value);
+        check.onchange = () => check.checked ? selected.add(option.value) : selected.delete(option.value);
+        label.append(check, el("span", "", option.label));
+        if (option.description) label.append(el("small", "", option.description));
+        card.append(label);
+      } else {
+        const button = el("button", "question-option", option.label);
+        button.type = "button"; button.title = option.description;
+        button.onclick = () => { selected.clear(); selected.add(option.value); if (custom) custom.value = ""; next(); };
+        card.append(button);
+      }
+    }
+    if (step.allowCustom) {
+      custom = document.createElement("input"); custom.type = "text";
+      custom.placeholder = "Something else"; custom.maxLength = 2000; custom.value = ui.custom;
+      custom.oninput = () => { ui.custom = custom.value; };
+      custom.onkeydown = (event) => { if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); next(); } };
+      card.append(custom);
+    }
+    if (step.multiSelect || step.allowCustom) {
+      const submit = el("button", "", step.multiSelect ? "Submit" : "Use answer");
+      submit.type = "button"; submit.onclick = next; card.append(submit);
+    }
+    const skip = el("button", "", "Skip"); skip.type = "button";
+    skip.onclick = () => send({skip: true}); card.append(skip);
+  }
+  draw(); return card;
+}
+
+async function loadMessages() {
+  const bot = currentBot();
+  if (!bot) return;
+  const id = bot.id;
+  const messages = await api("/v1/bots/" + id + "/messages?pending=true" + (state.showArchived ? "&archived=true" : ""));
+  if (state.selected !== id) return;
+  const done = messages.filter((m) => !m.pending && m.id > 0 && !m.archived_at);
+  state.shown = { bot: id, max: Math.max(0, ...done.map((m) => m.id)),
+    counted: Math.max(0, ...done.filter((m) => m.role !== "user").map((m) => m.id)) };
+  const sig = messages.map((m) => m.id + (m.pending ? ":" + m.job_id + ":" + m.job_status : "") + (m.archived_at ? "a" : "") + (m.steer_status || "") + (m.steer_delivered_at || "") + (m.question ? JSON.stringify(m.question) : "") + (m.notice ? JSON.stringify(m.notice) : "")).join(",") + "|" + (bot.activity || "") + "|" + (state.editingMsg ? state.editingMsg.id : "");
+  if (sig === state.msgSig) return;
+  state.msgSig = sig;
+  const box = $("messages");
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  const nodes = messages.map((m) => {
+    let who = senderLabel(m, bot);
+    if (m.source === "inbox" || m.source === "routine" || m.source === "assignment" || m.source === "wakeup") who += " · " + (m.source === "wakeup" ? "wake-up" : m.source);
+    who += " · " + new Date(m.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    if (m.pending && m.job_id) {
+      let view = state.live.get(m.job_id);
+      if (!view) {
+        view = newView(m);
+        state.live.set(m.job_id, view);
+        refreshView(view);
+        runStream(view); // replays buffered events from seq 0 after a reload, then continues live
+      }
+      view.status = m.job_status;
+      view.notBefore = m.not_before || null;
+      view.who.textContent = who;
+      if (!view.text) refreshView(view);
+      return view.wrap;
+    }
+    if (state.editingMsg && state.editingMsg.id === m.id && !m.archived_at) return state.editingMsg.wrap;
+    const wrap = el("div", "msg " + (m.kind === "say" ? "progress " : "") + m.role + (m.source === "inbox" ? " inbox" : "") + (m.archived_at ? " archived" : ""));
+    const whoLine = el("div", "who", who);
+    if (m.kind === "say") whoLine.append(el("span", "tag", "progress"));
+    if (m.steer_job_id) {
+      const status = m.steer_status === "delivered" ? "received by bot ✓ " + new Date(m.steer_delivered_at).toLocaleTimeString([], {timeStyle: "short"}) : m.steer_status === "queued" ? "queued as next turn" : "sending…";
+      whoLine.append(el("span", "tag", "Steer · " + status));
+    }
+    if (m.edit_of) whoLine.append(el("span", "tag", "edited"));
+    if (m.unverified) {
+      const tag = el("span", "tag unverified", "unverified");
+      tag.title = "The bot did not confirm whether this task is finished.";
+      whoLine.append(tag);
+    }
+    if (m.archived_at) wrap.setAttribute("aria-label", "archived");
+    if (canEdit(m)) {
+      const edit = el("button", "mini", "✎");
+      edit.type = "button";
+      edit.title = "Edit and rewind to here";
+      edit.setAttribute("aria-label", "Edit message");
+      edit.onclick = () => startEdit(bot, m);
+      whoLine.append(edit);
+    }
+    if (m.role === "user" && !m.sender && !m.archived_at) {
+      const assign = el("button", "mini", "⚑");
+      assign.type = "button";
+      assign.title = "Make assignment from this message";
+      assign.setAttribute("aria-label", "Make assignment");
+      assign.onclick = () => openAssignments(m.text);
+      whoLine.append(assign);
+    }
+    if (canPlay(m)) whoLine.append(playButton(m));
+    if (canRetry(m, messages)) {
+      const retry = el("button", "mini", "Retry");
+      retry.type = "button";
+      retry.title = "Run this turn again";
+      retry.onclick = async () => {
+        retry.disabled = true;
+        try { await api("/v1/jobs/" + m.job_id + "/retry", { method: "POST" }); state.msgSig = ""; await loadMessages(); }
+        catch (e) { retry.disabled = false; setStatus(e.message, true); }
+      };
+      whoLine.append(retry);
+    }
+    wrap.append(whoLine, el("div", "body", m.text));
+    if (m.question) wrap.append(renderQuestion(m.question, bot.id));
+    if (m.notice && m.notice.open) wrap.append(renderUsageNotice(m.notice));
+    for (const id of (m.attachments || [])) showAttachment(wrap, bot.id, id);
+    return wrap;
+  });
+  const hasPending = messages.some((m) => m.pending);
+  if (!messages.length) {
+    const box2 = el("div", "empty");
+    const av = el("div", "avatar");
+    fillAvatar(av, bot);
+    box2.append(av, el("p", "", "Say hello to " + bot.name + "."));
+    nodes.push(box2);
+  }
+  if (bot.activity && !hasPending) nodes.push(el("div", "typing", bot.name + " is " + (bot.activity === "running" ? "working…" : "queued…")));
+  $("thread").replaceChildren(...nodes);
+  if (atBottom || messages.length < 3) box.scrollTop = box.scrollHeight;
+  markRead(id, false);
+  autoRead(id, messages);
+}
+
+/* the last failure line of a job that is no longer queued or running */
+function canRetry(m, messages) {
+  if (m.role !== "system" || !m.job_id || m.archived_at || !/^(Job failed|Not done\b|\S+ usage limit reached|Bot-Office restarted during this turn; not retried)/.test(m.text)) return false;
+  if (/Will retry/.test(m.text.split("\n")[0])) return false;
+  return !messages.some((o) => o.job_id === m.job_id && o.kind !== "say" && (o.pending || (o.id > m.id && !o.archived_at)));
+}
+
+/* ---- edit and rewind ---- */
+const REWIND_CONFIRM = "Rewind the chat to this message? Later messages are archived and the bot restarts from the remaining chat. " +
+  "Files changed, desktop actions, messages sent to other bots and memory updates are NOT undone.";
+function canEdit(m) {
+  return m.role === "user" && !m.sender && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending && !m.steer_job_id && m.id > 0 && !m.archived_at;
+}
+function startEdit(bot, m) {
+  const wrap = el("div", "msg user");
+  const box = el("div", "edit-box");
+  const input = document.createElement("textarea");
+  input.value = m.text;
+  input.setAttribute("aria-label", "Edit message");
+  input.maxLength = 100000;
+  const imgs = el("div", "imgs");
+  const editing = { id: m.id, bot: bot.id, wrap, input, attachments: [...(m.attachments || [])] };
+  function drawImages() {
+    imgs.replaceChildren(...editing.attachments.map((id) => {
+      const cell = el("span", "attachment-item");
+      showAttachment(cell, bot.id, id);
+      const remove = el("button", "mini", "×");
+      remove.type = "button";
+      remove.setAttribute("aria-label", "Remove image");
+      remove.onclick = () => { editing.attachments = editing.attachments.filter((x) => x !== id); drawImages(); };
+      cell.append(remove);
+      return cell;
+    }));
+  }
+  drawImages();
+  const note = el("p", "note", "Saving archives this message and everything after it, then re-runs it. Side effects (files, desktop actions, messages to other bots, memory) are NOT undone.");
+  const actions = el("div", "actions");
+  const cancel = el("button", "", "Cancel");
+  cancel.type = "button";
+  cancel.onclick = () => { state.editingMsg = null; state.msgSig = ""; loadMessages().catch(handleError); };
+  const save = el("button", "primary", "Save and rewind");
+  save.type = "button";
+  save.onclick = () => saveEdit(editing, save);
+  input.addEventListener("keydown", (event) => { if (event.key === "Escape") cancel.onclick(); });
+  actions.append(cancel, save);
+  box.append(input, imgs, note, actions);
+  wrap.append(el("div", "who", "Editing"), box);
+  state.editingMsg = editing;
+  state.msgSig = "";
+  loadMessages().then(() => input.focus()).catch(handleError);
+}
+async function saveEdit(editing, button) {
+  const text = editing.input.value.trim();
+  if (!text) { editing.input.focus(); return; }
+  if (!confirm(REWIND_CONFIRM)) return;
+  const body = { text, attachments: editing.attachments };
+  if (!$("send-reason").hidden) {
+    const reason = $("send-reason").value.trim();
+    if (!reason) { handleError(new Error("Claude needs a reason before sending.")); $("send-reason").focus(); return; }
+    body.reason = reason;
+  }
+  const url = "/v1/bots/" + editing.bot + "/messages/" + editing.id + "/edit";
+  button.disabled = true;
+  try {
+    try {
+      await api(url, { method: "POST", body: JSON.stringify(body) });
+    } catch (err) {
+      if (!(err.status === 409 && err.body && Array.isArray(err.body.jobs) && err.body.jobs.length && !err.body.cancelled)) throw err;
+      if (!confirm("A reply is queued or running. Cancel it and rewind?")) return;
+      body.cancel_running = true;
+      setStatus("Cancelling the running reply…");
+      await api(url, { method: "POST", body: JSON.stringify(body) });
+    }
+    if (state.editingMsg === editing) state.editingMsg = null;
+    setStatus("Rewound. Side effects of the archived messages were not undone.");
+    state.msgSig = "";
+    if (state.selected === editing.bot) await loadMessages();
+  } catch (err) { handleError(err); }
+  finally { button.disabled = false; }
+}
+$("show-archived").onclick = () => {
+  state.showArchived = !state.showArchived;
+  $("show-archived").setAttribute("aria-pressed", String(state.showArchived));
+  state.msgSig = "";
+  loadMessages().catch(handleError);
+};
+
+$("composer").onsubmit = async (event) => {
+  event.preventDefault();
+  const bot = currentBot();
+  const revision = draftRevision;
+  const draft = $("text").value;
+  const text = draft.trim();
+  if (!bot || (!text && !pendingImages.length) || pendingImages.some((item) => !item.id || item.bot !== bot.id) || sendingImages) return;
+  const sentImages = [...pendingImages];
+  const body = { text: text || "Please see attached images.", attachments: sentImages.map((item) => item.id) };
+  if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
+  if (!$("send-reason").hidden) {
+    const reason = $("send-reason").value.trim();
+    if (!reason) { handleError(new Error("Claude needs a reason before sending.")); $("send-reason").focus(); return; }
+    body.reason = reason;
+  }
+  sendingImages = true; for (const item of sentImages) item.sending = true; updateImages();
+  try {
+    const posted = await api("/v1/bots/" + bot.id + "/messages", { method: "POST", body: JSON.stringify(body) });
+    if (state.selected === bot.id && draftRevision === revision && $("text").value === draft) $("text").value = "";
+    $("queue-next").checked = false;  // one-shot: the next message steers again
+    renderHeader();
+    for (const item of sentImages) { item.idSent = true; if (!item.removed) removeImage(item, true); }
+    updateImages();
+    autoGrow();
+    setStatus("");
+    if (!posted?.message?.steer_job_id) bot.activity = bot.activity === "running" ? "running" : "queued";
+    renderBots();
+    state.msgSig = "";
+    const box = $("messages");
+    await loadMessages();
+    box.scrollTop = box.scrollHeight;
+  } catch (err) { handleError(err); }
+  finally { for (const item of sentImages) { item.sending = false; if (item.removed && !item.idSent) deleteUpload(item); } sendingImages = false; updateImages(); }
+};
+
+function autoGrow() { const t = $("text"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 220) + "px"; }
+$("text").addEventListener("input", () => { draftRevision++; autoGrow(); });
+$("text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+
+/* ---- dictation: record, decode in the browser, send 16 kHz mono WAV; never sends the message ---- */
+const MIC_MAX_MS = 120000;
+const STT_RATE = 16000;
+const voice = { status: null, prefs: null, rec: null, stream: null, chunks: [], timer: null, busy: false, speech: null,
+                micGen: 0, asking: false, prefsSeq: 0 };
+
+async function loadVoice() {
+  try {
+    const data = await api("/v1/voice");
+    voice.status = data; voice.prefs = data.prefs;
+  } catch (err) { if (err instanceof AuthError) throw err; voice.status = null; }
+  updateMic();
+  updateReadAloud();
+}
+
+function browserSpeech() { return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
+function serverStt() { return !!(voice.status && voice.status.stt && voice.status.stt.available); }
+function useBrowserStt() { return !serverStt() && !!(voice.prefs && voice.prefs.browser_stt) && !!browserSpeech(); }
+
+function updateMic() {
+  const button = $("mic");
+  button.hidden = !(serverStt() || useBrowserStt());
+  const recording = !!(voice.rec || voice.speech || voice.asking);
+  button.setAttribute("aria-pressed", recording ? "true" : "false");
+  button.classList.toggle("busy", voice.busy);
+  button.disabled = voice.busy;
+  const label = voice.busy ? "Transcribing…" : recording ? "Stop dictation (Ctrl+Shift+M)" : "Dictate (Ctrl+Shift+M)";
+  button.title = label; button.setAttribute("aria-label", label);
+}
+
+function insertAtCaret(text) {
+  const box = $("text");
+  text = text.trim();
+  if (!text) return;
+  const start = box.selectionStart ?? box.value.length, end = box.selectionEnd ?? box.value.length;
+  const before = box.value.slice(0, start), after = box.value.slice(end);
+  const lead = before && !/\s$/.test(before) ? " " : "";
+  const trail = after && !/^\s/.test(after) ? " " : "";
+  box.value = before + lead + text + trail + after;
+  const caret = (before + lead + text + trail).length;
+  box.setSelectionRange(caret, caret);
+  draftRevision++;
+  autoGrow();
+  box.focus();
+}
+
+function micError(err) {
+  const name = err && err.name;
+  let text = err && err.message ? err.message : String(err);
+  if (name === "NotAllowedError" || name === "SecurityError") text = "Microphone permission was denied. Allow it in the browser's site settings.";
+  else if (name === "NotFoundError" || name === "OverconstrainedError") text = "No microphone was found.";
+  else if (name === "NotReadableError") text = "The microphone is in use by another application.";
+  handleError(new Error(text));
+}
+
+function stopTracks() {
+  if (voice.stream) for (const track of voice.stream.getTracks()) track.stop();
+  voice.stream = null;
+}
+
+function recorderType() {
+  for (const type of ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4", "audio/webm"]) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type)) return type;
+  }
+  return "";
+}
+
+async function startDictation() {
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    handleError(new Error("Dictation needs HTTPS or localhost (the browser blocks the microphone here)."));
+    return;
+  }
+  if (!window.MediaRecorder) { handleError(new Error("This browser cannot record audio.")); return; }
+  // The permission prompt can stay open while the user switches bots or locks the page:
+  // stopDictation() bumps micGen, and a stream granted for an older context is dropped.
+  const gen = ++voice.micGen;
+  const bot = state.selected;
+  voice.asking = true; updateMic();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch (err) {
+    if (gen === voice.micGen) { voice.asking = false; updateMic(); micError(err); }
+    return;
+  }
+  if (gen !== voice.micGen || state.selected !== bot) {
+    for (const track of stream.getTracks()) track.stop();
+    return;
+  }
+  voice.asking = false;
+  voice.stream = stream;
+  const type = recorderType();
+  const rec = new MediaRecorder(voice.stream, type ? { mimeType: type } : undefined);
+  voice.chunks = [];
+  rec.ondataavailable = (event) => { if (event.data && event.data.size) voice.chunks.push(event.data); };
+  rec.onstop = () => {
+    clearTimeout(voice.timer);
+    stopTracks();
+    const blob = new Blob(voice.chunks, { type: rec.mimeType || type || "audio/webm" });
+    voice.chunks = []; voice.rec = null;
+    transcribe(blob, bot);
+  };
+  voice.rec = rec;
+  rec.start();
+  voice.timer = setTimeout(() => { if (voice.rec === rec) rec.stop(); }, MIC_MAX_MS);
+  setStatus("Listening… press the mic again to stop");
+  updateMic();
+}
+
+async function transcribe(blob, bot) {
+  voice.busy = true; updateMic();
+  setStatus("Transcribing…");
+  try {
+    const wav = await toWav16k(blob);
+    const result = await api("/v1/voice/transcribe", { method: "POST", body: wav });
+    if (state.selected !== bot) return;  // the user moved to another bot: discard
+    insertAtCaret(result.text || "");
+    setStatus(result.text ? "" : "No speech recognised");
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    if (state.selected === bot) handleError(err.name === "EncodingError" ? new Error("The recording could not be decoded.") : err);
+  } finally { voice.busy = false; updateMic(); }
+}
+
+async function toWav16k(blob) {
+  const raw = await blob.arrayBuffer();
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new Ctx();
+  let decoded;
+  try { decoded = await ctx.decodeAudioData(raw); } finally { ctx.close(); }
+  const frames = Math.max(1, Math.ceil(decoded.duration * STT_RATE));
+  const offline = new OfflineAudioContext(1, frames, STT_RATE);
+  const source = offline.createBufferSource();
+  source.buffer = decoded;  // downmixed to mono by the 1-channel destination
+  source.connect(offline.destination);
+  source.start();
+  const samples = (await offline.startRendering()).getChannelData(0);
+  const out = new DataView(new ArrayBuffer(44 + samples.length * 2));
+  const text = (offset, value) => { for (let i = 0; i < value.length; i++) out.setUint8(offset + i, value.charCodeAt(i)); };
+  text(0, "RIFF"); out.setUint32(4, 36 + samples.length * 2, true); text(8, "WAVE");
+  text(12, "fmt "); out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
+  out.setUint32(24, STT_RATE, true); out.setUint32(28, STT_RATE * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+  text(36, "data"); out.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.max(-1, Math.min(1, samples[i]));
+    out.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+  }
+  return new Blob([out.buffer], { type: "audio/wav" });
+}
+
+function startBrowserSpeech() {
+  // Opt-in only: some browsers send this audio to their vendor's cloud service.
+  const Speech = browserSpeech();
+  const rec = new Speech();
+  const bot = state.selected;
+  rec.lang = "en-GB"; rec.interimResults = false; rec.continuous = true;
+  rec.onresult = (event) => {
+    if (state.selected !== bot) return;
+    for (let i = event.resultIndex; i < event.results.length; i++) if (event.results[i].isFinal) insertAtCaret(event.results[i][0].transcript);
+  };
+  rec.onerror = (event) => { if (event.error !== "aborted" && event.error !== "no-speech") micError({ name: event.error === "not-allowed" ? "NotAllowedError" : "", message: "Browser speech recognition: " + event.error }); };
+  rec.onend = () => { clearTimeout(voice.timer); voice.speech = null; setStatus(""); updateMic(); };
+  voice.speech = rec;
+  rec.start();
+  voice.timer = setTimeout(() => rec.stop(), MIC_MAX_MS);
+  setStatus("Listening (browser speech recognition)…");
+  updateMic();
+}
+
+function stopDictation() {
+  voice.micGen++;  // also abandons a pending microphone permission request
+  if (voice.asking) { voice.asking = false; updateMic(); }
+  if (voice.rec && voice.rec.state !== "inactive") voice.rec.stop();
+  if (voice.speech) voice.speech.stop();
+}
+
+function toggleDictation() {
+  if (voice.busy || !state.selected) return;
+  if (voice.rec || voice.speech || voice.asking) { stopDictation(); return; }
+  if (serverStt()) startDictation();
+  else if (useBrowserStt()) startBrowserSpeech();
+}
+$("mic").onclick = toggleDictation;
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === "m" || event.key === "M") && !$("mic").hidden) {
+    event.preventDefault(); toggleDictation();
+  }
+});
+
+/* ---- read aloud: plain-text chunks -> /v1/voice/speak -> blob: audio, one message at a time ---- */
+const player = { token: 0, msg: null, button: null, stop: null, queue: [], seen: new Map(), checking: false };
+// Other tabs learn about a read-aloud switch at once (no storage involved); tabs that miss
+// it still re-check the server preference before every automatic playback.
+const voiceChannel = window.BroadcastChannel ? new BroadcastChannel("bot-office-voice") : null;
+
+function ttsReady() { return !!(voice.status && voice.status.tts && voice.status.tts.available); }
+function canPlay(m) { return m.role === "assistant" && m.kind !== "say" && !m.pending && m.id > 0 && !m.archived_at && ttsReady(); }
+
+function playButton(m) {
+  const button = el("button", "mini play", player.msg === m.id ? "■" : "▶");
+  button.type = "button";
+  button.title = player.msg === m.id ? "Stop reading" : "Read aloud";
+  button.setAttribute("aria-label", button.title);
+  button.onclick = () => { if (player.msg === m.id) stopPlayback(); else { player.queue = []; playMessage(m, button); } };
+  if (player.msg === m.id) player.button = button;
+  return button;
+}
+
+function setPlayButton(playing) {
+  const button = player.button;
+  if (!button) return;
+  button.textContent = playing ? "■" : "▶";
+  button.title = playing ? "Stop reading" : "Read aloud";
+  button.setAttribute("aria-label", button.title);
+}
+
+function stopPlayback() {
+  player.token++;
+  player.queue = [];
+  if (player.stop) player.stop();
+  setPlayButton(false);
+  player.msg = null; player.button = null;
+}
+
+async function fetchSpeech(text) {
+  const prefs = voice.prefs || {};
+  return api("/v1/voice/speak", { method: "POST", body: JSON.stringify({ text, voice: prefs.voice, speed: prefs.speed }) });
+}
+
+function playBlob(blob, token) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    const done = (err) => {
+      audio.onended = audio.onerror = null;
+      audio.pause();
+      URL.revokeObjectURL(url);
+      if (player.stop === stop) player.stop = null;
+      if (err) reject(err); else resolve();
+    };
+    const stop = () => done();
+    player.stop = stop;
+    audio.onended = () => done();
+    audio.onerror = () => done(new Error("The audio could not be played."));
+    if (token !== player.token) { done(); return; }
+    audio.play().catch(done);
+  });
+}
+
+async function playText(text, token) {
+  const { chunks } = await api("/v1/voice/speakable", { method: "POST", body: JSON.stringify({ text: text.slice(0, 100000) }) });
+  let next = chunks.length ? fetchSpeech(chunks[0]) : null;
+  for (let i = 0; i < chunks.length && token === player.token; i++) {
+    const blob = await next;
+    next = i + 1 < chunks.length ? fetchSpeech(chunks[i + 1]) : null;  // prefetch while this one plays
+    if (next) next.catch(() => {});
+    if (token !== player.token) return;
+    await playBlob(blob, token);
+  }
+}
+
+async function playMessage(m, button) {
+  if (player.stop) player.stop();
+  setPlayButton(false);
+  const token = ++player.token;
+  player.msg = m.id; player.button = button || null;
+  setPlayButton(true);
+  try {
+    await playText(m.text, token);
+  } catch (err) {
+    if (err instanceof AuthError) throw err;
+    if (err.name === "NotAllowedError") handleError(new Error("The browser blocked audio playback. Click ▶ once to allow it."));
+    else if (token === player.token) handleError(err);
+    player.queue = [];
+  } finally {
+    if (token === player.token) {
+      setPlayButton(false);
+      player.msg = null; player.button = null;
+      startAutoRead();  // the queue only ever holds automatic reads
+    }
+  }
+}
+
+function autoRead(botId, messages) {
+  // only replies that complete while this bot is open; never the existing history
+  const done = messages.filter((m) => m.role === "assistant" && m.kind !== "say" && !m.pending && m.id > 0 && !m.archived_at);
+  const newest = Math.max(0, ...done.map((m) => m.id));
+  if (!player.seen.has(botId)) { player.seen.set(botId, newest); return; }
+  const fresh = done.filter((m) => m.id > player.seen.get(botId));
+  player.seen.set(botId, Math.max(newest, player.seen.get(botId)));
+  if (!fresh.length || !(voice.prefs && voice.prefs.auto_read) || !ttsReady()) return;
+  player.queue.push(...fresh);
+  startAutoRead();
+}
+
+// Starts the next queued reply only after a fresh check of the server preference, so a
+// switch-off in this tab (local at once) or in another tab always wins.
+async function startAutoRead() {
+  if (player.msg !== null || player.checking || !player.queue.length) return;
+  player.checking = true;
+  const token = player.token, seq = voice.prefsSeq;
+  let on = false;
+  try {
+    const prefs = await api("/v1/voice/prefs");
+    on = !!prefs.auto_read;
+    if (seq === voice.prefsSeq) { voice.prefs = prefs; updateReadAloud(); }
+  } catch (err) { if (err instanceof AuthError) handleError(err); }
+  finally { player.checking = false; }
+  if (!on || token !== player.token || !(voice.prefs && voice.prefs.auto_read)) { player.queue = []; return; }
+  if (player.msg === null && player.queue.length) playMessage(player.queue.shift());
+}
+
+function updateReadAloud() {
+  const button = $("read-aloud");
+  const on = !!(voice.prefs && voice.prefs.auto_read);
+  button.hidden = !ttsReady();
+  button.textContent = on ? "🔊" : "🔈";
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+}
+
+async function saveVoicePrefs(update) {
+  const seq = ++voice.prefsSeq;  // only the latest change's reply is applied
+  try {
+    const saved = await api("/v1/voice/prefs", { method: "PUT", body: JSON.stringify(update) });
+    if (seq === voice.prefsSeq) voice.prefs = saved;
+  } catch (err) { handleError(err, $("voice-tts-status")); }
+  updateReadAloud(); updateMic(); fillVoicePanel();
+}
+
+// Switching read-aloud takes effect here at once (switching off stops playback and drops
+// queued replies before the server has answered) and is announced to other tabs.
+function setAutoRead(on, announce = true) {
+  voice.prefsSeq++;  // replies to requests made before this switch are not applied
+  voice.prefs = { ...(voice.prefs || { voice: "bm_george", speed: 1, browser_stt: false }), auto_read: on };
+  if (!on) stopPlayback();
+  updateReadAloud();
+  if ($("voice-auto")) $("voice-auto").checked = on;
+  if (announce && voiceChannel) voiceChannel.postMessage({ auto_read: on });
+}
+if (voiceChannel) {
+  voiceChannel.onmessage = (event) => {
+    const data = event.data || {};
+    if (typeof data.auto_read === "boolean" && voice.prefs) setAutoRead(data.auto_read, false);
+  };
+}
+
+$("read-aloud").onclick = () => {
+  const on = !(voice.prefs && voice.prefs.auto_read);
+  setAutoRead(on);
+  saveVoicePrefs({ auto_read: on });
+};
+
+function fillVoicePanel() {
+  const status = voice.status || {};
+  const prefs = voice.prefs || { voice: "bm_george", speed: 1, auto_read: false, browser_stt: false };
+  const line = (info, name) => !info ? name + ": unknown" : info.available
+    ? name + ": ready (" + info.engine + " " + info.model + (info.loaded ? ", loaded" : ", starts on first use") + ")"
+    : name + ": " + (info.reason || "not available");
+  $("voice-stt-status").textContent = line(status.stt, "Dictation");
+  $("voice-tts-status").textContent = line(status.tts, "Read aloud");
+  $("voice-tts-status").classList.remove("bad");
+  $("voice-select").replaceChildren(...(status.voices || []).map((v) => {
+    const option = el("option", "", v.label + (v.installed ? "" : " (not installed)"));
+    option.value = v.id; option.disabled = !v.installed; option.selected = v.id === prefs.voice;
+    return option;
+  }));
+  $("voice-speed").value = prefs.speed;
+  $("voice-speed-value").textContent = Number(prefs.speed).toFixed(2) + "×";
+  $("voice-auto").checked = !!prefs.auto_read;
+  $("voice-auto").disabled = !ttsReady();
+  $("voice-preview").disabled = !ttsReady();
+  $("voice-browser-stt").checked = !!prefs.browser_stt;
+}
+$("voice-open").onclick = async () => {
+  showToolPanel("voice-panel", "Voice");
+  await loadVoice();
+  fillVoicePanel();
+  state.msgSig = "";  // installs may have changed: redraw the play buttons
+  loadMessages().catch(handleError);
+};
+$("voice-select").onchange = () => saveVoicePrefs({ voice: $("voice-select").value });
+$("voice-speed").oninput = () => { $("voice-speed-value").textContent = Number($("voice-speed").value).toFixed(2) + "×"; };
+$("voice-speed").onchange = () => saveVoicePrefs({ speed: Number($("voice-speed").value) });
+$("voice-auto").onchange = () => { const on = $("voice-auto").checked; setAutoRead(on); saveVoicePrefs({ auto_read: on }); };
+$("voice-browser-stt").onchange = () => saveVoicePrefs({ browser_stt: $("voice-browser-stt").checked });
+$("voice-preview").onclick = () => { player.queue = []; playMessage({ id: -1, text: "Hello. This is how your bots will sound when they read a reply aloud." }); };
+
+/* ---- settings dialog ---- */
+function fillModelSelect(bot) {
+  const select = $("f-model");
+  select.replaceChildren();
+  const loaded = Array.isArray(state.choices);
+  const choices = state.choices || [];
+  let current = null;
+  if (bot) {
+    current = bot.engine + "|" + (bot.model || "");
+    const known = choices.some((c) => c.engine === bot.engine && c.models.some((m) => m.id === bot.model));
+    if (!known) {
+      const suffix = loaded ? " (current, not in the signed-in list)" : " (current)";
+      const opt = el("option", "", modelLabel(bot.engine, bot.model) + suffix);
+      opt.value = current;
+      select.append(opt);
+    }
+  }
+  for (const choice of choices) {
+    const group = document.createElement("optgroup");
+    group.label = choice.label;
+    for (const m of choice.models) {
+      const opt = el("option", "", m.display);
+      opt.value = choice.engine + "|" + m.id;
+      group.append(opt);
+    }
+    select.append(group);
+  }
+  if (current) select.value = current;
+  else if (choices.length) {
+    const first = choices[0];
+    select.value = first.engine + "|" + (first.default_model && first.models.some((m) => m.id === first.default_model) ? first.default_model : first.models[0].id);
+  }
+  const none = !select.options.length;
+  $("f-model-hint").textContent = none
+    ? (state.choices ? "No engine is signed in yet. Sign in to a CLI on the host, then reopen this dialog." : "Loading models…")
+    : "Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.";
+  $("dialog-save").disabled = none;
+  updateReasonRow();
+  fillEffortSelect();
+  updateTier();
+}
+
+function selectedEngine() { return ($("f-model").value || "").split("|")[0]; }
+
+function choiceFor(engine) { return (state.choices || []).find((c) => c.engine === engine) || null; }
+function effortsFor(engine) { const c = choiceFor(engine); return c && c.efforts ? c.efforts : (FALLBACK_EFFORTS[engine] || []); }
+function defaultEffortFor(engine) { const c = choiceFor(engine); return (c && c.default_effort) || FALLBACK_DEFAULT_EFFORT[engine] || ""; }
+
+function fillEffortSelect() {
+  const engine = selectedEngine();
+  const levels = effortsFor(engine);
+  const bot = state.editing;
+  const select = $("f-effort");
+  const keep = select.dataset.engine === engine ? select.value : null;
+  select.replaceChildren(...(engine === "opencode" ? [""] : []).concat(levels).map((level) => { const o = el("option", "", level || "default (unset)"); o.value = level; return o; }));
+  const stored = bot && bot.engine === engine && (levels.includes(bot.effort) || (engine === "opencode" && !bot.effort)) ? (bot.effort || "") : null;
+  select.value = keep ?? stored ?? defaultEffortFor(engine);
+  select.dataset.engine = engine;
+  // engines without an effort flag (Cursor) get no control at all
+  $("f-custom-row").hidden = engine !== "opencode";
+  const oc = choiceFor("opencode");
+  $("f-custom-list").replaceChildren(...(oc ? oc.models : []).map((m) => { const o = el("option", ""); o.value = m.id; return o; }));
+  $("f-effort-row").hidden = !levels.length;
+  $("f-effort-hint").hidden = !levels.length;
+}
+
+function updateTier() {
+  const [engine, model] = ($("f-model").value || "").split("|");
+  let tier = "";
+  const choice = choiceFor(engine);
+  const option = choice && choice.models.find((m) => m.id === model);
+  if (option) tier = option.capability_tier;
+  else if (state.editing && state.editing.engine === engine && state.editing.model === model) tier = state.editing.capability_tier;
+  $("f-tier").textContent = tier ? "Capability tier: " + tier + " (derived from the model; it changes when the model does)" : "";
+}
+
+function updateReasonRow() {
+  const bot = state.editing;
+  const show = selectedEngine() === "claude" || !!(bot && (bot.reason || "").trim());
+  $("f-reason-row").hidden = !show;
+}
+
+function updateIconPreview() {
+  const bot = state.editing || { id: "", name: $("f-name").value, icon: "", icon_image: null, updated_at: "" };
+  const preview = $("f-icon-preview");
+  const icon = $("f-icon").value.trim() || bot.icon || "🤖";
+  if (state.pendingImage) { fillAvatar(preview, bot, { url: state.pendingImage.url, icon }); }
+  else if (state.removeImage || !bot.icon_image) { fillAvatar(preview, { ...bot, icon_image: null }, { url: null, icon }); }
+  else fillAvatar(preview, bot);
+  $("f-image-remove").hidden = !(state.pendingImage || (bot.icon_image && !state.removeImage));
+}
+
+function clearPendingImage() {
+  if (state.pendingImage) URL.revokeObjectURL(state.pendingImage.url);
+  state.pendingImage = null;
+}
+
+async function openDialog(bot) {
+  state.editing = bot;
+  clearPendingImage();
+  state.removeImage = false;
+  $("dialog-title").textContent = bot ? "Bot settings" : "New bot";
+  $("dialog-save").textContent = bot ? "Save" : "Create bot";
+  $("f-name").value = bot ? bot.name : "";
+  $("f-icon").value = bot ? bot.icon || "" : "";
+  $("f-desc").value = bot ? bot.description || "" : "";
+  $("f-instructions").value = bot ? bot.instructions || "" : "";
+  $("f-reason").value = bot ? bot.reason || "" : "";
+  $("f-custom").value = bot && bot.engine === "opencode" ? bot.model || "" : "";
+  $("f-image").value = "";
+  $("f-effort").dataset.engine = "";
+  $("session-zone").hidden = !bot;
+  $("session-reset").disabled = false;
+  $("session-reset").textContent = "Reset session";
+  $("session-reset").onclick = bot ? async () => {
+    if (!confirm("Start a fresh session for " + bot.name + " on its next turn?")) return;
+    $("session-reset").disabled = true;
+    try {
+      const out = await api("/v1/bots/" + bot.id + "/session/reset", { method: "POST" });
+      $("session-reset").textContent = out.reset && out.reset.length ? "Session reset" : "No saved session";
+    } catch (err) {
+      $("dialog-error").textContent = String(err && err.message || err);
+      $("session-reset").disabled = false;
+    }
+  } : null;
+  $("f-cli-access").value = bot && bot.cli_access === "restricted" ? "restricted" : "full";
+  $("delete-zone").hidden = !bot;
+  $("loop-zone").hidden = !bot;
+  $("f-timeout").value = bot && bot.job_timeout ? Math.round(bot.job_timeout / 60) : "";
+  $("f-notify").checked = !bot || bot.notify !== false;
+  $("f-allow-sudo").checked = Boolean(bot && bot.allow_sudo);
+  $("f-scheduled-runs").value = bot && bot.scheduled_runs === "gated" ? "gated" : "full";
+  $("f-digest").checked = Boolean(bot && bot.digest);
+  const budget = (bot && bot.daily_budget) || {};
+  $("f-budget-turns").value = budget.unattended_turns ?? "";
+  $("f-budget-minutes").value = budget.unattended_minutes ?? "";
+  $("f-budget-tokens").value = budget.tokens ?? "";
+  $("f-gate").textContent = "Action gate: checking…";
+  if (bot) {
+    api("/v1/gate").then((gate) => {
+      const info = gate[bot.engine] || {state: "none"};
+      const words = {enforced: "enforced (probe passed; gated runs allowed)",
+        advisory: "advisory (wired, not proven; gated runs are refused until scripts/probe_gate.sh passes)",
+        none: "none (gated runs are refused)"};
+      $("f-gate").textContent = "Action gate for " + bot.engine + ": " + (words[info.state] || info.state);
+    }).catch(() => { $("f-gate").textContent = "Action gate: unknown"; });
+  }
+  $("f-isolation").textContent = "Isolation: checking…";
+  api("/v1/isolation").then((info) => {
+    $("f-isolation").textContent = info.isolation === "on"
+      ? "Isolation: on (bots run as " + info.bots_user + " via the launcher; "
+        + (info.secrets_private ? "token and DB private"
+          : "token and DB private only if " + info.bots_user + "'s sudo needs a password: the installer's sudo check "
+            + (info.sudo_check === "nopasswd" ? "found NOPASSWD" : "has not passed"))
+        + "; sudo only if allowed below)"
+      : "Isolation: off (" + (info.why || "old single-user layout") + "; Allow sudo is not enforced)";
+  }).catch(() => { $("f-isolation").textContent = "Isolation: unknown"; });
+  $("delete-confirm").hidden = true;
+  $("delete-start").hidden = false;
+  $("dialog-error").textContent = "";
+  fillModelSelect(bot);
+  updateIconPreview();
+  $("bot-dialog").showModal();
+  $("f-name").focus();
+  if (!state.choices || !state.choices.length) { await loadChoices(); if ($("bot-dialog").open) fillModelSelect(state.editing); }
+}
+
+$("new-bot").onclick = () => openDialog(null);
+$("edit-bot").onclick = () => { const bot = currentBot(); if (bot) openDialog(bot); };
+$("dialog-cancel").onclick = () => $("bot-dialog").close();
+$("bot-dialog").addEventListener("close", () => { clearPendingImage(); state.editing = null; });
+$("f-models-refresh").onclick = async () => {
+  const button = $("f-models-refresh");
+  const picked = $("f-model").value, typed = $("f-custom").value;
+  button.disabled = true;
+  try {
+    state.choices = await api("/v1/model-choices?refresh=1");
+    fillModelSelect(state.editing);
+    if ([...$("f-model").options].some((o) => o.value === picked)) $("f-model").value = picked;
+    $("f-custom").value = typed;
+    fillEffortSelect(); updateTier();
+  } catch (err) {
+    if (err instanceof AuthError) handleError(err); else $("dialog-error").textContent = String(err && err.message || err);
+  } finally { button.disabled = false; }
+};
+$("f-model").onchange = () => { $("f-custom").value = ""; updateReasonRow(); fillEffortSelect(); updateTier(); };
+$("f-icon").oninput = updateIconPreview;
+$("f-name").oninput = () => { if (!state.editing) updateIconPreview(); };
+
+$("f-image").onchange = () => {
+  const file = $("f-image").files[0];
+  $("dialog-error").textContent = "";
+  if (!file) return;
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) { $("dialog-error").textContent = "Use a PNG, JPEG, GIF or WebP image."; $("f-image").value = ""; return; }
+  if (file.size > MAX_ICON_BYTES) { $("dialog-error").textContent = "Image is larger than 256 KB."; $("f-image").value = ""; return; }
+  if (!file.size) { $("dialog-error").textContent = "Image is empty."; $("f-image").value = ""; return; }
+  clearPendingImage();
+  state.pendingImage = { file, url: URL.createObjectURL(file) };
+  state.removeImage = false;
+  updateIconPreview();
+};
+$("f-image-remove").onclick = () => { clearPendingImage(); $("f-image").value = ""; state.removeImage = true; updateIconPreview(); };
+
+$("bot-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const err = $("dialog-error");
+  err.textContent = "";
+  const bot = state.editing;
+  let [engine, model] = ($("f-model").value || "").split("|");
+  if (engine === "opencode" && $("f-custom").value.trim()) model = $("f-custom").value.trim();
+  if (!engine || !model) { err.textContent = "Pick a model."; return; }
+  const name = $("f-name").value.trim();
+  if (!name) { err.textContent = "Name is required."; return; }
+  const reason = $("f-reason").value.trim();
+  const storedReason = bot ? (bot.reason || "").trim() : "";
+  if (engine === "claude" && !reason) {
+    err.textContent = "Claude models need a reason. Say why this bot should use Claude.";
+    $("f-reason").focus();
+    return;
+  }
+  const body = {
+    name,
+    icon: $("f-icon").value.trim() || (bot ? bot.icon : "") || "🤖",
+    description: $("f-desc").value.trim(),
+    instructions: $("f-instructions").value,
+  };
+  if (!bot || engine !== bot.engine || model !== bot.model) { body.engine = engine; body.model = model; }
+  if (!$("f-reason-row").hidden && (reason !== storedReason || !bot)) body.reason = reason || null;
+  if (!$("f-effort-row").hidden && (!bot || $("f-effort").value !== (bot.effort || "") || engine !== bot.engine)) body.effort = $("f-effort").value || null;
+  if (!bot || $("f-cli-access").value !== (bot.cli_access || "full")) body.cli_access = $("f-cli-access").value;
+  if (bot) {
+    const timeout = $("f-timeout").value ? Math.round(Number($("f-timeout").value) * 60) : null;
+    if (timeout !== (bot.job_timeout || null)) body.job_timeout = timeout;
+    if ($("f-notify").checked !== (bot.notify !== false)) body.notify = $("f-notify").checked;
+    if ($("f-digest").checked !== Boolean(bot.digest)) body.digest = $("f-digest").checked;
+    if ($("f-scheduled-runs").value !== (bot.scheduled_runs || "full")) body.scheduled_runs = $("f-scheduled-runs").value;
+    const cap = (id) => $(id).value === "" ? null : Math.round(Number($(id).value));
+    const wanted = {unattended_turns: cap("f-budget-turns"), unattended_minutes: cap("f-budget-minutes"), tokens: cap("f-budget-tokens")};
+    const had = bot.daily_budget || {};
+    if (Object.keys(wanted).some((key) => wanted[key] !== (had[key] ?? null))) body.daily_budget = wanted;
+    if ($("f-allow-sudo").checked !== Boolean(bot.allow_sudo)) {
+      if ($("f-allow-sudo").checked && !confirm("Allow sudo for " + bot.name + "? It can then read the controller's token, database and bridge key.")) {
+        $("f-allow-sudo").checked = false;
+      } else {
+        body.allow_sudo = $("f-allow-sudo").checked;
+      }
+    }
+  }
+  $("dialog-save").disabled = true;
+  try {
+    let saved = bot
+      ? await api("/v1/bots/" + bot.id, { method: "PATCH", body: JSON.stringify(body) })
+      : await api("/v1/bots", { method: "POST", body: JSON.stringify(body) });
+    if (state.pendingImage) {
+      saved = await api("/v1/bots/" + saved.id + "/icon", { method: "PUT", body: state.pendingImage.file });
+    } else if (state.removeImage && bot && bot.icon_image) {
+      saved = await api("/v1/bots/" + saved.id + "/icon", { method: "DELETE" });
+    }
+    $("bot-dialog").close();
+    state.selected = saved.id;
+    rememberBot(saved.id);
+    await loadBots();
+    state.msgSig = "";
+    await loadMessages();
+  } catch (e) { handleError(e, err); }
+  finally { $("dialog-save").disabled = false; }
+};
+
+$("delete-start").onclick = () => {
+  const bot = state.editing;
+  if (!bot) return;
+  $("del-name").textContent = bot.name;
+  $("del-typed").value = "";
+  $("delete-go").disabled = true;
+  $("delete-confirm").hidden = false;
+  $("delete-start").hidden = true;
+  $("del-typed").focus();
+};
+$("delete-cancel").onclick = () => { $("delete-confirm").hidden = true; $("delete-start").hidden = false; };
+$("del-typed").oninput = () => { $("delete-go").disabled = !state.editing || $("del-typed").value.trim() !== state.editing.name; };
+$("delete-go").onclick = async () => {
+  const bot = state.editing;
+  if (!bot || $("del-typed").value.trim() !== bot.name) return;
+  $("delete-go").disabled = true;
+  try {
+    await api("/v1/bots/" + bot.id, { method: "DELETE" });
+    const cached = state.iconUrls.get(bot.id);
+    if (cached && cached.url) URL.revokeObjectURL(cached.url);
+    state.iconUrls.delete(bot.id);
+    $("bot-dialog").close();
+    if (state.selected === bot.id) { state.selected = null; rememberBot(null); }
+    await loadBots();
+    state.msgSig = "";
+    await loadMessages();
+    setStatus("Deleted " + bot.name + ".");
+  } catch (e) { handleError(e, $("dialog-error")); $("delete-go").disabled = false; }
+};
+
+/* ---- desktop and agent messages ---- */
+let desktopRfb = null;
+function disconnectDesktop() {
+  if (desktopRfb) desktopRfb.disconnect();
+  desktopRfb = null;
+  $("desktop-take").disabled = true;
+  $("desktop-take").textContent = "Take over";
+  $("desktop-screen").replaceChildren();
+}
+$("tools-close").onclick = () => $("tools-dialog").close();
+$("tools-dialog").addEventListener("close", disconnectDesktop);
+$("desktop-open").onclick = async () => {
+  $("tools-title").textContent = "Desktop";
+  $("agent-panel").hidden = true;
+  $("memory-panel").hidden = true;
+  $("routines-panel").hidden = true;
+  $("assignments-panel").hidden = true;
+  $("watchers-panel").hidden = true;
+  $("voice-panel").hidden = true;
+  $("desktop-panel").hidden = false;
+  $("tools-dialog").showModal();
+  try {
+    const desktops = await api("/v1/desktops");
+    const bot = currentBot();
+    const list = $("desktop-select");
+    list.replaceChildren(...desktops.map((d) => {
+      const option = el("option", "", d.name + " · " + d.status + (d.bot ? " · " + d.bot : ""));
+      option.value = d.name; option.disabled = d.status !== "running";
+      if (bot && d.bot === bot.name) option.selected = true;
+      return option;
+    }));
+    $("desktop-status").textContent = desktops.length ? "Choose a running desktop." : "No desktop containers found.";
+  } catch (e) { $("desktop-status").textContent = e.message; }
+};
+let desktopMode = "view";
+async function connectDesktop() {
+  disconnectDesktop();
+  const name = $("desktop-select").value;
+  if (!name) return;
+  try {
+    const grant = await api("/v1/desktops/" + encodeURIComponent(name) + "/ticket?mode=" + desktopMode, {method: "POST"});
+    const {default: RFB} = await import("/static/vendor/novnc/core/rfb.js");
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = scheme + "//" + location.host + "/v1/desktops/" + encodeURIComponent(name) + "/vnc";
+    desktopRfb = new RFB($("desktop-screen"), url, {wsProtocols: ["binary", "bo-ticket." + grant.ticket]});
+    desktopRfb.viewOnly = desktopMode === "view";
+    desktopRfb.scaleViewport = true;
+    desktopRfb.addEventListener("connect", () => { $("desktop-status").textContent = desktopMode === "view" ? "Connected · view only" : "Connected · control enabled"; $("desktop-take").textContent = desktopMode === "view" ? "Take over" : "Release"; $("desktop-take").disabled = false; });
+    desktopRfb.addEventListener("disconnect", () => { $("desktop-status").textContent = "Disconnected. Reconnect to try again."; $("desktop-take").disabled = true; });
+  } catch (e) { $("desktop-status").textContent = e.message; }
+};
+$("desktop-connect").onclick = () => { desktopMode = "view"; connectDesktop(); };
+$("desktop-take").onclick = () => {
+  if (!desktopRfb) return;
+  desktopMode = desktopMode === "view" ? "control" : "view";
+  connectDesktop();
+};
+$("agent-open").onclick = async () => {
+  disconnectDesktop();
+  $("tools-title").textContent = "Agent messages";
+  $("desktop-panel").hidden = true;
+  $("memory-panel").hidden = true;
+  $("routines-panel").hidden = true;
+  $("assignments-panel").hidden = true;
+  $("watchers-panel").hidden = true;
+  $("voice-panel").hidden = true;
+  $("agent-panel").hidden = false;
+  $("tools-dialog").showModal();
+  try {
+    const bot = currentBot();
+    const items = await api("/v1/agent-messages?bot=" + encodeURIComponent(bot.id));
+    const names = new Map(state.bots.map((b) => [b.id, b.name]));
+    $("agent-panel").replaceChildren(...items.map((m) => {
+      const row = el("article", "msg inbox");
+      row.append(el("div", "who", (names.get(m.from_bot) || m.from_bot) + " → " + (names.get(m.to_bot) || m.to_bot) + " · " + m.status), el("div", "body", m.body + (m.reply ? "\n\nReply: " + m.reply : "")));
+      return row;
+    }));
+    if (!items.length) $("agent-panel").textContent = "No agent messages yet.";
+  } catch (e) { $("agent-panel").textContent = e.message; }
+};
+
+function showToolPanel(panel, title) {
+  disconnectDesktop();
+  for (const id of ["desktop-panel", "agent-panel", "memory-panel", "routines-panel", "voice-panel", "assignments-panel", "watchers-panel"]) $(id).hidden = id !== panel;
+  $("tools-title").textContent = title;
+  $("tools-dialog").showModal();
+}
+$("memory-open").onclick = async () => {
+  showToolPanel("memory-panel", "Memory");
+  try { $("memory-text").value = (await api("/v1/bots/" + currentBot().id + "/memory")).text; }
+  catch (e) { $("memory-text").value = e.message; }
+};
+$("memory-save").onclick = async () => {
+  try { await api("/v1/bots/" + currentBot().id + "/memory", {method: "PUT", body: JSON.stringify({text: $("memory-text").value})}); $("tools-dialog").close(); }
+  catch (e) { setStatus(e.message, true); }
+};
+async function loadRoutines() {
+  const items = await api("/v1/bots/" + currentBot().id + "/routines");
+  $("routines-list").replaceChildren(...items.map((item) => {
+    const row = el("div", "tools-bar");
+    row.append(el("span", "", item.cron + " · " + (item.catch_up === "skip" ? "skip missed · " : "") + item.prompt));
+    if (item.created_by === "bot") row.append(el("span", "model-pill", "made by bot"));
+    const toggle = el("button", "", item.enabled ? "Disable" : "Enable");
+    toggle.onclick = async () => { await api("/v1/routines/" + item.id, {method: "PATCH", body: JSON.stringify({enabled: !item.enabled})}); await loadRoutines(); };
+    const runs = el("button", "", "Runs");
+    runs.onclick = async () => {
+      const items = await api("/v1/routines/" + item.id + "/runs");
+      alert(items.length ? items.slice(0, 20).map((r) => (r.created_at || "").slice(0, 16).replace("T", " ") + "  " + r.status + (r.outcome ? " (" + r.outcome + ")" : "") + (r.attempts.length ? "  " + r.attempts.length + " retr" + (r.attempts.length > 1 ? "ies" : "y") : "")).join("\n") : "No runs yet.");
+    };
+    row.append(runs);
+    const del = el("button", "", "Delete");
+    del.onclick = async () => { if (confirm("Delete this routine?")) { await api("/v1/routines/" + item.id, {method: "DELETE"}); await loadRoutines(); } };
+    row.append(toggle, del); return row;
+  }));
+}
+async function loadWatchers() {
+  const items = await api("/v1/bots/" + currentBot().id + "/watchers");
+  $("watchers-list").replaceChildren(...items.map((item) => {
+    const row = el("div", "tools-bar");
+    const target = item.kind === "path" ? item.config.dir + "/" + item.config.glob : item.kind === "poll" ? item.config.argv.join(" ") : item.kind === "assignment" ? "assignment " + item.config.assignment_id.slice(0, 8) : "POST /v1/hooks/" + item.id;
+    row.append(el("span", "", item.name + " · " + item.kind + " · " + target + (item.paused_reason ? " · paused: " + item.paused_reason : "")));
+    const toggle = el("button", "", item.enabled ? "Pause" : "Resume");
+    toggle.onclick = async () => { await api("/v1/watchers/" + item.id, {method: "PATCH", body: JSON.stringify({enabled: !item.enabled})}); await loadWatchers(); };
+    const test = el("button", "", "Test");
+    test.onclick = async () => { const r = await api("/v1/watchers/" + item.id + "/test", {method: "POST"}); setStatus("Test: " + r.outcome); await loadWatchers(); };
+    const history = el("button", "", "History");
+    history.onclick = async () => {
+      const runs = await api("/v1/watchers/" + item.id + "/runs");
+      $("watcher-runs").hidden = false;
+      $("watcher-runs").textContent = runs.length ? runs.map((r) => r.created_at.slice(0, 19).replace("T", " ") + "  " + r.outcome + (r.job_status ? " (" + r.job_status + ")" : "") + "  " + r.detail).join("\n") : "No runs yet.";
+    };
+    const del = el("button", "", "Delete");
+    del.onclick = async () => { if (confirm("Delete this watcher?")) { await api("/v1/watchers/" + item.id, {method: "DELETE"}); await loadWatchers(); } };
+    row.append(toggle, test, history, del); return row;
+  }));
+  if (!items.length) $("watchers-list").textContent = "No watchers yet.";
+}
+$("watchers-open").onclick = async () => { showToolPanel("watchers-panel", "Watchers"); $("watcher-runs").hidden = true; try { await loadWatchers(); } catch (e) { $("watchers-list").textContent = e.message; } };
+$("watcher-kind").onchange = () => { $("watcher-target-label").hidden = $("watcher-kind").value === "webhook"; };
+$("watcher-target-label").hidden = true;
+$("watcher-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const kind = $("watcher-kind").value, target = $("watcher-target").value.trim();
+  const config = kind === "path" ? {dir: target.replace(/\/[^/]*[*?][^/]*$/, ""), glob: (target.match(/\/([^/]*[*?][^/]*)$/) || [null, "*"])[1]}
+    : kind === "poll" ? {argv: target.split(/\s+/).filter(Boolean)} : kind === "assignment" ? {assignment_id: target} : {};
+  try {
+    const made = await api("/v1/bots/" + currentBot().id + "/watchers", {method: "POST", body: JSON.stringify({kind, name: $("watcher-name").value, prompt: $("watcher-prompt").value, config})});
+    $("watcher-form").reset(); $("watcher-target-label").hidden = true;
+    if (made.secret) alert("Webhook URL: " + location.origin + made.url + "\nSecret (shown once, send as 'Authorization: Bearer <secret>'):\n" + made.secret);
+    await loadWatchers();
+  } catch (e) { $("watchers-list").textContent = e.message; }
+};
+$("routines-open").onclick = async () => { showToolPanel("routines-panel", "Routines"); try { await loadRoutines(); } catch (e) { $("routines-list").textContent = e.message; } };
+$("routine-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try { await api("/v1/bots/" + currentBot().id + "/routines", {method: "POST", body: JSON.stringify({cron: $("routine-cron").value, prompt: $("routine-prompt").value, catch_up: $("routine-catchup").value})}); $("routine-form").reset(); await loadRoutines(); }
+  catch (e) { $("routines-list").textContent = e.message; }
+};
+
+/* ---- assignments (0.10.0) ---- */
+function assignmentMeter(a) {
+  return a.turns_used + "/" + a.budget_turns + " turns · " + Math.round(a.minutes_used) + "/" + a.budget_minutes + " min";
+}
+async function assignmentAction(path, body) {
+  try { await api(path, {method: "POST", body: JSON.stringify(body || {})}); await loadAssignments(); }
+  catch (e) { $("assignments-list").prepend(el("p", "muted", e.message)); }
+}
+async function loadAssignments() {
+  const items = await api("/v1/bots/" + currentBot().id + "/assignments");
+  const rows = items.map((a) => {
+    const box = el("div", "assignment");
+    const head = el("div", "tools-bar");
+    head.append(el("strong", "", a.title), el("span", "model-pill", a.status.replaceAll("_", " ") + (a.stalled_at ? " · stalled" : "")), el("span", "muted", assignmentMeter(a)));
+    if (a.created_by !== "user") head.append(el("span", "muted", "made by bot"));
+    box.append(head);
+    if (a.status_note) box.append(el("div", "muted", a.status_note));
+    const bar = el("div", "tools-bar");
+    const button = (label, fn) => { const b = el("button", "", label); b.type = "button"; b.onclick = fn; bar.append(b); };
+    const closed = a.status === "done" || a.status === "dropped";
+    if (!closed && a.status !== "active") button("Start", () => {
+      const used = a.turns_used >= a.budget_turns || a.minutes_used >= a.budget_minutes;
+      const extra = used ? Number(prompt("Budget used up. Add how many turns?", "5") || 0) : 0;
+      assignmentAction("/v1/assignments/" + a.id + "/start", used ? {add_turns: extra, add_minutes: extra * 6} : {});
+    });
+    if (!closed && a.status !== "open") button("Stop", () => assignmentAction("/v1/assignments/" + a.id + "/stop"));
+    if (!closed) button("Reply", () => { const text = prompt("Reply to " + currentBot().name + " about this assignment"); if (text) assignmentAction("/v1/assignments/" + a.id + "/reply", {text}); });
+    if (!closed) button("Done", async () => { await api("/v1/assignments/" + a.id, {method: "PATCH", body: JSON.stringify({status: "done"})}); await loadAssignments(); });
+    if (!closed) button("Drop", async () => { if (confirm("Drop this assignment?")) { await api("/v1/assignments/" + a.id, {method: "PATCH", body: JSON.stringify({status: "dropped"})}); await loadAssignments(); } });
+    box.append(bar);
+    return box;
+  });
+  $("assignments-list").replaceChildren(...(rows.length ? rows : [el("p", "muted", "No assignments yet.")]));
+}
+async function loadWakeups() {
+  const items = await api("/v1/bots/" + currentBot().id + "/wakeups");
+  const rows = items.map((w) => {
+    const row = el("div", "tools-bar");
+    const when = (w.due_at ? new Date(w.due_at).toLocaleString() : "") + (w.on_assignment ? (w.due_at ? " or " : "") + "when a linked assignment changes" : "");
+    row.append(el("span", "muted", "Wake-up " + when), el("span", "", w.note));
+    const cancel = el("button", "", "Cancel");
+    cancel.type = "button";
+    cancel.onclick = async () => { await api("/v1/bots/" + currentBot().id + "/wakeups/" + w.id, {method: "DELETE"}); await loadWakeups(); };
+    row.append(cancel);
+    return row;
+  });
+  $("wakeups-list").replaceChildren(...(rows.length ? [el("h4", "", "Wake-ups the bot scheduled"), ...rows] : []));
+}
+function openAssignments(prefill) {
+  showToolPanel("assignments-panel", "Assignments");
+  if (prefill) { $("assignment-title").value = prefill.slice(0, 80).split("\n")[0]; $("assignment-goal").value = prefill; $("assignment-done").focus(); }
+  loadAssignments().catch((e) => { $("assignments-list").textContent = e.message; });
+  loadWakeups().catch((e) => { $("wakeups-list").textContent = e.message; });
+}
+$("assignments-open").onclick = () => openAssignments();
+$("assignment-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const body = {title: $("assignment-title").value, goal: $("assignment-goal").value, done_when: $("assignment-done").value,
+    budget_turns: Number($("assignment-turns").value), budget_minutes: Number($("assignment-minutes").value),
+    escalate: $("assignment-escalate").value, verify: $("assignment-verify").checked, start: $("assignment-start").checked};
+  try { await api("/v1/bots/" + currentBot().id + "/assignments", {method: "POST", body: JSON.stringify(body)}); $("assignment-form").reset(); await loadAssignments(); }
+  catch (e) { $("assignments-list").prepend(el("p", "muted", e.message)); }
+};
+$("assignment-propose").onclick = () => {
+  const goal = $("assignment-goal").value || $("assignment-title").value;
+  if (!goal) return;
+  $("tools-dialog").close();
+  $("text").value = "Propose a short, checkable \"done when\" for this goal (no work yet):\n" + goal;
+  $("text").focus();
+};
+
+/* ---- Needs you (0.10.0): polled, no model calls ---- */
+const NEEDS_SEEN_KEY = "bot-office-needs-seen";
+function notificationsAllowed() { return typeof Notification !== "undefined" && Notification.permission === "granted"; }
+async function needsAction(item, action) {
+  try {
+    if (item.kind === "question" && action === "answer") {
+      await selectBot(item.bot_id);
+    } else if (item.kind === "question" && action === "skip") {
+      await api("/v1/bots/" + item.bot_id + "/questions/" + item.question_id + "/answer",
+        {method: "POST", body: JSON.stringify({skip: true})});
+      state.msgSig = ""; await loadMessages();
+    } else if (action === "reply") {
+      const text = prompt("Reply to " + item.bot_name);
+      if (!text) return;
+      await api("/v1/assignments/" + item.assignment_id + "/reply", {method: "POST", body: JSON.stringify({text})});
+    } else if (action === "start") {
+      await api("/v1/assignments/" + item.assignment_id + "/start", {method: "POST", body: "{}"});
+    } else if (action === "done") {
+      await api("/v1/assignments/" + item.assignment_id, {method: "PATCH", body: JSON.stringify({status: "done"})});
+    } else if (action === "retry") {
+      await api("/v1/jobs/" + item.job_id + "/retry", {method: "POST"});
+    } else if (action === "approve" || action === "rerun") {
+      await api("/v1/approvals/" + item.approval_id + "/approve", {method: "POST"});
+    } else if (action === "deny") {
+      await api("/v1/approvals/" + item.approval_id + "/deny", {method: "POST"});
+    } else if (action === "allow") {
+      await api("/v1/bots/" + item.bot_id + "/budget/allow", {method: "POST", body: JSON.stringify({turns: 10, minutes: 30})});
+    } else if (item.kind === "usage_limit" && action.startsWith("switch:")) {
+      if (!(await switchProvider(item.job_id, action.slice(7)))) return;
+    } else if (item.kind === "usage_limit" && action === "keep") {
+      await api("/v1/jobs/" + item.job_id + "/keep-waiting", {method: "POST"});
+    } else if (action === "resume") {
+      await api("/v1/watchers/" + item.watcher_id, {method: "PATCH", body: JSON.stringify({enabled: true})});
+    } else if (item.kind === "alert") {
+      await api("/v1/gate-alerts/" + item.alert_id + "/dismiss", {method: "POST"});
+    } else if (item.kind === "assignment") {
+      await api("/v1/needs-you/dismiss", {method: "POST", body: JSON.stringify({assignment_id: item.assignment_id})});
+    } else {
+      await api("/v1/jobs/" + item.job_id + "/dismiss", {method: "POST"});
+    }
+  } catch (err) { $("needs-list").prepend(el("p", "muted", err.message)); return; }
+  await loadNeedsYou();
+}
+async function loadNeedsYou() {
+  const items = await api("/v1/needs-you");
+  const labels = {reply: "Reply", start: "Continue", done: "Done", retry: "Retry", dismiss: "Dismiss",
+    approve: "Approve once", deny: "Deny", rerun: "Re-run", resume: "Resume", allow: "Allow +10 today",
+    answer: "Answer", skip: "Skip", keep: "Keep waiting"};
+  $("needs-list").replaceChildren(...items.map((item) => {
+    const row = el("div", "needs-item");
+    const ask = el("button", "needs-ask", item.ask);
+    ask.type = "button";
+    ask.onclick = () => selectBot(item.bot_id);
+    const bar = el("div", "tools-bar");
+    // #10: "switch" is one "Retry on <provider>" button per enabled, signed-in other provider
+    const actions = item.actions.flatMap((action) => action === "switch"
+      ? (item.options || []).map((option) => "switch:" + option.provider) : [action]);
+    const optionLabels = Object.fromEntries((item.options || []).map((o) => ["switch:" + o.provider, "Retry on " + o.label]));
+    for (const action of actions) {
+      const button = el("button", "ghost", optionLabels[action] || labels[action] || action);
+      button.type = "button";
+      button.onclick = () => needsAction(item, action);
+      bar.append(button);
+    }
+    if (item.command) row.append(ask, el("pre", "needs-command", item.command), bar);  // the whole command (Sec 5)
+    else row.append(ask, bar);
+    return row;
+  }));
+  $("needs-you").hidden = !items.length;
+  $("needs-toggle").textContent = `Needs you (${items.length})`;
+  $("notify-enable").hidden = typeof Notification === "undefined" || Notification.permission !== "default";
+  const stored = sessionStorage.getItem(NEEDS_SEEN_KEY);
+  let seen = new Set();
+  try { seen = new Set(JSON.parse(stored || "[]")); } catch (err) { seen = new Set(); }
+  // seen ids live in this tab (sessionStorage, like the token); the first load only records what is there; later loads notify new items once
+  if (stored !== null && notificationsAllowed()) {
+    for (const item of items) {
+      if (item.notify && !seen.has(item.id)) {
+        try { new Notification("Bot-Office: " + item.bot_name, {body: item.ask, tag: item.id}); } catch (err) { /* not supported here */ }
+      }
+    }
+  }
+  sessionStorage.setItem(NEEDS_SEEN_KEY, JSON.stringify(items.map((item) => item.id)));
+}
+$("needs-toggle").onclick = () => {
+  const open = $("needs-you").classList.toggle("open");
+  $("needs-toggle").setAttribute("aria-expanded", String(open));
+};
+$("notify-enable").onclick = async () => {
+  if (typeof Notification === "undefined") return;
+  try { await Notification.requestPermission(); } catch (err) { /* ignored: stays off */ }
+  $("notify-enable").hidden = Notification.permission !== "default";
+};
+$("desktop-hand-back").onclick = async () => {
+  const name = $("desktop-select").value;
+  if (!name) return;
+  try {
+    await api("/v1/desktops/" + encodeURIComponent(name) + "/hand-back", {method: "POST"});
+    $("desktop-status").textContent = "Handed back; the bot continues.";
+  } catch (err) { $("desktop-status").textContent = err.message; }
+};
+
+/* ---- session ---- */
+function poll() {
+  clearInterval(state.timer);
+  state.timer = setInterval(async () => {
+    if (!getToken()) return;
+    state.tick += 1;
+    try {
+      if (state.tick % 2 === 0) { await loadBots(); }
+      if (state.tick % 8 === 0) { await loadNeedsYou(); }
+      await loadMessages();
+    } catch (err) { handleError(err); }
+  }, 2000);
+}
+
+function lock(message) {
+  clearInterval(state.timer);
+  document.title = "Bot-Office";
+  stopDictation(); stopTracks(); stopPlayback();
+  sessionStorage.removeItem(TOKEN_KEY);
+  for (const key of LEGACY_TOKEN_KEYS) sessionStorage.removeItem(key);
+  if ($("bot-dialog").open) $("bot-dialog").close();
+  if ($("tools-dialog").open) $("tools-dialog").close();
+  $("app").hidden = true;
+  $("lock").hidden = false;
+  $("lock-error").textContent = message || "";
+  $("token").focus();
+}
+
+async function start() {
+  $("lock").hidden = true;
+  $("app").hidden = false;
+  try {
+    await loadBots();
+    await loadVoice();
+    await loadMessages();
+    poll();
+    await loadNeedsYou();
+    await loadChoices();
+  } catch (err) { handleError(err); }
+}
+
+$("lock-form").onsubmit = (event) => {
+  event.preventDefault();
+  const token = $("token").value.trim();
+  $("token").value = "";
+  if (!token) return;
+  sessionStorage.setItem(TOKEN_KEY, token);
+  for (const key of LEGACY_TOKEN_KEYS) sessionStorage.removeItem(key);
+  start();
+};
+$("lock-btn").onclick = () => lock("");
+
+if (getToken()) start(); else lock("");
+</script>
+</body>
+</html>

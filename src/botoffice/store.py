@@ -1,0 +1,2360 @@
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import secrets
+import sqlite3
+import threading
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from uuid import UUID, uuid4
+
+from . import attachments as attachment_files
+from . import failures
+from . import usage as budgets
+from .catalog import DEFAULT_ICON, DEFAULT_ICONS, default_effort, default_model
+from .domain import Bot, Job, JobStatus, Message, Routine
+
+BOT_DATES = ("created_at", "updated_at")
+BOT_FIELDS = {
+    "name",
+    "instructions",
+    "default_provider",
+    "reason",
+    "model",
+    "icon",
+    "icon_image",
+    "description",
+    "effort",
+    "cli_access",
+    "job_timeout",
+    "notify",
+    "allow_sudo",
+    "scheduled_runs",
+    "daily_budget_json",
+    "digest",
+}
+IDENTITY_MIGRATION = "crewdeck-identity-v1"
+EFFORT_MIGRATION = "crewdeck-effort-v1"
+READS_MIGRATION = "reads-seeded-v1"
+# 0.9.0: Grok bridge rate/hop state moved from JSON files into SQLite (imported once)
+BRIDGE_IMPORT = "bridge_json_import"
+BRIDGE_JSON = ("grok_bridge_rate.json", "grok_bridge_threads.json")
+# roles that count as unread: what the bot (or the system) said, never the prompts it received
+UNREAD_ROLES = ("assistant", "system")
+LEGACY_RENAMES = {("Cursor Bot", "cursor"): "Scout"}
+# A rewound turn is seeded with the complete remaining chat. These bound that seed
+# (text kept well below every provider's context window; images copied into the job).
+SEED_MAX_CHARS = 400_000
+MAX_MANUAL_RETRIES = 10  # per job (Retry button / API); a new message starts a new job
+SEED_MAX_IMAGES = 24
+SEED_MAX_IMAGE_BYTES = 64 * 1024 * 1024
+EDITABLE_SOURCES = ("chat", "api", "assignment")  # assignment: the user's own replies (sender NULL)
+SAY_MAX_CHARS = 500
+SAY_INTERVAL_SECONDS = 10
+SAY_MAX_PER_JOB = 10
+BUDGET_USED = "its assignment's budget is used up"
+
+
+class EditError(Exception):
+    """An edit was rejected; ``status`` is the HTTP status, ``jobs`` blocking job ids."""
+
+    def __init__(self, status: int, detail: str, jobs: list[str] | None = None):
+        super().__init__(detail)
+        self.status, self.detail, self.jobs = status, detail, jobs or []
+
+
+@dataclass
+class RewindSeed:
+    messages: list[Message]
+    images: list[tuple[int, str]] = dataclass_field(default_factory=list)  # (message id, attachment id)
+
+
+def now() -> datetime:
+    return datetime.now(UTC)
+
+
+# job status -> agent message status (bot-msg / message-agent)
+AGENT_STATUS = {"succeeded": "done", "failed": "failed", "cancelled": "failed", "needs_login": "failed",
+                "incomplete": "not_done"}
+
+
+# lower runs first; chat, edit and API turns (Joshua) are 0
+STORED_ERROR_LIMIT = 2000
+SOURCE_PRIORITY = {"inbox": 2, "assignment": 2, "wakeup": 2, "routine": 3, "trigger": 3}
+
+
+class InboxLimit(ValueError):
+    """An inbox or bot-to-bot turn over its hourly cap (per sender or for everyone)."""
+
+
+def _inbox_limit(db: sqlite3.Connection, caps: tuple[int, int], *, sender: str | None = None,
+                 from_bot: str | None = None) -> None:
+    """Raise InboxLimit if another inbox turn would exceed *caps* = (per sender, all senders)
+    in the last hour. A bot sender is counted by id; any other by its sender name (unnamed
+    inbox files share one count)."""
+    per_sender, overall = caps
+    since = (now() - timedelta(hours=1)).isoformat()
+    if db.execute("SELECT count(*) FROM jobs WHERE source='inbox' AND created_at>=?", (since,)).fetchone()[0] >= overall:
+        raise InboxLimit(f"inbox limit of {overall} turns per hour reached")
+    if from_bot is not None:
+        count = db.execute("SELECT count(*) FROM agent_messages WHERE from_bot=? AND created_at>=?",
+                           (from_bot, since)).fetchone()[0]
+    else:
+        count = db.execute(
+            "SELECT count(*) FROM messages m JOIN jobs j ON j.id=m.job_id WHERE m.role='user' "
+            "AND m.source='inbox' AND j.source='inbox' AND COALESCE(m.sender,'')=? AND j.created_at>=? "
+            "AND j.id NOT IN (SELECT job_id FROM agent_messages)", (sender or "", since)).fetchone()[0]
+    if count >= per_sender:
+        raise InboxLimit(f"inbox limit of {per_sender} turns per hour from this sender reached")
+
+
+def _init_assignment_tables(db: sqlite3.Connection) -> None:
+    """0.10.0: assignments, their event trail and self-scheduled wake-ups (all additive)."""
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS assignments (
+            id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, title TEXT NOT NULL, goal TEXT NOT NULL DEFAULT '',
+            done_when TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open', due_at TEXT,
+            budget_turns INTEGER NOT NULL DEFAULT 20, budget_minutes INTEGER NOT NULL DEFAULT 120,
+            turns_used INTEGER NOT NULL DEFAULT 0, minutes_used REAL NOT NULL DEFAULT 0,
+            verify INTEGER NOT NULL DEFAULT 0, escalate TEXT NOT NULL DEFAULT 'on_block',
+            created_by TEXT NOT NULL DEFAULT 'user', parent_id TEXT, checkpoint TEXT NOT NULL DEFAULT '',
+            status_note TEXT NOT NULL DEFAULT '', last_progress_at TEXT, stalled_at TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_at TEXT,
+            next_turn INTEGER NOT NULL DEFAULT 0, missing_status INTEGER NOT NULL DEFAULT 0,
+            verifying INTEGER NOT NULL DEFAULT 0, dismissed_at TEXT,
+            reported_status TEXT, reported_note TEXT, reported_job TEXT
+        )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS assignments_bot ON assignments(bot_id, status)")
+    db.execute("CREATE INDEX IF NOT EXISTS assignments_parent ON assignments(parent_id)")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS assignment_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, assignment_id TEXT NOT NULL, kind TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '', job_id TEXT, created_at TEXT NOT NULL
+        )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS assignment_events_a ON assignment_events(assignment_id, id)")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS wakeups (
+            id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, assignment_id TEXT, due_at TEXT, on_assignment TEXT,
+            note TEXT NOT NULL DEFAULT '', created_by_job TEXT, status TEXT NOT NULL DEFAULT 'pending',
+            job_id TEXT, created_at TEXT NOT NULL, fired_at TEXT
+        )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS wakeups_pending ON wakeups(status, due_at)")
+    # one job per (assignment, turn number): a replayed enqueue can never add a second turn
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_assignment_turn ON jobs(assignment_id, assignment_turn) "
+               "WHERE assignment_id IS NOT NULL")
+
+
+def _init_control_tables(db: sqlite3.Connection) -> None:
+    """0.11.0: action rules, approvals and the gate's log of refused actions (all additive)."""
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS action_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, effect TEXT NOT NULL, kind TEXT NOT NULL,
+            pattern TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'all', note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )"""
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS approvals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL, job_id TEXT NOT NULL,
+            assignment_id TEXT, tool TEXT NOT NULL, summary TEXT NOT NULL, input_hash TEXT NOT NULL,
+            scope TEXT NOT NULL, source TEXT NOT NULL, preset TEXT, status TEXT NOT NULL DEFAULT 'pending',
+            expires_at TEXT, decided_at TEXT, grant_expires_at TEXT, resume_job_id TEXT,
+            consumed_by TEXT, consumed_at TEXT, created_at TEXT NOT NULL
+        )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS approvals_grant ON approvals(bot_id, input_hash, status)")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS gate_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, job_id TEXT, provider TEXT, decision TEXT NOT NULL,
+            effect TEXT NOT NULL, preset TEXT, tool TEXT, summary TEXT NOT NULL, approval_id INTEGER,
+            created_at TEXT NOT NULL, dismissed_at TEXT
+        )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS gate_log_time ON gate_log(created_at)")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS watchers (
+            id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
+            prompt TEXT NOT NULL DEFAULT '', config_json TEXT NOT NULL DEFAULT '{}', secret_hash TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1, debounce_s INTEGER NOT NULL DEFAULT 60,
+            max_per_hour INTEGER NOT NULL DEFAULT 6, assignment_id TEXT, last_state TEXT,
+            last_checked_at TEXT, last_fired_at TEXT, paused_reason TEXT, created_at TEXT NOT NULL
+        )"""
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS watcher_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, watcher_id TEXT NOT NULL, outcome TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '', job_id TEXT, created_at TEXT NOT NULL
+        )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS watcher_runs_w ON watcher_runs(watcher_id, id)")
+    # 0.11.0 (#10): one "parked on a usage limit" notice per job and attempt (needs_you.post_usage_notices)
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS usage_notices (
+            job_id TEXT NOT NULL, attempt INTEGER NOT NULL, bot_id TEXT NOT NULL, message_id INTEGER,
+            provider TEXT NOT NULL, back_at TEXT, created_at TEXT NOT NULL, dismissed_at TEXT,
+            PRIMARY KEY (job_id, attempt)
+        )"""
+    )
+
+
+class BridgeHopConflict(Exception):
+    """An inbound bridge thread's hop moved between reading it and queueing the turn."""
+
+
+class RoutineChanged(Exception):
+    """The routine was edited, disabled, deleted or scanned after it was read; the scan is dropped."""
+
+
+def _priority(source: str | None) -> int:
+    return SOURCE_PRIORITY.get(source or "", 0)
+
+
+# a job parked on a usage limit (#10): queued, waiting for its retry time; *j* is the jobs row
+PARKED_SQL = "j.status='queued' AND j.failure_kind='usage_limit' AND j.not_before IS NOT NULL"
+
+
+def clip_error(error: str | None) -> str | None:
+    """Failure text as stored (jobs.error, job_attempts): secrets redacted, bounded."""
+    return failures.clip(error, STORED_ERROR_LIMIT) if error else error
+
+
+def execution(row: Mapping[str, Any]) -> int:
+    """Execution number of a job row's current (or next) run: every retry and every restart
+    replay is a new execution, so events and attempt history never mix two runs."""
+    return int(row["attempts"] or 0) + int(row["restart_attempts"] or 0)
+
+
+def _minutes(start: str | None, end: str | None) -> float:
+    if not start or not end:
+        return 0.0
+    return max(0.0, (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds() / 60)
+
+
+def _run_minutes(db: sqlite3.Connection, job: Mapping[str, Any]) -> tuple[float, bool]:
+    """Minutes of a job's finished runs, and whether its latest run happened."""
+    runs = db.execute("SELECT started_at, finished_at FROM job_attempts WHERE job_id=? AND started_at IS NOT NULL "
+                      "ORDER BY id", (job["id"],)).fetchall()
+    total = sum(_minutes(a["started_at"], a["finished_at"]) for a in runs)
+    # a cancelled queued job never ran its latest run (its started_at belongs to a recorded attempt)
+    last_started = runs[-1]["started_at"] if runs else None
+    ran = (job["status"] not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value) and bool(job["started_at"])
+           and job["started_at"] != last_started)
+    if ran:
+        total += _minutes(job["started_at"], job["finished_at"] or now().isoformat())
+    return total, ran
+
+
+def charge_assignment_minutes(db: sqlite3.Connection, job: Mapping[str, Any]) -> tuple[float, bool]:
+    """Charge the minutes of an assignment job's finished runs that were not charged yet.
+
+    Every run counts once: earlier runs (retries, restart replays) are in job_attempts, the
+    latest one counts when the job has finished. Returns (minutes charged now, whether the
+    latest run happened). Runs inside the caller's transaction.
+    """
+    total, ran = _run_minutes(db, job)
+    delta = total - (job["assignment_minutes"] or 0)
+    if job["assignment_id"] and delta > 0:
+        db.execute("UPDATE assignments SET minutes_used=minutes_used+? WHERE id=?", (delta, job["assignment_id"]))
+        db.execute("UPDATE jobs SET assignment_minutes=? WHERE id=?", (total, job["id"]))
+    return max(delta, 0.0), ran
+
+
+def _assignment_gate(db: sqlite3.Connection, job_id: str) -> str | None:
+    """Claim-time check of an assignment turn (every run: continuation, verify, retry, reply,
+    wake-up, restart replay): its assignment must be active with budget left. Reserves one turn
+    of the budget in the claim's transaction; returns why the run may not start, else None."""
+    job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not job["assignment_id"]:
+        return None
+    charge_assignment_minutes(db, job)  # earlier runs of a retried job count before the check
+    row = db.execute("SELECT * FROM assignments WHERE id=?", (job["assignment_id"],)).fetchone()
+    if row is None:
+        return "its assignment is gone"
+    if row["status"] != "active":
+        return "its assignment was stopped" if row["status"] == "open" else f"its assignment is {row['status']}"
+    if row["turns_used"] >= row["budget_turns"] or row["minutes_used"] >= row["budget_minutes"]:
+        return BUDGET_USED
+    db.execute("UPDATE assignments SET turns_used=turns_used+1, updated_at=? WHERE id=?", (now().isoformat(), row["id"]))
+    return None
+
+
+def _hold_for_budget(db: sqlite3.Connection, job_id: str, why: str) -> None:
+    """Over the bot's daily budget: the unattended job waits until 00:00 New York time (a
+    Needs-you item offers "Allow +N today"), with one chat line per held job."""
+    row = db.execute("SELECT bot_id, source, failure_kind FROM jobs WHERE id=?", (job_id,)).fetchone()
+    db.execute("UPDATE jobs SET not_before=?, failure_kind=?, error=? WHERE id=?",
+               (budgets.next_day(now()).isoformat(), failures.BUDGET, f"held: daily budget used ({why})", job_id))
+    if row["failure_kind"] != failures.BUDGET and db.execute("SELECT 1 FROM bots WHERE id=?", (row["bot_id"],)).fetchone():
+        db.execute("INSERT INTO messages (bot_id,role,source,text,job_id,created_at,attachments) VALUES (?,?,?,?,?,?,'[]')",
+                   (row["bot_id"], "system", row["source"],
+                    f"A {row['source']} turn waits until tomorrow: daily budget used ({why}).", job_id, now().isoformat()))
+
+
+def _run_row(db: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    """A job as one timeline entry, with its earlier attempts and their usage."""
+    attempts = [{"attempt": item["attempt"], "kind": item["kind"], "started_at": item["started_at"],
+                 "finished_at": item["finished_at"], "usage": json.loads(item["usage_json"]) if item["usage_json"] else None}
+                for item in db.execute("SELECT * FROM job_attempts WHERE job_id=? ORDER BY id", (row["id"],))]
+    return {"job_id": row["id"], "source": row["source"], "status": row["status"], "outcome": row["outcome"],
+            "failure_kind": row["failure_kind"], "created_at": row["created_at"], "started_at": row["started_at"],
+            "finished_at": row["finished_at"], "usage": json.loads(row["usage_json"]) if row["usage_json"] else None,
+            "error": row["error"], "attempts": attempts}
+
+
+def _read_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _minute(moment: datetime) -> datetime:
+    return moment.astimezone(UTC).replace(second=0, microsecond=0)
+
+
+def _model(cls, row: sqlite3.Row | None, dates: tuple[str, ...]):
+    if row is None:
+        return None
+    values = dict(row)
+    for field in dates:
+        if values[field]:
+            values[field] = datetime.fromisoformat(values[field])
+    if cls is Message and "attachments" in values:
+        values["attachments"] = json.loads(values["attachments"])
+    return cls.model_validate(values)
+
+
+class JobStore:
+    def __init__(self, path: Path, initialize: bool = True):
+        self.path = Path(path)
+        self._initialized = False
+        # The one lock for chat mutations that must not interleave with an edit: the edit
+        # commit and outcome publication (chat message + memory write). Every other
+        # enqueue/claim path is a single BEGIN IMMEDIATE transaction, i.e. serialized by
+        # SQLite's database-wide write lock. There is no per-bot lock, so there is no lock
+        # order to get wrong; neither lock is ever held while waiting for a job to stop.
+        self.chat_lock = threading.RLock()
+        if initialize:
+            self.initialize()
+
+    def initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if not self._initialized:
+            self._initialized = True
+            self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        if not self._initialized:
+            self.initialize()
+        db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA busy_timeout=10000")
+        return db
+
+    def _init_db(self) -> None:
+        with closing(self._connect()) as db:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY, prompt TEXT NOT NULL, status TEXT NOT NULL,
+                    slot TEXT, provider TEXT NOT NULL, created_at TEXT NOT NULL,
+                    started_at TEXT, finished_at TEXT, exit_code INTEGER,
+                    log_path TEXT, error TEXT
+                )"""
+            )
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+            for column, ddl in (
+                ("bot_id", "TEXT"),
+                ("reason", "TEXT"),
+                ("source", "TEXT NOT NULL DEFAULT 'api'"),
+                ("reply_path", "TEXT"),
+                ("routine_id", "TEXT"),
+                ("model", "TEXT"),
+                ("effort", "TEXT"),
+                ("reply_text", "TEXT"),
+                ("draft_text", "TEXT"),
+                ("agent_token_hash", "TEXT"),
+                # 0.9.0: failures.classify kind of the last failed attempt; reported token usage
+                ("failure_kind", "TEXT"),
+                ("usage_json", "TEXT"),
+                # provider attempts so far (same row is re-queued; job_id never changes) and
+                # the earliest time a re-queued attempt may start
+                ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("not_before", "TEXT"),
+                # controller restarts that re-queued this job (at most 1), separate from attempts
+                ("restart_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                # what the bot reported (BOT-OFFICE-STATUS line): done | unverified | not_done: reason …
+                ("outcome", "TEXT"),
+                # claim order: Joshua's chat/API turns first, then bot-to-bot, then routines
+                ("priority", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.10.0: the assignment this turn advances, its turn number there, whether the
+                # loop has settled it (budget charged, next step decided), and Needs-you dismissal
+                ("assignment_id", "TEXT"),
+                ("assignment_turn", "INTEGER"),
+                ("assignment_settled", "INTEGER NOT NULL DEFAULT 0"),
+                # minutes of this job's runs already charged to its assignment (each run once)
+                ("assignment_minutes", "REAL NOT NULL DEFAULT 0"),
+                ("dismissed_at", "TEXT"),
+                # 0.11.0: the job whose approval this turn resumes (one-shot grants bind to it)
+                ("origin_job_id", "TEXT"),
+                # 0.11.0: the watcher that started this turn (source trigger)
+                ("watcher_id", "TEXT"),
+            ):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
+            if "priority" not in columns:
+                # jobs queued before 0.9.0 keep their place behind Joshua's turns
+                db.execute("UPDATE jobs SET priority=CASE source WHEN 'inbox' THEN ? WHEN 'routine' THEN ? ELSE 0 END",
+                           (SOURCE_PRIORITY["inbox"], SOURCE_PRIORITY["routine"]))
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS bots (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, instructions TEXT NOT NULL,
+                    default_provider TEXT NOT NULL, reason TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                )"""
+            )
+            bot_columns = {row["name"] for row in db.execute("PRAGMA table_info(bots)")}
+            for column, ddl in (
+                ("model", "TEXT"),
+                ("icon", "TEXT NOT NULL DEFAULT ''"),
+                ("icon_image", "TEXT"),
+                ("description", "TEXT NOT NULL DEFAULT ''"),
+                ("effort", "TEXT"),
+                ("cli_access", "TEXT NOT NULL DEFAULT 'full'"),
+                # id of the replacement message of an edit whose provider-session reset
+                # (saved <engine>-session pointers) is not yet reconciled; NULL when nothing is pending
+                ("session_reset", "INTEGER"),
+                # WORKING.md to restore with that reset (its state before the first archived
+                # turn that changed it); NULL when it needs no change
+                ("working_restore", "TEXT"),
+                # id of the replacement message of an edit whose full-chat seed has not yet
+                # reached a provider turn that actually ran; NULL when nothing is pending
+                ("rewind_seed", "INTEGER"),
+                # 0.10.0: per-bot turn timeout in seconds (NULL: service default); browser notifications
+                ("job_timeout", "INTEGER"),
+                ("notify", "INTEGER NOT NULL DEFAULT 1"),
+                # 0.11.0: run this bot's CLI without no_new_privs (sudo works; Joshua only)
+                ("allow_sudo", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.11.0: full (0.10.x behaviour) | gated (strict profile for scheduled turns)
+                ("scheduled_runs", "TEXT NOT NULL DEFAULT 'full'"),
+                # 0.11.0: daily unattended budget (NULL: defaults), today's "Allow +N", digest opt-in
+                ("daily_budget_json", "TEXT"),
+                ("budget_extra_json", "TEXT"),
+                ("digest", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in bot_columns:
+                    db.execute(f"ALTER TABLE bots ADD COLUMN {column} {ddl}")
+            db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            # WORKING.md as it was before each turn that changed it, so an edit can roll it back
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS working_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL, job_id TEXT NOT NULL,
+                    before TEXT NOT NULL, created_at TEXT NOT NULL
+                )"""
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS working_snapshots_bot ON working_snapshots(bot_id, job_id)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS bot_aliases (alias TEXT PRIMARY KEY, bot_id TEXT NOT NULL)"
+            )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL,
+                    role TEXT NOT NULL, sender TEXT, source TEXT NOT NULL, text TEXT NOT NULL,
+                    job_id TEXT, created_at TEXT NOT NULL
+                )"""
+            )
+            message_columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
+            for column, ddl in (
+                ("attachments", "TEXT NOT NULL DEFAULT '[]'"),
+                ("kind", "TEXT NOT NULL DEFAULT 'message'"),
+                # message edit / rewind: soft archive, never deleted
+                ("archived_at", "TEXT"),
+                ("archived_by", "INTEGER"),
+                ("edit_of", "INTEGER"),
+                ("steer_job_id", "TEXT"),
+                ("steer_status", "TEXT"),
+                ("steer_delivered_at", "TEXT"),
+                ("steer_reason", "TEXT"),  # the API reason, used if the steer becomes a queued turn
+            ):
+                if column not in message_columns:
+                    db.execute(f"ALTER TABLE messages ADD COLUMN {column} {ddl}")
+            db.execute("CREATE INDEX IF NOT EXISTS messages_bot ON messages (bot_id, id)")
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS routines (
+                    id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, cron TEXT NOT NULL,
+                    prompt TEXT NOT NULL, enabled INTEGER NOT NULL, last_run_at TEXT,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            routine_columns = {row["name"] for row in db.execute("PRAGMA table_info(routines)")}
+            for column, ddl in (
+                ("name", "TEXT"),
+                # 0.9.0: what to do with runs missed while the controller was down (once | skip)
+                ("catch_up", "TEXT NOT NULL DEFAULT 'once'"),
+                # last minute (UTC) already scanned for due runs; NULL = start scanning now
+                ("scan_cursor", "TEXT"),
+                # bumped by every edit, so a scan never acts on a routine changed meanwhile
+                ("version", "INTEGER NOT NULL DEFAULT 0"),
+                # latest run that came due while the previous run was still going (catch-up owed)
+                ("pending_run", "TEXT"),
+                # 0.10.0: "bot" when the bot made it through its job token (limited per bot)
+                ("created_by", "TEXT NOT NULL DEFAULT 'user'"),
+            ):
+                if column not in routine_columns:
+                    db.execute(f"ALTER TABLE routines ADD COLUMN {column} {ddl}")
+            # Audit trail of every stream event, kept after a bot is deleted.
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS job_events (
+                    job_id TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
+                    data TEXT NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY (job_id, seq)
+                )"""
+            )
+
+            db.execute("""CREATE TABLE IF NOT EXISTS agent_messages (
+                id TEXT PRIMARY KEY, from_bot TEXT NOT NULL, to_bot TEXT NOT NULL,
+                body TEXT NOT NULL, job_id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL,
+                hop INTEGER NOT NULL, created_at TEXT NOT NULL
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS agent_messages_pair ON agent_messages (from_bot, to_bot, created_at)")
+
+            # one row per finished attempt that was re-queued (automatic or manual retry)
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS job_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL, attempt INTEGER NOT NULL,
+                    kind TEXT, error TEXT, reply_text TEXT, started_at TEXT, finished_at TEXT NOT NULL,
+                    automatic INTEGER NOT NULL DEFAULT 1, not_before TEXT
+                )"""
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS job_attempts_time ON job_attempts(automatic, finished_at)")
+            if "usage_json" not in {row["name"] for row in db.execute("PRAGMA table_info(job_attempts)")}:
+                # 0.11.0: what each retried run reported (tokens, cost), so budgets count every run
+                db.execute("ALTER TABLE job_attempts ADD COLUMN usage_json TEXT")
+            if "assignment_id" in columns and "assignment_minutes" not in columns:
+                # pre-release 0.10.0 data charged turn and minutes at settlement: settled jobs are
+                # fully charged, finished unsettled ones still owe the turn claim now charges
+                for job in db.execute("SELECT * FROM jobs WHERE assignment_id IS NOT NULL").fetchall():
+                    if job["assignment_settled"]:
+                        db.execute("UPDATE jobs SET assignment_minutes=? WHERE id=?",
+                                   (_run_minutes(db, job)[0], job["id"]))
+                    elif job["status"] not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+                        db.execute("UPDATE assignments SET turns_used=turns_used+1 WHERE id=?", (job["assignment_id"],))
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(status, priority, created_at)")
+            db.execute("CREATE TABLE IF NOT EXISTS agent_tokens (token_hash TEXT PRIMARY KEY, job_id TEXT NOT NULL, bot_id TEXT NOT NULL)")
+
+            # Unread state per bot. revision changes on every "mark as unread" so a stale
+            # read from another tab or an older poll can be rejected as a whole.
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS bot_reads (
+                    bot_id TEXT PRIMARY KEY, last_read_message_id INTEGER NOT NULL DEFAULT 0,
+                    read_at TEXT, manual_unread_at TEXT, revision INTEGER NOT NULL DEFAULT 0
+                )"""
+            )
+
+            self._migrate_identity(db)
+            self._migrate_effort(db)
+            self._migrate_reads(db)
+
+            # Grok bridge state: one row per send (reserved before the webhook call, then sent
+            # or failed) and the last hop per bridge thread.
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS bridge_sends (id INTEGER PRIMARY KEY, bot TEXT NOT NULL, "
+                "ts TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'reserved')"
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS bridge_sends_ts ON bridge_sends(ts)")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS bridge_threads (thread_id TEXT PRIMARY KEY, hop INTEGER NOT NULL, "
+                "updated_at TEXT NOT NULL)"
+            )
+            self._import_bridge_json(db)
+            _init_assignment_tables(db)
+            db.execute("CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, "
+                       "job_id TEXT, assignment_id TEXT, message_id INTEGER NOT NULL, payload TEXT NOT NULL, "
+                       "status TEXT NOT NULL, answer TEXT, blocking INTEGER NOT NULL, created_at TEXT NOT NULL, "
+                       "answered_at TEXT)")
+            db.execute("CREATE INDEX IF NOT EXISTS questions_bot ON questions(bot_id, status)")
+            _init_control_tables(db)
+
+    def _import_bridge_json(self, db: sqlite3.Connection) -> None:
+        """One-time: import the pre-0.9.0 bridge JSON files, then rename them ``*.imported``."""
+        directory = self.path.parent
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM meta WHERE key=?", (BRIDGE_IMPORT,)).fetchone():
+                db.rollback()
+            else:
+                rate, threads = (_read_json(directory / name) for name in BRIDGE_JSON)
+                for item in (rate.get("sends") or []) if isinstance(rate, dict) else []:
+                    with contextlib.suppress(KeyError, TypeError, ValueError, AttributeError):
+                        stamp = datetime.fromisoformat(item["ts"])
+                        stamp = stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp
+                        db.execute("INSERT INTO bridge_sends (bot, ts, state) VALUES (?,?,'sent')",
+                                   (str(item.get("bot") or ""), stamp.astimezone(UTC).isoformat()))
+                for thread_id, hop in (threads.items() if isinstance(threads, dict) else ()):
+                    with contextlib.suppress(TypeError, ValueError):
+                        db.execute(
+                            "INSERT INTO bridge_threads VALUES (?,?,?) ON CONFLICT(thread_id) DO UPDATE "
+                            "SET hop=max(hop, excluded.hop)", (str(thread_id), int(hop), now().isoformat()))
+                db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (BRIDGE_IMPORT, now().isoformat()))
+                db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        for name in BRIDGE_JSON:
+            with contextlib.suppress(OSError):
+                if (directory / name).is_file():
+                    (directory / name).replace(directory / f"{name}.imported")
+
+    # --- Grok bridge state (rate limits and thread hops; network I/O happens outside) ---
+
+    def bridge_reserve(self, bot: str, thread_id: str | None, moment: datetime, *, per_bot_seconds: int,
+                       daily_limit: int, max_hops: int,
+                       per_bot_daily: int | None = None) -> tuple[int | None, int, str | None]:
+        """Check the limits, then reserve a send and advance the thread hop in one short write
+        transaction, committed before the webhook call. Returns (reservation id, hop, None),
+        or (None, hop, reason) when the send must be dropped. A reservation whose process died
+        before settling keeps counting against the limits (fails safe)."""
+        moment = moment.astimezone(UTC)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT hop FROM bridge_threads WHERE thread_id=?", (thread_id,)).fetchone() if thread_id else None
+                hop = (row["hop"] if row else 0) + 1
+                reason = None
+                if hop > max_hops:
+                    reason = f"hop limit of {max_hops} reached"
+                elif db.execute("SELECT count(*) FROM bridge_sends WHERE ts>=? AND state!='failed'",
+                                ((moment - timedelta(hours=24)).isoformat(),)).fetchone()[0] >= daily_limit:
+                    reason = f"daily limit of {daily_limit} sends reached"
+                elif per_bot_daily is not None and db.execute(
+                        "SELECT count(*) FROM bridge_sends WHERE bot=? AND ts>=? AND state!='failed'",
+                        (bot, (moment - timedelta(hours=24)).isoformat())).fetchone()[0] >= per_bot_daily:
+                    reason = f"daily limit of {per_bot_daily} sends per bot reached"
+                elif db.execute("SELECT 1 FROM bridge_sends WHERE bot=? AND ts>? AND state!='failed' LIMIT 1",
+                                (bot, (moment - timedelta(seconds=per_bot_seconds)).isoformat())).fetchone():
+                    reason = f"rate limit: at most one send per {per_bot_seconds}s per bot"
+                if reason:
+                    db.rollback()
+                    return None, hop, reason
+                cursor = db.execute("INSERT INTO bridge_sends (bot, ts) VALUES (?,?)", (bot, moment.isoformat()))
+                if thread_id:
+                    db.execute("INSERT INTO bridge_threads VALUES (?,?,?) ON CONFLICT(thread_id) DO UPDATE "
+                               "SET hop=excluded.hop, updated_at=excluded.updated_at", (thread_id, hop, now().isoformat()))
+                db.commit()
+                return cursor.lastrowid, hop, None
+            except BaseException:
+                db.rollback()
+                raise
+
+    def bridge_settle(self, reservation: int, sent: bool, thread_id: str | None = None, hop: int = 0) -> None:
+        """A sent reservation stays counted; a failed one is released and its hop step undone
+        (unless the thread moved on meanwhile)."""
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE bridge_sends SET state=? WHERE id=?", ("sent" if sent else "failed", reservation))
+            if not sent and thread_id:
+                db.execute("UPDATE bridge_threads SET hop=hop-1 WHERE thread_id=? AND hop=?", (thread_id, hop))
+            db.commit()
+
+    def bridge_inbox_hop(self, thread_id: str | None, supplied: int, max_hops: int) -> tuple[int, bool]:
+        """Hop of an inbound bridge message: max(stored + 1, supplied), so a sender cannot
+        reset a thread's count. Returns (hop, accepted). Read only: the hop is stored with the
+        turn itself (enqueue_message *bridge_hop*), so a failed enqueue consumes no hop."""
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT hop FROM bridge_threads WHERE thread_id=?", (thread_id,)).fetchone() if thread_id else None
+        hop = max((row["hop"] + 1) if row else 1, supplied)
+        return hop, hop <= max_hops
+
+    @staticmethod
+    def _migrate_effort(db: sqlite3.Connection) -> None:
+        """One-time: give existing bots their engine's default effort (Codex high, Claude medium).
+
+        Bots on an engine with no effort flag stay unset. Past jobs are not rewritten.
+        """
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM meta WHERE key=?", (EFFORT_MIGRATION,)).fetchone():
+                db.rollback()
+                return
+            stamp = now().isoformat()
+            for row in db.execute(
+                "SELECT id, default_provider FROM bots WHERE effort IS NULL"
+            ).fetchall():
+                level = default_effort(row["default_provider"])
+                if level:
+                    db.execute("UPDATE bots SET effort=? WHERE id=?", (level, row["id"]))
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (EFFORT_MIGRATION, stamp))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_reads(db: sqlite3.Connection) -> None:
+        """One-time: treat everything already in existing chats as read, so an upgrade does
+        not flood the sidebar with old history. Bots created later start with nothing read."""
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM meta WHERE key=?", (READS_MIGRATION,)).fetchone():
+                db.rollback()
+                return
+            stamp = now().isoformat()
+            db.execute(
+                "INSERT OR IGNORE INTO bot_reads (bot_id, last_read_message_id, read_at) "
+                "SELECT bots.id, COALESCE((SELECT MAX(id) FROM messages WHERE messages.bot_id=bots.id), 0), ? "
+                "FROM bots",
+                (stamp,),
+            )
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (READS_MIGRATION, stamp))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_identity(db: sqlite3.Connection) -> None:
+        """One-time: give existing bots a model and icon, and rename CLI-named bots.
+
+        Ids, memory, history and routines are untouched. A renamed bot keeps its
+        old name as an alias so bridge senders addressing it still reach it.
+        """
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM meta WHERE key=?", (IDENTITY_MIGRATION,)).fetchone():
+                db.rollback()
+                return
+            stamp = now().isoformat()
+            rows = db.execute("SELECT id, name, default_provider, model, icon FROM bots").fetchall()
+            names = {row["name"] for row in rows}
+            for row in rows:
+                name = row["name"]
+                updates: dict[str, str] = {}
+                new_name = LEGACY_RENAMES.get((name, row["default_provider"]))
+                if new_name and new_name not in names:
+                    updates["name"] = new_name
+                    names.add(new_name)
+                    db.execute(
+                        "INSERT OR IGNORE INTO bot_aliases (alias, bot_id) VALUES (?,?)",
+                        (name, row["id"]),
+                    )
+                if not row["model"]:
+                    model = default_model(row["default_provider"])
+                    if model:
+                        updates["model"] = model
+                if not row["icon"]:
+                    updates["icon"] = DEFAULT_ICONS.get(updates.get("name", name), DEFAULT_ICON)
+                if updates:
+                    updates["updated_at"] = stamp
+                    db.execute(
+                        f"UPDATE bots SET {','.join(f'{k}=?' for k in updates)} WHERE id=?",
+                        (*updates.values(), row["id"]),
+                    )
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (IDENTITY_MIGRATION, stamp))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
+    @staticmethod
+    def _job(row: sqlite3.Row | None) -> Job | None:
+        return _model(Job, row, ("created_at", "started_at", "finished_at", "not_before"))
+
+    def create(
+        self,
+        prompt: str,
+        provider: str = "codex",
+        *,
+        bot_id: UUID | None = None,
+        reason: str | None = None,
+        source: str = "api",
+        routine_id: UUID | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> Job:
+        job = Job(
+            id=uuid4(),
+            prompt=prompt,
+            provider=provider,
+            status=JobStatus.QUEUED,
+            created_at=now(),
+            bot_id=bot_id,
+            reason=reason,
+            source=source,
+            routine_id=routine_id,
+            model=model,
+            effort=effort,
+        )
+        with closing(self._connect()) as db:
+            db.execute(
+                "INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,"
+                "routine_id,model,effort,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(job.id),
+                    job.prompt,
+                    job.status.value,
+                    job.provider,
+                    job.created_at.isoformat(),
+                    str(bot_id) if bot_id else None,
+                    reason,
+                    source,
+                    str(routine_id) if routine_id else None,
+                    model,
+                    effort,
+                    _priority(source),
+                ),
+            )
+        return job
+
+    def get(self, job_id: UUID | str) -> Job | None:
+        with closing(self._connect()) as db:
+            return self._job(db.execute("SELECT * FROM jobs WHERE id=?", (str(job_id),)).fetchone())
+
+    def list(self) -> list[Job]:
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT * FROM jobs ORDER BY created_at, id").fetchall()
+        return [self._job(row) for row in rows if row is not None]
+
+    def running_job_ids(self) -> list[str]:
+        with closing(self._connect()) as db:
+            return [row["id"] for row in db.execute("SELECT id FROM jobs WHERE status=?", (JobStatus.RUNNING.value,))]
+
+    def post_steer(self, bot_id: UUID | str, text: str, attachments: list[str],
+                   reason: str | None = None, job_id: UUID | str | None = None) -> tuple[Message, Job] | None:
+        """Attach an owner message to the bot's current turn atomically with checking its state.
+
+        The turn is, in order: the bot's running job (a chat/API one first), else its oldest queued
+        chat/API job (not started yet, or parked between attempts; the steer is delivered when it starts).
+        Never steered into: bot-to-bot turns (``inbox``, anything with an agent message row), whose reply
+        goes back to the sending bot and must not carry the owner's chat text; and assignment turns, whose
+        status line, checkpoint and budget accounting (0.10.0) stay separate, so the owner's message
+        stays a plain queued chat turn that runs before the next continuation.
+        """
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if job_id:
+                row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND id=? AND status='running'",
+                                 (str(bot_id), str(job_id))).fetchone()
+            else:
+                row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='running' AND source!='inbox' "
+                                 "AND assignment_id IS NULL AND NOT EXISTS (SELECT 1 FROM agent_messages a WHERE a.job_id=jobs.id) "
+                                 "ORDER BY source IN ('chat','api') DESC, started_at LIMIT 1",
+                                 (str(bot_id),)).fetchone()
+                if not row:
+                    row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='queued' "
+                                     "AND source IN ('chat','api') ORDER BY created_at, id LIMIT 1",
+                                     (str(bot_id),)).fetchone()
+            if not row:
+                db.rollback()
+                return None
+            cur = db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,attachments,steer_job_id,"
+                             "steer_status,steer_reason) VALUES (?,'user','chat',?,?,?,?,'pending',?)",
+                             (str(bot_id), text, now().isoformat(), json.dumps(attachments), row['id'], reason))
+            message = db.execute("SELECT * FROM messages WHERE id=?", (cur.lastrowid,)).fetchone()
+            db.commit()
+            return _model(Message, message, ("created_at",)), self._job(row)
+
+    def pending_steers(self, job_id: UUID | str) -> list[Message]:
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT * FROM messages WHERE steer_job_id=? AND steer_status='pending' "
+                              "AND archived_at IS NULL ORDER BY id", (str(job_id),)).fetchall()
+        return [_model(Message, row, ("created_at",)) for row in rows]
+
+    def has_open_question(self, job_id: UUID | str) -> bool:
+        """The job is waiting on an unanswered blocking ``desk ask`` question."""
+        with closing(self._connect()) as db:
+            return db.execute("SELECT 1 FROM questions WHERE job_id=? AND status='open' AND blocking=1",
+                              (str(job_id),)).fetchone() is not None
+
+    def take_pending_steers(self, job_id: UUID | str) -> tuple[list[Message], list[tuple[int, str]]]:
+        """Claim the job's pending steers for an attempt's prompt: select and mark delivered in one
+        transaction, so the provider's mid-turn steer loop can never also send them.
+
+        Returns (every non-archived steer of this job still attached to it, pending or delivered earlier,
+        so a retry keeps the ones an earlier attempt did not get to use; (id, stamp) of those claimed now)."""
+        stamp = now().isoformat()
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            claimed = [(row["id"], stamp) for row in db.execute(
+                "SELECT id FROM messages WHERE steer_job_id=? AND steer_status='pending' AND archived_at IS NULL "
+                "ORDER BY id", (str(job_id),)).fetchall()]
+            db.executemany("UPDATE messages SET steer_status='delivered', steer_delivered_at=? WHERE id=?",
+                           [(stamp, mid) for mid, _ in claimed])
+            rows = db.execute("SELECT * FROM messages WHERE steer_job_id=? AND steer_status IN ('pending','delivered') "
+                              "AND archived_at IS NULL ORDER BY id", (str(job_id),)).fetchall()
+            db.commit()
+        return [_model(Message, row, ("created_at",)) for row in rows], claimed
+
+    def deliver_steer(self, message_id: int) -> str | None:
+        stamp = now().isoformat()
+        with closing(self._connect()) as db:
+            changed = db.execute("UPDATE messages SET steer_status='delivered', steer_delivered_at=? "
+                                 "WHERE id=? AND steer_status='pending' AND archived_at IS NULL",
+                                 (stamp, message_id)).rowcount
+        return stamp if changed else None
+
+    @staticmethod
+    def _queue_steers(db: sqlite3.Connection, job_id: str) -> list[int]:
+        # the steered job's settings; the bot's if that job row is gone
+        rows = db.execute("SELECT m.*, j.id AS steered, COALESCE(j.provider, b.default_provider) AS provider, "
+                          "COALESCE(m.steer_reason, j.reason, b.reason) AS turn_reason, "
+                          "j.created_at AS steered_at, CASE WHEN j.id IS NULL THEN b.model ELSE j.model END AS turn_model, "
+                          "CASE WHEN j.id IS NULL THEN b.effort ELSE j.effort END AS turn_effort "
+                          "FROM messages m JOIN bots b ON b.id=m.bot_id LEFT JOIN jobs j ON j.id=m.steer_job_id "
+                          "WHERE m.steer_job_id=? AND m.steer_status='pending' AND m.archived_at IS NULL "
+                          "ORDER BY m.id", (job_id,)).fetchall()
+        for index, row in enumerate(rows, 1):
+            key = str(uuid4())
+            # claim orders by (priority, created_at): stamping the turn just after the job it was steered
+            # into (+1 ms per steer, message order) puts it ahead of turns queued later, and keeps two
+            # steered jobs' turns in the order of their jobs. Not "now", which would sort behind them.
+            created = (datetime.fromisoformat(row['steered_at']) + timedelta(milliseconds=index)
+                       if row['steered_at'] else now())
+            effort = row['turn_effort'] or (None if row['steered'] else default_effort(row['provider']))
+            db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority) "
+                       "VALUES (?,?,'queued',?,?,?,?,?,?,?,?)",
+                       (key, row['text'], row['provider'], created.isoformat(), row['bot_id'], row['turn_reason'],
+                        'chat', row['turn_model'], effort, _priority('chat')))
+            db.execute("UPDATE messages SET job_id=?, steer_status='queued' WHERE id=?", (key, row['id']))
+        return [row['id'] for row in rows]
+
+    def steered_reply_id(self, message: Message) -> int | None:
+        """For a steer turned into a queued turn: the newest message of the job it was sent into."""
+        if not message.steer_job_id:
+            return None
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT MAX(id) FROM messages WHERE bot_id=? AND job_id=? AND kind!='say' AND archived_at IS NULL",
+                             (str(message.bot_id), str(message.steer_job_id))).fetchone()
+        return row[0] if row else None
+
+    def queue_steers(self, job_id: UUID | str) -> list[int]:
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            ids = self._queue_steers(db, str(job_id))
+            db.commit()
+        return ids
+
+    def recover_interrupted(
+        self, held: set[str] | frozenset[str] = frozenset(), queued_steers: list[int] | None = None
+    ) -> list[dict]:
+        """After a controller restart: re-queue each RUNNING job once, else fail it.
+
+        A job whose leftover provider processes could not be stopped (*held*) is never
+        replayed. Each transition and its chat notice commit together, so a repeated
+        startup neither loses nor duplicates them. Replay is at-least-once: actions the
+        interrupted attempt already took may have happened. Returns the affected rows. Message ids of
+        pending steers turned into queued turns are appended to *queued_steers* (the caller logs them).
+        """
+        stamp = now().isoformat()
+        affected = []
+        made: list[int] = []
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = db.execute("SELECT * FROM jobs WHERE status=?", (JobStatus.RUNNING.value,)).fetchall()
+                for row in rows:
+                    key = row["id"]
+                    made.extend(self._queue_steers(db, key))
+                    stopped = row["assignment_id"] and not db.execute(
+                        "SELECT 1 FROM assignments WHERE id=? AND status='active'", (row["assignment_id"],)).fetchone()
+                    if stopped:
+                        # a stop (or close) is durable: its turn is never replayed
+                        db.execute(
+                            "UPDATE jobs SET status=?, finished_at=?, error=?, failure_kind='interrupted', slot=NULL,"
+                            " agent_token_hash=NULL WHERE id=?",
+                            (JobStatus.CANCELLED.value, stamp, "assignment stopped; not replayed after restart", key),
+                        )
+                        notice = "Bot-Office restarted during this turn; not replayed (its assignment was stopped)."
+                        outcome = "cancelled"
+                    elif key not in held and not row["restart_attempts"]:
+                        # the interrupted execution goes into the attempt history; the replay runs
+                        # as a new execution (restart_attempts+1) without using an automatic retry
+                        db.execute(
+                            "INSERT INTO job_attempts (job_id,attempt,kind,error,reply_text,started_at,finished_at,"
+                            "automatic) VALUES (?,?,'interrupted',?,?,?,?,0)",
+                            (key, execution(row), "interrupted by controller restart", row["draft_text"],
+                             row["started_at"], stamp),
+                        )
+                        db.execute(
+                            "UPDATE jobs SET status=?, restart_attempts=restart_attempts+1, failure_kind='interrupted',"
+                            " slot=NULL, not_before=NULL, draft_text=NULL, agent_token_hash=NULL WHERE id=?",
+                            (JobStatus.QUEUED.value, key),
+                        )
+                        seq = db.execute("SELECT COALESCE(MAX(seq),0) FROM job_events WHERE job_id=?", (key,)).fetchone()[0]
+                        db.execute(
+                            "INSERT INTO job_events (job_id,seq,kind,data,created_at) VALUES (?,?,?,?,?)",
+                            (key, seq + 1, "retry", json.dumps({"attempt": execution(row) + 1, "restart": True}), stamp),
+                        )
+                        notice = ("Bot-Office restarted during this turn; retrying from the last confirmed session; "
+                                  "prior actions may have occurred.")
+                        outcome = "requeued"
+                    else:
+                        why = ("its earlier processes could not be proven stopped" if key in held
+                               else "it was already retried once after a restart")
+                        db.execute(
+                            "UPDATE jobs SET status=?, finished_at=?, error=?, failure_kind='interrupted' WHERE id=?",
+                            (JobStatus.FAILED.value, stamp, f"interrupted by controller restart; not retried: {why}", key),
+                        )
+                        notice = f"Bot-Office restarted during this turn; not retried again ({why})."
+                        outcome = "failed"
+                    if row["bot_id"] and db.execute("SELECT 1 FROM bots WHERE id=?", (row["bot_id"],)).fetchone() and not db.execute(
+                        "SELECT 1 FROM messages WHERE bot_id=? AND job_id=? AND role='user' AND archived_at IS NOT NULL",
+                        (row["bot_id"], key),
+                    ).fetchone():
+                        db.execute(
+                            "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments)"
+                            " VALUES (?,?,?,?,?,?,?,'[]')",
+                            (row["bot_id"], "system", None, row["source"], notice, key, stamp),
+                        )
+                    affected.append({"id": key, "bot_id": row["bot_id"], "outcome": outcome})
+                # Also repair a crash between a terminal transition and its pending-steer cleanup. A queued
+                # (parked) job is not terminal: its pending steers stay attached for its next attempt.
+                for row in db.execute("SELECT DISTINCT m.steer_job_id FROM messages m LEFT JOIN jobs j "
+                                      "ON j.id=m.steer_job_id WHERE m.steer_status='pending' "
+                                      "AND (j.id IS NULL OR j.status NOT IN ('queued','running'))").fetchall():
+                    made.extend(self._queue_steers(db, row[0]))
+                db.execute("DELETE FROM agent_tokens WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id=agent_tokens.job_id AND j.bot_id=agent_tokens.bot_id AND j.status='running')")
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        if queued_steers is not None:
+            queued_steers.extend(made)  # only after the commit: a rolled-back recovery logs nothing
+        return affected
+
+    def cancel(self, job_id: UUID | str, *, queue_steers: bool = True) -> Job | None:
+        """Cancel a queued job. Steers still pending on it become queued turns (unless the caller,
+        an edit/rewind, archives or queues them itself)."""
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (str(job_id),)).fetchone()
+            job = self._job(row)
+            if job and job.status == JobStatus.QUEUED:
+                db.execute(
+                    "UPDATE jobs SET status=?, finished_at=?, error=? WHERE id=?",
+                    (JobStatus.CANCELLED.value, now().isoformat(), "cancelled", str(job_id)),
+                )
+                if queue_steers:
+                    self._queue_steers(db, str(job_id))
+            db.commit()
+        return self.get(job_id)
+
+    def claim(self, desktops: str | Sequence[str], enabled_providers: set[str] | frozenset[str]) -> Job | None:
+        """Start the next due queued job (lowest priority value, then oldest) and lease it the
+        first free desktop of *desktops*; with none free it runs without a desktop (slot NULL).
+        How many jobs run at once is the scheduler's lane count, not the desktop count."""
+        if not enabled_providers:
+            return None
+        desktops = [desktops] if isinstance(desktops, str) else list(desktops)
+        placeholders = ",".join("?" for _ in enabled_providers)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            busy = {row["slot"] for row in db.execute(
+                "SELECT slot FROM jobs WHERE status=? AND slot IS NOT NULL", (JobStatus.RUNNING.value,))}
+            slot = next((name for name in desktops if name not in busy), None)
+            while True:
+                row = db.execute(
+                    f"SELECT id FROM jobs AS queued WHERE status=? AND provider IN ({placeholders}) "
+                    "AND (bot_id IS NULL OR NOT EXISTS (SELECT 1 FROM jobs AS active "
+                    "WHERE active.bot_id=queued.bot_id AND active.status='running')) "
+                    "AND (not_before IS NULL OR not_before <= ?) "
+                    "ORDER BY priority, created_at, id LIMIT 1",
+                    (JobStatus.QUEUED.value, *sorted(enabled_providers), now().isoformat()),
+                ).fetchone()
+                if not row:
+                    db.commit()  # keeps the cancellations of turns the gate refused
+                    return None
+                job_id = row["id"]
+                refused = _assignment_gate(db, job_id)
+                if refused is None:
+                    held = budgets.budget_gate(db, job_id, now())
+                    if held is None:
+                        break
+                    _hold_for_budget(db, job_id, held)
+                    continue
+                # cancelled with a short note; the assignment loop settles it (budget -> blocked)
+                db.execute("UPDATE jobs SET status=?, finished_at=?, error=? WHERE id=?",
+                           (JobStatus.CANCELLED.value, now().isoformat(), f"not run: {refused}", job_id))
+                bot_id = db.execute("SELECT bot_id FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
+                if bot_id and db.execute("SELECT 1 FROM bots WHERE id=?", (bot_id,)).fetchone():
+                    db.execute("INSERT INTO messages (bot_id,role,source,text,job_id,created_at,attachments) "
+                               "VALUES (?,?,?,?,?,?,'[]')", (bot_id, "system", "assignment",
+                                                             f"Assignment turn not run: {refused}.", job_id,
+                                                             now().isoformat()))
+            db.execute(
+                "UPDATE jobs SET status=?, slot=?, started_at=? WHERE id=? AND status=?",
+                (JobStatus.RUNNING.value, slot, now().isoformat(), job_id, JobStatus.QUEUED.value),
+            )
+            db.commit()
+        return self.get(job_id)
+
+    def finish(
+        self,
+        job_id: UUID | str,
+        status: JobStatus,
+        *,
+        exit_code: int | None = None,
+        log_path: str | None = None,
+        error: str | None = None,
+        reply_path: str | None = None,
+        reply_text: str | None = None,
+        failure_kind: str | None = None,
+        usage: dict | None = None,
+        outcome: str | None = None,
+    ) -> Job | None:
+        if status in {JobStatus.QUEUED, JobStatus.RUNNING}:
+            raise ValueError("finish requires a terminal status")
+        with closing(self._connect()) as db:
+            db.execute(
+                "UPDATE jobs SET status=?, finished_at=?, exit_code=?, log_path=?, error=?, reply_path=?, "
+                "reply_text=?, failure_kind=?, usage_json=?, outcome=? WHERE id=? AND status=?",
+                (
+                    status.value,
+                    now().isoformat(),
+                    exit_code,
+                    log_path,
+                    clip_error(error),
+                    reply_path,
+                    reply_text,
+                    failure_kind,
+                    json.dumps(usage) if usage else None,
+                    outcome,
+                    str(job_id),
+                    JobStatus.RUNNING.value,
+                ),
+            )
+        return self.get(job_id)
+
+    # --- retries (same job row; job_id, chat linkage and rewind checks stay intact) ---
+
+    def requeue(
+        self, job_id: UUID | str, not_before: datetime, kind: str, *, error: str | None,
+        reply_text: str | None, max_per_hour: int, event_error: str | None = None,
+        usage: dict | None = None,
+    ) -> bool:
+        """Move a RUNNING job back to QUEUED for an automatic retry at *not_before*.
+
+        The rolling-hour cap is checked, the attempt recorded and the ``retry`` event written
+        in the same transaction, so a crash never leaves a re-queued job without its event.
+        Returns False (nothing changed) when the cap is reached or the job is not running.
+        """
+        stamp = now()
+        error = clip_error(error)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT attempts, restart_attempts, started_at FROM jobs WHERE id=? AND status=?",
+                                 (str(job_id), JobStatus.RUNNING.value)).fetchone()
+                used = db.execute("SELECT COUNT(*) FROM job_attempts WHERE automatic=1 AND finished_at>?",
+                                  ((stamp - timedelta(hours=1)).isoformat(),)).fetchone()[0]
+                if not row or used >= max_per_hour:
+                    db.rollback()
+                    return False
+                db.execute(
+                    "INSERT INTO job_attempts (job_id,attempt,kind,error,reply_text,started_at,finished_at,"
+                    "automatic,not_before,usage_json) VALUES (?,?,?,?,?,?,?,1,?,?)",
+                    (str(job_id), execution(row), kind, error, reply_text, row["started_at"],
+                     stamp.isoformat(), not_before.isoformat(), json.dumps(usage) if usage else None),
+                )
+                db.execute(
+                    "UPDATE jobs SET status=?, attempts=attempts+1, not_before=?, failure_kind=?, error=?, "
+                    "slot=NULL, draft_text=NULL, agent_token_hash=NULL WHERE id=?",
+                    (JobStatus.QUEUED.value, not_before.isoformat(), kind, error, str(job_id)),
+                )
+                db.execute("DELETE FROM agent_tokens WHERE job_id=?", (str(job_id),))
+                seq = db.execute("SELECT COALESCE(MAX(seq),0) FROM job_events WHERE job_id=?",
+                                 (str(job_id),)).fetchone()[0]
+                db.execute(
+                    "INSERT INTO job_events (job_id,seq,kind,data,created_at) VALUES (?,?,?,?,?)",
+                    (str(job_id), seq + 1, "retry", json.dumps({
+                        "attempt": execution(row) + 1, "not_before": not_before.isoformat(),
+                        "failure_kind": kind, "error": event_error if event_error is not None else error}),
+                     stamp.isoformat()),
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return True
+
+    def retry_now(self, job_id: UUID | str) -> Job:
+        """Manual retry of a failed (or incomplete) job: re-queue the same row once, now.
+
+        Raises ValueError if the job is not in a retryable state or its turn was archived
+        by an edit. Writes a ``retry`` event so open event streams switch attempts. An
+        assignment turn is retried through its assignment (reactivated, settled again).
+        """
+        key = str(job_id)
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT assignment_id FROM jobs WHERE id=?", (key,)).fetchone()
+        if row and row["assignment_id"]:
+            from .assignments import Assignments
+
+            return Assignments(self).retry(key)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                self._retry(db, key)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return self.get(key)
+
+    def _retry(self, db: sqlite3.Connection, key: str) -> None:
+        stamp = now().isoformat()
+        row = db.execute("SELECT * FROM jobs WHERE id=?", (key,)).fetchone()
+        if not row:
+            raise LookupError("job not found")
+        if row["status"] not in (JobStatus.FAILED.value, JobStatus.INCOMPLETE.value):
+            raise ValueError(f"job is {row['status']}; only failed or incomplete jobs can be retried")
+        if row["bot_id"] and db.execute(
+            "SELECT 1 FROM messages WHERE bot_id=? AND job_id=? AND role='user' AND archived_at IS NOT NULL",
+            (row["bot_id"], key),
+        ).fetchone():
+            raise ValueError("this turn was rewound by an edit")
+        manual = db.execute(
+            "SELECT COUNT(*) FROM job_attempts WHERE job_id=? AND automatic=0 AND kind!='interrupted'",
+            (key,),
+        ).fetchone()[0]
+        if manual >= MAX_MANUAL_RETRIES:
+            raise ValueError(f"this job was already retried {manual} times; send a new message instead")
+        db.execute(
+            "INSERT INTO job_attempts (job_id,attempt,kind,error,reply_text,started_at,finished_at,"
+            "automatic) VALUES (?,?,?,?,?,?,?,0)",
+            (key, execution(row), row["failure_kind"] or row["status"], row["error"],
+             row["reply_text"], row["started_at"], row["finished_at"] or stamp),
+        )
+        # assignment_settled=0: the new run is settled (charged, decided) like any other
+        db.execute(
+            "UPDATE jobs SET status=?, attempts=attempts+1, not_before=NULL, finished_at=NULL, slot=NULL,"
+            " draft_text=NULL, agent_token_hash=NULL, assignment_settled=0 WHERE id=?",
+            (JobStatus.QUEUED.value, key),
+        )
+        seq = db.execute("SELECT COALESCE(MAX(seq),0) FROM job_events WHERE job_id=?", (key,)).fetchone()[0]
+        db.execute(
+            "INSERT INTO job_events (job_id,seq,kind,data,created_at) VALUES (?,?,?,?,?)",
+            (key, seq + 1, "retry", json.dumps({"attempt": execution(row) + 1, "manual": True}), stamp),
+        )
+
+    def switch_provider(self, job_id: UUID | str, provider: str, model: str | None, effort: str | None,
+                        reason: str | None) -> Job:
+        """#10: the owner's "Retry on <provider>" for a job parked on a usage limit. One transaction:
+        this job's provider, model and effort (the bot's defaults are untouched), no wait, and a
+        ``retry`` event {switched_from, switched_to}. Never called by the scheduler (only the
+        endpoint). The next claim takes the model-switch handoff (workspace.model_switch keys off
+        the job's provider). Raises LookupError (no job) or ValueError (not parked)."""
+        key = str(job_id)
+        stamp = now().isoformat()
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute(f"SELECT j.*, ({PARKED_SQL}) AS parked FROM jobs j WHERE j.id=?", (key,)).fetchone()
+                if not row:
+                    raise LookupError("job not found")
+                if not row["parked"]:
+                    raise ValueError(f"job is {row['status']}; only a job waiting on a usage limit can switch provider")
+                if row["provider"] == provider:
+                    raise ValueError(f"the job already runs on {provider}")
+                db.execute("UPDATE jobs SET provider=?, model=?, effort=?, reason=?, not_before=NULL WHERE id=?",
+                           (provider, model, effort, reason if reason is not None else row["reason"], key))
+                seq = db.execute("SELECT COALESCE(MAX(seq),0) FROM job_events WHERE job_id=?", (key,)).fetchone()[0]
+                db.execute(
+                    "INSERT INTO job_events (job_id,seq,kind,data,created_at) VALUES (?,?,?,?,?)",
+                    (key, seq + 1, "retry", json.dumps({"attempt": execution(row), "not_before": None,
+                                                        "switched_from": row["provider"], "switched_to": provider}),
+                     stamp),
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        job = self.get(key)
+        assert job is not None
+        return job
+
+    def keep_waiting(self, job_id: UUID | str) -> bool:
+        """#10 [Keep waiting]: close the open notice of a parked job (the job keeps its retry time)."""
+        with closing(self._connect()) as db:
+            return db.execute("UPDATE usage_notices SET dismissed_at=? WHERE job_id=? AND dismissed_at IS NULL",
+                              (now().isoformat(), str(job_id))).rowcount > 0
+
+    def list_attempts(self, job_id: UUID | str) -> list[dict]:
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT * FROM job_attempts WHERE job_id=? ORDER BY attempt, id", (str(job_id),))
+            return [dict(row) for row in rows]
+
+    # --- stream events (audit trail + live replay) ---
+
+    def set_draft(self, job_id: UUID | str, text: str) -> None:
+        with closing(self._connect()) as db:
+            db.execute("UPDATE jobs SET draft_text=? WHERE id=?", (text, str(job_id)))
+
+    def add_event(self, job_id: UUID | str, seq: int, kind: str, data: dict) -> None:
+        with closing(self._connect()) as db:
+            db.execute(
+                "INSERT OR REPLACE INTO job_events (job_id,seq,kind,data,created_at) VALUES (?,?,?,?,?)",
+                (str(job_id), seq, kind, json.dumps(data, ensure_ascii=False), now().isoformat()),
+            )
+
+    def last_event_seq(self, job_id: UUID | str) -> int:
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT MAX(seq) AS seq FROM job_events WHERE job_id=?", (str(job_id),)
+            ).fetchone()
+        return int(row["seq"] or 0)
+
+    def last_tool_before_retry(self, job_id: UUID | str) -> dict | None:
+        """The last ``tool`` event (data dict) of the attempt that ended in the newest ``retry`` event,
+        i.e. between the previous ``retry`` event (or the start) and the newest one."""
+        key = str(job_id)
+        with closing(self._connect()) as db:
+            seqs = [r[0] for r in db.execute(
+                "SELECT seq FROM job_events WHERE job_id=? AND kind='retry' ORDER BY seq DESC LIMIT 2", (key,))]
+            if not seqs:
+                return None
+            row = db.execute(
+                "SELECT data FROM job_events WHERE job_id=? AND kind='tool' AND seq<? AND seq>? "
+                "ORDER BY seq DESC LIMIT 1", (key, seqs[0], seqs[1] if len(seqs) > 1 else 0)).fetchone()
+        try:
+            return json.loads(row["data"]) if row else None
+        except ValueError:
+            return None
+
+    def list_events(self, job_id: UUID | str, after: int = 0, limit: int = 2000) -> list[dict]:
+        """Events with ``seq > after`` in order, each as ``{seq, kind, created_at, **data}``."""
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT seq, kind, data, created_at FROM job_events WHERE job_id=? AND seq>? "
+                "ORDER BY seq LIMIT ?",
+                (str(job_id), after, limit),
+            ).fetchall()
+        events = []
+        for row in rows:
+            try:
+                data = json.loads(row["data"])
+            except ValueError:
+                data = {}
+            events.append(
+                {**data, "seq": row["seq"], "kind": row["kind"], "created_at": row["created_at"]}
+            )
+        return events
+
+    def pending_jobs(self, bot_id: UUID | str) -> list[Job]:
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT * FROM jobs WHERE bot_id=? AND status IN (?,?) ORDER BY created_at, id",
+                (str(bot_id), JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+            ).fetchall()
+        return [self._job(row) for row in rows]
+
+    def routine_active(self, routine_id: UUID | str) -> bool:
+        with closing(self._connect()) as db:
+            return bool(
+                db.execute(
+                    "SELECT 1 FROM jobs WHERE routine_id=? AND status IN (?,?) LIMIT 1",
+                    (str(routine_id), JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+                ).fetchone()
+            )
+
+    def routine_last_start(self, routine_id: UUID | str) -> datetime | None:
+        """When the routine's latest run actually started (or was queued, if it has not started)."""
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT MAX(COALESCE(started_at, created_at)) AS at FROM jobs WHERE routine_id=?",
+                             (str(routine_id),)).fetchone()
+        return datetime.fromisoformat(row["at"]) if row and row["at"] else None
+
+    def create_bot(
+        self,
+        name: str,
+        instructions: str,
+        default_provider: str,
+        reason: str | None,
+        *,
+        model: str | None = None,
+        icon: str = "",
+        description: str = "",
+        effort: str | None = None,
+        cli_access: str | None = None,
+    ) -> Bot:
+        stamp = now()
+        bot = Bot(
+            id=uuid4(),
+            name=name,
+            instructions=instructions,
+            default_provider=default_provider,
+            model=model or default_model(default_provider),
+            effort=effort or default_effort(default_provider),
+            cli_access=cli_access or "full",
+            icon=icon or DEFAULT_ICON,
+            description=description,
+            reason=reason,
+            created_at=stamp,
+            updated_at=stamp,
+        )
+        try:
+            with closing(self._connect()) as db:
+                db.execute(
+                    "INSERT INTO bots (id,name,instructions,default_provider,reason,created_at,"
+                    "updated_at,model,icon,description,effort,cli_access) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(bot.id),
+                        name,
+                        instructions,
+                        default_provider,
+                        reason,
+                        stamp.isoformat(),
+                        stamp.isoformat(),
+                        bot.model,
+                        bot.icon,
+                        description,
+                        bot.effort,
+                        bot.cli_access,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("bot name already exists") from exc
+        return bot
+
+    def get_bot(self, bot_id: UUID | str) -> Bot | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT * FROM bots WHERE id=?", (str(bot_id),)).fetchone()
+        return _model(Bot, row, BOT_DATES)
+
+    def find_bot(self, ref: str) -> Bot | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT * FROM bots WHERE id=? OR name=?", (ref, ref)).fetchone()
+            if row is None:
+                row = db.execute(
+                    "SELECT bots.* FROM bot_aliases JOIN bots ON bots.id = bot_aliases.bot_id"
+                    " WHERE bot_aliases.alias=?",
+                    (ref,),
+                ).fetchone()
+        return _model(Bot, row, BOT_DATES)
+
+    def list_bots(self) -> list[Bot]:
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                f"SELECT bots.*, {self._ACTIVITY_SELECT}, {self._UNREAD_SELECT}"
+                " FROM bots LEFT JOIN bot_reads r ON r.bot_id = bots.id"
+                " ORDER BY name COLLATE NOCASE, name"
+            ).fetchall()
+        return [self._bot_with_unread(row) for row in rows]
+
+    def self_peers(self, bot_id, limit: int = 20):
+        """Bounded peer details for SELF.md, without unread-message subqueries."""
+        with closing(self._connect()) as db:
+            count = db.execute("SELECT COUNT(*) FROM bots WHERE id != ?", (str(bot_id),)).fetchone()[0]
+            rows = db.execute(
+                f"SELECT id, name, model, default_provider, description, {self._ACTIVITY_SELECT} "
+                "FROM bots WHERE id != ? ORDER BY name COLLATE NOCASE, name LIMIT ?",
+                (str(bot_id), limit),
+            ).fetchall()
+        return rows, count
+
+    def job_assignment_events(self, job_id, limit: int = 5):
+        with closing(self._connect()) as db:
+            count = db.execute("SELECT COUNT(*) FROM assignment_events WHERE job_id=?", (str(job_id),)).fetchone()[0]
+            rows = db.execute("SELECT assignment_id, kind FROM assignment_events WHERE job_id=? ORDER BY id LIMIT ?",
+                              (str(job_id), limit)).fetchall()
+        return rows, count
+
+    _ACTIVITY_SELECT = (
+        "(SELECT CASE WHEN SUM(jobs.status='running') > 0 THEN 'running'"
+        " WHEN COUNT(*) > 0 THEN 'queued' END FROM jobs WHERE jobs.bot_id = bots.id"
+        " AND jobs.status IN ('queued','running')) AS activity"
+    )
+
+    # unread = bot-originated, not archived, newer than the read watermark; a usage-limit notice
+    # whose job is no longer parked is hidden from the chat (list_messages), so it never counts
+    _UNREAD_WHERE = (
+        "m.bot_id = bots.id AND m.role IN ('assistant','system') AND m.archived_at IS NULL"
+        " AND m.id > COALESCE(r.last_read_message_id, 0)"
+        " AND NOT EXISTS (SELECT 1 FROM usage_notices n JOIN jobs j ON j.id=n.job_id WHERE n.message_id=m.id"
+        f" AND NOT ({PARKED_SQL} AND n.attempt=j.attempts))"
+    )
+    _UNREAD_SELECT = (
+        f"(SELECT COUNT(*) FROM messages m WHERE {_UNREAD_WHERE}) AS unread_count,"
+        f" (SELECT MIN(m.created_at) FROM messages m WHERE {_UNREAD_WHERE}) AS unread_first,"
+        " r.manual_unread_at AS manual_unread_at, COALESCE(r.revision, 0) AS read_revision"
+    )
+
+    @staticmethod
+    def _bot_with_unread(row: sqlite3.Row) -> Bot:
+        values = dict(row)
+        first, manual = values.pop("unread_first"), values.pop("manual_unread_at")
+        values["marked_unread"] = bool(manual)
+        since = first or manual
+        if first and manual:
+            since = min(first, manual)
+        values["unread_since"] = since
+        return _model(Bot, values, (*BOT_DATES, "unread_since"))
+
+    def bot_unread(self, bot_id: UUID | str) -> Bot | None:
+        with closing(self._connect()) as db:
+            row = db.execute(
+                f"SELECT bots.*, {self._ACTIVITY_SELECT}, {self._UNREAD_SELECT} FROM bots"
+                " LEFT JOIN bot_reads r ON r.bot_id = bots.id WHERE bots.id=?",
+                (str(bot_id),),
+            ).fetchone()
+        return self._bot_with_unread(row) if row else None
+
+    def mark_read(
+        self, bot_id: UUID | str, up_to: int | None = None, revision: int | None = None,
+        explicit: bool = False,
+    ) -> bool:
+        """Advance the read watermark. Returns False if the request was stale and ignored.
+
+        The whole mutation (watermark and manual flag) is rejected when ``revision`` does
+        not match the current one, so a read computed before a "mark as unread" (another
+        tab, an older poll) can neither clear the flag nor move the watermark past the
+        rewound position. A manual unread is only cleared by an explicit open that saw
+        the current revision. The watermark never moves backwards and never past the
+        newest message of the bot.
+        """
+        key = str(bot_id)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT * FROM bot_reads WHERE bot_id=?", (key,)).fetchone()
+                current = row["revision"] if row else 0
+                manual = row["manual_unread_at"] if row else None
+                if revision is not None and revision != current:
+                    db.rollback()
+                    return False
+                if manual and not (explicit and revision == current):
+                    db.rollback()
+                    return False
+                newest = db.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM messages WHERE bot_id=?", (key,)
+                ).fetchone()[0]
+                target = newest if up_to is None else min(up_to, newest)
+                watermark = max(row["last_read_message_id"] if row else 0, target)
+                db.execute(
+                    "INSERT INTO bot_reads (bot_id, last_read_message_id, read_at, manual_unread_at, revision)"
+                    " VALUES (?,?,?,NULL,?) ON CONFLICT(bot_id) DO UPDATE SET"
+                    " last_read_message_id=excluded.last_read_message_id, read_at=excluded.read_at,"
+                    " manual_unread_at=NULL",
+                    (key, watermark, now().isoformat(), current),
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return True
+
+    def mark_unread(self, bot_id: UUID | str) -> None:
+        """Rewind the watermark to just before the latest bot message (never forward)
+        and set the manual flag, so bots without any bot messages still show as unread."""
+        key = str(bot_id)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT * FROM bot_reads WHERE bot_id=?", (key,)).fetchone()
+                latest = db.execute(
+                    "SELECT MAX(id) FROM messages WHERE bot_id=? AND role IN ('assistant','system')"
+                    " AND archived_at IS NULL",
+                    (key,),
+                ).fetchone()[0]
+                existing = row["last_read_message_id"] if row else 0
+                watermark = min(existing, latest - 1) if latest else existing
+                db.execute(
+                    "INSERT INTO bot_reads (bot_id, last_read_message_id, manual_unread_at, revision)"
+                    " VALUES (?,?,?,1) ON CONFLICT(bot_id) DO UPDATE SET"
+                    " last_read_message_id=excluded.last_read_message_id,"
+                    " manual_unread_at=excluded.manual_unread_at, revision=bot_reads.revision+1",
+                    (key, max(watermark, 0), now().isoformat()),
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+
+    def update_bot(self, bot_id: UUID | str, **fields: str | None) -> Bot | None:
+        if not fields.keys() <= BOT_FIELDS:
+            raise ValueError("unknown bot field")
+        fields["updated_at"] = now().isoformat()
+        assignments = ",".join(f"{key}=?" for key in fields)
+        try:
+            with closing(self._connect()) as db:
+                db.execute(
+                    f"UPDATE bots SET {assignments} WHERE id=?", (*fields.values(), str(bot_id))
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("bot name already exists") from exc
+        return self.get_bot(bot_id)
+
+    def delete_bot(self, bot_id: UUID | str) -> list[Job]:
+        """Delete a bot, its messages, routines and aliases; cancel its queued jobs.
+
+        Returns jobs of this bot that were running so the caller can stop them.
+        Job records themselves are kept as history.
+        """
+        key = str(bot_id)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE jobs SET status=?, finished_at=?, error=? WHERE bot_id=? AND status=?",
+                (JobStatus.CANCELLED.value, now().isoformat(), "bot deleted", key, JobStatus.QUEUED.value),
+            )
+            running = db.execute(
+                "SELECT * FROM jobs WHERE bot_id=? AND status=?", (key, JobStatus.RUNNING.value)
+            ).fetchall()
+            db.execute("DELETE FROM messages WHERE bot_id=?", (key,))
+            db.execute("DELETE FROM routines WHERE bot_id=?", (key,))
+            db.execute("DELETE FROM watcher_runs WHERE watcher_id IN (SELECT id FROM watchers WHERE bot_id=?)", (key,))
+            db.execute("DELETE FROM watchers WHERE bot_id=?", (key,))
+            db.execute("DELETE FROM bot_aliases WHERE bot_id=?", (key,))
+            db.execute("DELETE FROM bot_reads WHERE bot_id=?", (key,))
+            db.execute("DELETE FROM working_snapshots WHERE bot_id=?", (key,))
+            # 0.11.0: its usage notices, own action rules (global rules have bot_id NULL), approvals and gate log
+            for table in ("usage_notices", "action_rules", "approvals", "gate_log"):
+                db.execute(f"DELETE FROM {table} WHERE bot_id=?", (key,))
+            # 0.10.0: its open assignments are dropped (kept as history) and its wake-ups cancelled
+            db.execute("UPDATE assignments SET status='dropped', status_note='bot deleted', closed_at=?, updated_at=? "
+                       "WHERE bot_id=? AND status NOT IN ('done','dropped')", (now().isoformat(), now().isoformat(), key))
+            db.execute("UPDATE wakeups SET status='cancelled' WHERE bot_id=? AND status='pending'", (key,))
+            db.execute("DELETE FROM bots WHERE id=?", (key,))
+            db.commit()
+        return [self._job(row) for row in running]
+
+    def issue_agent_token(self, job: Job) -> str:
+        token = secrets.token_urlsafe(32)
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE jobs SET agent_token_hash=? WHERE id=? AND bot_id=?", (digest, str(job.id), str(job.bot_id)))
+            db.execute("INSERT INTO agent_tokens VALUES (?,?,?)", (digest, str(job.id), str(job.bot_id)))
+            db.commit()
+        return token
+
+    def valid_desk_agent_token(self, job_id: str, bot_id: UUID, token: str) -> bool:
+        """Accept a running job or a job finished within the inbox delivery window."""
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        current = now()
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT agent_token_hash, status, finished_at FROM jobs WHERE id=? AND bot_id=?",
+                (job_id, str(bot_id)),
+            ).fetchone()
+        if not row or not row["agent_token_hash"] or not secrets.compare_digest(row["agent_token_hash"], digest):
+            return False
+        if row["status"] == JobStatus.RUNNING.value:
+            return True
+        if row["finished_at"] and row["status"] in {status.value for status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.NEEDS_LOGIN, JobStatus.INCOMPLETE)}:
+            finished = datetime.fromisoformat(row["finished_at"])
+            # an inbox file from a bot is accepted for 60 s after its job ended (the live
+            # agent-token endpoints stop accepting the token at job end)
+            return current - timedelta(seconds=60) < finished <= current
+        return False
+
+    def agent_token_job(self, token: str) -> Job | None:
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT j.* FROM agent_tokens t JOIN jobs j ON j.id=t.job_id AND j.bot_id=t.bot_id WHERE t.token_hash=? AND j.status='running'", (digest,)).fetchone()
+        return self._job(row)
+
+    def revoke_agent_token(self, job_id: UUID) -> None:
+        with closing(self._connect()) as db:
+            db.execute("DELETE FROM agent_tokens WHERE job_id=?", (str(job_id),))
+
+    def enqueue_agent_message(self, sender: Bot, target: Bot, text: str, origin_id: str | None, since: str,
+                              inbox_caps: tuple[int, int] | None = None) -> tuple[Message, Job, dict]:
+        job_id, message_id, stamp = str(uuid4()), str(uuid4()), now().isoformat()
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                parent = None
+                if origin_id:
+                    origin = db.execute("SELECT bot_id FROM jobs WHERE id=?", (origin_id,)).fetchone()
+                    if not origin or origin["bot_id"] != str(sender.id):
+                        raise ValueError("invalid originating job")
+                    parent = db.execute("SELECT * FROM agent_messages WHERE job_id=?", (origin_id,)).fetchone()
+                hop = parent["hop"] + 1 if parent else 1
+                if hop > 3:
+                    raise ValueError("maximum message hop depth reached")
+                if db.execute("SELECT 1 FROM agent_messages WHERE from_bot=? AND to_bot=? AND created_at>?", (str(sender.id), str(target.id), since)).fetchone():
+                    raise ValueError("message rate limit reached")
+                if inbox_caps:
+                    _inbox_limit(db, inbox_caps, from_bot=str(sender.id))
+                prompt = f"(from bot {sender.name}) {text}"
+                db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (job_id, prompt, 'queued', target.default_provider, stamp, str(target.id), target.reason, 'inbox', target.model, target.effort or default_effort(target.default_provider), _priority('inbox')))
+                db.execute("INSERT INTO agent_messages VALUES (?,?,?,?,?,?,?,?)", (message_id, str(sender.id), str(target.id), text, job_id, parent['thread_id'] if parent else job_id, hop, stamp))
+                cursor = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at) VALUES (?,?,?,?,?,?,?)", (str(target.id), 'user', f'bot {sender.name}', 'inbox', text, job_id, stamp))
+                row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
+                db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at) VALUES (?,?,?,?,?,?,?)", (str(sender.id), 'user', f'to {target.name}', 'inbox', text, job_id, stamp))
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return _model(Message, row, ("created_at",)), self.get(job_id), self.get_agent_message(message_id)
+
+    def create_agent_message(self, from_bot: UUID, to_bot: UUID, body: str, job_id: UUID,
+                             thread_id: str, hop: int) -> dict:
+        message_id = str(uuid4())
+        with closing(self._connect()) as db:
+            db.execute("INSERT INTO agent_messages VALUES (?,?,?,?,?,?,?,?)",
+                       (message_id, str(from_bot), str(to_bot), body, str(job_id),
+                        thread_id, hop, now().isoformat()))
+        return self.get_agent_message(message_id)
+
+    def list_agent_messages(self, bot: str | None = None) -> list[dict]:
+        query = ("SELECT m.*, j.status AS job_status, j.reply_text AS reply, j.finished_at "
+                 "FROM agent_messages m JOIN jobs j ON j.id=m.job_id")
+        args = ()
+        if bot:
+            query += " WHERE m.from_bot=? OR m.to_bot=?"
+            args = (bot, bot)
+        query += " ORDER BY m.created_at DESC LIMIT 500"
+        with closing(self._connect()) as db:
+            rows = db.execute(query, args).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            status = item.pop("job_status")
+            item["status"] = AGENT_STATUS.get(status, status)
+            result.append(item)
+        return result
+
+    def get_agent_message(self, message_id: str) -> dict | None:
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT m.*, j.status AS job_status, j.reply_text AS reply, j.finished_at "
+                "FROM agent_messages m JOIN jobs j ON j.id=m.job_id WHERE m.id=?", (message_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        status = item.pop("job_status")
+        item["status"] = AGENT_STATUS.get(status, status)
+        return item
+
+    def agent_message_for_job(self, job_id: UUID | str) -> dict | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT * FROM agent_messages WHERE job_id=?", (str(job_id),)).fetchone()
+        return dict(row) if row else None
+
+    def recent_pair_message(self, from_bot: UUID, to_bot: UUID, since: str) -> bool:
+        with closing(self._connect()) as db:
+            return bool(db.execute("SELECT 1 FROM agent_messages WHERE from_bot=? AND to_bot=? AND created_at>? LIMIT 1",
+                                   (str(from_bot), str(to_bot), since)).fetchone())
+
+    def attachment_references(self) -> dict[str, set[str]]:
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT bot_id, attachments FROM messages").fetchall()
+        result: dict[str, set[str]] = {}
+        for row in rows:
+            result.setdefault(row["bot_id"], set()).update(json.loads(row["attachments"]))
+        return result
+
+    def enqueue_message(self, bot: Bot, prompt: str, text: str, reason: str | None,
+                        source: str, sender: str | None, routine_id: UUID | None,
+                        attachment_ids: list[str] | None, *,
+                        routine_scan: tuple[Routine, datetime, datetime] | None = None,
+                        notice: str | None = None,
+                        bridge_hop: tuple[str, int] | None = None,
+                        inbox_caps: tuple[int, int] | None = None,
+                        priority: int | None = None,
+                        hook: Callable[[sqlite3.Connection, Job], None] | None = None) -> tuple[Message, Job]:
+        """Queue a turn. *routine_scan* = (routine as scanned, new scan cursor, fired minute)
+        advances the routine and clears its owed catch-up in the same transaction (RoutineChanged
+        if the routine changed since the scan), and *notice* adds a system line before the turn.
+        *bridge_hop* = (thread id, hop) stores an inbound bridge hop with the turn
+        (BridgeHopConflict if the thread's stored hop reached it meanwhile). *inbox_caps* applies
+        the hourly inbox caps (InboxLimit). *hook* runs in the same transaction after the inserts
+        (watchers: quota, dedupe and state); an exception from it rolls everything back."""
+        job = Job(id=uuid4(), prompt=prompt, provider=bot.default_provider,
+                  status=JobStatus.QUEUED, created_at=now(), bot_id=bot.id,
+                  reason=reason, source=source, routine_id=routine_id, model=bot.model,
+                  effort=bot.effort or default_effort(bot.default_provider))
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if routine_scan and routine_id:
+                    scanned, cursor, fired = routine_scan
+                    if not self._routine_unchanged(db, scanned):
+                        raise RoutineChanged(str(routine_id))
+                    db.execute("UPDATE routines SET scan_cursor=?, last_run_at=?, pending_run=NULL WHERE id=?",
+                               (cursor.isoformat(), fired.isoformat(), str(routine_id)))
+                if inbox_caps:
+                    _inbox_limit(db, inbox_caps, sender=sender)
+                if bridge_hop:
+                    thread_id, hop = bridge_hop
+                    row = db.execute("SELECT hop FROM bridge_threads WHERE thread_id=?", (thread_id,)).fetchone()
+                    if row and row["hop"] >= hop:
+                        raise BridgeHopConflict(thread_id)
+                    db.execute("INSERT INTO bridge_threads VALUES (?,?,?) ON CONFLICT(thread_id) DO UPDATE "
+                               "SET hop=excluded.hop, updated_at=excluded.updated_at", (thread_id, hop, now().isoformat()))
+                if notice:
+                    db.execute("INSERT INTO messages (bot_id,role,source,text,created_at) VALUES (?,?,?,?,?)",
+                               (str(bot.id), "system", source, notice, now().isoformat()))
+                db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,routine_id,model,effort,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                           (str(job.id), prompt, job.status.value, job.provider, job.created_at.isoformat(), str(bot.id), reason, source, str(routine_id) if routine_id else None, bot.model, job.effort, _priority(source) if priority is None else priority))
+                cursor = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments) VALUES (?,?,?,?,?,?,?,?)",
+                                    (str(bot.id), "user", sender, source, text, str(job.id), now().isoformat(), json.dumps(attachment_ids or [])))
+                row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
+                if hook:
+                    hook(db, job)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return _model(Message, row, ("created_at",)), job
+
+    def add_message(
+        self,
+        bot_id: UUID | str,
+        role: str,
+        text: str,
+        *,
+        sender: str | None = None,
+        source: str = "chat",
+        job_id: UUID | str | None = None,
+        attachments: list[str] | None = None,
+    ) -> Message:
+        stamp = now().isoformat()
+        with closing(self._connect()) as db:
+            cursor = db.execute(
+                "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (str(bot_id), role, sender, source, text, str(job_id) if job_id else None, stamp, json.dumps(attachments or [])),
+            )
+            row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return _model(Message, row, ("created_at",))
+
+    def list_messages(
+        self, bot_id: UUID | str, limit: int | None = None, *, include_archived: bool = False,
+        up_to: int | None = None, include_progress: bool = True,
+    ) -> list[Message]:
+        where = "bot_id=?" + ("" if include_archived else " AND archived_at IS NULL")
+        if not include_progress:
+            where += " AND kind!='say'"
+        args: tuple = (str(bot_id),)
+        if up_to is not None:
+            where, args = where + " AND id<=?", (*args, up_to)
+        with closing(self._connect()) as db:
+            # a succeeded reply without a BOT-OFFICE-STATUS line is marked "unverified" (subtle label)
+            rows = db.execute(
+                f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified"
+                f" FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) AS m"
+                " LEFT JOIN jobs AS j ON j.id=m.job_id ORDER BY m.id",
+                (*args, limit if limit is not None else -1),
+            ).fetchall()
+            from .questions import unpack
+            cards = {row["message_id"]: unpack(row) for row in db.execute(
+                "SELECT * FROM questions WHERE bot_id=?", (str(bot_id),))}
+            notices = {row["message_id"]: row for row in db.execute(
+                f"SELECT n.*, ({PARKED_SQL} AND n.attempt=j.attempts) AS parked FROM usage_notices n "
+                "JOIN jobs j ON j.id=n.job_id "
+                "WHERE n.bot_id=? AND n.message_id IS NOT NULL", (str(bot_id),))}
+        out = []
+        for row in rows:
+            notice = notices.get(row["id"])
+            if notice is not None and not notice["parked"]:
+                continue  # the job started, was switched or cancelled: the notice is gone
+            card = {"kind": "usage_limit", "job_id": notice["job_id"], "provider": notice["provider"],
+                    "open": not notice["dismissed_at"]} if notice is not None else None
+            out.append(_model(Message, row, ("created_at", "archived_at")).model_copy(
+                update={"question": cards.get(row["id"]), "notice": card}))
+        return out
+
+    def get_message(self, message_id: int) -> Message | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        return _model(Message, row, ("created_at", "archived_at"))
+
+    def job_message(self, bot_id: UUID | str, job_id: UUID | str) -> Message | None:
+        """The user message that started *job_id* in this bot's chat (archived or not)."""
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT * FROM messages WHERE bot_id=? AND job_id=? AND role='user' ORDER BY id LIMIT 1",
+                (str(bot_id), str(job_id)),
+            ).fetchone()
+        return _model(Message, row, ("created_at", "archived_at"))
+
+    # --- message edit / rewind ---
+
+    def _seed(self, db: sqlite3.Connection, bot_id: str, before_id: int, text: str) -> RewindSeed:
+        """The non-archived chat before *before_id*, excluding progress notes, checked against the seed limits.
+
+        Raises EditError(413) when it cannot be seeded in full; nothing is ever dropped.
+        """
+        rows = db.execute(
+            "SELECT * FROM messages WHERE bot_id=? AND archived_at IS NULL AND kind!='say' AND id<? ORDER BY id",
+            (bot_id, before_id),
+        ).fetchall()
+        messages = [_model(Message, row, ("created_at", "archived_at")) for row in rows]
+        chars = len(text) + sum(len(m.text) + 64 for m in messages)
+        if chars > SEED_MAX_CHARS:
+            raise EditError(413, f"the remaining chat is too long to seed a fresh session ({chars} > {SEED_MAX_CHARS} characters)")
+        images = [(m.id, name) for m in messages for name in m.attachments]
+        if len(images) > SEED_MAX_IMAGES:
+            raise EditError(413, f"the remaining chat has too many images to seed ({len(images)} > {SEED_MAX_IMAGES})")
+        total = 0
+        for _, name in images:
+            try:
+                total += attachment_files.size(self.path.parent, bot_id, name)
+            except (OSError, ValueError) as exc:
+                raise EditError(409, f"image {name} of the remaining chat is missing") from exc
+        if total > SEED_MAX_IMAGE_BYTES:
+            raise EditError(413, "the remaining chat's images are too large to seed")
+        return RewindSeed(messages, images)
+
+    def rewind_seed(self, bot_id: UUID | str, before_id: int, text: str = "") -> RewindSeed:
+        with closing(self._connect()) as db:
+            return self._seed(db, str(bot_id), before_id, text)
+
+    def _editable(self, db: sqlite3.Connection, bot_id: str, message_id: int) -> sqlite3.Row:
+        row = db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        if not row or row["bot_id"] != bot_id or row["archived_at"]:
+            raise EditError(404, "message not found")
+        if row["steer_job_id"]:
+            raise EditError(409, "steering messages cannot be edited")
+        if row["role"] != "user" or row["sender"] is not None or row["source"] not in EDITABLE_SOURCES:
+            raise EditError(422, "only your own messages can be edited")
+        return row
+
+    def check_edit(self, bot_id: UUID | str, message_id: int, text: str) -> RewindSeed:
+        """Everything that can be validated without changing state (used before cancelling)."""
+        with closing(self._connect()) as db:
+            self._editable(db, str(bot_id), message_id)
+            return self._seed(db, str(bot_id), message_id, text)
+
+    def edit_message(
+        self, bot: Bot, message_id: int, text: str, reason: str | None,
+        attachment_ids: list[str],
+    ) -> tuple[Message, Job]:
+        """Archive *message_id* and everything after it, queue the replacement, and record
+        that the bot's provider session must be reset - all in one transaction.
+
+        Rechecks ownership, archive state, the seed and pending jobs under the write lock;
+        a job that appeared since the caller's checks makes this fail with 409.
+        """
+        key = str(bot.id)
+        job = Job(id=uuid4(), prompt=text, provider=bot.default_provider,
+                  status=JobStatus.QUEUED, created_at=now(), bot_id=bot.id,
+                  reason=reason, source="chat", model=bot.model,
+                  effort=bot.effort or default_effort(bot.default_provider))
+        with self.chat_lock, closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                original = self._editable(db, key, message_id)
+                pending = [row["id"] for row in db.execute(
+                    "SELECT id FROM jobs WHERE bot_id=? AND status IN ('queued','running') ORDER BY created_at, id",
+                    (key,),
+                )]
+                if pending:
+                    raise EditError(409, "a reply is queued or running for this bot", pending)
+                self._seed(db, key, message_id, text)
+                stamp = now().isoformat()
+                # an edited assignment reply re-runs as a turn of the same assignment
+                # (a closed one too: the re-run reopens it, see _rewind_assignments)
+                linked = db.execute(
+                    "SELECT a.* FROM jobs j JOIN assignments a ON a.id=j.assignment_id WHERE j.id=?",
+                    (original["job_id"],)).fetchone() if original["source"] == "assignment" else None
+                if original["source"] == "assignment" and linked is None:
+                    raise EditError(409, "the assignment of this reply is gone")
+                turn = None
+                if linked is not None:
+                    turn = linked["next_turn"] + 1
+                    db.execute("UPDATE assignments SET next_turn=? WHERE id=?", (turn, linked["id"]))
+                    job = job.model_copy(update={"source": "assignment", "assignment_id": UUID(linked["id"]),
+                                                 "assignment_turn": turn})
+                db.execute(
+                    "INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,"
+                    "assignment_id,assignment_turn,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (str(job.id), text, job.status.value, job.provider, job.created_at.isoformat(), key,
+                     reason, job.source, bot.model, job.effort, linked["id"] if linked else None, turn,
+                     1 if linked else 0),
+                )
+                cursor = db.execute(
+                    "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments,edit_of)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (key, "user", None, original["source"], text, str(job.id), stamp,
+                     json.dumps(attachment_ids), message_id),
+                )
+                new_id = cursor.lastrowid
+                # WORKING.md before the first turn being archived that changed it
+                restore = db.execute(
+                    "SELECT before FROM working_snapshots WHERE bot_id=? AND job_id IN"
+                    " (SELECT job_id FROM messages WHERE bot_id=? AND id>=? AND id<? AND archived_at IS NULL"
+                    " AND job_id IS NOT NULL) ORDER BY id LIMIT 1",
+                    (key, key, message_id, new_id),
+                ).fetchone()
+                self._rewind_assignments(db, key, message_id, new_id, linked["id"] if linked else None, stamp)
+                db.execute(
+                    "UPDATE messages SET archived_at=?, archived_by=? WHERE bot_id=? AND id>=? AND id<?"
+                    " AND archived_at IS NULL",
+                    (stamp, new_id, key, message_id, new_id),
+                )
+                db.execute(
+                    "UPDATE questions SET status='skipped', answer=?, answered_at=? WHERE bot_id=?"
+                    " AND status='open' AND message_id IN (SELECT id FROM messages WHERE bot_id=?"
+                    " AND archived_by=?)",
+                    (json.dumps({"skip": True, "steps": []}), stamp, key, key, new_id),
+                )
+                # an older pending restore (not yet reconciled) stays unless this edit reaches further back
+                db.execute(
+                    "UPDATE bots SET session_reset=?, rewind_seed=?, working_restore=COALESCE(?, working_restore)"
+                    " WHERE id=?",
+                    (new_id, new_id, restore["before"] if restore else None, key),
+                )
+                row = db.execute("SELECT * FROM messages WHERE id=?", (new_id,)).fetchone()
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return _model(Message, row, ("created_at", "archived_at")), job
+
+    @staticmethod
+    def _rewind_assignments(db: sqlite3.Connection, bot_id: str, first: int, new_id: int, rerun: str | None,
+                            stamp: str) -> None:
+        """Reconcile assignments whose turns an edit archives. Their checkpoints have no snapshots,
+        so each one is marked "rewound" (paused, with a note; the re-run's own assignment stays
+        active), including one the archived turns completed or that was closed since: it reopens,
+        and wake-ups the archived turns scheduled are cancelled. No turn of this bot is
+        queued here (edit_message refuses while one is), so no continuation survives the edit."""
+        jobs = [r["job_id"] for r in db.execute(
+            "SELECT job_id FROM messages WHERE bot_id=? AND id>=? AND id<? AND archived_at IS NULL "
+            "AND job_id IS NOT NULL", (bot_id, first, new_id))]
+        if not jobs:
+            return
+        marks = ",".join("?" * len(jobs))
+        db.execute(f"UPDATE wakeups SET status='cancelled' WHERE status='pending' AND created_by_job IN ({marks})", jobs)
+        touched = {r["assignment_id"] for r in db.execute(
+            f"SELECT DISTINCT assignment_id FROM jobs WHERE id IN ({marks}) AND assignment_id IS NOT NULL", jobs)}
+        for assignment_id in sorted(touched | ({rerun} if rerun else set())):
+            row = db.execute("SELECT * FROM assignments WHERE id=?", (assignment_id,)).fetchone()
+            if row is None:
+                continue
+            if assignment_id == rerun:
+                status, note = "active", "rewound: re-running the edited reply"
+            else:
+                status, note = "open", "rewound by an edit; its checkpoint may describe removed turns"
+            db.execute("UPDATE assignments SET status=?, status_note=?, updated_at=?, closed_at=NULL, stalled_at=NULL, "
+                       "dismissed_at=NULL, missing_status=0, verifying=0, reported_status=NULL, reported_note=NULL, "
+                       "reported_job=NULL WHERE id=?", (status, note, stamp, assignment_id))
+            db.execute("INSERT INTO assignment_events (assignment_id,kind,note,job_id,created_at) VALUES (?,?,?,?,?)",
+                       (assignment_id, "rewound", note, None, stamp))
+
+    def pending_session_reset(self, bot_id: UUID | str) -> int | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT session_reset FROM bots WHERE id=?", (str(bot_id),)).fetchone()
+        return row["session_reset"] if row else None
+
+    def bots_with_session_reset(self) -> list[str]:
+        with closing(self._connect()) as db:
+            return [row["id"] for row in db.execute("SELECT id FROM bots WHERE session_reset IS NOT NULL")]
+
+    def pending_working_restore(self, bot_id: UUID | str) -> str | None:
+        """WORKING.md content to restore with the pending session reset, if it needs one."""
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT working_restore FROM bots WHERE id=?", (str(bot_id),)).fetchone()
+        return row["working_restore"] if row else None
+
+    def complete_session_reset(self, bot_id: UUID | str, generation: int) -> None:
+        """Clear the reset marker, unless a newer edit has replaced it meanwhile."""
+        with closing(self._connect()) as db:
+            db.execute("UPDATE bots SET session_reset=NULL, working_restore=NULL WHERE id=? AND session_reset=?",
+                       (str(bot_id), generation))
+
+    def snapshot_working(self, bot_id: UUID | str, job_id: UUID | str, before: str) -> bool:
+        """Record WORKING.md as it was before *job_id* changed it. Returns False (nothing
+        recorded) if that turn has been archived by an edit; the caller then must not save
+        the turn's WORKING.md. Callers hold chat_lock so an edit cannot commit in between."""
+        key, job_key = str(bot_id), str(job_id)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                archived = db.execute(
+                    "SELECT 1 FROM messages WHERE bot_id=? AND job_id=? AND role='user'"
+                    " AND archived_at IS NOT NULL LIMIT 1",
+                    (key, job_key),
+                ).fetchone()
+                if archived or not db.execute("SELECT 1 FROM bots WHERE id=?", (key,)).fetchone():
+                    db.rollback()
+                    return False
+                db.execute(
+                    "INSERT INTO working_snapshots (bot_id,job_id,before,created_at) VALUES (?,?,?,?)",
+                    (key, job_key, before, now().isoformat()),
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return True
+
+    def pending_rewind_seed(self, bot_id: UUID | str) -> int | None:
+        """The edit whose seed the bot's next provider turn must still carry, if any."""
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT rewind_seed FROM bots WHERE id=?", (str(bot_id),)).fetchone()
+        return row["rewind_seed"] if row else None
+
+    def complete_rewind_seed(self, bot_id: UUID | str, generation: int) -> None:
+        """Clear the seed obligation, unless a newer edit has replaced it meanwhile."""
+        with closing(self._connect()) as db:
+            db.execute("UPDATE bots SET rewind_seed=NULL WHERE id=? AND rewind_seed=?", (str(bot_id), generation))
+
+    def say(self, bot_id: UUID | str, job_id: UUID | str, text: str) -> Message:
+        """Post a progress note atomically with the running and rate-limit checks."""
+        if not isinstance(text, str) or not 1 <= len(text.strip()) <= SAY_MAX_CHARS:
+            raise EditError(400, f"text must be 1..{SAY_MAX_CHARS} characters after stripping")
+        text = text.strip()
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                job = db.execute("SELECT * FROM jobs WHERE id=? AND bot_id=?", (str(job_id), str(bot_id))).fetchone()
+                archived = db.execute("SELECT 1 FROM messages WHERE bot_id=? AND job_id=? AND role='user' AND archived_at IS NOT NULL", (str(bot_id), str(job_id))).fetchone()
+                if not job or job["status"] != "running" or archived:
+                    raise EditError(409, "job is not running or its turn is archived")
+                count, last = db.execute("SELECT COUNT(*), MAX(created_at) FROM messages WHERE job_id=? AND kind='say'", (str(job_id),)).fetchone()
+                if count >= SAY_MAX_PER_JOB:
+                    raise EditError(429, "progress note limit reached; try again in a new turn")
+                stamp = now()
+                if last:
+                    next_at = datetime.fromisoformat(last) + timedelta(seconds=SAY_INTERVAL_SECONDS)
+                    if stamp < next_at:
+                        raise EditError(429, f"progress notes are rate limited; try again at {next_at.isoformat()}")
+                cursor = db.execute("INSERT INTO messages (bot_id,role,source,text,job_id,created_at,kind) VALUES (?,?,?,?,?,?,'say')", (str(bot_id), 'assistant', job['source'], text, str(job_id), stamp.isoformat()))
+                row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return _model(Message, row, ("created_at",))
+
+    def publish_outcome(
+        self, bot_id: UUID | str, job_id: UUID | str, role: str, text: str, *,
+        sender: str | None = None, source: str = "chat", attachments: list[str] | None = None,
+    ) -> Message | None:
+        """Add a job's result to *bot_id*'s chat unless the turn that asked for it has been
+        archived by an edit (checked and inserted in one transaction). Returns None if
+        dropped; the job record keeps the reply either way."""
+        ids = attachments or []
+        if len(ids) > 6 or any(not attachment_files.ID_RE.fullmatch(name) for name in ids):
+            raise ValueError("invalid attachment ids")
+        key, job_key = str(bot_id), str(job_id)
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                archived = db.execute(
+                    "SELECT 1 FROM messages WHERE bot_id=? AND job_id=? AND role='user'"
+                    " AND archived_at IS NOT NULL LIMIT 1",
+                    (key, job_key),
+                ).fetchone()
+                if archived or not db.execute("SELECT 1 FROM bots WHERE id=?", (key,)).fetchone():
+                    db.rollback()
+                    return None
+                cursor = db.execute(
+                    "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (key, role, sender, source, text, job_key, now().isoformat(), json.dumps(ids)),
+                )
+                row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return _model(Message, row, ("created_at", "archived_at"))
+
+    def get_meta(self, key: str) -> str | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with closing(self._connect()) as db:
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    @staticmethod
+    def _routine(row: sqlite3.Row | None) -> Routine | None:
+        if row is not None:
+            row = dict(row) | {"enabled": bool(row["enabled"])}
+        return _model(Routine, row, ("created_at", "last_run_at", "scan_cursor", "pending_run"))
+
+    def create_routine(
+        self,
+        bot_id: UUID | str,
+        cron: str,
+        prompt: str,
+        enabled: bool,
+        name: str | None = None,
+        catch_up: str = "once",
+        created_by: str = "user",
+        max_bot_routines: int | None = None,
+    ) -> Routine:
+        """*max_bot_routines* (bot-made routines) is checked in the insert's transaction."""
+        routine_id = str(uuid4())
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if max_bot_routines is not None and db.execute(
+                    "SELECT COUNT(*) FROM routines WHERE bot_id=? AND created_by='bot'", (str(bot_id),)
+                ).fetchone()[0] >= max_bot_routines:
+                    raise OverflowError(f"limit of {max_bot_routines} bot-made routines reached")
+                db.execute(
+                    "INSERT INTO routines (id,bot_id,cron,prompt,enabled,created_at,name,catch_up,scan_cursor,created_by)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (routine_id, str(bot_id), cron, prompt, int(enabled), now().isoformat(), name, catch_up,
+                     _minute(now()).isoformat(), created_by),
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return self.get_routine(routine_id)
+
+    def get_routine(self, routine_id: UUID | str) -> Routine | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT * FROM routines WHERE id=?", (str(routine_id),)).fetchone()
+        return self._routine(row)
+
+    def list_routines(self, bot_id: UUID | str | None = None) -> list[Routine]:
+        query, args = "SELECT * FROM routines", ()
+        if bot_id is not None:
+            query, args = query + " WHERE bot_id=?", (str(bot_id),)
+        with closing(self._connect()) as db:
+            rows = db.execute(query + " ORDER BY created_at, id", args).fetchall()
+        return [self._routine(row) for row in rows]
+
+    def update_routine(self, routine_id: UUID | str, **fields: object) -> Routine | None:
+        if not fields:
+            return self.get_routine(routine_id)
+        if not fields.keys() <= {"cron", "prompt", "enabled", "last_run_at", "name", "bot_id", "catch_up", "scan_cursor"}:
+            raise ValueError("unknown routine field")
+        if ("cron" in fields or fields.get("enabled")) and "scan_cursor" not in fields:
+            # a new schedule or a re-enabled routine starts now; time spent disabled is not "missed"
+            fields["scan_cursor"] = _minute(now())
+        if "bot_id" in fields:
+            bot_id = fields["bot_id"]
+            if bot_id is None or not self.get_bot(bot_id):
+                raise ValueError("routine bot not found")
+            fields["bot_id"] = str(bot_id if isinstance(bot_id, UUID) else UUID(str(bot_id)))
+        values = [
+            int(v)
+            if k == "enabled"
+            else v.isoformat()
+            if isinstance(v, datetime)
+            else v
+            for k, v in fields.items()
+        ]
+        with closing(self._connect()) as db:
+            db.execute(
+                f"UPDATE routines SET {','.join(f'{k}=?' for k in fields)}, version=version+1 WHERE id=?",
+                (*values, str(routine_id)),
+            )
+        return self.get_routine(routine_id)
+
+    @staticmethod
+    def _routine_unchanged(db: sqlite3.Connection, scanned: Routine) -> bool:
+        """The routine still exists, is enabled and was neither edited nor scanned since *scanned*."""
+        row = db.execute("SELECT enabled, version, scan_cursor FROM routines WHERE id=?", (str(scanned.id),)).fetchone()
+        if not row or not row["enabled"] or row["version"] != scanned.version:
+            return False
+        cursor = datetime.fromisoformat(row["scan_cursor"]) if row["scan_cursor"] else None
+        return cursor == scanned.scan_cursor
+
+    def advance_routine(self, routine: Routine, cursor: datetime, bot_id: UUID | str | None = None,
+                        notice: str | None = None, *, pending: datetime | None = None) -> bool:
+        """Move a routine's scan cursor without starting a turn (optionally with a chat notice),
+        and set (or clear) its owed catch-up run. Nothing changes, and False is returned, if the
+        routine was edited, disabled, deleted or scanned since *routine* was read."""
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if not self._routine_unchanged(db, routine):
+                    db.rollback()
+                    return False
+                db.execute("UPDATE routines SET scan_cursor=?, pending_run=? WHERE id=?",
+                           (cursor.isoformat(), pending.isoformat() if pending else None, str(routine.id)))
+                if notice and bot_id and db.execute("SELECT 1 FROM bots WHERE id=?", (str(bot_id),)).fetchone():
+                    db.execute("INSERT INTO messages (bot_id,role,source,text,created_at) VALUES (?,?,?,?,?)",
+                               (str(bot_id), "system", "routine", notice, now().isoformat()))
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return True
+
+    # --- 0.11.0 usage, budgets and timelines ---
+
+    def allow_budget(self, bot_id: UUID | str, turns: int, minutes: int, tokens: int) -> int:
+        """"Allow +N today": raise today's unattended budget and release the bot's held jobs
+        (returns how many). The extra lapses at 00:00 New York time."""
+        stamp = now()
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT budget_extra_json FROM bots WHERE id=?", (str(bot_id),)).fetchone()
+                if row is None:
+                    db.rollback()
+                    raise LookupError("bot not found")
+                extra = budgets.extra_today(row["budget_extra_json"], stamp)
+                extra = {"day": budgets.day_key(stamp), "turns": extra["turns"] + turns,
+                         "minutes": extra["minutes"] + minutes, "tokens": extra["tokens"] + tokens}
+                db.execute("UPDATE bots SET budget_extra_json=? WHERE id=?", (json.dumps(extra), str(bot_id)))
+                released = db.execute("UPDATE jobs SET not_before=NULL, failure_kind=NULL, error=NULL WHERE bot_id=? "
+                                      "AND status='queued' AND failure_kind=?", (str(bot_id), failures.BUDGET)).rowcount
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return released
+
+    def usage_by_day(self, days: int = 7) -> list[dict]:
+        """Per bot and New York day: all runs and unattended runs (turns, minutes, tokens, cost)."""
+        stamp = now()
+        out = []
+        with closing(self._connect()) as db:
+            bots = db.execute("SELECT id, name, daily_budget_json, budget_extra_json, scheduled_runs FROM bots").fetchall()
+            for back in range(days):
+                since = budgets.day_start(stamp, back)
+                until = budgets.next_day(since) if back else stamp
+                items = budgets.runs(db, since, until)
+                for bot in bots:
+                    mine = [item for item in items if item["bot_id"] == bot["id"]]
+                    if not mine and back:
+                        continue
+                    unattended = [item for item in mine if item["source"] in budgets.UNATTENDED]
+                    # what the daily budget counts: strict-profile runs, without gate refusals
+                    held = budgets.budget_sources(bot["scheduled_runs"])
+                    budgeted = [item for item in unattended if item["source"] in held and item["kind"] != "gate"]
+                    out.append({"bot_id": bot["id"], "bot_name": bot["name"], "day": budgets.day_key(since),
+                                "all": budgets.totals(mine), "unattended": budgets.totals(unattended),
+                                "budgeted": budgets.totals(budgeted),
+                                **({"budget": budgets.budget_of(bot["daily_budget_json"]),
+                                    "extra": budgets.extra_today(bot["budget_extra_json"], stamp)} if not back else {})})
+        return out
+
+    def routine_runs(self, routine_id: UUID | str, limit: int = 50) -> list[dict]:
+        with closing(self._connect()) as db:
+            return [_run_row(db, row) for row in db.execute(
+                "SELECT * FROM jobs WHERE routine_id=? ORDER BY created_at DESC LIMIT ?", (str(routine_id), limit))]
+
+    def assignment_timeline(self, assignment_id: UUID | str) -> list[dict]:
+        """Turns, assignment events and approvals of one assignment, oldest first."""
+        key = str(assignment_id)
+        with closing(self._connect()) as db:
+            items = [{"type": "job", "at": row["created_at"], **_run_row(db, row)} for row in db.execute(
+                "SELECT * FROM jobs WHERE assignment_id=?", (key,))]
+            items += [{"type": "event", "at": row["created_at"], "kind": row["kind"], "note": row["note"],
+                       "job_id": row["job_id"]} for row in db.execute(
+                "SELECT * FROM assignment_events WHERE assignment_id=?", (key,))]
+            items += [{"type": "approval", "at": row["created_at"], "approval_id": row["id"], "status": row["status"],
+                       "summary": row["summary"], "job_id": row["job_id"]} for row in db.execute(
+                "SELECT * FROM approvals WHERE assignment_id=? OR job_id IN (SELECT id FROM jobs WHERE assignment_id=?)",
+                (key, key))]
+        return sorted(items, key=lambda item: item["at"] or "")
+
+    def delete_routine(self, routine_id: UUID | str) -> bool:
+        with closing(self._connect()) as db:
+            return db.execute("DELETE FROM routines WHERE id=?", (str(routine_id),)).rowcount > 0

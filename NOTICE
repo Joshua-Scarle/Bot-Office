@@ -1,0 +1,30 @@
+Bot-Office is distributed under the MIT License; see LICENSE.
+
+GUI layout ideas (bot sidebar with status, chat-centered layout, live desktop take-over) were inspired by CopilotKit OpenBot (MIT, https://github.com/CopilotKit/OpenBot); no OpenBot code was copied.
+
+noVNC 1.7.0 is bundled under the Mozilla Public License 2.0; see src/botoffice/static/vendor/novnc/LICENSE.txt and the included third-party notices.
+
+Optional voice components (not bundled; downloaded by scripts/install_voice.sh into a
+separate virtual environment and data directory, and run as separate processes)
+
+Models
+- Kokoro-82M v1.0 text-to-speech model and voicepacks by hexgrad: Apache-2.0
+  (https://huggingface.co/hexgrad/Kokoro-82M). The default voice is bm_george; the
+  operator accepted its Apache-2.0 licence and training-data provenance per upstream
+  statement: "Kokoro was trained exclusively on permissive/non-copyrighted audio data
+  and IPA phoneme labels". Bot-Office has not independently audited the training data. ONNX export from the kokoro-onnx project (MIT), release model-files-v1.1.
+- Whisper English models by OpenAI: MIT. CTranslate2 conversions by SYSTRAN
+  (Systran/faster-whisper-tiny.en, -base.en, -small.en): MIT.
+
+Engine packages (exact versions and hashes in deploy/voice-requirements.txt)
+- faster-whisper, CTranslate2, onnxruntime, kokoro-onnx, espeakng-loader, PyYAML, anyio,
+  attrs, filelock, h11, dlinfo, truststore: MIT
+- numpy: BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0
+- PyAV (av): BSD-3-Clause; its wheels include FFmpeg libraries under the LGPL
+- tokenizers, huggingface_hub, hf-xet, flatbuffers: Apache-2.0
+- click, httpx2, httpcore2, idna, fsspec, joblib, cloudpickle, protobuf: BSD-3-Clause
+- packaging: Apache-2.0 OR BSD-2-Clause; tqdm: MPL-2.0 AND MIT; typing_extensions: PSF-2.0
+- phonemizer: GPL-3.0-or-later, and espeak-ng (shipped inside espeakng-loader): GPL-3.0.
+  Bot-Office does not include, link or import these; the voice worker that uses them is a
+  separate program in its own environment. Redistributing that environment means
+  meeting the GPL's terms.
