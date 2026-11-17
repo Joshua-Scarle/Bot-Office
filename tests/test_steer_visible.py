@@ -1,5 +1,5 @@
 """0.11.6: a message to a working bot steers it wherever the engine can take it, and when it cannot
-the fallback is stated at once (``delivery`` / ``delivery_note``, ``steer_note``), never a silent queue."""
+(since 0.11.7 no built-in engine is in that case, see test_steer_all_engines) the fallback is stated at once (``delivery`` / ``delivery_note``, ``steer_note``), never a silent queue."""
 import dataclasses
 
 from fastapi.testclient import TestClient
@@ -72,30 +72,6 @@ def test_message_to_a_bot_answering_another_bot_says_it_was_queued(settings):
         assert posted["job"]["id"] != inbox["job"]["id"]
 
 
-def test_opencode_cannot_take_a_message_mid_run_and_says_so_at_once(settings, tmp_path):
-    settings = dataclasses.replace(settings, job_timeout=8)
-    exe = fake_script(tmp_path, "fake_opencode_slow", '''
-import json, sys, time
-from pathlib import Path
-Path("ready").touch()
-time.sleep(1.5)
-print(json.dumps({"type":"text", "sessionID":"ses_abc12345", "part":{"text":"finished"}}), flush=True)
-''')
-    app = create_app(settings, {"opencode": OpenCodeAdapter(executable=exe)})
-    with TestClient(app) as client:
-        bot = client.post("/v1/bots", headers=H, json={"name": "OC", "default_provider": "opencode"}).json()
-        assert bot["steering"] == "queue"
-        url = f"/v1/bots/{bot['id']}/messages"
-        job = client.post(url, headers=H, json={"text": "start"}).json()["job"]
-        ws = settings.data_dir / "workspaces" / job["id"]
-        wait_for(lambda: (ws / "ready").exists())
-        posted = client.post(url, headers=H, json={"text": "steer"}).json()
-        # decided in the response itself, not some milliseconds later by the stream loop
-        assert posted["delivery"] == "queue" and posted["message"]["steer_status"] == "queued"
-        assert "OpenCode" in posted["delivery_note"] and "OpenCode" in posted["message"]["steer_note"]
-        assert posted["job"]["id"] != job["id"] and posted["job"]["status"] == "queued"
-
-
 def test_bots_report_how_they_can_be_steered(settings):
     apps = {"codex": CodexAdapter(executable="codex"), "claude": ClaudeAdapter(executable="claude"),
             "opencode": OpenCodeAdapter(executable="opencode")}
@@ -107,9 +83,9 @@ def test_bots_report_how_they_can_be_steered(settings):
             if engine == "claude":
                 body["reason"] = "tests"
             got[engine] = client.post("/v1/bots", headers=H, json=body).json()["steering"]
-        assert got == {"codex": "interrupt", "claude": "live", "opencode": "queue"}
+        assert got == {"codex": "interrupt", "claude": "live", "opencode": "restart"}
         restricted = client.post("/v1/bots", headers=H, json={"name": "r", "cli_access": "restricted"}).json()
-        assert restricted["steering"] == "queue"
+        assert restricted["steering"] == "restart"  # 0.11.7: restricted access is steered by a restart, not queued
 
 
 def test_claude_live_steer_response_is_a_steer(settings, tmp_path):

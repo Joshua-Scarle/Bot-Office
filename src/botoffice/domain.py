@@ -176,10 +176,12 @@ class Bot(BaseModel):
     unread_since: datetime | None = None
     marked_unread: bool = False
     read_revision: int = 0
-    # 0.11.6: how a message sent while this bot works reaches it: "live" (written into the running CLI),
-    # "interrupt" (the CLI is interrupted at a step boundary and resumed with it), "queue" (this engine
-    # or access mode cannot take input mid-run: it becomes the next turn). Filled by the bot endpoints.
-    steering: Literal["live", "interrupt", "queue"] | None = None
+    # How a message sent while this bot works reaches it: "live" (written into the running CLI),
+    # "interrupt" (the CLI is interrupted promptly and its session resumed with it), "restart" (0.11.7:
+    # interrupted promptly and run again as the same turn with a note of what it had done, for engines or
+    # access modes that cannot resume), "queue" (an engine that cannot take input mid-run: it becomes the
+    # next turn). Filled by the bot endpoints.
+    steering: Literal["live", "interrupt", "restart", "queue"] | None = None
 
     @computed_field
     @property

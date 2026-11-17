@@ -110,7 +110,9 @@ def test_composer_and_delivery_marks_say_how_a_message_reaches_the_bot():
         '$("queue-next").onchange', '//') + _slice("function steerMark(", "async function loadMessages()") + r'''
 const bot = (steering, activity = 'running') => ({ name: 'Ada', steering, activity });
 assert(/right away/.test(steerHint(bot('live'), false)));
-assert(/end of its current step/.test(steerHint(bot('interrupt'), false)));
+assert(/same conversation and carries on/.test(steerHint(bot('interrupt'), false)));
+assert(/same task starts again with your message/.test(steerHint(bot('restart'), false)));
+assert(!/15 s/.test(steerHint(bot('interrupt'), false)));
 assert(/cannot take a message while it works/.test(steerHint(bot('queue'), true)));
 assert(/joins the waiting turn/.test(steerHint(bot('queue', 'queued'), false)));
 assert(/waits until/.test(steerHint(bot('live'), true)));
@@ -120,7 +122,8 @@ assert(/after the current turn/.test(composerPlaceholder(bot('queue'), true, tru
 const done = steerMark({ steer_status: 'delivered', steer_delivered_at: '2026-11-17T10:00:00Z' }, bot('live'));
 assert.strictEqual(done.cls, 'delivered'); assert(/^✓ Delivered to Ada/.test(done.text));
 assert.strictEqual(steerMark({ steer_status: 'queued' }, bot('queue')).cls, 'queued');
-assert.strictEqual(steerMark({ steer_status: 'pending' }, bot('interrupt')).text, 'Delivering at the next step');
+assert.strictEqual(steerMark({ steer_status: 'pending' }, bot('interrupt')).text, 'Delivering in a moment');
+assert.strictEqual(steerMark({ steer_status: 'pending' }, bot('restart')).text, 'Delivering in a moment');
 assert.strictEqual(steerMark({ steer_status: 'pending' }, bot('live')).text, 'Delivering');
 '''
     _run(script)
