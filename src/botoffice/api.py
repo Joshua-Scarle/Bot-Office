@@ -11,6 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -390,27 +391,51 @@ def create_app(
             if job:
                 scheduler.cancel(job)
 
-    def _post_owner_message(bot: Bot, text: str, *, reason: str | None = None,
-                            attachments: list[str] | None = None, queue: bool = False) -> tuple[Message, Job]:
+    def _steer_blocked(bot: Bot):
+        """For store.post_steer_explained: why this engine cannot take a message while *job* runs."""
+        def note(job: Job) -> str | None:
+            adapter = providers.get(job.provider)
+            check = getattr(adapter, "steer_unavailable_note", None)
+            return check(job.model_copy(update={"cli_access": bot.cli_access})) if check else None
+        return note
+
+    def _post_owner_message_ex(bot: Bot, text: str, *, reason: str | None = None,
+                               attachments: list[str] | None = None,
+                               queue: bool = False) -> tuple[Message, Job, str, str | None]:
         """An owner chat post: steered into the bot's running or queued turn (see JobStore.post_steer)
-        unless the caller asks for a separate queued turn (mode "queue"). Bot-to-bot inbox messages,
-        routines, wakeups and assignment steps are not owner posts and never come through here."""
+        unless the caller asks for a separate queued turn (mode "queue"). Returns (message, job, delivery,
+        note): delivery "steer" (attached to the working turn), "queue" (a new turn behind other work, the
+        note says why: the owner asked, the engine cannot take input mid-run, the bot is answering another
+        bot) or "start" (idle bot). Bot-to-bot inbox messages, routines, wakeups and assignment steps are
+        not owner posts and never come through here."""
+        note = None
         if not queue:
             _, steer_reason = scheduler.turns._validate(bot.default_provider, reason, bot)
-            result = store.post_steer(bot.id, text, attachments or [], steer_reason)
+            result, note = store.post_steer_explained(bot.id, text, attachments or [], steer_reason,
+                                                      unsteerable=_steer_blocked(bot))
             if result:
-                return result
-        return scheduler.turns.post_message(bot, text, reason=reason, attachments=attachments)
+                message, job = result
+                if message.steer_status == "queued":  # the engine cannot take it mid-run: said at once
+                    return message, job, "queue", message.steer_note
+                return message, job, "steer", None
+        message, job = scheduler.turns.post_message(bot, text, reason=reason, attachments=attachments)
+        others = [item for item in store.pending_jobs(bot.id) if str(item.id) != str(job.id)]
+        if not others:
+            return message, job, "start", None
+        if queue:
+            note = "Queued as the next turn, as you chose."
+        return message, job, "queue", note or "Queued behind the bot's other turns; it runs when they finish."
+
+    def _post_owner_message(bot: Bot, text: str, *, reason: str | None = None,
+                            attachments: list[str] | None = None, queue: bool = False) -> tuple[Message, Job]:
+        message, job, _, _ = _post_owner_message_ex(bot, text, reason=reason, attachments=attachments, queue=queue)
+        return message, job
 
     def _bot(bot_id: UUID | str) -> Bot:
         bot = store.get_bot(bot_id)
         if not bot:
             raise HTTPException(status_code=404, detail="bot not found")
         return bot
-
-    def _check_claude_reason(provider: str, reason: str | None) -> None:
-        if provider == "claude" and not (reason or "").strip():
-            raise HTTPException(status_code=400, detail="provider claude requires a non-empty reason")
 
     @app.get("/", response_class=HTMLResponse)
     async def chat_page() -> HTMLResponse:
@@ -656,7 +681,6 @@ def create_app(
     @app.post("/v1/bots", response_model=Bot, status_code=201, dependencies=[Depends(auth)])
     async def create_bot(body: BotCreate) -> Bot:
         _check_model(body.default_provider, body.model)
-        _check_claude_reason(body.default_provider, body.reason)
         _check_effort(body.default_provider, body.effort)
         try:
             bot = store.create_bot(
@@ -673,7 +697,15 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         memory.write_bot(bot.id, "")
-        return bot
+        return _with_steering([bot])[0]
+
+    def _with_steering(bots: list[Bot]) -> list[Bot]:
+        """Set each bot's ``steering``: how a message sent while it works reaches the CLI."""
+        for bot in bots:
+            check = getattr(providers.get(bot.default_provider), "steering", None)
+            if check:
+                bot.steering = check(SimpleNamespace(bot_id=bot.id, cli_access=bot.cli_access))
+        return bots
 
     def _with_status(bots: list[Bot]) -> list[Bot]:
         """Set each bot's ``status`` (offline/working/queued/blocked/waiting/error, else idle)."""
@@ -686,6 +718,7 @@ def create_app(
             else:
                 latest = {job.bot_id: job for job in store.list() if job.bot_id}
         waiting = assignments.bot_states()
+        _with_steering(bots)
         for bot in bots:
             adapter = providers.get(bot.default_provider)
             if not adapter or not adapter.enabled or bot.default_provider not in settings.enabled_providers:
@@ -769,7 +802,6 @@ def create_app(
             # keep the level if the new engine accepts it, else that engine's default (or none)
             keep = bot.effort if bot.effort and valid_effort(engine, bot.effort) else None
             fields["effort"] = keep or default_effort(engine)
-        _check_claude_reason(engine, fields.get("reason", bot.reason))
         try:
             updated = store.update_bot(bot_id, **fields)
         except ValueError as exc:
@@ -1314,11 +1346,11 @@ def create_app(
                             raise ValueError("invalid image")
                     except (ValueError, OSError) as exc:
                         raise HTTPException(status_code=400, detail="attachment not found") from exc
-                message, job = _post_owner_message(bot, body.text, reason=body.reason, attachments=ids,
-                                                   queue=body.mode == "queue")
+                message, job, delivery, note = _post_owner_message_ex(
+                    bot, body.text, reason=body.reason, attachments=ids, queue=body.mode == "queue")
         except TurnError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return MessagePosted(message=message, job=job)
+        return MessagePosted(message=message, job=job, delivery=delivery, delivery_note=note)
 
     async def _check_attachments(bot_id: UUID, ids: list[str]) -> None:
         for attachment_id in ids:
@@ -1666,7 +1698,6 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"the job already runs on {target}")
         if target not in ENGINES or target not in {item["provider"] for item in await _switch_options(job.provider, fresh=True)}:
             raise HTTPException(status_code=400, detail=f"{target} is not enabled and signed in")
-        _check_claude_reason(target, body.reason)
         reason = (body.reason or "").strip() or None
         try:
             switched = await asyncio.to_thread(store.switch_provider, job.id, target, default_model(target),
