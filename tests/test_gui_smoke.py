@@ -46,7 +46,7 @@ def test_opencode_effort_can_be_unset(settings):
         assert response.status_code == 200 and response.json()["effort"] is None
         page = client.get("/").text
         assert 'default (unset)' in page
-        assert '$("f-custom").value = ""; updateReasonRow()' in page
+        assert '$("f-custom").value = ""; fillEffortSelect()' in page
 
 
 def test_image_composer_smoke():
@@ -76,7 +76,7 @@ def test_sending_preserves_changed_draft_and_new_images():
     handler = page[start:end]
     script = r'''
 const assert = require('assert');
-const elements = { composer: {}, text: {value: 'first'}, 'send-reason': {hidden: true}, 'queue-next': {checked: false}, messages: {} };
+const elements = { composer: {}, text: {value: 'first'}, 'queue-next': {checked: false}, messages: {} };
 const $ = (id) => elements[id];
 let bot = {id: 'one'}, state = {selected: 'one'}, draftRevision = 0, sendingImages = false;
 const first = {id: 'a', bot: 'one'}, pendingImages = [first];

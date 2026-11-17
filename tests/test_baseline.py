@@ -31,8 +31,7 @@ def _setup(settings, engine="codex"):
     store = JobStore(settings.data_dir / "agentdesk.sqlite3")
     adapter = RecordingAdapter()
     scheduler = Scheduler(store, settings, {engine: adapter})
-    # the Claude engine still needs a reason on this base (removed separately in 0.11.8)
-    bot = store.create_bot("Ada", "", engine, "test" if engine == "claude" else None)
+    bot = store.create_bot("Ada", "", engine, None)  # 0.11.8: Claude needs no reason
     return store, scheduler, adapter, bot
 
 
