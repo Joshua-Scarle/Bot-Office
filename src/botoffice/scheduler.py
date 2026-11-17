@@ -961,11 +961,13 @@ class Scheduler:
         for message_id in self.store.queue_steers(key):
             self._log_steer_turn(message_id)
             active = sink or self._sinks.get(key)
+            queued = self.store.get_message(message_id)
+            note = queued.steer_note if queued else None
             if active:
-                active.emit("steer", message_id=message_id, status="queued")
+                active.emit("steer", message_id=message_id, status="queued", note=note)
             else:
                 self.store.add_event(key, self.store.last_event_seq(key) + 1, "steer",
-                                     {"message_id": message_id, "status": "queued"})
+                                     {"message_id": message_id, "status": "queued", "note": note})
 
     @contextlib.contextmanager
     def defer_steers_for_edit(self, jobs: list[Job]):

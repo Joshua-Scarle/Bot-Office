@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.5. What changed is recorded below: [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.6. What changed is recorded below: [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -116,7 +116,7 @@ Other routes include `POST/GET /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/{i
 
 ## Providers
 
-OpenCode uses the official `opencode` executable on the service PATH. On the server, run `opencode auth login` or configure a provider API key in the service environment. Choose a `provider/model` ID; effort is passed as an OpenCode variant and availability depends on the model. OpenCode 1.19.5 `run -s` resume hangs (and a session stays bound to its first directory), so Bot-Office starts every OpenCode turn fresh with the compact handoff context (WORKING.md and the last 12 messages); steering messages are queued as the next turn. A run that prints nothing at all (stdout or stderr) in its first 60 s is killed and fails as a provider error (retried by the normal rules); after its first output the guard is off and only the turn timeout applies, so a long silent tool call is never killed; a job with an open `desk ask` question is not killed either. Provider credentials remain under the CLI’s control.
+OpenCode uses the official `opencode` executable on the service PATH. On the server, run `opencode auth login` or configure a provider API key in the service environment. Choose a `provider/model` ID; effort is passed as an OpenCode variant and availability depends on the model. OpenCode 1.19.5 `run -s` resume hangs (and a session stays bound to its first directory), so Bot-Office starts every OpenCode turn fresh with the compact handoff context (WORKING.md and the last 12 messages); a message sent while an OpenCode turn runs is queued as the next turn, and the chat says so at once ("OpenCode cannot take a message while it works, so yours is queued as the next turn."). A run that prints nothing at all (stdout or stderr) in its first 60 s is killed and fails as a provider error (retried by the normal rules); after its first output the guard is off and only the turn timeout applies, so a long silent tool call is never killed; a job with an open `desk ask` question is not killed either. Provider credentials remain under the CLI’s control.
 
 Enabled by default: `codex`, `claude`, `cursor`, `antigravity`, `opencode`. `grok` stays disabled. `BOT_OFFICE_PROVIDERS` (or `AGENTDESK_PROVIDERS`) restricts the set.
 
@@ -138,6 +138,18 @@ Restricted-mode command lines:
 **Claude reason rule:** a job or chat turn may use `claude` only with a non-empty `reason` (request, or the bot's stored default reason); otherwise the API returns 400. The reason is stored on the job and one line (timestamp, job id, reason) is appended to `data/claude-use-log.tsv` (mode 0600). Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.11.6
+
+**Steering reaches assignment turns, and the fallback is stated.** A message sent to a bot that is working on an assignment (or wake-up) turn used to be refused by the steering path (`post_steer` skipped every running job with an `assignment_id`) and became a separate queued chat turn with no explanation, which is what "it queues instead of steering" looked like. It now attaches to the running assignment turn like any other, is not charged to the assignment's budget, and is converted to a plain chat turn only if it was never delivered. Bot-to-bot inbox turns are still never steered into (the message would reach the other bot); the chat says so.
+
+**Explicit delivery.** `POST /v1/bots/{id}/messages` returns `delivery` (`start`, `steer` or `queue`) and `delivery_note` (why it was queued, else null). A message to an engine that cannot take input mid-run (OpenCode, restricted-access Codex, Cursor and Antigravity) is queued in the request itself, with the reason, instead of showing as pending for a moment and being converted later. `messages.steer_note` stores the reason and the `steer` event carries it as `note`. `GET /v1/bots` reports `steering` per bot: `live` (Claude, written into the open stream), `interrupt` (Codex, Cursor and Antigravity stop at a step boundary, at most 15 seconds, and resume the session) or `queue`.
+
+**Chat page.** Jobs are no longer cards in the chat. The bot's turn shows one live bubble: animated dots, a short status line that follows the stream ("Thinking", "Running npm test", "Reading src/app.py", "Writing the reply", "Got your message, adjusting"), the elapsed time, "N more queued" when others wait, and Stop. The composer stays usable while the bot works and sends a steer by default; under it a line says how the message will reach the bot for that engine. A steering message is an ordinary user message with a mark: "Delivered to <bot>" with the time, "Delivering", or "Queued, runs next" plus the reason. Tool steps, logs and the list of queued and recent jobs moved to a **Details** drawer (the Activity button in the header, or Details on the live bubble). The animation stops under `prefers-reduced-motion`. No new assets; the CSP hashes are recomputed from the page.
+
+**Not verified here.** Real Claude, Codex, Cursor and Antigravity CLIs were not run: delivery and the interrupt and resume path are tested with fake CLIs only, and the page was checked with node against a stubbed DOM, not in a browser. Codex steering still waits for a step boundary or up to 15 seconds, so it is not instant.
+
+Roll back by deploying 0.11.5 (take a git tag and a copy of the database first, as for any deploy, and deploy when no job is running). The only data change is the nullable `messages.steer_note` column, added on start; 0.11.5 ignores it, so no data rollback is needed.
 
 ## What changed in 0.11.5 (deployed)
 
@@ -238,7 +250,7 @@ Deployed 14 November 2026. Bots can now work on a goal across many turns, wake t
 - **Hand back.** After you finish a step on a desktop, **Hand back** in the desktop viewer tells the bot that used it last to continue (resuming its open assignment if it had one).
 - **Images in assignment turns.** An assignment or wake-up turn shows images in chat the same way as a chat reply (0.9.2): `![description](path)` in the final reply or `desk attach <file>` / `bot-office-attach <file>`; the status line is removed before images are collected.
 - **Model switches in assignment turns.** An assignment, wake-up or routine turn after an engine or model change gets the same fresh handed-off session as a chat turn (0.9.3). A rewound turn's seed prompt also names a switch, and a pending rewind seed that has outgrown its limits falls back to the handoff (last 12 messages) instead of a plain fresh start.
-- **Steering and assignments.** Steering (0.9.1) attaches only to a running chat or API turn. A message sent while an assignment or wake-up turn runs is queued as an ordinary chat turn instead; it runs before the assignment's next continuation and is not charged to its budget. A steer converted into a queued turn belongs to no assignment, so an assignment reply never supersedes it.
+- **Steering and assignments.** Since 0.11.6 a message sent while an assignment or wake-up turn runs steers that turn like any other and is not charged to the assignment's budget. A message with `mode: "queue"`, or one the engine cannot take mid-run, is queued as an ordinary chat turn; it runs before the assignment's next continuation. A steer converted into a queued turn belongs to no assignment, so an assignment reply never supersedes it.
 
 **Cost.** The only model calls the new features make are the assignment turns and wake-ups, within the caps above. The watchdog, Needs-you and notifications are computed from the database.
 
@@ -349,7 +361,7 @@ Each bot has an `effort` next to its model; change it any time with `PATCH /v1/b
 Replies fill in live. Each CLI is run with its official streaming output (above) and Bot-Office reads only the documented events it needs: assistant text, thinking, tool calls and the final result; anything else is ignored. This applies to every job that creates a turn: chat, inbox, routine and API.
 
 - `GET /v1/jobs/{id}/events` (bearer auth): with `Accept: text/event-stream` it is **SSE** (`id`, `event`, `data` frames; a final `done` event ends it, `: keep-alive` comments every 15 s); without it, a JSON snapshot `{status, events, next, done, draft, reply_text}`. Resume with `?after=<seq>` or a `Last-Event-ID` header. Event kinds: `start`, `text`, `thinking`, `tool`, `error`, `final`, `done`. The token is never a query parameter; the page uses `fetch` with a `ReadableStream`, not `EventSource`.
-- `GET /v1/bots/{id}/messages?pending=true` adds one placeholder assistant message (`pending: true`, negative `id`, live draft in `text`, `job_id`) per queued or running job, so a page reload can replay `/events` from 0 and keep going. The default listing is unchanged.
+- `GET /v1/bots/{id}/messages?pending=true` adds one placeholder assistant message (`pending: true`, negative `id`, live draft in `text`, `job_id`) per queued or running job (`job_status` says which), so a page reload can replay `/events` from 0 and keep going. The page shows the running one as the live bubble and counts the others ("N more queued"; details in the drawer). The default listing is unchanged.
 - The page shows the growing reply in the bubble and puts thinking and tool calls in a one-line, collapsed disclosure. When the job finishes the bubble is replaced by the normal history entry.
 - The reply is still `reply.txt` when the model writes it, then the assembled stream text, then a short log tail.
 
@@ -387,7 +399,7 @@ All providers receive absolute paths and an instruction to view the files in the
 With the SSH tunnel open, browse to `http://127.0.0.1:8787/`. It is one dark-mode page with no external assets (inline CSS and JS, locked down with a hash-based Content-Security-Policy). The page and bundled noVNC files are public local assets; API operations require authentication.
 
 - Left sidebar: your bots (icon, name, current model, and status dot), plus **New bot**.
-- Center: the selected bot's chat history and composer (Enter sends, Shift+Enter adds a line). A running turn streams into a live bubble; history is polled every 2 seconds.
+- Center: the selected bot's chat history and composer (Enter sends, Shift+Enter adds a line). A running turn is one live bubble with animated dots, a short status line, the elapsed time and Stop; jobs are not cards in the chat, and their steps, logs and the queue are in the Details drawer (Activity button). The composer stays usable while the bot works: a message steers it and is marked as delivered. History is polled every 2 seconds.
 - **Desktop**, **Agents**, **Memory** and **Routines** open the corresponding controls; the desktop starts view-only and **Take over** enables input.
 - **Settings**: edit name, emoji or uploaded image, description, model, thinking effort (only the levels that engine supports; hidden for Cursor), the derived capability tier (read only), Claude reason and instructions; delete the bot after typing its name to confirm.
 - Choosing a Claude model requires a reason in the UI when none is stored; the server rule below still applies.
@@ -550,17 +562,17 @@ Agents running on the same host and UID are trusted: they can read files the ser
 ### Real-time steering (0.9.1)
 
 While a bot is running, send a steering message to adjust its current task. The
-composer defaults to **Steer**; choose **Queue as next turn** to wait instead.
+composer defaults to **Steer**; tick **Send after this turn instead of steering** to wait instead (hidden when the engine cannot take a message mid-run).
 The messages API accepts `mode: "steer"` or `mode: "queue"`; when omitted it
 steers a running job and otherwise starts a normal queued turn. Steering messages
 show `pending`, `delivered` (with a delivery time), or `queued` when converted
-to a next turn. Images remain in the bot's persistent attachment directory.
+to a next turn, with the reason (0.11.6). The POST response says which happened in `delivery` and `delivery_note`. Images remain in the bot's persistent attachment directory.
 
 Claude receives a user message on its open stream-json stdin and acknowledges
 it through the replayed user message. Codex, Cursor, Antigravity and OpenCode
 interrupt at a completed step (or after 15 seconds) and resume the same session;
 the interrupted step may need re-checking. OpenCode, and restricted Codex and Cursor, cannot
-resume and their steering messages are queued. When a session ID has not yet
+resume and their steering messages are queued at once, with the reason. When a session ID has not yet
 arrived, interruption waits for it; if the job ends without an ID, the message
 is queued. Pending messages also become queued turns after a job ends or is
 recovered following a restart. Codex app-server's `turn/steer` RPC could enable
