@@ -478,21 +478,18 @@ def test_repeated_edits_keep_chain(settings):
     assert store.pending_session_reset(bot.id) == third.id
 
 
-def test_claude_edit_requires_reason_and_logs(settings):
+def test_claude_edit_needs_no_reason_and_logs(settings):
     settings.ensure_dirs()
     store = JobStore(settings.data_dir / "agentdesk.sqlite3")
-    from botoffice.turns import TurnError, Turns
+    from botoffice.turns import Turns
 
     turns = Turns(store, settings, {"claude": FakeAdapter()})
     bot = store.create_bot("Claude bot", "", "claude", None)
-    message, _ = turns.post_message(bot, "hi", reason="r")
+    message, _ = turns.post_message(bot, "hi")  # 0.11.8: no reason needed
     with closing(sqlite3.connect(store.path)) as db:
         db.execute("UPDATE jobs SET status='succeeded'")
         db.commit()
-    with pytest.raises(TurnError):
-        turns.edit_message(bot, message.id, "edited")
-    assert store.list_messages(bot.id)[0].archived_at is None
-    _, job = turns.edit_message(bot, message.id, "edited", reason="fix typo")
+    _, job = turns.edit_message(bot, message.id, "edited")
     assert str(job.id) in (settings.data_dir / "claude-use-log.tsv").read_text()
 
 

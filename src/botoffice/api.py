@@ -437,10 +437,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="bot not found")
         return bot
 
-    def _check_claude_reason(provider: str, reason: str | None) -> None:
-        if provider == "claude" and not (reason or "").strip():
-            raise HTTPException(status_code=400, detail="provider claude requires a non-empty reason")
-
     @app.get("/", response_class=HTMLResponse)
     async def chat_page() -> HTMLResponse:
         html, csp = _page_with_csp()
@@ -685,7 +681,6 @@ def create_app(
     @app.post("/v1/bots", response_model=Bot, status_code=201, dependencies=[Depends(auth)])
     async def create_bot(body: BotCreate) -> Bot:
         _check_model(body.default_provider, body.model)
-        _check_claude_reason(body.default_provider, body.reason)
         _check_effort(body.default_provider, body.effort)
         try:
             bot = store.create_bot(
@@ -807,7 +802,6 @@ def create_app(
             # keep the level if the new engine accepts it, else that engine's default (or none)
             keep = bot.effort if bot.effort and valid_effort(engine, bot.effort) else None
             fields["effort"] = keep or default_effort(engine)
-        _check_claude_reason(engine, fields.get("reason", bot.reason))
         try:
             updated = store.update_bot(bot_id, **fields)
         except ValueError as exc:
@@ -1704,7 +1698,6 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"the job already runs on {target}")
         if target not in ENGINES or target not in {item["provider"] for item in await _switch_options(job.provider, fresh=True)}:
             raise HTTPException(status_code=400, detail=f"{target} is not enabled and signed in")
-        _check_claude_reason(target, body.reason)
         reason = (body.reason or "").strip() or None
         try:
             switched = await asyncio.to_thread(store.switch_provider, job.id, target, default_model(target),
