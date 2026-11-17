@@ -21,7 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import attachments, grok_bridge, isolation, needs_you, safefs, vnc
+from . import attachments, baseline, grok_bridge, isolation, needs_you, safefs, vnc
 from . import rules as action_rules
 from . import usage as budgets
 from .auth import auth_dependency, bearer
@@ -981,6 +981,25 @@ def create_app(
     async def put_shared_memory(body: TextBody) -> dict[str, str]:
         memory.write_shared(body.text)
         return {"text": body.text}
+
+    # 0.11.9: the baseline charter every bot gets. Owner only (master token): bots read it as
+    # BASELINE.md in their job directory but cannot change it.
+    @app.get("/v1/baseline", dependencies=[Depends(auth)])
+    async def get_baseline() -> dict[str, object]:
+        return baseline.state(store)
+
+    @app.put("/v1/baseline", dependencies=[Depends(auth)])
+    async def put_baseline(body: TextBody) -> dict[str, object]:
+        try:
+            baseline.set_override(store, body.text)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return baseline.state(store)
+
+    @app.delete("/v1/baseline", dependencies=[Depends(auth)])
+    async def reset_baseline() -> dict[str, object]:
+        baseline.reset(store)
+        return baseline.state(store)
 
     @app.get("/v1/desktops", dependencies=[Depends(auth)])
     async def list_desktops() -> list[dict]:

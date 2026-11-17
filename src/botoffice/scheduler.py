@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from . import attachments, failures, isolation, needs_you, procs, safefs
+from . import attachments, baseline, failures, isolation, needs_you, procs, safefs
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
 from .catalog import ENGINE_LABELS
@@ -624,6 +624,11 @@ class Scheduler:
                     save_rules_snapshot(shared, self.memory.bot_dir(bot.id))
                 except OSError:
                     log.warning("Could not save rules snapshot for bot %s", bot.id, exc_info=True)
+                if job.baseline_text is not None:
+                    try:
+                        baseline.save_snapshot(job.baseline_text, self.memory.bot_dir(bot.id))
+                    except OSError:
+                        log.warning("Could not save baseline snapshot for bot %s", bot.id, exc_info=True)
                 await asyncio.to_thread(self._prepare_memory, job, workspace)
             # only failures the adapter classified itself are retried automatically
             retryable = bool(result.failure_kind)

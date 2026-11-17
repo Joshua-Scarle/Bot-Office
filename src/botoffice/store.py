@@ -2208,6 +2208,10 @@ class JobStore:
         with closing(self._connect()) as db:
             db.execute("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
+    def delete_meta(self, key: str) -> None:
+        with closing(self._connect()) as db:
+            db.execute("DELETE FROM meta WHERE key=?", (key,))
+
     @staticmethod
     def _routine(row: sqlite3.Row | None) -> Routine | None:
         if row is not None:

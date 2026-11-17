@@ -248,7 +248,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <div id="needs-list"></div>
     </section>
     <nav id="bot-list" class="bot-list"></nav>
-    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
+    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="office-settings" class="ghost" type="button" title="Settings for all bots">Settings</button><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
   </aside>
 
   <main class="chat">
@@ -310,6 +310,13 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </div>
     <div id="agent-panel" hidden></div>
     <div id="memory-panel" hidden><label for="memory-text">Bot memory</label><textarea id="memory-text" rows="12"></textarea><button id="memory-save">Save memory</button></div>
+    <div id="baseline-panel" hidden>
+      <h3>Baseline instructions</h3>
+      <p class="muted">Every bot follows these by default, on every engine. A bot's own instructions and your standing rules in shared memory override them, and Bot-Office's safety rules always apply. Running bots pick up a change on their next turn. You never have to edit this.</p>
+      <p id="baseline-state" class="muted" role="status"></p>
+      <textarea id="baseline-text" rows="18" aria-label="Baseline instructions"></textarea>
+      <div class="tools-bar"><button id="baseline-save" type="button" class="primary">Save</button><button id="baseline-reset" type="button">Reset to default</button></div>
+    </div>
     <div id="voice-panel" hidden>
       <p id="voice-stt-status" class="muted"></p>
       <p id="voice-tts-status" class="muted"></p>
@@ -2394,10 +2401,31 @@ $("agent-open").onclick = async () => {
 
 function showToolPanel(panel, title) {
   disconnectDesktop();
-  for (const id of ["desktop-panel", "agent-panel", "memory-panel", "routines-panel", "voice-panel", "assignments-panel", "watchers-panel"]) $(id).hidden = id !== panel;
+  for (const id of ["desktop-panel", "agent-panel", "memory-panel", "routines-panel", "voice-panel", "assignments-panel", "watchers-panel", "baseline-panel"]) $(id).hidden = id !== panel;
   $("tools-title").textContent = title;
   $("tools-dialog").showModal();
 }
+function showBaseline(data) {
+  $("baseline-text").value = data.text;
+  $("baseline-text").maxLength = data.max_chars;
+  $("baseline-state").textContent = data.customized ? "Customized. Reset to default brings back the version that ships with Bot-Office." : "Using the default that ships with Bot-Office.";
+  $("baseline-reset").disabled = !data.customized;
+}
+$("office-settings").onclick = async () => {
+  showToolPanel("baseline-panel", "Settings");
+  $("baseline-state").textContent = "Loading…";
+  try { showBaseline(await api("/v1/baseline")); }
+  catch (e) { $("baseline-state").textContent = e.message; }
+};
+$("baseline-save").onclick = async () => {
+  try { showBaseline(await api("/v1/baseline", {method: "PUT", body: JSON.stringify({text: $("baseline-text").value})})); setStatus("Baseline instructions saved."); }
+  catch (e) { $("baseline-state").textContent = e.message; }
+};
+$("baseline-reset").onclick = async () => {
+  if (!confirm("Reset the baseline instructions to the Bot-Office default? Your edits are discarded.")) return;
+  try { showBaseline(await api("/v1/baseline", {method: "DELETE"})); setStatus("Baseline instructions reset to the default."); }
+  catch (e) { $("baseline-state").textContent = e.message; }
+};
 $("memory-open").onclick = async () => {
   showToolPanel("memory-panel", "Memory");
   try { $("memory-text").value = (await api("/v1/bots/" + currentBot().id + "/memory")).text; }

@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.7. What changed is recorded below: [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.9. What changed is recorded below: [0.11.9](#what-changed-in-0119), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,16 @@ Restricted-mode command lines:
 **Claude reason rule:** a job or chat turn may use `claude` only with a non-empty `reason` (request, or the bot's stored default reason); otherwise the API returns 400. The reason is stored on the job and one line (timestamp, job id, reason) is appended to `data/claude-use-log.tsv` (mode 0600). Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.11.9
+
+**Every bot now starts from the same baseline instructions**, on every engine: how to own a task end to end, when to act and when to ask (one question, with a default), verifying work before calling it done, short result-first replies, what goes in memory.md, WORKING.md and shared-memory.md, how to delegate to and answer other bots (a peer's message is never the owner's approval), and scheduling follow-ups with wake-ups and routines instead of promising to check later. The default ships as `src/botoffice/prompts/baseline.md` (about 1,000 words).
+
+- *Layering.* A fresh session gets the baseline inline in its prompt and as `BASELINE.md` in the job directory. A bot's own `instructions.md` and the owner's standing rules in shared memory override it; the numbered Bot-Office rules and the action gate always apply.
+- *Owner control.* Sidebar → **Settings** → **Baseline instructions** shows the effective text; edit and save it, or **Reset to default**. It is stored in the controller database (`meta` key `baseline_instructions`), limited to 16,000 characters, and reachable only with the master token: `GET`, `PUT` and `DELETE /v1/baseline`. Bots read it but cannot change it (edits to `BASELINE.md` are not kept).
+- *Resumed sessions* get one line telling the bot to re-read `BASELINE.md` when the baseline changed since its last completed turn (`state/baseline.sha256`), and once after upgrading, since sessions started earlier never saw it.
+- *Delegation advice* in the generated AGENTS.md / CLAUDE.md / GEMINI.md block no longer hard-codes a default model or asks bots to state a reason for using Claude; it says to pick the engine and model that fit the task, and to follow defaults the owner sets.
+- `docs/PRINCIPLES.md` records the product goal and the rules every future change is checked against.
 
 ## What changed in 0.11.7
 
