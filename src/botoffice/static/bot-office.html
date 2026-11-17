@@ -97,6 +97,31 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .msg.assistant .body { background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
 .msg.system { align-self: center; max-width: 95%; }
 .msg.system .body { font-size: 13px; color: var(--muted); background: transparent; border: 1px dashed var(--line); padding: 6px 12px; }
+/* 0.11.10: messages between bots: a time and "N messages with <bot>"; click opens #agent-chat */
+.agent-group { align-self: center; display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: 95%; }
+.agent-when { font-size: 12px; color: var(--muted); }
+.agent-open { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 999px; padding: 3px 10px; max-width: 100%; }
+.agent-open:hover, .agent-open:focus-visible { color: var(--text); border-color: var(--line); }
+.agent-peer { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.avatar.xs { width: 20px; height: 20px; border-radius: 6px; font-size: 12px; display: inline-grid; }
+#agent-chat { width: min(760px, calc(100vw - 16px)); max-height: calc(100vh - 32px); background: var(--bg, #111); }
+#agent-chat[open] { display: flex; flex-direction: column; }
+#agent-chat-title { align-self: center; display: inline-flex; align-items: center; gap: 8px; margin: 12px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 14px; max-width: calc(100% - 24px); overflow: hidden; }
+.agent-swap { color: var(--muted); }
+#agent-chat-list { flex: 1; overflow-y: auto; padding: 4px 16px 12px; display: flex; flex-direction: column; gap: 14px; }
+.agent-msg .agent-name { font-size: 12px; margin: 0 0 4px 30px; }
+.agent-msg .agent-row { display: flex; align-items: flex-end; gap: 8px; }
+.agent-bubble { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; border-bottom-left-radius: 4px; padding: 8px 14px; overflow-wrap: anywhere; min-width: 0; }
+.agent-bubble .md p { margin: 0 0 8px; } .agent-bubble .md p:last-child { margin-bottom: 0; }
+.agent-bubble .md ul, .agent-bubble .md ol { margin: 0 0 8px; padding-left: 20px; }
+.agent-bubble .md pre { white-space: pre-wrap; background: rgba(0,0,0,.25); padding: 8px; border-radius: 8px; margin: 0 0 8px; }
+.agent-bubble .md .md-h { font-weight: 700; }
+.agent-chat-foot { display: flex; justify-content: center; padding: 10px; }
+#agent-chat-close { border-radius: 999px; padding: 8px 18px; }
+.msg.system.office .body { text-align: left; }
+.msg .body.folded { max-height: 5.6em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
+.msg button.mini.fold { align-self: flex-start; font-size: 12px; padding: 2px 8px; margin-top: 2px; background: transparent; border-color: transparent; color: var(--muted); }
+.msg.system button.mini.fold { align-self: center; }
 .msg .who button.mini { font-size: 12px; padding: 0 6px; margin-left: 6px; background: transparent; border-color: transparent; color: var(--muted); }
 .msg .who button.mini:hover { color: var(--text); border-color: var(--line); }
 .msg .tag { margin-left: 6px; font-style: italic; }
@@ -139,6 +164,20 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 
 /* Settings dialog */
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(520px, calc(100vw - 24px)); }
+#settings-dialog { width: min(780px, calc(100vw - 24px)); }
+.settings-content { padding: 18px; display: grid; gap: 14px; max-height: calc(100vh - 48px); overflow-y: auto; }
+.settings-head { justify-content: space-between; }
+.settings-section { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 8px; }
+.settings-section h3 { margin: 0; font-size: 16px; }
+.settings-section p { margin: 0; }
+.settings-section textarea { min-height: 200px; font: 13px/1.45 ui-monospace, monospace; }
+.settings-section .check { display: flex; gap: 8px; align-items: flex-start; color: var(--text); font-size: 15px; }
+.settings-section .inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--text); font-size: 15px; }
+.settings-section input[type=checkbox] { width: auto; margin-top: 4px; }
+.settings-section input[type=number] { width: 6em; }
+.settings-section summary { cursor: pointer; font-weight: 600; }
+details.settings-section[open] > summary { margin-bottom: 4px; }
+.engine-row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
 dialog::backdrop { background: rgba(0, 0, 0, .6); }
 dialog form { display: grid; gap: 12px; padding: 20px; max-height: calc(100vh - 48px); overflow-y: auto; }
 dialog h2 { margin: 0; font-size: 18px; }
@@ -248,7 +287,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <div id="needs-list"></div>
     </section>
     <nav id="bot-list" class="bot-list"></nav>
-    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="office-settings" class="ghost" type="button" title="Settings for all bots">Settings</button><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
+    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="office-settings" class="ghost" type="button" title="Settings for all bots">⚙ Settings</button><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
   </aside>
 
   <main class="chat">
@@ -309,13 +348,6 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </div>
     <div id="agent-panel" hidden></div>
     <div id="memory-panel" hidden><label for="memory-text">Bot memory</label><textarea id="memory-text" rows="12"></textarea><button id="memory-save">Save memory</button></div>
-    <div id="baseline-panel" hidden>
-      <h3>Baseline instructions</h3>
-      <p class="muted">Every bot follows these by default, on every engine. A bot's own instructions and your standing rules in shared memory override them, and Bot-Office's safety rules always apply. Running bots pick up a change on their next turn. You never have to edit this.</p>
-      <p id="baseline-state" class="muted" role="status"></p>
-      <textarea id="baseline-text" rows="18" aria-label="Baseline instructions"></textarea>
-      <div class="tools-bar"><button id="baseline-save" type="button" class="primary">Save</button><button id="baseline-reset" type="button">Reset to default</button></div>
-    </div>
     <div id="voice-panel" hidden>
       <p id="voice-stt-status" class="muted"></p>
       <p id="voice-tts-status" class="muted"></p>
@@ -340,6 +372,42 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </div>
     <div id="watchers-panel" hidden><div id="watchers-list"></div><pre id="watcher-runs" class="muted" hidden></pre><form id="watcher-form"><label>Name<input id="watcher-name" required maxlength="80"></label><label>Kind<select id="watcher-kind"><option value="webhook">Webhook (POST with a secret)</option><option value="path">Folder (new or changed files)</option><option value="poll">gh poll (read-only, every 5+ min)</option><option value="assignment">Another bot's assignment</option></select></label><label id="watcher-target-label">Target<input id="watcher-target" placeholder="folder path, gh command, or assignment id"></label><label>When it fires, the bot should<textarea id="watcher-prompt" required maxlength="4000"></textarea></label><p class="muted">Runs are unattended: outbound actions need your approval, at most 6 runs/hour per watcher (then it pauses), and only for engines whose action gate is proven.</p><button>Create watcher</button></form></div>
     <div id="routines-panel" hidden><div id="routines-list"></div><form id="routine-form"><label>Schedule (cron, New York time)<input id="routine-cron" placeholder="0 9 * * *" required></label><label>Prompt<textarea id="routine-prompt" required></textarea></label><label>If runs were missed while Bot-Office was down<select id="routine-catchup"><option value="once">Run once when back</option><option value="skip">Skip them</option></select></label><button>Create routine</button></form></div>
+  </div>
+</dialog>
+
+<dialog id="settings-dialog" aria-labelledby="settings-title">
+  <div class="settings-content">
+    <div class="tools-bar settings-head"><h2 id="settings-title">Settings</h2><button id="settings-close" type="button">Close</button></div>
+    <p class="muted">These apply to every bot. Each bot's own profile, model and limits are under Settings in its chat.</p>
+    <section class="settings-section" id="set-rules" aria-labelledby="set-rules-title">
+      <h3 id="set-rules-title">Rules for all bots</h3>
+      <p class="muted">Every bot follows these rules. Edit them to change how all your bots work. A bot's own instructions and your standing rules can override them, and Bot-Office's safety rules always apply.</p>
+      <textarea id="rules-text" rows="14" aria-label="Rules for all bots"></textarea>
+      <div class="tools-bar"><button id="rules-save" type="button" class="primary">Save rules</button><button id="rules-reset" type="button">Reset to default</button><span id="rules-state" class="muted" role="status"></span></div>
+    </section>
+    <section class="settings-section" id="set-behavior" aria-labelledby="set-behavior-title">
+      <h3 id="set-behavior-title">Bot behavior</h3>
+      <label class="check"><input id="auto-continue" type="checkbox"> Keep going automatically when a bot stops before its task is done</label>
+      <label class="inline">At most <input id="auto-continue-max" type="number" min="1" max="50" aria-label="Most automatic continuations in a row"> continuations in a row, then the bot waits for you</label>
+      <p class="muted">A message from you or Stop ends the run. Continuations run quietly: the bot stays "Working" in the chat. Assignments use the same loop, within the turn budget set on each assignment (20 turns by default).</p>
+      <div class="tools-bar"><button id="behavior-save" type="button" class="primary">Save</button><span id="behavior-state" class="muted" role="status"></span></div>
+    </section>
+    <section class="settings-section" id="set-engines" aria-labelledby="set-engines-title">
+      <h3 id="set-engines-title">Engines</h3>
+      <p class="muted">The official CLIs your bots run on, with your own subscriptions. Pick a bot's engine and model in its own settings.</p>
+      <div id="engines-list"></div>
+    </section>
+    <section class="settings-section" id="set-voice" aria-labelledby="set-voice-title">
+      <h3 id="set-voice-title">Voice</h3>
+      <div class="tools-bar"><button id="settings-voice" type="button">Voice and dictation…</button></div>
+    </section>
+    <details class="settings-section" id="set-advanced">
+      <summary>Advanced</summary>
+      <h3>System prompt</h3>
+      <p class="muted">How Bot-Office works for every bot: turns, memory files, messaging other bots, trust and safety. It comes prebuilt and rarely needs changing.</p>
+      <textarea id="system-text" rows="16" aria-label="System prompt"></textarea>
+      <div class="tools-bar"><button id="system-save" type="button">Save system prompt</button><button id="system-reset" type="button">Reset to default</button><span id="system-state" class="muted" role="status"></span></div>
+    </details>
   </div>
 </dialog>
 
@@ -399,6 +467,11 @@ dialog textarea { min-height: 90px; resize: vertical; }
   </form>
 </dialog>
 
+<dialog id="agent-chat" aria-labelledby="agent-chat-title">
+  <div id="agent-chat-title"></div>
+  <div id="agent-chat-list" role="log"></div>
+  <div class="agent-chat-foot"><button type="button" id="agent-chat-close">Close Chat</button></div>
+</dialog>
 <dialog id="image-view"><button type="button" id="image-close">Close</button><div><img id="image-full" alt="Attached image"></div></dialog>
 <script>
 "use strict";
@@ -416,6 +489,8 @@ const state = {
   timer: null, tick: 0, live: new Map(),
   // newest message ids rendered for the selected bot (all / counted as unread)
   shown: { bot: null, max: 0, counted: 0 }, readSent: new Map(),
+  // 0.11.10: the selected bot's last message list (the bot-to-bot overlay reads it)
+  lastMessages: [],
   showArchived: false, editingMsg: null,
   // details drawer (0.11.6) and the current queued/running placeholders of the selected bot
   drawerOpen: false, drawerOpener: null, drawerSteps: false, drawerLogs: new Set(), pendingJobs: [],
@@ -754,11 +829,139 @@ async function selectBot(id) {
 }
 
 /* ---- messages ---- */
+/* 0.11.10: who wrote a message (m.author from the server). Only the owner's own typed messages get
+   the "You" label and the right-hand bubble; bot-to-bot messages read "A → B" on the left, and lines
+   Bot-Office wrote (routines, wake-ups, assignment steps, automatic continuations) are compact notes */
+const OFFICE_SOURCES = { routine: "Routine", wakeup: "Wake-up", trigger: "Watcher", assignment: "Bot-Office", inbox: "Inbox" };
 function senderLabel(m, bot) {
-  if (m.sender) return m.sender;
-  if (m.role === "assistant") return bot.name;
-  if (m.role === "system") return "System";
-  return m.source === "routine" ? "Routine" : "You";
+  const peer = m.peer || "another bot";
+  switch (m.author) {
+    case "owner": return "You";
+    case "bot_out": return bot.name + " → " + peer;
+    case "bot_in": return peer + " → " + bot.name;
+    case "bot_reply": return peer + " → " + bot.name + " (reply)";
+    case "office": return m.sender || OFFICE_SOURCES[m.source] || "Bot-Office";
+    case "system": return "System";
+    default: return m.role === "assistant" ? bot.name : (m.sender || "System");
+  }
+}
+function isOwnerMessage(m) { return m.author === "owner" && m.role === "user"; }
+/* what the bot side said: counts toward Unread (matches the server's rule) */
+function countsUnread(m) { return m.role !== "user" || m.author === "bot_out"; }
+function bubbleClass(m) {
+  if (m.author === "office") return "system office";
+  return m.role === "user" && !isOwnerMessage(m) ? "system office" : m.role;
+}
+/* 0.11.10: messages between bots (bot-msg, inbox drops, reply copies, assignment hand-offs), as in
+   Grok Bot: the chat shows only a time and "2 messages with <bot>"; consecutive messages with the same
+   bot (sent and received) share one row. Clicking it opens that conversation in an overlay.
+   Restyle through the .agent-group and #agent-chat classes. */
+function isAgentRow(m) { return m.author === "bot_out" || m.author === "bot_in" || m.author === "bot_reply"; }
+function agentGroups(messages) {
+  const groups = new Map(); // first message id -> group; later members map to null
+  let current = null;
+  for (const m of messages) {
+    if (m.pending) continue;
+    if (isAgentRow(m)) {
+      const key = (m.peer || "") + (m.archived_at ? "|archived" : "");
+      if (current && current.key === key) { current.items.push(m); groups.set(m.id, null); continue; }
+      current = { key, peer: m.peer || "another bot", items: [m] };
+      groups.set(m.id, current);
+    } else current = null; // anything else in between starts a new row
+  }
+  return groups;
+}
+function botByName(name) { return state.bots.find((b) => b.name === name) || { id: "peer:" + name, name, icon: null }; }
+function accentColor(name) {
+  let h = 0;
+  for (const c of name || "") h = (h * 31 + c.charCodeAt(0)) % 360;
+  return "hsl(" + h + " 70% 72%)";
+}
+function smallAvatar(bot) { const av = el("span", "avatar xs"); fillAvatar(av, bot); return av; }
+function agentGroupRow(group, bot) {
+  const first = group.items[0];
+  const wrap = el("div", "agent-group" + (first.archived_at ? " archived" : ""));
+  wrap.append(el("div", "agent-when", new Date(first.created_at).toLocaleString([],
+    { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })));
+  const open = el("button", "agent-open");
+  open.type = "button";
+  const n = group.items.length;
+  open.append(el("span", "", n + (n === 1 ? " message with" : " messages with")), smallAvatar(botByName(group.peer)),
+    el("span", "agent-peer", group.peer));
+  open.title = "Show the messages between " + bot.name + " and " + group.peer;
+  open.onclick = () => openAgentChat(bot, group.peer, first.id);
+  wrap.append(open);
+  return wrap;
+}
+/* a small, safe Markdown subset for the overlay (DOM nodes only, never innerHTML) */
+function mdInline(parent, text) {
+  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*)/g;
+  let last = 0, hit;
+  while ((hit = re.exec(text))) {
+    if (hit.index > last) parent.append(text.slice(last, hit.index));
+    const t = hit[0];
+    if (t[0] === "`") parent.append(el("code", "", t.slice(1, -1)));
+    else if (t.startsWith("**")) parent.append(el("strong", "", t.slice(2, -2)));
+    else parent.append(el("em", "", t.slice(1, -1)));
+    last = hit.index + t.length;
+  }
+  if (last < text.length) parent.append(text.slice(last));
+}
+function renderMarkdown(text) {
+  const root = el("div", "md");
+  const lines = text.split("\n");
+  let list = null, para = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("```")) {
+      const code = [];
+      for (i++; i < lines.length && !lines[i].startsWith("```"); i++) code.push(lines[i]);
+      root.append(el("pre", "", code.join("\n")));
+      list = para = null;
+      continue;
+    }
+    const bullet = /^\s*(?:[-*•]|\d+[.)])\s+(.*)$/.exec(line);
+    const heading = /^#{1,6}\s+(.*)$/.exec(line);
+    if (bullet) {
+      if (!list) { list = el(/^\s*\d/.test(line) ? "ol" : "ul"); root.append(list); }
+      const li = el("li"); mdInline(li, bullet[1]); list.append(li); para = null;
+    } else if (heading) {
+      const h = el("p", "md-h"); mdInline(h, heading[1]); root.append(h); list = para = null;
+    } else if (!line.trim()) {
+      list = para = null;
+    } else {
+      if (!para) { para = el("p"); root.append(para); } else para.append(document.createElement("br"));
+      mdInline(para, line); list = null;
+    }
+  }
+  return root;
+}
+function openAgentChat(bot, peerName, focusId) {
+  const peer = botByName(peerName);
+  const title = $("agent-chat-title");
+  title.replaceChildren(smallAvatar(bot), el("span", "", bot.name), el("span", "agent-swap", "⇄"),
+    smallAvatar(peer), el("span", "", peerName));
+  const list = $("agent-chat-list");
+  list.replaceChildren();
+  let focus = null;
+  for (const m of state.lastMessages) {
+    if (!isAgentRow(m) || (m.peer || "another bot") !== peerName || m.pending) continue;
+    const sender = m.author === "bot_out" ? bot : peer;
+    const item = el("div", "agent-msg");
+    const name = el("div", "agent-name", sender.name + " · " + new Date(m.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" }));
+    name.style.color = accentColor(sender.name);
+    const row = el("div", "agent-row");
+    const bubble = el("div", "agent-bubble");
+    bubble.append(renderMarkdown(m.text));
+    for (const id of (m.attachments || [])) showAttachment(bubble, bot.id, id);
+    row.append(smallAvatar(sender), bubble);
+    item.append(name, row);
+    list.append(item);
+    if (m.id === focusId) focus = item;
+  }
+  $("agent-chat").showModal();
+  (focus || list.lastElementChild || list).scrollIntoView({ block: "start" });
+  $("agent-chat-close").focus();
 }
 
 /* ---- live streaming (fetch + ReadableStream; the bearer token is only ever a header) ---- */
@@ -871,7 +1074,7 @@ async function stopJob(jobId, button) {
 function refreshView(view) {
   view.body.textContent = view.text || "";
   view.body.hidden = !view.text;
-  view.statusText.textContent = liveStatus(view);
+  view.statusText.textContent = liveStatus(view) + (view.continuing ? " · continuing, " + view.continuing : "");
   view.wrap.classList.toggle("is-waiting", view.status === "queued");
   view.more.hidden = !view.queuedAfter;
   view.more.textContent = view.queuedAfter ? "· " + view.queuedAfter + " more queued" : "";
@@ -1257,6 +1460,9 @@ for (const zone of [$("composer"), $("messages")]) {
   zone.addEventListener("drop", (event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addImages(event.dataTransfer.files); } });
 }
 $("image-close").onclick = () => $("image-view").close();
+$("agent-chat-close").onclick = () => $("agent-chat").close();
+// a click on the backdrop (outside the panel) closes it too; Esc is the dialog's own
+$("agent-chat").addEventListener("click", (e) => { if (e.target === $("agent-chat")) $("agent-chat").close(); });
 async function imageUrl(botId, id) {
   const key = botId + "/" + id;
   if (imageCache.has(key)) {
@@ -1403,7 +1609,7 @@ async function loadMessages() {
   if (state.drawerOpen) scheduleDrawer();
   const done = messages.filter((m) => !m.pending && m.id > 0 && !m.archived_at);
   state.shown = { bot: id, max: Math.max(0, ...done.map((m) => m.id)),
-    counted: Math.max(0, ...done.filter((m) => m.role !== "user").map((m) => m.id)) };
+    counted: Math.max(0, ...done.filter(countsUnread).map((m) => m.id)) };
   const sig = messages.map((m) => m.id + (m.pending ? ":" + m.job_id + ":" + m.job_status : "") + (m.archived_at ? "a" : "") + (m.steer_status || "") + (m.steer_delivered_at || "") + (m.steer_note || "") + (m.question ? JSON.stringify(m.question) : "") + (m.notice ? JSON.stringify(m.notice) : "")).join(",") + "|" + (bot.activity || "") + "|" + (state.editingMsg ? state.editingMsg.id : "");
   if (sig === state.msgSig) return;
   state.msgSig = sig;
@@ -1416,9 +1622,11 @@ async function loadMessages() {
   for (const [jobId, view] of state.live) {
     if (!current || jobId !== current.job_id) { view.stopped = true; if (view.ctrl) view.ctrl.abort(); state.live.delete(jobId); }
   }
+  state.lastMessages = messages;
+  const groups = agentGroups(messages);
   const nodes = messages.map((m) => {
     let who = senderLabel(m, bot);
-    if (m.source === "inbox" || m.source === "routine" || m.source === "assignment" || m.source === "wakeup") who += " · " + (m.source === "wakeup" ? "wake-up" : m.source);
+    if (m.source === "routine" || m.source === "assignment" || m.source === "wakeup" || (m.source === "inbox" && m.author === "bot")) who += " · " + (m.source === "wakeup" ? "wake-up" : m.source);
     who += " · " + new Date(m.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
     if (m.pending && m.job_id) {
       if (m !== current) return null;
@@ -1430,6 +1638,7 @@ async function loadMessages() {
       }
       view.status = m.job_status;
       view.notBefore = m.not_before || null;
+      view.continuing = m.continuing || null; // 0.11.10: an automatic continuation ("3 of 10")
       view.queuedAfter = live.length - 1;
       view.who.textContent = who;
       setSince(view, m.created_at);
@@ -1437,7 +1646,8 @@ async function loadMessages() {
       return view.wrap;
     }
     if (state.editingMsg && state.editingMsg.id === m.id && !m.archived_at) return state.editingMsg.wrap;
-    const wrap = el("div", "msg " + (m.kind === "say" ? "progress " : "") + m.role + (m.source === "inbox" ? " inbox" : "") + (m.archived_at ? " archived" : ""));
+    if (isAgentRow(m)) { const group = groups.get(m.id); return group ? agentGroupRow(group, bot) : null; }
+    const wrap = el("div", "msg " + (m.kind === "say" ? "progress " : "") + bubbleClass(m) + (m.source === "inbox" ? " inbox" : "") + (m.archived_at ? " archived" : ""));
     const whoLine = el("div", "who", who);
     if (m.kind === "say") whoLine.append(el("span", "tag", "progress"));
     if (m.steer_job_id) {
@@ -1460,7 +1670,7 @@ async function loadMessages() {
       edit.onclick = () => startEdit(bot, m);
       whoLine.append(edit);
     }
-    if (m.role === "user" && !m.sender && !m.archived_at) {
+    if (isOwnerMessage(m) && !m.archived_at) {
       const assign = el("button", "mini", "⚑");
       assign.type = "button";
       assign.title = "Make assignment from this message";
@@ -1480,7 +1690,21 @@ async function loadMessages() {
       };
       whoLine.append(retry);
     }
-    wrap.append(whoLine, el("div", "body", m.text));
+    const body = el("div", "body", m.text);
+    wrap.append(whoLine, body);
+    if (wrap.classList.contains("office") && (m.text.length > 280 || m.text.split("\n").length > 4)) {
+      // long Bot-Office notes (a routine's prompt, an assignment start) start folded
+      body.classList.add("folded");
+      const more = el("button", "mini fold", "Show more");
+      more.type = "button";
+      more.setAttribute("aria-expanded", "false");
+      more.onclick = () => {
+        const open = body.classList.toggle("folded") === false;
+        more.textContent = open ? "Show less" : "Show more";
+        more.setAttribute("aria-expanded", String(open));
+      };
+      wrap.append(more);
+    }
     if (m.steer_job_id && m.steer_status === "queued" && m.steer_note) wrap.append(el("div", "delivery-note", m.steer_note));
     if (m.question) wrap.append(renderQuestion(m.question, bot.id));
     if (m.notice && m.notice.open) wrap.append(renderUsageNotice(m.notice));
@@ -1519,7 +1743,7 @@ function canRetry(m, messages) {
 const REWIND_CONFIRM = "Rewind the chat to this message? Later messages are archived and the bot restarts from the remaining chat. " +
   "Files changed, desktop actions, messages sent to other bots and memory updates are NOT undone.";
 function canEdit(m) {
-  return m.role === "user" && !m.sender && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending && !m.steer_job_id && m.id > 0 && !m.archived_at;
+  return isOwnerMessage(m) && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending && !m.steer_job_id && m.id > 0 && !m.archived_at;
 }
 function startEdit(bot, m) {
   const wrap = el("div", "msg user");
@@ -2392,30 +2616,66 @@ $("agent-open").onclick = async () => {
 
 function showToolPanel(panel, title) {
   disconnectDesktop();
-  for (const id of ["desktop-panel", "agent-panel", "memory-panel", "routines-panel", "voice-panel", "assignments-panel", "watchers-panel", "baseline-panel"]) $(id).hidden = id !== panel;
+  for (const id of ["desktop-panel", "agent-panel", "memory-panel", "routines-panel", "voice-panel", "assignments-panel", "watchers-panel"]) $(id).hidden = id !== panel;
   $("tools-title").textContent = title;
   $("tools-dialog").showModal();
 }
-function showBaseline(data) {
-  $("baseline-text").value = data.text;
-  $("baseline-text").maxLength = data.max_chars;
-  $("baseline-state").textContent = data.customized ? "Customized. Reset to default brings back the version that ships with Bot-Office." : "Using the default that ships with Bot-Office.";
-  $("baseline-reset").disabled = !data.customized;
+/* ---- Settings for all bots (0.11.10) ---- */
+const ENGINE_STATUS = { ok: "signed in", needs_login: "needs sign-in", disabled: "not enabled" };
+function showLayer(prefix, data) {
+  $(prefix + "-text").value = data.text;
+  $(prefix + "-text").maxLength = data.max_chars;
+  $(prefix + "-state").textContent = data.customized ? "Customized" : "Default";
+  $(prefix + "-reset").disabled = !data.customized;
+}
+function showBehavior(data) {
+  $("auto-continue").checked = !!data.auto_continue.enabled;
+  $("auto-continue-max").value = data.auto_continue.max;
+  $("auto-continue-max").max = data.auto_continue_max_limit;
+}
+async function loadSettings() {
+  const [rules, system, settings, engines] = await Promise.all([
+    api("/v1/rules-for-all-bots"), api("/v1/system-prompt"), api("/v1/settings"),
+    api("/v1/providers").catch(() => [])]);
+  showLayer("rules", rules); showLayer("system", system); showBehavior(settings);
+  $("engines-list").replaceChildren(...engines.map((e) => {
+    const row = el("div", "engine-row");
+    row.append(el("span", "", ENGINE_LABELS[e.name] || e.name), el("span", "muted", ENGINE_STATUS[e.login_status] || e.login_status));
+    return row;
+  }));
 }
 $("office-settings").onclick = async () => {
-  showToolPanel("baseline-panel", "Settings");
-  $("baseline-state").textContent = "Loading…";
-  try { showBaseline(await api("/v1/baseline")); }
-  catch (e) { $("baseline-state").textContent = e.message; }
+  for (const id of ["rules-state", "system-state", "behavior-state"]) $(id).textContent = "";
+  $("set-advanced").open = false;
+  $("settings-dialog").showModal();
+  try { await loadSettings(); } catch (e) { if (e instanceof AuthError) return handleError(e); $("rules-state").textContent = e.message; }
 };
-$("baseline-save").onclick = async () => {
-  try { showBaseline(await api("/v1/baseline", {method: "PUT", body: JSON.stringify({text: $("baseline-text").value})})); setStatus("Baseline instructions saved."); }
-  catch (e) { $("baseline-state").textContent = e.message; }
+$("settings-close").onclick = () => $("settings-dialog").close();
+function layerButtons(prefix, path, label) {
+  $(prefix + "-save").onclick = async () => {
+    try { showLayer(prefix, await api(path, {method: "PUT", body: JSON.stringify({text: $(prefix + "-text").value})})); $(prefix + "-state").textContent = "Saved. Bots use it from their next turn."; }
+    catch (e) { $(prefix + "-state").textContent = e.message; }
+  };
+  $(prefix + "-reset").onclick = async () => {
+    if (!confirm("Reset " + label + " to the Bot-Office default? Your edits are discarded.")) return;
+    try { showLayer(prefix, await api(path, {method: "DELETE"})); $(prefix + "-state").textContent = "Reset to the default."; }
+    catch (e) { $(prefix + "-state").textContent = e.message; }
+  };
+}
+layerButtons("rules", "/v1/rules-for-all-bots", "the rules for all bots");
+layerButtons("system", "/v1/system-prompt", "the system prompt");
+$("behavior-save").onclick = async () => {
+  const max = Number($("auto-continue-max").value);
+  try {
+    showBehavior(await api("/v1/settings", {method: "PUT", body: JSON.stringify({auto_continue: {enabled: $("auto-continue").checked, max}})}));
+    $("behavior-state").textContent = "Saved.";
+  } catch (e) { $("behavior-state").textContent = e.message; }
 };
-$("baseline-reset").onclick = async () => {
-  if (!confirm("Reset the baseline instructions to the Bot-Office default? Your edits are discarded.")) return;
-  try { showBaseline(await api("/v1/baseline", {method: "DELETE"})); setStatus("Baseline instructions reset to the default."); }
-  catch (e) { $("baseline-state").textContent = e.message; }
+$("settings-voice").onclick = async () => {
+  $("settings-dialog").close();
+  showToolPanel("voice-panel", "Voice");
+  try { await loadVoice(); } catch (e) { if (e instanceof AuthError) return handleError(e); }
+  fillVoicePanel();
 };
 $("memory-open").onclick = async () => {
   showToolPanel("memory-panel", "Memory");

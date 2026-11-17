@@ -1,71 +1,135 @@
-"""The baseline charter every bot gets on every engine, before its own profile and the owner's rules.
+"""The two owner-side layers every bot gets on every engine, before its own profile and the owner's rules.
 
-The default ships with the package (prompts/baseline.md). The owner can replace it in Settings; the
-override lives in the controller's database (meta table), which bots cannot reach, and "Reset to
-default" removes it. Bots see the effective text as BASELINE.md in each job directory and inline
-in every fresh-session prompt; edits they make there are not kept.
+- ``RULES`` ("Rules for all bots", 0.11.10): short, user-facing rules for agency and competence. Shown
+  first in Settings and meant to be edited.
+- ``SYSTEM`` ("System prompt"): how Bot-Office works (turns, memory files, bot-msg / bot-task / desk,
+  delegation, trust). Prebuilt; editable under Settings > Advanced. It keeps the 0.11.9 storage
+  (``meta`` key ``baseline_instructions``, API ``/v1/baseline``), so a 0.11.9 override carries over.
+
+Defaults ship with the package (prompts/). Owner overrides live in the controller's database, which
+bots cannot reach; "Reset to default" removes them. Bots see the effective text as files in each job
+directory and inline in every fresh-session prompt; edits they make there are not kept.
+
+Also here: the owner's auto-continue setting (0.11.10), a JSON document in ``meta``.
 """
 from __future__ import annotations
 
 import hashlib
+import json
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
 from . import isolation, safefs
 from .store import JobStore
 
-META_KEY = "baseline_instructions"
-SNAPSHOT = "baseline.sha256"
-MAX_CHARS = 16_000  # it is inlined in every fresh prompt (argv-sized on some CLIs)
-DEFAULT_PATH = Path(__file__).with_name("prompts") / "baseline.md"
-CHANGED_NOTICE = ("The baseline instructions every bot follows changed; re-read BASELINE.md in the current "
-                  "directory now (your profile and the owner's standing rules still override it).")
+PROMPTS = Path(__file__).with_name("prompts")
+
+
+@dataclass(frozen=True)
+class Layer:
+    key: str          # API name
+    title: str
+    meta_key: str
+    default_file: str
+    file_name: str    # written into each job directory
+    snapshot: str     # sha of the text the bot's last completed turn saw
+    max_chars: int
+
+    def default_text(self) -> str:
+        return _read_default(self.default_file)
+
+    def override(self, store: JobStore) -> str | None:
+        return store.get_meta(self.meta_key)
+
+    def effective(self, store: JobStore) -> str:
+        custom = self.override(store)
+        return self.default_text() if custom is None else custom
+
+    def set_override(self, store: JobStore, text: str) -> None:
+        if len(text) > self.max_chars:
+            raise ValueError(f"{self.title} is limited to {self.max_chars} characters")
+        store.set_meta(self.meta_key, text)
+
+    def reset(self, store: JobStore) -> None:
+        store.delete_meta(self.meta_key)
+
+    def state(self, store: JobStore) -> dict[str, object]:
+        custom = self.override(store)
+        return {"text": self.default_text() if custom is None else custom, "default": self.default_text(),
+                "customized": custom is not None, "max_chars": self.max_chars, "title": self.title}
+
+    def changed_notice(self) -> str:
+        return (f"The {self.title.lower()} every bot follows changed; re-read {self.file_name} in the current "
+                "directory now.")
+
+    def resume_note(self, text: str, bot_dir: Path) -> str:
+        """One line for a resumed session when the layer differs from the one its last completed turn
+        saw (also once for sessions that started before the layer existed)."""
+        try:
+            previous = safefs.read_bytes(isolation.state_dir(bot_dir) / self.snapshot).decode()
+        except (OSError, UnicodeError):
+            previous = None
+        return "" if previous == _sha(text) else f"\n{self.changed_notice()}\n"
+
+    def save_snapshot(self, text: str, bot_dir: Path) -> None:
+        safefs.write_text(isolation.state_dir(bot_dir) / self.snapshot, _sha(text), isolation.file_mode(),
+                          dir_mode=isolation.dir_mode())
 
 
 @cache
-def default_text() -> str:
-    return DEFAULT_PATH.read_text(encoding="utf-8")
-
-
-def override(store: JobStore) -> str | None:
-    return store.get_meta(META_KEY)
-
-
-def effective(store: JobStore) -> str:
-    custom = override(store)
-    return default_text() if custom is None else custom
-
-
-def set_override(store: JobStore, text: str) -> None:
-    if len(text) > MAX_CHARS:
-        raise ValueError(f"baseline instructions are limited to {MAX_CHARS} characters")
-    store.set_meta(META_KEY, text)
-
-
-def reset(store: JobStore) -> None:
-    store.delete_meta(META_KEY)
-
-
-def state(store: JobStore) -> dict[str, object]:
-    custom = override(store)
-    return {"text": default_text() if custom is None else custom, "default": default_text(),
-            "customized": custom is not None, "max_chars": MAX_CHARS}
+def _read_default(name: str) -> str:
+    return (PROMPTS / name).read_text(encoding="utf-8")
 
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def resume_note(text: str, bot_dir: Path) -> str:
-    """One line for a resumed session when the baseline differs from the one its last completed turn
-    saw (also once for sessions that started before baselines existed)."""
-    try:
-        previous = safefs.read_bytes(isolation.state_dir(bot_dir) / SNAPSHOT).decode()
-    except (OSError, UnicodeError):
-        previous = None
-    return "" if previous == _sha(text) else f"\n{CHANGED_NOTICE}\n"
+SYSTEM = Layer("system", "System prompt", "baseline_instructions", "system.md", "SYSTEM-PROMPT.md",
+               "baseline.sha256", 16_000)
+RULES = Layer("rules", "Rules for all bots", "rules_for_all_bots", "rules-for-all-bots.md",
+              "RULES-FOR-ALL-BOTS.md", "all-bots-rules.sha256", 8_000)
+LAYERS = (SYSTEM, RULES)  # prompt order
+
+# 0.11.9 names (the system prompt is what /v1/baseline edits)
+META_KEY, MAX_CHARS = SYSTEM.meta_key, SYSTEM.max_chars
 
 
-def save_snapshot(text: str, bot_dir: Path) -> None:
-    safefs.write_text(isolation.state_dir(bot_dir) / SNAPSHOT, _sha(text), isolation.file_mode(),
-                      dir_mode=isolation.dir_mode())
+def effective_layers(store: JobStore) -> dict[str, str]:
+    return {layer.key: layer.effective(store) for layer in LAYERS}
+
+
+# --- auto-continue (0.11.10) ---
+
+AUTO_CONTINUE_KEY = "auto_continue"
+AUTO_CONTINUE_DEFAULT = {"enabled": True, "max": 10}
+AUTO_CONTINUE_MAX = 50
+
+
+def auto_continue(store: JobStore) -> dict[str, object]:
+    settings = dict(AUTO_CONTINUE_DEFAULT)
+    raw = store.get_meta(AUTO_CONTINUE_KEY)
+    if raw:
+        try:
+            saved = json.loads(raw)
+        except ValueError:
+            saved = {}
+        if isinstance(saved, dict):
+            if isinstance(saved.get("enabled"), bool):
+                settings["enabled"] = saved["enabled"]
+            if isinstance(saved.get("max"), int) and not isinstance(saved.get("max"), bool):
+                settings["max"] = max(1, min(AUTO_CONTINUE_MAX, saved["max"]))
+    return settings
+
+
+def set_auto_continue(store: JobStore, enabled: bool | None = None, maximum: int | None = None) -> dict[str, object]:
+    settings = auto_continue(store)
+    if enabled is not None:
+        settings["enabled"] = bool(enabled)
+    if maximum is not None:
+        if not 1 <= maximum <= AUTO_CONTINUE_MAX:
+            raise ValueError(f"the limit must be between 1 and {AUTO_CONTINUE_MAX}")
+        settings["max"] = maximum
+    store.set_meta(AUTO_CONTINUE_KEY, json.dumps(settings))
+    return settings
