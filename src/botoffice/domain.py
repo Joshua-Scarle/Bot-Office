@@ -47,6 +47,8 @@ class Slot(StrEnum):
 
 class Job(BaseModel):
     self_extra: str | None = Field(default=None, exclude=True)
+    # 0.11.9: the baseline text this turn's prompt carried (its snapshot is saved once the turn succeeds)
+    baseline_text: str | None = Field(default=None, exclude=True)
     id: UUID
     prompt: str
     status: JobStatus
