@@ -89,6 +89,15 @@ from .voice.text import chunks as speech_chunks
 from .voice.wav import WavError, parse_pcm16_mono
 
 
+class AutoContinueBody(BaseModel):
+    enabled: bool | None = None
+    max: int | None = None
+
+
+class SettingsBody(BaseModel):
+    auto_continue: AutoContinueBody | None = None
+
+
 class AgentMessageCreate(BaseModel):
     to: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=10000)
@@ -976,24 +985,46 @@ def create_app(
         memory.write_shared(body.text)
         return {"text": body.text}
 
-    # 0.11.9: the baseline charter every bot gets. Owner only (master token): bots read it as
-    # BASELINE.md in their job directory but cannot change it.
-    @app.get("/v1/baseline", dependencies=[Depends(auth)])
-    async def get_baseline() -> dict[str, object]:
-        return baseline.state(store)
+    # 0.11.9/0.11.10: the owner-side layers every bot gets (Rules for all bots; the System prompt, which
+    # /v1/baseline has edited since 0.11.9). Owner only (master token): bots read them as files in their
+    # job directory but cannot change them.
+    def _layer_routes(layer: baseline.Layer, *paths: str) -> None:
+        async def get_layer() -> dict[str, object]:
+            return layer.state(store)
 
-    @app.put("/v1/baseline", dependencies=[Depends(auth)])
-    async def put_baseline(body: TextBody) -> dict[str, object]:
-        try:
-            baseline.set_override(store, body.text)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return baseline.state(store)
+        async def put_layer(body: TextBody) -> dict[str, object]:
+            try:
+                layer.set_override(store, body.text)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return layer.state(store)
 
-    @app.delete("/v1/baseline", dependencies=[Depends(auth)])
-    async def reset_baseline() -> dict[str, object]:
-        baseline.reset(store)
-        return baseline.state(store)
+        async def reset_layer() -> dict[str, object]:
+            layer.reset(store)
+            return layer.state(store)
+
+        for path in paths:
+            app.get(path, dependencies=[Depends(auth)])(get_layer)
+            app.put(path, dependencies=[Depends(auth)])(put_layer)
+            app.delete(path, dependencies=[Depends(auth)])(reset_layer)
+
+    _layer_routes(baseline.SYSTEM, "/v1/baseline", "/v1/system-prompt")
+    _layer_routes(baseline.RULES, "/v1/rules-for-all-bots")
+
+    @app.get("/v1/settings", dependencies=[Depends(auth)])
+    async def get_settings() -> dict[str, object]:
+        """Settings for all bots (0.11.10). The two layers have their own routes (large texts)."""
+        return {"auto_continue": baseline.auto_continue(store),
+                "auto_continue_max_limit": baseline.AUTO_CONTINUE_MAX}
+
+    @app.put("/v1/settings", dependencies=[Depends(auth)])
+    async def put_settings(body: SettingsBody) -> dict[str, object]:
+        if body.auto_continue is not None:
+            try:
+                baseline.set_auto_continue(store, body.auto_continue.enabled, body.auto_continue.max)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return await get_settings()
 
     @app.get("/v1/desktops", dependencies=[Depends(auth)])
     async def list_desktops() -> list[dict]:
@@ -1483,6 +1514,9 @@ def create_app(
                     pending=True,
                     job_status=job.status.value,
                     not_before=job.not_before,
+                    author="bot",
+                    continuing=(f"{job.continue_count} of {baseline.auto_continue(store)['max']}"
+                                if job.continue_count else None),
                 )
             )
         return messages

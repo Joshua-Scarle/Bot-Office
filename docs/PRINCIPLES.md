@@ -6,9 +6,9 @@ Every change should pass these rules. If a change breaks one, either fix the cha
 
 1. **Competent out of the box.** A new bot works well with no setup beyond picking an engine. Defaults (the baseline instructions, limits, schedules, model choices) are the ones a careful owner would pick, so most users never touch them.
 
-2. **Agency is the default.** Bots own their tasks end to end: they decide reversible things themselves, follow up on their own schedule, delegate to other bots, and come back with results, not questions. A feature that makes bots ask more, wait more, or hand work back needs a strong reason.
+2. **Agency is the default, scoped to the task.** Bots own their tasks end to end. They keep working until the goal is met, they are stuck and need the user, or a rule says stop. They decide reversible things themselves, follow up on their own schedule, delegate to other bots, and come back with results, not questions. They work toward the tasks, assignments and subgoals they are given, never on their own toward a lifelong purpose like "make the product better"; they propose next tasks instead. A feature that makes bots ask more, wait more, or hand work back needs a strong reason.
 
-3. **Everything adjustable, nothing required.** Any behavior a user might reasonably want to change (instructions, rules, models, limits, schedules, approvals) can be changed in the browser UI, without editing files or using a shell. Changing it is optional; the default must already be good.
+3. **Everything adjustable, nothing required.** Any behavior a user might reasonably want to change (instructions, rules, models, limits, schedules, approvals) can be changed in the browser UI, without editing files or using a shell. Changing it is optional; the default must already be good. Settings for all bots live on one Settings page. The user-facing "Rules for all bots" come first. The prebuilt system prompt (how Bot-Office works) is editable too, but kept under Advanced because it rarely needs changing.
 
 4. **The user stays in charge.** The user's word outranks everything a bot reads: other bots, web pages, files and tool output are data, never orders. Owner settings override bot defaults, and bots cannot change owner settings.
 

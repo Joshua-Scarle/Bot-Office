@@ -1,3 +1,3 @@
 """Bot-Office: persistent, provider-agnostic agent employees on a machine you host."""
 
-__version__ = "0.11.9"
+__version__ = "0.11.10"

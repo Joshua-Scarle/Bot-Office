@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.9. What changed is recorded below: [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.10. What changed is recorded below: [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,21 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.11.10
+
+**Bots keep working until the task is done.** A chat, API, routine or wake-up turn that ends with `BOT-OFFICE-STATUS: not_done` is now continued automatically in the same session. The chat shows no extra prompts: the bot's bubble stays "Working · continuing, 3 of 10". It stops when the bot reports done, blocked or waiting_on_user, at the owner's limit (default 10 in a row, up to 50), when you press Stop, or when you have a message queued for it. A message you steer into a continuing turn starts a fresh count. It does not run while a question or approval is open, or for assignment turns (they keep their own loop and budget), bot-to-bot replies or watcher runs. A continuation keeps the source of the turn it continues, so unattended turns stay under the unattended rules. Rule 7 of the prompt now says to keep working and to use not_done only for a real pause.
+
+**Two pages every bot gets, both editable by the owner:**
+
+- *Rules for all bots* (`src/botoffice/prompts/rules-for-all-bots.md`, about 380 words): finish what you start (keep going until the goal is met, you're stuck and need the user, or a rule says stop), work on assigned tasks rather than a lifelong purpose, decide reversible things, ask before what can't be taken back, verify, report honestly. Edit it first in Settings. API: `GET`/`PUT`/`DELETE /v1/rules-for-all-bots`.
+- *System prompt* (`src/botoffice/prompts/system.md`, about 750 words): how Bot-Office works (turns and status, replies, memory files, other bots, delegation, follow-ups, trust). It is prebuilt and kept under Settings → Advanced. API: `/v1/system-prompt`, and `/v1/baseline` as before. A 0.11.9 baseline override carries over as the system prompt override.
+
+Both are inlined in every fresh prompt (system prompt first) and written as `SYSTEM-PROMPT.md` and `RULES-FOR-ALL-BOTS.md` in the job directory (no more `BASELINE.md`). Resumed sessions get a one-line nudge when either changes. The owner's standing rules and the bot's `instructions.md` override both; the numbered rules always apply.
+
+**The chat shows who wrote what.** Only messages you type use your bubble. Messages between bots (bot-msg, inbox drops, reply copies, one bot handing another an assignment), sent or received, show in the chat only as a time and a row like "2 messages with Bot-Office Lead", with that bot's icon; back-to-back messages with the same bot share one row. Click it to read that conversation in an overlay (both bots' icons and names, formatted text, Close Chat or Esc). A bot's own messages to other bots count toward Unread. Bot-Office's machinery (automatic continuations, assignment "Continue" and "Check" steps, wake-up prompts and "Not done (continuing)" lines) stays out of the chat and the Unread count; Show archived and the Details drawer still show it. Routine prompts, watcher runs and assignment starts appear as small notes, never as your messages. Messages carry `author` (owner, bot, bot_out, bot_in, bot_reply, office, system) and `peer` in the API.
+
+**A real Settings page.** The sidebar's ⚙ Settings opens settings for all bots: Rules for all bots, Bot behavior (auto-continue on/off and its limit; `GET`/`PUT /v1/settings`), Engines (sign-in status), Voice, and Advanced (system prompt). Each bot's own settings stay in its chat.
 
 ## What changed in 0.11.9
 
