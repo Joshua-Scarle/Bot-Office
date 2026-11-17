@@ -1,0 +1,35 @@
+[Unit]
+# 0.11.0 isolated layout (installed by deploy/install-isolation.sh --apply). The controller runs
+# as system user botoffice; the provider CLIs and podman run as the bots user through
+# /usr/local/libexec/bot-office-run (sudoers: botoffice ALL=(ubuntu) NOPASSWD: that path only).
+Description=Bot-Office controller (isolated: user botoffice)
+After=network.target
+
+[Service]
+Type=simple
+User=botoffice
+Group=botoffice
+SupplementaryGroups=bo-share
+UMask=0007
+WorkingDirectory=/opt/bot-office
+Environment=BOT_OFFICE_PRIVATE_DIR=/var/lib/bot-office/private
+Environment=BOT_OFFICE_TOKEN_FILE=/var/lib/bot-office/private/token
+Environment=BOT_OFFICE_DATA_DIR=/var/lib/bot-office/data
+Environment=BOT_OFFICE_LAUNCHER=/usr/local/libexec/bot-office-run
+Environment=BOT_OFFICE_BOTS_USER=ubuntu
+Environment=HOME=/var/lib/bot-office/private
+# The controller's own PATH holds no dir the bots user can write (0.11.0 review Sec 3). Bot CLIs,
+# gh and podman resolve as the bots user on BOT_OFFICE_BOTS_PATH (launcher --which).
+Environment=PATH=/opt/bot-office/bin:/usr/local/bin:/usr/bin:/bin
+Environment=BOT_OFFICE_BOTS_PATH=/home/ubuntu/.local/bin:/home/ubuntu/.grok/bin:/home/ubuntu/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/bot-office/.venv/bin/python -m botoffice
+Restart=on-failure
+RestartSec=5
+# stop/restart: sudo relays SIGTERM to the bots' CLIs; the launcher's --stop-job finds the rest
+KillMode=control-group
+# no ProtectSystem/PrivateTmp: the bots' CLIs and podman inherit this unit's mount namespace,
+# and sudo (the privileged path) needs NoNewPrivileges off for the controller itself
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,317 @@
+{"type": "system", "subtype": "init"}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "F"}]}, "timestamp_ms": 1794784158462}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ir"}]}, "timestamp_ms": 1794784158462}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "st"}]}, "timestamp_ms": 1794784158462}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " s"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "yn"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "he"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ti"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c "}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "se"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "te"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "nc"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e "}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "fo"}]}, "timestamp_ms": 1794784158463}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "r "}]}, "timestamp_ms": 1794784158464}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}, "timestamp_ms": 1794784158464}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " p"}]}, "timestamp_ms": 1794784158471}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "re"}]}, "timestamp_ms": 1794784158472}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "li"}]}, "timestamp_ms": 1794784158472}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "mi"}]}, "timestamp_ms": 1794784158473}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784158473}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ar"}]}, "timestamp_ms": 1794784158473}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "y "}]}, "timestamp_ms": 1794784158473}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ch"}]}, "timestamp_ms": 1794784158473}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ec"}]}, "timestamp_ms": 1794784158473}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "k."}]}, "model_call_id": "synthetic", "timestamp_ms": 1794784158475}
+{"type": "tool_call", "subtype": "started", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "S"}]}, "timestamp_ms": 1794784270782}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784270783}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "co"}]}, "timestamp_ms": 1794784270783}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784270783}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "d"}]}, "timestamp_ms": 1794784270783}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " s"}]}, "timestamp_ms": 1794784270783}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "y"}]}, "timestamp_ms": 1794784270783}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "nt"}]}, "timestamp_ms": 1794784270783}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "h"}]}, "timestamp_ms": 1794784270783}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784270784}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ti"}]}, "timestamp_ms": 1794784270784}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c"}]}, "timestamp_ms": 1794784270808}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784270837}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "se"}]}, "timestamp_ms": 1794784270870}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784270902}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "te"}]}, "timestamp_ms": 1794784270932}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784270963}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c"}]}, "timestamp_ms": 1794784271008}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e "}]}, "timestamp_ms": 1794784271031}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "d"}]}, "timestamp_ms": 1794784271035}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "es"}]}, "timestamp_ms": 1794784271046}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c"}]}, "timestamp_ms": 1794784271060}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "r"}]}, "timestamp_ms": 1794784271069}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ib"}]}, "timestamp_ms": 1794784271080}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784271090}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s"}]}, "timestamp_ms": 1794784271100}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " a"}]}, "timestamp_ms": 1794784271111}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784271122}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ot"}]}, "timestamp_ms": 1794784271148}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "h"}]}, "timestamp_ms": 1794784271148}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784271162}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "r "}]}, "timestamp_ms": 1794784271167}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "r"}]}, "timestamp_ms": 1794784271177}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "o"}]}, "timestamp_ms": 1794784271188}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ut"}]}, "timestamp_ms": 1794784271200}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "i"}]}, "timestamp_ms": 1794784271211}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ne"}]}, "timestamp_ms": 1794784271220}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784271230}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c"}]}, "timestamp_ms": 1794784271241}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "he"}]}, "timestamp_ms": 1794784271252}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c"}]}, "timestamp_ms": 1794784271264}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "k."}]}, "model_call_id": "synthetic", "timestamp_ms": 1794784271762}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"grepToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"editToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"shellToolCall": {"args": {}}}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"shellToolCall": {"args": {}}}}
+{"type": "thinking", "subtype": "completed"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "F"}]}, "timestamp_ms": 1794784310510}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "in"}]}, "timestamp_ms": 1794784310510}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}, "timestamp_ms": 1794784310511}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "l "}]}, "timestamp_ms": 1794784310511}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s"}]}, "timestamp_ms": 1794784310511}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "yn"}]}, "timestamp_ms": 1794784310512}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310512}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "he"}]}, "timestamp_ms": 1794784310512}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310512}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ic"}]}, "timestamp_ms": 1794784310512}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310513}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "se"}]}, "timestamp_ms": 1794784310513}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784310513}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "te"}]}, "timestamp_ms": 1794784310513}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784310525}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ce"}]}, "timestamp_ms": 1794784310525}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310525}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "re"}]}, "timestamp_ms": 1794784310525}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "p"}]}, "timestamp_ms": 1794784310525}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "or"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s "}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "he"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ou"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "co"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "m"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e "}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "o"}]}, "timestamp_ms": 1794784310526}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "f "}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "he"}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ch"}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ck"}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s"}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": ". "}]}, "timestamp_ms": 1794784310527}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "A"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ll"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ch"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ck"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " p"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "as"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s"}]}, "timestamp_ms": 1794784310528}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ed"}]}, "timestamp_ms": 1794784310529}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310529}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "sa"}]}, "timestamp_ms": 1794784310529}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "f"}]}, "timestamp_ms": 1794784310529}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "el"}]}, "timestamp_ms": 1794784310529}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "y"}]}, "timestamp_ms": 1794784310529}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " a"}]}, "timestamp_ms": 1794784310529}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784310530}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "d "}]}, "timestamp_ms": 1794784310530}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310531}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "he"}]}, "timestamp_ms": 1794784310531}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310532}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ex"}]}, "timestamp_ms": 1794784310532}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}, "timestamp_ms": 1794784310532}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "mp"}]}, "timestamp_ms": 1794784310532}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "l"}]}, "timestamp_ms": 1794784310532}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e "}]}, "timestamp_ms": 1794784310532}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "i"}]}, "timestamp_ms": 1794784310533}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s "}]}, "timestamp_ms": 1794784310533}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c"}]}, "timestamp_ms": 1794784310533}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "om"}]}, "timestamp_ms": 1794784310533}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "p"}]}, "timestamp_ms": 1794784310533}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "le"}]}, "timestamp_ms": 1794784310533}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310534}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e."}]}, "timestamp_ms": 1794784310534}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310534}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Al"}]}, "timestamp_ms": 1794784310534}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "l"}]}, "timestamp_ms": 1794784310534}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " c"}]}, "timestamp_ms": 1794784310534}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "h"}]}, "timestamp_ms": 1794784310535}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ec"}]}, "timestamp_ms": 1794784310535}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "k"}]}, "timestamp_ms": 1794784310535}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s "}]}, "timestamp_ms": 1794784310535}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "p"}]}, "timestamp_ms": 1794784310535}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "as"}]}, "timestamp_ms": 1794784310536}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s"}]}, "timestamp_ms": 1794784310536}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ed"}]}, "timestamp_ms": 1794784310536}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310536}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "sa"}]}, "timestamp_ms": 1794784310537}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "f"}]}, "timestamp_ms": 1794784310537}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "el"}]}, "timestamp_ms": 1794784310537}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "y"}]}, "timestamp_ms": 1794784310537}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " a"}]}, "timestamp_ms": 1794784310537}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "n"}]}, "timestamp_ms": 1794784310537}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "d "}]}, "timestamp_ms": 1794784310537}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "t"}]}, "timestamp_ms": 1794784310537}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "he"}]}, "timestamp_ms": 1794784310538}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " e"}]}, "timestamp_ms": 1794784310538}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}]}, "timestamp_ms": 1794784310538}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "am"}]}, "timestamp_ms": 1794784310538}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "p"}]}, "timestamp_ms": 1794784310538}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "le"}]}, "timestamp_ms": 1794784310539}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310539}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "is"}]}, "timestamp_ms": 1794784310539}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310539}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "co"}]}, "timestamp_ms": 1794784310539}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "m"}]}, "timestamp_ms": 1794784310539}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "pl"}]}, "timestamp_ms": 1794784310540}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784310540}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "te"}]}, "timestamp_ms": 1794784310544}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "."}]}, "timestamp_ms": 1794784310544}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " A"}]}, "timestamp_ms": 1794784310544}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "l"}]}, "timestamp_ms": 1794784310671}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "l "}]}, "timestamp_ms": 1794784310674}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c"}]}, "timestamp_ms": 1794784310674}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "he"}]}, "timestamp_ms": 1794784310675}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "c"}]}, "timestamp_ms": 1794784310678}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ks"}]}, "timestamp_ms": 1794784310678}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310679}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "pa"}]}, "timestamp_ms": 1794784310679}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "s"}]}, "timestamp_ms": 1794784310679}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "se"}]}, "timestamp_ms": 1794784310679}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "d"}]}, "timestamp_ms": 1794784310679}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " s"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "fe"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "l"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "y "}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "nd"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "th"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " e"}]}, "timestamp_ms": 1794784310680}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}]}, "timestamp_ms": 1794784310681}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "am"}]}, "timestamp_ms": 1794784310681}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "p"}]}, "timestamp_ms": 1794784310681}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "le"}]}, "timestamp_ms": 1794784310681}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310681}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "is"}]}, "timestamp_ms": 1794784310681}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": " "}]}, "timestamp_ms": 1794784310681}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "co"}]}, "timestamp_ms": 1794784310683}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "m"}]}, "timestamp_ms": 1794784310683}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "pl"}]}, "timestamp_ms": 1794784310683}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "e"}]}, "timestamp_ms": 1794784310683}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "te"}]}, "timestamp_ms": 1794784310684}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": ". "}]}, "timestamp_ms": 1794784310684}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Final synthetic sentence reports the outcome of the checks. All checks passed safely and the example is complete. All checks passed safely and the example is complete. All checks passed safely and the example is complete. "}]}}
+{"type": "result", "subtype": "success", "duration_ms": 193068, "duration_api_ms": 193068, "is_error": false, "result": "First synthetic sentence for a preliminary check.Second synthetic sentence describes another routine check.Final synthetic sentence reports the outcome of the checks. All checks passed safely and the example is complete. All checks passed safely and the example is complete. All checks passed safely and the example is complete. ", "usage": {"inputTokens": 84228, "outputTokens": 23181, "cacheReadTokens": 1042560, "cacheWriteTokens": 0, "reasoningTokens": 16257}}

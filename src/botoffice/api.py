@@ -1,0 +1,1923 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+from contextlib import closing
+import hashlib
+import json
+import re
+import time
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from . import attachments, grok_bridge, isolation, needs_you, safefs, vnc
+from . import rules as action_rules
+from . import usage as budgets
+from .auth import auth_dependency, bearer
+from .catalog import (
+    ENGINE_LABELS,
+    ENGINES,
+    STATIC_MODELS,
+    capability_tier,
+    choice_label,
+    default_effort,
+    default_model,
+    effort_levels,
+    model_error,
+    shortlist_models,
+    valid_effort,
+)
+from .config import Settings
+from .cron import min_gap
+from .desktop import run_desktop_command
+from .assignments import BOT_ROUTINE_MIN_GAP, MAX_BOT_ROUTINES, AssignmentError
+from .domain import (
+    _check_cron,
+    Assignment,
+    AssignmentCreate,
+    AssignmentReply,
+    AssignmentStart,
+    AssignmentUpdate,
+    Bot,
+    BotCreate,
+    BotUpdate,
+    DesktopCommand,
+    EngineChoice,
+    InboxCreate,
+    Job,
+    JobCreate,
+    JobStatus,
+    Message,
+    MessageCreate,
+    MessageEdit,
+    MessagePosted,
+    ModelOption,
+    ProviderInfo,
+    ReadMark,
+    Routine,
+    RoutineCreate,
+    RoutineUpdate,
+    TextBody,
+    Wakeup,
+)
+from .providers.antigravity import AntigravityAdapter
+from .providers.base import ProviderAdapter
+from .providers.claude import ClaudeAdapter
+from .providers.codex import CodexAdapter
+from .providers.cursor import CursorAdapter
+from .providers.grok import GrokAdapter
+from .providers.opencode import OpenCodeAdapter
+from .scheduler import Scheduler
+from .store import EditError, JobStore
+from .turns import TurnError
+from .watchers import BODY_LIMIT as WATCHER_BODY_LIMIT
+from .watchers import WatcherError
+from .voice import SpeakableRequest, SpeakRequest, VoiceError, VoicePrefs, VoiceService
+from .voice import VoicePrefsUpdate as VoicePrefsBody
+from .voice.text import chunks as speech_chunks
+from .voice.wav import WavError, parse_pcm16_mono
+
+
+class AgentMessageCreate(BaseModel):
+    to: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=10000)
+    wait: bool = False
+    timeout: float = Field(default=30, gt=0, le=120)
+
+
+class AgentAssignmentCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    goal: str = Field(default="", max_length=20_000)
+    done_when: str = Field(default="", max_length=4000)
+    for_bot: str | None = Field(default=None, max_length=200)
+    parent_id: str | None = Field(default=None, max_length=64)
+    budget_turns: int = Field(default=20, ge=1, le=200)
+    budget_minutes: int = Field(default=120, ge=1, le=24 * 60)
+    start: bool = True
+
+
+class AgentStatus(BaseModel):
+    state: str = Field(min_length=1, max_length=32)
+    note: str = Field(default="", max_length=1000)
+
+
+class AgentText(BaseModel):
+    text: str = Field(max_length=20_000)
+
+
+class GateRequest(BaseModel):
+    provider: str = Field(default="", max_length=32)
+    event: dict = Field(default_factory=dict)
+
+
+# a hook event is at most what bin/bot-office-gate forwards (1 MB of stdin) plus its envelope;
+# larger bodies are refused before parsing (0.11.0 review Sec 4)
+GATE_BODY_LIMIT = 1024 * 1024 + 4096
+SWITCH_OPTIONS_TTL = 60.0  # #10: seconds a parked job's [Retry on <provider>] choices are reused
+
+
+async def _read_capped(request: Request, limit: int, what: str) -> bytes:
+    """The request body, refused with 413 above *limit* bytes (400 for a bad Content-Length)."""
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="bad Content-Length") from exc
+    if declared > limit:
+        raise HTTPException(status_code=413, detail=f"{what} over {limit // 1024} kB")
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            raise HTTPException(status_code=413, detail=f"{what} over {limit // 1024} kB")
+    return bytes(body)
+
+
+class RuleCreate(BaseModel):
+    bot_id: UUID | None = None
+    effect: str = Field(max_length=10)
+    kind: str = Field(max_length=10)
+    pattern: str = Field(min_length=1, max_length=500)
+    scope: str = Field(default="all", max_length=12)
+    note: str = Field(default="", max_length=500)
+
+
+class WatcherCreate(BaseModel):
+    kind: str = Field(max_length=12)
+    name: str = Field(min_length=1, max_length=80)
+    prompt: str = Field(min_length=1, max_length=4000)
+    config: dict = Field(default_factory=dict)
+    debounce_s: int = 60
+    max_per_hour: int = 6
+    enabled: bool = True
+
+
+class WatcherUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    prompt: str | None = Field(default=None, max_length=4000)
+    config: dict | None = None
+    debounce_s: int | None = None
+    max_per_hour: int | None = None
+    enabled: bool | None = None
+
+
+class BudgetAllow(BaseModel):
+    turns: int = Field(default=10, ge=0, le=1000)
+    minutes: int = Field(default=30, ge=0, le=1440)
+    tokens: int = Field(default=0, ge=0, le=10**9)
+
+
+class NeedsYouDismiss(BaseModel):
+    assignment_id: UUID
+
+
+class SwitchProvider(BaseModel):
+    """#10 "Retry on <provider>" for a job parked on a usage limit (owner only)."""
+    provider: str = Field(min_length=1, max_length=40)
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class AgentWakeup(BaseModel):
+    assignment_id: str | None = Field(default=None, max_length=64)
+    due_at: datetime | None = None
+    in_minutes: int | None = Field(default=None, ge=1, le=60 * 24 * 31)
+    on_assignment: str | None = Field(default=None, max_length=64)
+    note: str = Field(default="", max_length=2000)
+
+
+class AgentRoutine(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    cron: str = Field(min_length=1, max_length=100)
+    prompt: str = Field(min_length=1, max_length=20_000)
+    enabled: bool = True
+
+    _cron = field_validator("cron")(_check_cron)
+
+
+class AgentRoutineUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    cron: str | None = Field(default=None, min_length=1, max_length=100)
+    prompt: str | None = Field(default=None, min_length=1, max_length=20_000)
+    enabled: bool | None = None
+
+    @field_validator("cron")
+    @classmethod
+    def _cron(cls, value: str | None) -> str | None:
+        return None if value is None else _check_cron(value)
+
+
+class BridgeSend(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    to: str = Field(min_length=1, max_length=200)
+    kind: str = Field(min_length=1, max_length=20)
+    text: str = Field(min_length=1, max_length=10000)
+    thread_id: str | None = Field(default=None, max_length=200)
+    from_bot: str | None = Field(default=None, alias="from", max_length=200)
+
+
+class BridgeInbox(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    to: str = Field(min_length=1, max_length=200)
+    sender: str = Field(alias="from", min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=10000)
+    thread_id: str | None = Field(default=None, max_length=200)
+    hop: int | None = None
+
+
+CHAT_PAGE = Path(__file__).parent / "static" / "bot-office.html"
+MAX_ICON_BYTES = 256 * 1024
+TERMINAL = {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.NEEDS_LOGIN, JobStatus.INCOMPLETE}
+EVENT_POLL_SECONDS = 0.2
+EVENT_KEEPALIVE_SECONDS = 15.0
+EVENT_GRACE_SECONDS = 3.0
+SNAPSHOT_LIMIT = 2000
+EDIT_CANCEL_WAIT_SECONDS = 15.0
+STT_MAX_BYTES = 4 * 1024 * 1024  # ~125 s of 16 kHz 16-bit mono
+STT_MIN_SECONDS, STT_MAX_SECONDS = 0.3, 120.0
+STT_PER_MINUTE = 20
+TTS_PER_MINUTE = 120
+SPEAKABLE_PER_MINUTE = 60
+STT_READ_SECONDS = 30.0  # a slow upload never holds a connection open longer
+# synthesized audio is served as an opaque download, never rendered as a document
+AUDIO_HEADERS = {
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "sandbox",
+    "Content-Disposition": 'inline; filename="speech.wav"',
+}
+VOICE_REAP_SECONDS = 30.0
+ICON_FILE = "icon"
+_sniff_image = attachments.sniff_image
+
+
+def _page_with_csp() -> tuple[str, str]:
+    """Return the page and a CSP that allows only its own inline script and style."""
+    html = CHAT_PAGE.read_text(encoding="utf-8")
+
+    def hashes(tag: str) -> str:
+        blocks = re.findall(rf"<{tag}>(.*?)</{tag}>", html, flags=re.DOTALL)
+        return " ".join(
+            "'sha256-" + base64.b64encode(hashlib.sha256(b.encode()).digest()).decode() + "'"
+            for b in blocks
+        )
+
+    csp = (
+        "default-src 'none'; "
+        f"script-src 'self' {hashes('script')}; style-src {hashes('style')}; "
+        "img-src blob: data:; media-src blob:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'none'"
+    )
+    return html, csp
+
+
+def _default_providers(settings: Settings) -> dict[str, ProviderAdapter]:
+    return {
+        "opencode": OpenCodeAdapter(enabled="opencode" in settings.enabled_providers),
+        "codex": CodexAdapter(enabled="codex" in settings.enabled_providers),
+        "claude": ClaudeAdapter(enabled="claude" in settings.enabled_providers),
+        "cursor": CursorAdapter(enabled="cursor" in settings.enabled_providers),
+        "antigravity": AntigravityAdapter(enabled="antigravity" in settings.enabled_providers),
+        "grok": GrokAdapter(),
+    }
+
+
+def _tail(path: str | None, limit: int = 8192) -> str:
+    if not path:
+        return ""
+    try:
+        with Path(path).open("rb") as stream:
+            stream.seek(0, 2)
+            size = stream.tell()
+            stream.seek(max(0, size - limit))
+            return stream.read().decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def create_app(
+    settings: Settings | None = None,
+    providers: dict[str, ProviderAdapter] | None = None,
+    store: JobStore | None = None,
+    voice: VoiceService | None = None,
+) -> FastAPI:
+    if settings is None:
+        # the real server: pick the layout (launcher + private dir, or the old single-user one)
+        settings = Settings.from_env()
+        isolation.configure(settings)
+        if settings.private_dir and not settings.private_dir.is_dir():
+            # never fall back to the shared tree for the DB and the token (Sec 6)
+            raise RuntimeError(f"BOT_OFFICE_PRIVATE_DIR {settings.private_dir} is missing; "
+                               "run deploy/install-isolation.sh --apply or unset it")
+    store = store or JobStore(settings.db_path, initialize=False)
+    providers = providers or _default_providers(settings)
+    scheduler = Scheduler(store, settings, providers)
+    voice = voice or VoiceService(settings)
+
+    async def reap_voice() -> None:
+        while True:
+            await asyncio.sleep(VOICE_REAP_SECONDS)
+            with contextlib.suppress(Exception):
+                await voice.reap_idle()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        store.initialize()
+        await asyncio.to_thread(attachments.prune, settings.data_dir, store.attachment_references())
+        await scheduler.start()
+        reaper = asyncio.create_task(reap_voice(), name="botoffice-voice-reaper")
+        yield
+        reaper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reaper
+        await voice.close()
+        await scheduler.stop()
+
+    app = FastAPI(
+        title="Bot-Office",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    app.state.settings = settings
+    app.state.store = store
+    app.state.providers = providers
+    app.state.scheduler = scheduler
+    app.state.voice = voice
+    app.mount("/static/vendor/novnc", StaticFiles(directory=CHAT_PAGE.parent / "vendor" / "novnc"), name="novnc")
+    tickets = vnc.Tickets()
+    proxy_counts: dict[str, int] = {}
+    attachment_uploads: dict[UUID, list[float]] = {}
+    attachment_locks: dict[UUID, asyncio.Lock] = {}
+    attachment_global_lock = asyncio.Lock()
+    upload_slots = asyncio.Semaphore(4)
+
+    async def attachment_io(fn, *args):
+        # Keep the lock held until a worker finishes even if its caller is cancelled.
+        task = asyncio.create_task(asyncio.to_thread(fn, *args))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    def attachment_lock(bot_id: UUID) -> asyncio.Lock:
+        return attachment_locks.setdefault(bot_id, asyncio.Lock())
+    auth = auth_dependency(settings)
+    memory = scheduler.memory
+    assignments = scheduler.assignments
+
+    def _assignment_call(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except AssignmentError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+    def _cancel_jobs(job_ids: list[str]) -> None:
+        for job_id in job_ids:
+            job = store.get(job_id)
+            if job:
+                scheduler.cancel(job)
+
+    def _post_owner_message(bot: Bot, text: str, *, reason: str | None = None,
+                            attachments: list[str] | None = None, queue: bool = False) -> tuple[Message, Job]:
+        """An owner chat post: steered into the bot's running or queued turn (see JobStore.post_steer)
+        unless the caller asks for a separate queued turn (mode "queue"). Bot-to-bot inbox messages,
+        routines, wakeups and assignment steps are not owner posts and never come through here."""
+        if not queue:
+            _, steer_reason = scheduler.turns._validate(bot.default_provider, reason, bot)
+            result = store.post_steer(bot.id, text, attachments or [], steer_reason)
+            if result:
+                return result
+        return scheduler.turns.post_message(bot, text, reason=reason, attachments=attachments)
+
+    def _bot(bot_id: UUID | str) -> Bot:
+        bot = store.get_bot(bot_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="bot not found")
+        return bot
+
+    def _check_claude_reason(provider: str, reason: str | None) -> None:
+        if provider == "claude" and not (reason or "").strip():
+            raise HTTPException(status_code=400, detail="provider claude requires a non-empty reason")
+
+    @app.get("/", response_class=HTMLResponse)
+    async def chat_page() -> HTMLResponse:
+        html, csp = _page_with_csp()
+        return HTMLResponse(
+            html,
+            headers={
+                "Content-Security-Policy": csp,
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "no-store",
+                "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",
+            },
+        )
+
+    @app.post("/v1/jobs", response_model=Job, status_code=201, dependencies=[Depends(auth)])
+    async def create_job(body: JobCreate) -> Job:
+        bot = _bot(body.bot_id) if body.bot_id else None
+        provider = body.provider
+        if bot and "provider" not in body.model_fields_set:
+            provider = bot.default_provider
+        try:
+            return scheduler.turns.create_job(
+                body.prompt,
+                provider,
+                bot=bot,
+                reason=body.reason,
+                source="api",
+                model=body.model,
+                effort=body.effort,
+            )
+        except TurnError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/v1/jobs",
+        response_model=list[Job],
+        response_model_exclude={"__all__": {"reply_text", "draft_text"}},
+        dependencies=[Depends(auth)],
+    )
+    async def list_jobs() -> list[Job]:
+        """All jobs. The full audit reply is on ``GET /v1/jobs/{id}`` (``reply_text``)."""
+        return store.list()
+
+    @app.get("/v1/jobs/{job_id}", dependencies=[Depends(auth)])
+    async def get_job(job_id: UUID) -> dict[str, Any]:
+        job = store.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        return {"job": job, "log_tail": _tail(job.log_path)}
+
+    def _frame(event: dict[str, Any]) -> str:
+        data = json.dumps(event, ensure_ascii=False)
+        return f"id: {event['seq']}\nevent: {event['kind']}\ndata: {data}\n\n"
+
+    @app.get("/v1/jobs/{job_id}/events", dependencies=[Depends(auth)])
+    async def job_events(job_id: UUID, request: Request, after: int = Query(default=0, ge=0)):
+        """Stream events of one job (chat, inbox, routine or API).
+
+        ``Accept: text/event-stream`` gives SSE (``id``/``event``/``data`` frames; use
+        ``fetch`` with the bearer header, never the query string). Otherwise a JSON
+        snapshot. Resume after a reload with ``?after=<seq>`` or ``Last-Event-ID``.
+        """
+        job = store.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        last_id = (request.headers.get("last-event-id") or "").strip()
+        if last_id.isdigit():
+            after = int(last_id)
+        if "text/event-stream" not in request.headers.get("accept", ""):
+            events = store.list_events(job_id, after, SNAPSHOT_LIMIT)
+            current = store.get(job_id) or job
+            finished = current.status in TERMINAL and len(events) < SNAPSHOT_LIMIT
+            return {
+                "job_id": str(job_id),
+                "status": current.status,
+                "events": events,
+                "next": events[-1]["seq"] if events else after,
+                "done": finished,
+                "draft": current.draft_text or "",
+                "reply_text": current.reply_text if finished else None,
+            }
+
+        async def stream():
+            cursor = after
+            idle = 0.0
+            terminal_wait = 0.0
+            while True:
+                events = store.list_events(job_id, cursor, 500)
+                for event in events:
+                    cursor = event["seq"]
+                    yield _frame(event)
+                    if event["kind"] == "done":
+                        # a retried job re-runs under the same id: only the current attempt's
+                        # done ends the stream (events before 0.9.0 carry no attempt)
+                        current = store.get(job_id)
+                        if current is None or event.get("attempt", current.execution) == current.execution:
+                            return
+                if events:
+                    idle = terminal_wait = 0.0
+                    continue
+                current = store.get(job_id)
+                if current is None:
+                    return
+                if current.status in TERMINAL:
+                    # the scheduler writes final+done just after marking the job finished;
+                    # a job that never streamed (older job) closes at once
+                    if store.last_event_seq(job_id) == 0 or terminal_wait >= EVENT_GRACE_SECONDS:
+                        tail = {"seq": cursor, "kind": "done", "status": current.status.value}
+                        yield f"event: done\ndata: {json.dumps(tail)}\n\n"
+                        return
+                    terminal_wait += EVENT_POLL_SECONDS
+                if await request.is_disconnected():
+                    return
+                idle += EVENT_POLL_SECONDS
+                if idle >= EVENT_KEEPALIVE_SECONDS:
+                    idle = 0.0
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(EVENT_POLL_SECONDS)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.post("/v1/jobs/{job_id}/cancel", response_model=Job, dependencies=[Depends(auth)])
+    async def cancel_job(job_id: UUID) -> Job:
+        before = store.get(job_id)
+        if not before:
+            raise HTTPException(status_code=404, detail="job not found")
+        if before.status == JobStatus.RUNNING:
+            scheduler.cancel(before)
+            job = store.get(job_id)
+        else:
+            job = store.cancel(job_id)
+        assert job is not None
+        return job
+
+    @app.post("/v1/jobs/{job_id}/retry", response_model=Job, dependencies=[Depends(auth)])
+    async def retry_job(job_id: UUID) -> Job:
+        """Re-queue a failed or incomplete job now, as the same job (same chat turn)."""
+        try:
+            return store.retry_now(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/v1/slots", dependencies=[Depends(auth)])
+    async def get_slots() -> list[dict[str, object]]:
+        return scheduler.slots()
+
+    async def _provider_info(name: str) -> ProviderInfo:
+        adapter = providers.get(name)
+        enabled = bool(adapter and adapter.enabled and name in settings.enabled_providers)
+        if not enabled:
+            login = "disabled"
+        else:
+            try:
+                login = await adapter.login_status()
+                if login not in {"ok", "needs_login", "disabled", "error"}:
+                    login = "error"
+            except Exception:
+                login = "error"
+        return ProviderInfo(name=name, enabled=enabled, login_status=login)
+
+    @app.get("/v1/providers", response_model=list[ProviderInfo], dependencies=[Depends(auth)])
+    async def get_providers() -> list[ProviderInfo]:
+        names = (*ENGINES, "grok")
+        return list(await asyncio.gather(*(_provider_info(name) for name in names)))
+
+    @app.get("/v1/model-choices", response_model=list[EngineChoice], dependencies=[Depends(auth)])
+    async def get_model_choices(refresh: bool = False) -> list[EngineChoice]:
+        """Engines that are enabled and signed in, each with selectable model ids."""
+
+        async def _choice(info: ProviderInfo) -> EngineChoice | None:
+            if not info.enabled or info.login_status != "ok":
+                return None
+            adapter = providers[info.name]
+            models: list[tuple[str, str]] = []
+            lister = getattr(adapter, "list_models", None)
+            if lister is not None:
+                try:
+                    models = list(await (lister(refresh=True) if refresh else lister()))
+                except Exception:
+                    models = []
+            if not models:
+                models = list(STATIC_MODELS.get(info.name, ()))
+            models = shortlist_models(info.name, models)
+            return EngineChoice(
+                engine=info.name,
+                label=ENGINE_LABELS[info.name],
+                default_model=default_model(info.name),
+                models=[
+                    ModelOption(
+                        id=mid,
+                        label=label,
+                        display=choice_label(info.name, mid, label),
+                        capability_tier=capability_tier(mid),
+                    )
+                    for mid, label in models
+                ],
+                efforts=list(effort_levels(info.name)),
+                default_effort=default_effort(info.name),
+            )
+
+        infos = await asyncio.gather(*(_provider_info(name) for name in ENGINES))
+        listed = await asyncio.gather(*(_choice(info) for info in infos))
+        return [choice for choice in listed if choice is not None]
+
+    @app.post("/v1/slots/{slot_name}/exec", dependencies=[Depends(auth)])
+    async def exec_in_desktop(slot_name: str, body: DesktopCommand) -> dict[str, str | int]:
+        if slot_name not in settings.desktops:
+            raise HTTPException(status_code=404, detail="unknown slot")
+        slot = slot_name
+        if any(not arg or "\x00" in arg for arg in body.command):
+            raise HTTPException(status_code=422, detail="command arguments must be non-empty")
+        try:
+            return await run_desktop_command(slot, body.command, settings.desktop_timeout)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail="podman executable not found") from exc
+
+    def _check_effort(engine: str, effort: str | None) -> None:
+        if effort is None or valid_effort(engine, effort):
+            return
+        levels = effort_levels(engine)
+        detail = (
+            f"effort must be one of: {', '.join(levels)}"
+            if levels
+            else f"engine {engine} has no effort setting"
+        )
+        raise HTTPException(status_code=400, detail=detail)
+
+    def _check_model(engine: str, model: str | None) -> None:
+        if error := model_error(engine, model):
+            raise HTTPException(status_code=400, detail=error)
+
+    @app.post("/v1/bots", response_model=Bot, status_code=201, dependencies=[Depends(auth)])
+    async def create_bot(body: BotCreate) -> Bot:
+        _check_model(body.default_provider, body.model)
+        _check_claude_reason(body.default_provider, body.reason)
+        _check_effort(body.default_provider, body.effort)
+        try:
+            bot = store.create_bot(
+                body.name.strip(),
+                body.instructions,
+                body.default_provider,
+                body.reason,
+                model=body.model,
+                icon=body.icon or "",
+                description=(body.description or "").strip(),
+                effort=body.effort,
+                cli_access=body.cli_access,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        memory.write_bot(bot.id, "")
+        return bot
+
+    def _with_status(bots: list[Bot]) -> list[Bot]:
+        """Set each bot's ``status`` (offline/working/queued/blocked/waiting/error, else idle)."""
+        with closing(store._connect()) as db:
+            question_bots = {row[0] for row in db.execute("SELECT DISTINCT bot_id FROM questions WHERE status='open'")}
+            if len(bots) == 1:  # one bot (GET/PATCH): read only its latest job, not every job
+                row = db.execute("SELECT * FROM jobs WHERE bot_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+                                 (str(bots[0].id),)).fetchone()
+                latest = {bots[0].id: store._job(row)} if row is not None else {}
+            else:
+                latest = {job.bot_id: job for job in store.list() if job.bot_id}
+        waiting = assignments.bot_states()
+        for bot in bots:
+            adapter = providers.get(bot.default_provider)
+            if not adapter or not adapter.enabled or bot.default_provider not in settings.enabled_providers:
+                bot.status = "offline"
+            elif bot.activity:
+                bot.status = "working" if bot.activity == "running" else "queued"
+            elif state := waiting.get(str(bot.id)):
+                bot.status = state  # from its assignments: blocked or waiting
+            elif str(bot.id) in question_bots:
+                bot.status = "waiting"
+            elif (job := latest.get(bot.id)) and job.status in {JobStatus.FAILED, JobStatus.NEEDS_LOGIN}:
+                bot.status = "error"
+        return bots
+
+    @app.get("/v1/bots", response_model=list[Bot], dependencies=[Depends(auth)])
+    async def list_bots() -> list[Bot]:
+        return _with_status(store.list_bots())
+
+    @app.post("/v1/bots/{bot_id}/read", response_model=Bot, dependencies=[Depends(auth)])
+    async def mark_read(bot_id: UUID, body: ReadMark | None = None) -> Bot:
+        """Mark the bot's messages read up to ``up_to``; a stale request is ignored and the
+        current state is returned so the client can resync its revision."""
+        _bot(bot_id)
+        body = body or ReadMark()
+        store.mark_read(bot_id, body.up_to, body.revision, body.explicit)
+        return store.bot_unread(bot_id)
+
+    @app.post("/v1/bots/{bot_id}/unread", response_model=Bot, dependencies=[Depends(auth)])
+    async def mark_unread(bot_id: UUID) -> Bot:
+        _bot(bot_id)
+        store.mark_unread(bot_id)
+        return store.bot_unread(bot_id)
+
+    @app.get("/v1/bots/{bot_id}", response_model=Bot, dependencies=[Depends(auth)])
+    async def get_bot(bot_id: UUID) -> Bot:
+        _bot(bot_id)
+        return _with_status([store.bot_unread(bot_id)])[0]  # unread fields so a client can resync, and the live status
+
+    @app.patch("/v1/bots/{bot_id}", response_model=Bot, dependencies=[Depends(auth)])
+    async def update_bot(bot_id: UUID, body: BotUpdate) -> Bot:
+        """Edit identity (name, icon, description, instructions), model or effort.
+
+        Changing the engine/model/effort never touches id, memory, history, routines or
+        past jobs (a job keeps the effort it was queued with).
+        """
+        bot = _bot(bot_id)
+        fields = body.model_dump(exclude_unset=True)
+        if fields.get("name"):
+            fields["name"] = fields["name"].strip()
+        if "description" in fields:
+            fields["description"] = (fields["description"] or "").strip()
+        for key in ("name", "instructions", "default_provider", "model", "icon", "cli_access", "notify", "allow_sudo",
+                    "scheduled_runs", "daily_budget", "digest"):
+            if key in fields and fields[key] is None:
+                del fields[key]
+        if "daily_budget" in fields:
+            try:
+                fields["daily_budget_json"] = json.dumps(budgets.check_budget(fields.pop("daily_budget")))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if "digest" in fields:
+            fields["digest"] = int(fields["digest"])
+        if fields.get("job_timeout") is not None and fields["job_timeout"] > settings.max_turn_timeout:
+            raise HTTPException(status_code=422, detail=f"job_timeout must be at most {settings.max_turn_timeout} seconds")
+        if "notify" in fields:
+            fields["notify"] = int(fields["notify"])
+        if "allow_sudo" in fields:
+            # Joshua only (master token): this bot's CLI then runs without no_new_privs and can
+            # read the controller's secrets through sudo
+            fields["allow_sudo"] = int(fields["allow_sudo"])
+        engine = fields.get("default_provider", bot.default_provider)
+        if engine != bot.default_provider and "model" not in fields:
+            # a model id belongs to one engine; pick the new engine's default
+            fields["model"] = default_model(engine)
+        if "model" in fields or engine != bot.default_provider:
+            _check_model(engine, fields.get("model", bot.model))
+        if fields.get("effort") is None and engine != "opencode":
+            fields.pop("effort", None)
+        _check_effort(engine, fields.get("effort"))
+        if engine != bot.default_provider and "effort" not in fields:
+            # keep the level if the new engine accepts it, else that engine's default (or none)
+            keep = bot.effort if bot.effort and valid_effort(engine, bot.effort) else None
+            fields["effort"] = keep or default_effort(engine)
+        _check_claude_reason(engine, fields.get("reason", bot.reason))
+        try:
+            updated = store.update_bot(bot_id, **fields)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        assert updated is not None
+        return _with_status([store.bot_unread(bot_id) or updated])[0]
+
+    @app.post("/v1/bots/{bot_id}/session/reset", dependencies=[Depends(auth)])
+    async def reset_bot_session(bot_id: UUID) -> dict[str, list[str]]:
+        """Forget the bot's saved provider sessions; its next turn starts one fresh session.
+
+        Chat history, memory.md and WORKING.md are kept (the fresh session is seeded with
+        WORKING.md and the last few messages). Refused while the bot has a queued or running job.
+        """
+        bot = _bot(bot_id)
+        if any(j.bot_id == bot.id and j.status in {JobStatus.QUEUED, JobStatus.RUNNING} for j in store.list()):
+            raise HTTPException(status_code=409, detail="bot is busy; reset after its current job")
+        bot_dir = memory.bot_dir(bot.id)
+        reset = [name for name, adapter in providers.items()
+                 if hasattr(adapter, "reset_session") and adapter.reset_session(bot_dir)]
+        return {"reset": reset}
+
+    @app.delete("/v1/bots/{bot_id}", status_code=204, dependencies=[Depends(auth)])
+    async def delete_bot(bot_id: UUID) -> None:
+        """Remove the bot, its messages, routines and data/bots/<id>/. Shared memory stays."""
+        async with attachment_global_lock, attachment_lock(bot_id):
+            _bot(bot_id)
+            for job in store.delete_bot(bot_id):
+                scheduler.cancel(job)
+            try:
+                await attachment_io(memory.delete_bot_dir, bot_id)
+            except (OSError, ValueError) as exc:
+                raise HTTPException(status_code=500, detail="bot removed but its data dir was not") from exc
+
+    def _icon_path(bot_id: UUID) -> Path:
+        return memory.bot_dir(bot_id) / ICON_FILE
+
+    @app.post("/v1/bots/{bot_id}/attachments", status_code=201, dependencies=[Depends(auth)])
+    async def upload_attachment(bot_id: UUID, request: Request) -> dict:
+        _bot(bot_id)
+        length = request.headers.get("content-length")
+        if length:
+            try:
+                if int(length) > attachments.MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="image too large")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid content length") from exc
+        if upload_slots.locked():
+            raise HTTPException(status_code=429, detail="too many concurrent uploads")
+        async with upload_slots:
+            cutoff = time.monotonic() - 60
+            recent = [stamp for stamp in attachment_uploads.get(bot_id, []) if stamp > cutoff]
+            if len(recent) >= 30:
+                raise HTTPException(status_code=429, detail="too many attachment uploads")
+            recent.append(time.monotonic())
+            attachment_uploads[bot_id] = recent
+            data = bytearray()
+            async for chunk in request.stream():
+                if len(data) + len(chunk) > attachments.MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="image too large")
+                data.extend(chunk)
+            if not data:
+                raise HTTPException(status_code=400, detail="image is empty")
+            mime = _sniff_image(data)
+            if not mime:
+                raise HTTPException(status_code=415, detail="unsupported image")
+            try:
+                async with attachment_global_lock, attachment_lock(bot_id):
+                    _bot(bot_id)
+                    refs = await asyncio.to_thread(store.attachment_references)
+                    name = await attachment_io(attachments.save, settings.data_dir, bot_id, bytes(data), mime, refs)
+            except OverflowError as exc:
+                raise HTTPException(status_code=507, detail=str(exc)) from exc
+            except (ValueError, OSError) as exc:
+                raise HTTPException(status_code=400, detail="invalid attachment directory") from exc
+            return {"id": name, "mime": mime, "size": len(data), "url": f"/v1/bots/{bot_id}/attachments/{name}"}
+
+    @app.delete("/v1/bots/{bot_id}/attachments/{attachment_id}", status_code=204, dependencies=[Depends(auth)])
+    async def delete_attachment(bot_id: UUID, attachment_id: str) -> None:
+        async with attachment_global_lock, attachment_lock(bot_id):
+            _bot(bot_id)
+            refs = await asyncio.to_thread(store.attachment_references)
+            if attachment_id in refs.get(str(bot_id), set()):
+                raise HTTPException(status_code=409, detail="attachment is referenced by a message")
+            try:
+                await attachment_io(attachments.delete, settings.data_dir, bot_id, attachment_id)
+            except (ValueError, OSError) as exc:
+                raise HTTPException(status_code=404, detail="attachment not found") from exc
+
+    @app.get("/v1/bots/{bot_id}/attachments/{attachment_id}", dependencies=[Depends(auth)])
+    async def get_attachment(bot_id: UUID, attachment_id: str) -> Response:
+        _bot(bot_id)
+        try:
+            data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
+            mime = _sniff_image(data)
+            if not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
+                raise ValueError("invalid image")
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=404, detail="attachment not found") from exc
+        return Response(data, media_type=mime, headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": "inline", "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+    @app.get("/v1/bots/{bot_id}/icon", dependencies=[Depends(auth)])
+    async def get_bot_icon(bot_id: UUID) -> Response:
+        bot = _bot(bot_id)
+        try:
+            data = safefs.read_bytes(_icon_path(bot_id), MAX_ICON_BYTES) if bot.icon_image else None
+        except OSError:
+            data = None
+        if data is None:
+            raise HTTPException(status_code=404, detail="no icon image")
+        return Response(
+            data,
+            media_type=bot.icon_image,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": "default-src 'none'; sandbox",
+            },
+        )
+
+    @app.put("/v1/bots/{bot_id}/icon", response_model=Bot, dependencies=[Depends(auth)])
+    async def put_bot_icon(bot_id: UUID, request: Request) -> Bot:
+        """Upload a PNG, JPEG, GIF or WebP icon as the raw request body (max 256 KiB)."""
+        _bot(bot_id)
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_ICON_BYTES:
+            raise HTTPException(status_code=413, detail="icon image is too large")
+        data = bytearray()
+        async for chunk in request.stream():
+            data += chunk
+            if len(data) > MAX_ICON_BYTES:
+                raise HTTPException(status_code=413, detail="icon image is too large")
+        if not data:
+            raise HTTPException(status_code=400, detail="icon image is empty")
+        mime = _sniff_image(bytes(data))
+        if mime is None:
+            raise HTTPException(
+                status_code=415, detail="icon must be a PNG, JPEG, GIF or WebP image"
+            )
+        # bots/<id> is bot-writable when isolated: create, write and replace without following links
+        safefs.mkdir(memory.bot_dir(bot_id), isolation.shared_dir_mode())
+        safefs.write_bytes(_icon_path(bot_id), bytes(data), 0o600)
+        updated = store.update_bot(bot_id, icon_image=mime)
+        assert updated is not None
+        return updated
+
+    @app.delete("/v1/bots/{bot_id}/icon", response_model=Bot, dependencies=[Depends(auth)])
+    async def delete_bot_icon(bot_id: UUID) -> Bot:
+        _bot(bot_id)
+        safefs.unlink(_icon_path(bot_id))
+        updated = store.update_bot(bot_id, icon_image=None)
+        assert updated is not None
+        return updated
+
+    @app.get("/v1/bots/{bot_id}/memory", dependencies=[Depends(auth)])
+    async def get_bot_memory(bot_id: UUID) -> dict[str, str]:
+        _bot(bot_id)
+        return {"text": memory.read_bot(bot_id)}
+
+    @app.put("/v1/bots/{bot_id}/memory", dependencies=[Depends(auth)])
+    async def put_bot_memory(bot_id: UUID, body: TextBody) -> dict[str, str]:
+        _bot(bot_id)
+        memory.write_bot(bot_id, body.text)
+        return {"text": body.text}
+
+    @app.get("/v1/shared-memory", dependencies=[Depends(auth)])
+    async def get_shared_memory() -> dict[str, str]:
+        return {"text": memory.read_shared()}
+
+    @app.put("/v1/shared-memory", dependencies=[Depends(auth)])
+    async def put_shared_memory(body: TextBody) -> dict[str, str]:
+        memory.write_shared(body.text)
+        return {"text": body.text}
+
+    @app.get("/v1/desktops", dependencies=[Depends(auth)])
+    async def list_desktops() -> list[dict]:
+        result = await vnc.desktops()
+        slots = {item["slot"]: item for item in scheduler.slots()}
+        for desktop in result:
+            slot = slots.get(desktop["name"], {})
+            job = slot.get("current_job")
+            bot = store.get_bot(job.bot_id) if job and job.bot_id else None
+            desktop["bot"] = bot.name if bot else None
+            desktop["job_id"] = str(job.id) if job else None
+        return result
+
+    @app.post("/v1/desktops/{name}/ticket", dependencies=[Depends(auth)])
+    async def desktop_ticket(name: str, mode: str = Query(default="view", pattern="^(view|control)$")) -> dict:
+        try:
+            vnc.desktop_port(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="desktop not found") from exc
+        if not any(item["name"] == name and item["status"] == "running" for item in await vnc.desktops()):
+            raise HTTPException(status_code=404, detail="desktop is not running")
+        return {"ticket": tickets.issue(name, mode), "expires_in": vnc.TICKET_TTL}
+
+    @app.websocket("/v1/desktops/{name}/vnc")
+    async def desktop_vnc(ws: WebSocket, name: str) -> None:
+        try:
+            port = vnc.desktop_port(name)
+        except ValueError:
+            await ws.close(code=1008)
+            return
+        protocols = ws.scope.get("subprotocols", [])
+        ticket = next((p[10:] for p in protocols if p.startswith("bo-ticket.")), "")
+        mode = tickets.consume(ticket, name) if vnc.same_origin(ws.headers.get("origin"), ws.headers.get("host", "")) else None
+        if not mode or "binary" not in protocols or proxy_counts.get(name, 0) >= 4 or sum(proxy_counts.values()) >= 8:
+            await ws.close(code=1008)
+            return
+        proxy_counts[name] = proxy_counts.get(name, 0) + 1
+        writer = None
+        try:
+            try:
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            except OSError:
+                await ws.close(code=1011)
+                return
+            await ws.accept(subprotocol="binary")
+            last_traffic = time.monotonic()
+            view_filter = vnc.ViewFilter() if mode == "view" else None
+
+            async def to_desktop() -> None:
+                nonlocal last_traffic
+                while True:
+                    data = await ws.receive_bytes()
+                    last_traffic = time.monotonic()
+                    data = view_filter.feed(data) if view_filter else data
+                    if data:
+                        writer.write(data)
+                        await writer.drain()
+
+            async def to_browser() -> None:
+                nonlocal last_traffic
+                while data := await reader.read(65536):
+                    last_traffic = time.monotonic()
+                    if view_filter:
+                        view_filter.feed_server(data)
+                    await ws.send_bytes(data)
+
+            async def idle_watch() -> None:
+                while True:
+                    await asyncio.sleep(30)
+                    if time.monotonic() - last_traffic >= 1800:
+                        return
+
+            tasks = [asyncio.create_task(to_desktop()), asyncio.create_task(to_browser()), asyncio.create_task(idle_watch())]
+            try:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*done, *pending, return_exceptions=True)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            proxy_counts[name] -= 1
+            if writer:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
+            with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+                await ws.close()
+
+    async def agent_auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> Job | None:  # noqa: B008
+        if credentials:
+            job = store.agent_token_job(credentials.credentials)
+            if job:
+                return job
+        await auth(credentials)
+        return None
+
+    async def agent_scope(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> Job:  # noqa: B008
+        """The job-scoped agent token only (never the master token): its bot, while its job runs."""
+        job = store.agent_token_job(credentials.credentials) if credentials else None
+        if not job or not job.bot_id:
+            raise HTTPException(status_code=401, detail="a running job's agent token is required")
+        return job
+
+    @app.post("/v1/agent/ask", status_code=201)
+    async def agent_ask(request: Request, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        from . import questions
+        try:
+            body = await request.json()
+            if not isinstance(body, dict) or not isinstance(body.get("blocking", True), bool):
+                raise ValueError("invalid question or blocking flag")
+            return questions.create(store, job.bot_id, job.id, body, body.get("blocking", True))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/agent/say", status_code=201, response_model=Message)
+    async def agent_say(request: Request, job: Job = Depends(agent_scope)) -> Message:  # noqa: B008
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("expected an object with text")
+            return store.say(job.bot_id, job.id, body.get("text"))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except EditError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+    @app.get("/v1/agent/questions/{question_id}")
+    async def agent_question(question_id: str, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        from . import questions
+        item = questions.get(store, question_id)
+        if not item or item["job_id"] != str(job.id):
+            raise HTTPException(status_code=404, detail="question not found")
+        return item
+
+    @app.post("/v1/bots/{bot_id}/questions/{question_id}/answer", dependencies=[Depends(auth)])
+    async def answer_question(bot_id: UUID, question_id: str, request: Request) -> dict:
+        from . import questions
+        bot = _bot(bot_id)
+        try:
+            body = await request.json()
+            item = questions.answer(store, bot_id, question_id, body)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        asker = store.get(item["job_id"]) if item["job_id"] else None
+        running = asker is not None and asker.status == JobStatus.RUNNING
+        # A running job's waiting helper returns a blocking answer itself; in every other
+        # case (non-blocking, or the helper is gone) it reaches the bot as a user message.
+        if not (item["blocking"] and running):
+            answer = item["answer"]
+            if answer["skip"]:
+                text = "[The user skipped your question]"
+            else:
+                parts = []
+                for step, choice in zip(item["payload"]["steps"], answer["steps"], strict=True):
+                    parts.append(step["prompt"] + ": " + ", ".join(
+                        choice["selected"] + ([choice["custom"]] if choice["custom"] else [])))
+                text = "[Answer to your question] " + "\n".join(parts)
+            steered = running and store.post_steer(bot.id, text, [], job_id=item["job_id"])
+            if not steered:
+                try:
+                    _post_owner_message(bot, text)
+                except TurnError:
+                    # Keep the answer queued even if the provider was disabled meanwhile.
+                    store.enqueue_message(bot, text, text, bot.reason, "chat", None, None, None)
+        return item
+
+    def _agent_assignment_id(job: Job, ref: str) -> str:
+        if ref in ("current", "-"):
+            if not job.assignment_id:
+                raise HTTPException(status_code=400, detail="this turn has no current assignment; pass its id")
+            return str(job.assignment_id)
+        try:
+            return str(UUID(ref))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="assignment not found") from exc
+
+    @app.get("/v1/agent/assignments")
+    async def agent_list_assignments(job: Job = Depends(agent_scope)) -> list[Assignment]:  # noqa: B008
+        return assignments.visible_to(job.bot_id)
+
+    @app.post("/v1/agent/assignments", response_model=Assignment, status_code=201)
+    async def agent_create_assignment(body: AgentAssignmentCreate, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
+        target = None
+        if body.for_bot:
+            found = store.find_bot(body.for_bot)
+            if not found:
+                raise HTTPException(status_code=404, detail="bot not found")
+            target = found.id
+        parent = _agent_assignment_id(job, body.parent_id) if body.parent_id else None
+        fields = body.model_dump(exclude={"for_bot", "parent_id"})
+        return _assignment_call(assignments.agent_create, job.bot_id, fields, for_bot=target, parent_id=parent)
+
+    @app.get("/v1/agent/assignments/{ref}")
+    async def agent_get_assignment(ref: str, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        item = _assignment_call(assignments.readable_by, _agent_assignment_id(job, ref), job.bot_id)
+        return {**item.model_dump(mode="json"), "events": assignments.events(item.id, 10)}
+
+    @app.post("/v1/agent/assignments/{ref}/status", response_model=Assignment)
+    async def agent_assignment_status(ref: str, body: AgentStatus, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
+        return _assignment_call(assignments.report, _agent_assignment_id(job, ref), job.bot_id, job.id,
+                                body.state.strip().lower(), body.note.strip())
+
+    @app.post("/v1/agent/assignments/{ref}/checkpoint", response_model=Assignment)
+    async def agent_assignment_checkpoint(ref: str, body: AgentText, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
+        return _assignment_call(assignments.save_checkpoint, _agent_assignment_id(job, ref), job.bot_id, job.id, body.text)
+
+    @app.post("/v1/agent/assignments/{ref}/note", status_code=204)
+    async def agent_assignment_note(ref: str, body: AgentText, job: Job = Depends(agent_scope)) -> None:  # noqa: B008
+        if not body.text.strip():
+            raise HTTPException(status_code=400, detail="note is empty")
+        _assignment_call(assignments.add_note, _agent_assignment_id(job, ref), job.bot_id, job.id, body.text.strip()[:2000])
+
+    @app.get("/v1/agent/wakeups")
+    async def agent_list_wakeups(job: Job = Depends(agent_scope)) -> list[Wakeup]:  # noqa: B008
+        return assignments.wakeups(job.bot_id)
+
+    @app.post("/v1/agent/wakeups", response_model=Wakeup, status_code=201)
+    async def agent_add_wakeup(body: AgentWakeup, job: Job = Depends(agent_scope)) -> Wakeup:  # noqa: B008
+        due = body.due_at
+        if body.in_minutes is not None:
+            due = datetime.now(UTC) + timedelta(minutes=body.in_minutes)
+        linked = _agent_assignment_id(job, body.assignment_id) if body.assignment_id else None
+        waits = _agent_assignment_id(job, body.on_assignment) if body.on_assignment else None
+        return _assignment_call(assignments.add_wakeup, job.bot_id, job.id, assignment_id=linked, due_at=due,
+                                on_assignment=waits, note=body.note.strip())
+
+    @app.delete("/v1/agent/wakeups/{wakeup_id}", status_code=204)
+    async def agent_cancel_wakeup(wakeup_id: UUID, job: Job = Depends(agent_scope)) -> None:  # noqa: B008
+        _assignment_call(assignments.cancel_wakeup, wakeup_id, job.bot_id)
+
+    def _bot_routine(job: Job, routine_id: UUID) -> Routine:
+        routine = store.get_routine(routine_id)
+        if routine is None:
+            raise HTTPException(status_code=404, detail="routine not found")
+        if routine.bot_id != job.bot_id or routine.created_by != "bot":
+            raise HTTPException(status_code=403, detail="a bot changes only the routines it made itself")
+        return routine
+
+    def _routine_gap(cron: str) -> None:
+        gap = min_gap(cron, datetime.now(UTC))
+        if gap is not None and gap < BOT_ROUTINE_MIN_GAP:
+            raise HTTPException(status_code=400, detail="a bot's routine must fire at most every 15 minutes")
+
+    @app.get("/v1/agent/routines")
+    async def agent_list_routines(job: Job = Depends(agent_scope)) -> list[Routine]:  # noqa: B008
+        return store.list_routines(job.bot_id)
+
+    @app.post("/v1/agent/routines", response_model=Routine, status_code=201)
+    async def agent_create_routine(body: AgentRoutine, job: Job = Depends(agent_scope)) -> Routine:  # noqa: B008
+        _routine_gap(body.cron)
+        try:
+            return store.create_routine(job.bot_id, body.cron, body.prompt, body.enabled, name=body.name,
+                                        created_by="bot", max_bot_routines=MAX_BOT_ROUTINES)
+        except OverflowError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+    @app.patch("/v1/agent/routines/{routine_id}", response_model=Routine)
+    async def agent_update_routine(routine_id: UUID, body: AgentRoutineUpdate, job: Job = Depends(agent_scope)) -> Routine:  # noqa: B008
+        _bot_routine(job, routine_id)
+        fields = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+        if "cron" in fields:
+            _routine_gap(fields["cron"])
+        return store.update_routine(routine_id, **fields)
+
+    @app.delete("/v1/agent/routines/{routine_id}", status_code=204)
+    async def agent_delete_routine(routine_id: UUID, job: Job = Depends(agent_scope)) -> None:  # noqa: B008
+        _bot_routine(job, routine_id)
+        store.delete_routine(routine_id)
+
+    @app.post("/v1/bots/{bot_ref}/message-agent")
+    async def message_agent(bot_ref: str, body: AgentMessageCreate, binding: Job | None = Depends(agent_auth)) -> dict:  # noqa: B008
+        sender = store.find_bot(bot_ref)
+        target = store.find_bot(body.to)
+        if not sender or not target:
+            raise HTTPException(status_code=404, detail="bot not found")
+        if binding and binding.bot_id != sender.id:
+            raise HTTPException(status_code=403, detail="token is bound to another bot")
+        try:
+            _, _, item = scheduler.turns.post_agent_message(sender, target, body.body, str(binding.id) if binding else None)
+        except TurnError as exc:
+            status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        if body.wait and binding:
+            item["note"] = "Queued asynchronously: agent turns cannot wait for another worker; the reply will appear in chat."
+            return item
+        if body.wait:
+            deadline = asyncio.get_running_loop().time() + body.timeout
+            while item["status"] in ("queued", "running") and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(min(0.1, max(0, deadline - asyncio.get_running_loop().time())))
+                item = store.get_agent_message(item["id"])
+        return item
+
+    @app.post("/v1/bridge/grok/send")
+    async def bridge_grok_send(body: BridgeSend, binding: Job | None = Depends(agent_auth)) -> dict:  # noqa: B008
+        """Send to a Grok Bot over the webhook. The controller holds the webhook key; a job's
+        token always sends as its own bot (``from`` is for the master token only)."""
+        if binding:
+            bot = store.get_bot(binding.bot_id) if binding.bot_id else None
+            if not bot:
+                raise HTTPException(status_code=403, detail="token is not bound to a bot")
+            if body.from_bot and body.from_bot.strip() not in (bot.name, str(bot.id)):
+                raise HTTPException(status_code=403, detail="--from is only allowed with the master token")
+            sender = bot.name
+        else:
+            sender = (body.from_bot or "").strip() or None
+        try:
+            result = await asyncio.to_thread(
+                grok_bridge.send_to_grok, to=body.to, kind=body.kind, text=body.text, thread_id=body.thread_id,
+                from_bot=sender, data_dir=settings.control_dir, environ={},
+            )
+        except grok_bridge.DeskError as exc:
+            status = 400 if str(exc).startswith(("kind must", "to and text")) else 502
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        return {"result": result}
+
+    @app.post("/v1/bridge/inbox", dependencies=[Depends(auth)])
+    async def bridge_inbox(body: BridgeInbox) -> dict:
+        """An inbound bridge message (``desk inbox post``, master token only)."""
+        try:
+            status, detail = grok_bridge.post_inbox(to=body.to, text=body.text, sender=body.sender,
+                                                    thread_id=body.thread_id, hop=body.hop, turns=scheduler.turns)
+        except grok_bridge.DeskError as exc:
+            raise HTTPException(status_code=404 if str(exc).startswith("bot not found") else 400,
+                                detail=str(exc)) from exc
+        return {"status": status, "detail": detail}
+
+    @app.get("/v1/agent-messages", dependencies=[Depends(auth)])
+    async def list_agent_messages(bot: str | None = None) -> list[dict]:
+        if bot:
+            found = store.find_bot(bot)
+            if not found:
+                raise HTTPException(status_code=404, detail="bot not found")
+            bot = str(found.id)
+        return store.list_agent_messages(bot)
+
+    @app.get("/v1/agent-messages/{message_id}")
+    async def get_agent_message(message_id: str, binding: Job | None = Depends(agent_auth)) -> dict:  # noqa: B008
+        item = store.get_agent_message(message_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="message not found")
+        if binding and item["from_bot"] != str(binding.bot_id):
+            raise HTTPException(status_code=403, detail="message belongs to another bot")
+        return item
+
+    @app.post(
+        "/v1/bots/{bot_id}/messages",
+        response_model=MessagePosted,
+        status_code=201,
+        dependencies=[Depends(auth)],
+    )
+    async def post_message(bot_id: UUID, body: MessageCreate) -> MessagePosted:
+        bot = _bot(bot_id)
+        try:
+            async with attachment_global_lock, attachment_lock(bot_id):
+                _bot(bot_id)
+                ids = list(dict.fromkeys(body.attachments))
+                for attachment_id in ids:
+                    try:
+                        data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
+                        mime = _sniff_image(data)
+                        if not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
+                            raise ValueError("invalid image")
+                    except (ValueError, OSError) as exc:
+                        raise HTTPException(status_code=400, detail="attachment not found") from exc
+                message, job = _post_owner_message(bot, body.text, reason=body.reason, attachments=ids,
+                                                   queue=body.mode == "queue")
+        except TurnError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return MessagePosted(message=message, job=job)
+
+    async def _check_attachments(bot_id: UUID, ids: list[str]) -> None:
+        for attachment_id in ids:
+            try:
+                data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
+                mime = _sniff_image(data)
+                if not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
+                    raise ValueError("invalid image")
+            except (ValueError, OSError) as exc:
+                raise HTTPException(status_code=400, detail="attachment not found") from exc
+
+    def _edit_failed(exc: EditError, cancelled: list[str]) -> JSONResponse:
+        detail = exc.detail
+        if cancelled:
+            detail = f"The queued/running reply was cancelled, but the chat was not changed: {detail}"
+        return JSONResponse({"detail": detail, "jobs": exc.jobs, "cancelled": cancelled}, status_code=exc.status)
+
+    @app.post(
+        "/v1/bots/{bot_id}/messages/{message_id}/edit",
+        response_model=MessagePosted,
+        status_code=201,
+        dependencies=[Depends(auth)],
+    )
+    async def edit_message(bot_id: UUID, message_id: int, body: MessageEdit):
+        """Edit one of the owner's messages and rewind: that message and everything after
+        it are archived (never deleted), the new text is queued, and the bot's next turn
+        starts a fresh provider session seeded with the remaining chat.
+
+        Everything that can fail without side effects (ownership, editability, provider and
+        reason, images, seed size) is validated before any job is cancelled. Cancellation
+        waits happen without holding any lock; the final commit revalidates under the
+        write lock and reports, if it still fails, that jobs were cancelled.
+        """
+        bot = _bot(bot_id)
+        try:
+            original = store.get_message(message_id)
+            store.check_edit(bot_id, message_id, body.text)
+            scheduler.turns._validate(bot.default_provider, body.reason, bot)
+        except EditError as exc:
+            return _edit_failed(exc, [])
+        except TurnError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        assert original is not None
+        ids = list(dict.fromkeys(original.attachments if body.attachments is None else body.attachments))
+        await _check_attachments(bot_id, ids)
+        cancelled: list[str] = []
+        pending = store.pending_jobs(bot_id)
+        if pending and not body.cancel_running:
+            return JSONResponse(
+                {"detail": "A reply is queued or running for this bot. Cancel it and rewind?",
+                 "jobs": [str(job.id) for job in pending]},
+                status_code=409,
+            )
+        with scheduler.defer_steers_for_edit(pending):
+            if pending:
+                signalled: set[str] = set()
+                for job in pending:
+                    cancelled.append(str(job.id))
+                    if job.status == JobStatus.RUNNING:
+                        scheduler.cancel(job)
+                        signalled.add(str(job.id))
+                    else:
+                        store.cancel(job.id, queue_steers=False)  # defer_steers_for_edit handles them
+                deadline = asyncio.get_running_loop().time() + EDIT_CANCEL_WAIT_SECONDS
+                while waiting := [job for job in store.pending_jobs(bot_id) if str(job.id) in cancelled]:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        still = [str(job.id) for job in waiting]
+                        return _edit_failed(EditError(409, "a job did not stop in time; try again", still), cancelled)
+                    for job in waiting:  # a queued job may have been claimed meanwhile
+                        if job.status == JobStatus.RUNNING and str(job.id) not in signalled:
+                            scheduler.cancel(job)
+                            signalled.add(str(job.id))
+                    await asyncio.sleep(0.05)
+            try:
+                async with attachment_global_lock, attachment_lock(bot_id):
+                    bot = _bot(bot_id)
+                    await _check_attachments(bot_id, ids)
+                    message, job = scheduler.turns.edit_message(bot, message_id, body.text, reason=body.reason, attachments=ids)
+            except EditError as exc:
+                return _edit_failed(exc, cancelled)
+            except TurnError as exc:
+                return _edit_failed(EditError(400, str(exc)), cancelled)
+            except HTTPException as exc:
+                if not cancelled:
+                    raise
+                return _edit_failed(EditError(exc.status_code, str(exc.detail)), cancelled)
+            with contextlib.suppress(OSError):
+                scheduler.reconcile_session(bot_id)  # otherwise done before the bot's next job
+            return MessagePosted(message=message, job=job)
+
+    @app.get("/v1/bots/{bot_id}/messages", response_model=list[Message], dependencies=[Depends(auth)])
+    async def list_messages(bot_id: UUID, pending: bool = False, archived: bool = False) -> list[Message]:
+        """Chat history. With ``?pending=true`` also one in-flight placeholder per queued/running job.
+
+        A placeholder has ``pending=true``, a negative ``id`` and the live draft as
+        ``text``; attach to ``/v1/jobs/{job_id}/events`` to replay and continue it.
+        The default list is unchanged so older clients never see placeholders.
+        """
+        _bot(bot_id)
+        messages = store.list_messages(bot_id, include_archived=archived)
+        for index, job in enumerate(store.pending_jobs(bot_id) if pending else (), start=1):
+            messages.append(
+                Message(
+                    id=-index,
+                    bot_id=bot_id,
+                    role="assistant",
+                    source=job.source,
+                    text=job.draft_text or "",
+                    job_id=job.id,
+                    created_at=job.started_at or job.created_at,
+                    pending=True,
+                    job_status=job.status.value,
+                    not_before=job.not_before,
+                )
+            )
+        return messages
+
+    @app.post(
+        "/v1/bots/{bot_id}/inbox",
+        response_model=MessagePosted,
+        status_code=201,
+        dependencies=[Depends(auth)],
+    )
+    async def post_inbox(bot_id: UUID, body: InboxCreate) -> MessagePosted:
+        bot = _bot(bot_id)
+        sender = _bot(body.from_bot_id) if body.from_bot_id else None
+        try:
+            if sender:
+                raise TurnError("originating job required; use message-agent")
+            else:
+                message, job = scheduler.turns.post_message(bot, body.text, source="inbox")
+        except TurnError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return MessagePosted(message=message, job=job)
+
+    # --- voice (optional; see voice/__init__.py) ---
+
+    stt_requests: list[float] = []
+    tts_requests: list[float] = []
+    speakable_requests: list[float] = []
+
+    def _voice_prefs() -> VoicePrefs:
+        raw = store.get_meta("voice_prefs")
+        try:
+            return VoicePrefs.model_validate_json(raw) if raw else VoicePrefs()
+        except ValueError:
+            return VoicePrefs()
+
+    def _voice_error(exc: VoiceError) -> HTTPException:
+        return HTTPException(status_code=exc.status, detail=str(exc))
+
+    def _rate_limit(log: list[float], limit: int) -> None:
+        cutoff = time.monotonic() - 60
+        log[:] = [stamp for stamp in log if stamp > cutoff]
+        if len(log) >= limit:
+            raise HTTPException(status_code=429, detail="too many voice requests, wait a minute")
+        log.append(time.monotonic())
+
+    @app.get("/v1/voice", dependencies=[Depends(auth)])
+    async def voice_status() -> dict:
+        return {**await voice.status(), "prefs": _voice_prefs().model_dump()}
+
+    @app.get("/v1/voice/prefs", dependencies=[Depends(auth)])
+    async def get_voice_prefs() -> dict:
+        """Just the preferences (cheap; the GUI re-checks auto_read before auto-playing)."""
+        return _voice_prefs().model_dump()
+
+    @app.put("/v1/voice/prefs", dependencies=[Depends(auth)])
+    async def put_voice_prefs(body: VoicePrefsBody) -> dict:
+        prefs = _voice_prefs().model_copy(update=body.model_dump(exclude_none=True))
+        store.set_meta("voice_prefs", prefs.model_dump_json())
+        return prefs.model_dump()
+
+    @app.post("/v1/voice/transcribe", dependencies=[Depends(auth)])
+    async def transcribe(request: Request) -> dict:
+        """16 kHz mono 16-bit PCM WAV in, text out. Audio stays in memory and is never
+        stored or logged; the browser does all decoding of compressed audio."""
+        if not (await voice.stt_status())["available"]:
+            raise HTTPException(status_code=503, detail="speech-to-text is not installed")
+        content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+        if content_type not in ("audio/wav", "audio/x-wav", "audio/wave"):
+            raise HTTPException(status_code=415, detail="send audio/wav (16 kHz mono 16-bit PCM)")
+        length = request.headers.get("content-length")
+        if length:
+            try:
+                if int(length) > STT_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="recording too large")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid content length") from exc
+        data = bytearray()
+        try:
+            async with asyncio.timeout(STT_READ_SECONDS):
+                async for chunk in request.stream():
+                    if len(data) + len(chunk) > STT_MAX_BYTES:
+                        raise HTTPException(status_code=413, detail="recording too large")
+                    data.extend(chunk)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=408, detail="the upload took too long") from exc
+        try:
+            pcm = parse_pcm16_mono(bytes(data))
+        except WavError as exc:
+            raise HTTPException(status_code=415, detail=f"invalid WAV: {exc}") from exc
+        seconds = len(pcm) / 2 / 16_000
+        if not STT_MIN_SECONDS <= seconds <= STT_MAX_SECONDS:
+            raise HTTPException(status_code=422, detail="recording must be 0.3 to 120 seconds long")
+        _rate_limit(stt_requests, STT_PER_MINUTE)  # only valid recordings use up the budget
+        try:
+            return await voice.transcribe(pcm)
+        except VoiceError as exc:
+            raise _voice_error(exc) from exc
+
+    @app.post("/v1/voice/speakable", dependencies=[Depends(auth)])
+    async def speakable(body: SpeakableRequest) -> dict:
+        """A message's Markdown as plain-text chunks (<= 400 chars) for /v1/voice/speak."""
+        _rate_limit(speakable_requests, SPEAKABLE_PER_MINUTE)
+        return {"chunks": await asyncio.to_thread(speech_chunks, body.text)}
+
+    @app.post("/v1/voice/speak", dependencies=[Depends(auth)])
+    async def speak(body: SpeakRequest) -> Response:
+        """One chunk of plain text in, 24 kHz mono WAV out; nothing is stored on disk."""
+        if not (await voice.tts_status())["available"]:
+            raise HTTPException(status_code=503, detail="text-to-speech is not installed")
+        _rate_limit(tts_requests, TTS_PER_MINUTE)
+        try:
+            wav = await voice.speak(body.text, body.voice, body.speed)
+        except VoiceError as exc:
+            raise _voice_error(exc) from exc
+        return Response(wav, media_type="audio/wav", headers=AUDIO_HEADERS)
+
+    @app.post(
+        "/v1/bots/{bot_id}/routines",
+        response_model=Routine,
+        status_code=201,
+        dependencies=[Depends(auth)],
+    )
+    async def create_routine(bot_id: UUID, body: RoutineCreate) -> Routine:
+        _bot(bot_id)
+        return store.create_routine(bot_id, body.cron, body.prompt, body.enabled, name=body.name,
+                                    catch_up=body.catch_up)
+
+    @app.get("/v1/bots/{bot_id}/routines", response_model=list[Routine], dependencies=[Depends(auth)])
+    async def list_routines(bot_id: UUID) -> list[Routine]:
+        _bot(bot_id)
+        return store.list_routines(bot_id)
+
+    @app.patch("/v1/routines/{routine_id}", response_model=Routine, dependencies=[Depends(auth)])
+    async def update_routine(routine_id: UUID, body: RoutineUpdate) -> Routine:
+        if not store.get_routine(routine_id):
+            raise HTTPException(status_code=404, detail="routine not found")
+        fields = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+        try:
+            routine = store.update_routine(routine_id, **fields)
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc) else 409
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+        assert routine is not None
+        return routine
+
+    @app.delete("/v1/routines/{routine_id}", status_code=204, dependencies=[Depends(auth)])
+    async def delete_routine(routine_id: UUID) -> None:
+        if not store.delete_routine(routine_id):
+            raise HTTPException(status_code=404, detail="routine not found")
+
+    # --- 0.10.0 assignments (master token) ---
+
+    @app.post("/v1/bots/{bot_id}/assignments", response_model=Assignment, status_code=201,
+              dependencies=[Depends(auth)])
+    async def create_assignment(bot_id: UUID, body: AssignmentCreate) -> Assignment:
+        _bot(bot_id)
+        return _assignment_call(assignments.create, bot_id, body.model_dump())
+
+    @app.get("/v1/bots/{bot_id}/assignments", response_model=list[Assignment], dependencies=[Depends(auth)])
+    async def list_assignments(bot_id: UUID, include_closed: bool = True) -> list[Assignment]:
+        _bot(bot_id)
+        return assignments.list(bot_id, include_closed=include_closed)
+
+    @app.get("/v1/assignments/{assignment_id}", dependencies=[Depends(auth)])
+    async def get_assignment(assignment_id: UUID) -> dict:
+        item = assignments.get(assignment_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="assignment not found")
+        return {**item.model_dump(mode="json"), "events": assignments.events(assignment_id)}
+
+    @app.patch("/v1/assignments/{assignment_id}", response_model=Assignment, dependencies=[Depends(auth)])
+    async def update_assignment(assignment_id: UUID, body: AssignmentUpdate) -> Assignment:
+        fields = body.model_dump(exclude_unset=True)
+        for key in ("title", "goal", "done_when", "budget_turns", "budget_minutes", "verify", "escalate"):
+            if key in fields and fields[key] is None:
+                del fields[key]
+        return _assignment_call(assignments.update, assignment_id, fields)
+
+    @app.post("/v1/assignments/{assignment_id}/start", response_model=Assignment, dependencies=[Depends(auth)])
+    async def start_assignment(assignment_id: UUID, body: AssignmentStart | None = None) -> Assignment:
+        body = body or AssignmentStart()
+        return _assignment_call(assignments.start, assignment_id, body.add_turns, body.add_minutes)
+
+    # --- 0.10.0 Needs-you (computed, model-free) ---
+
+    switch_cache: dict[str, tuple[float, list[dict]]] = {}
+
+    async def _switch_options(current: str, fresh: bool = False) -> list[dict]:
+        """Providers a parked job may switch to: enabled, signed in and different from *current*.
+        Cached for SWITCH_OPTIONS_TTL seconds: Needs-you is polled every few seconds per tab and each
+        login check spawns a CLI (through sudo when isolated). The switch itself checks fresh."""
+        cached = switch_cache.get(current)
+        if not fresh and cached and time.monotonic() - cached[0] < SWITCH_OPTIONS_TTL:
+            return [dict(item) for item in cached[1]]
+        infos = await asyncio.gather(*(_provider_info(name) for name in ENGINES if name != current))
+        options = [{"provider": info.name, "label": ENGINE_LABELS.get(info.name, info.name)}
+                   for info in infos if info.enabled and info.login_status == "ok"]
+        switch_cache[current] = (time.monotonic(), options)
+        return [dict(item) for item in options]
+
+    @app.get("/v1/needs-you", dependencies=[Depends(auth)])
+    async def get_needs_you() -> list[dict]:
+        items = needs_you.needs_you(store)
+        options: dict[str, list[dict]] = {}
+        for item in items:
+            if item["kind"] == "usage_limit":
+                if item["provider"] not in options:
+                    options[item["provider"]] = await _switch_options(item["provider"])
+                item["options"] = options[item["provider"]]
+        return items
+
+    @app.get("/v1/jobs/{job_id}/switch-options", dependencies=[Depends(auth)])
+    async def get_switch_options(job_id: UUID) -> list[dict]:
+        """#10: the [Retry on <provider>] choices for a parked job's notice."""
+        job = store.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        return await _switch_options(job.provider)
+
+    @app.post("/v1/jobs/{job_id}/switch-provider", response_model=Job, dependencies=[Depends(auth)])
+    async def switch_provider(job_id: UUID, body: SwitchProvider) -> Job:
+        """#10: run a job parked on a usage limit on another provider, now. Owner only (master
+        token); never automatic. Only that job changes (provider, the target's default model and
+        effort); the bot's defaults stay. The next run gets the model-switch handoff."""
+        job = store.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="job not found")
+        if not (job.status == JobStatus.QUEUED and job.failure_kind == "usage_limit" and job.not_before):
+            raise HTTPException(status_code=409, detail="only a job waiting on a usage limit can switch provider")
+        target = body.provider
+        if target == job.provider:
+            raise HTTPException(status_code=400, detail=f"the job already runs on {target}")
+        if target not in ENGINES or target not in {item["provider"] for item in await _switch_options(job.provider, fresh=True)}:
+            raise HTTPException(status_code=400, detail=f"{target} is not enabled and signed in")
+        _check_claude_reason(target, body.reason)
+        reason = (body.reason or "").strip() or None
+        try:
+            switched = await asyncio.to_thread(store.switch_provider, job.id, target, default_model(target),
+                                               default_effort(target), reason)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if target == "claude":
+            scheduler.turns._log_claude_use(switched)
+        return switched
+
+    @app.post("/v1/jobs/{job_id}/keep-waiting", dependencies=[Depends(auth)])
+    async def keep_waiting(job_id: UUID) -> dict:
+        """#10 [Keep waiting]: close the notice; the job keeps its retry time."""
+        if not store.get(job_id):
+            raise HTTPException(status_code=404, detail="job not found")
+        return {"closed": await asyncio.to_thread(store.keep_waiting, job_id)}
+
+    # --- 0.11.0 action rules and approvals ---
+
+    rules = scheduler.rules
+
+    @app.post("/v1/agent/gate")
+    async def agent_gate(request: Request, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        """bin/bot-office-gate asks before a tool runs; the job's source and its bot's scheduled_runs
+        setting (never its text) decide attended vs the strict unattended profile. The agent token
+        is valid only while its job runs. The body is capped before it is parsed (Sec 4)."""
+        raw = await _read_capped(request, GATE_BODY_LIMIT, "gate event")
+        try:
+            body = GateRequest.model_validate_json(raw or b"{}")
+        except (ValueError, RecursionError) as exc:
+            raise HTTPException(status_code=422, detail="invalid gate event") from exc
+        return (await asyncio.to_thread(rules.decide, job, body.event, body.provider[:32])).as_dict()
+
+    @app.get("/v1/rules", dependencies=[Depends(auth)])
+    async def list_rules(bot_id: UUID | None = None) -> dict:
+        return {"rules": rules.list_rules(bot_id), "presets": {
+            "outbound": "git push, gh writes, mail, curl/wget writes to other hosts, desk grok send, desk click/type/key, "
+                        "ssh/scp/rsync to hosts, publish/push of packages and images, MCP tools",
+            "destructive": "sudo, systemctl, crontab, podman rm/stop/kill, git reset --hard / clean, rm -r outside the "
+                           "workspace, writes to ~/.ssh, ~/.config/systemd, shell profiles, /etc, the Bot-Office repo",
+            "secrets": "the controller token, database, bridge config, private dir and other bots' dirs (always never)",
+            "network": "strict-profile Codex runs get network only with a 'network' allow rule; without one "
+                       "they start only if scripts/probe_gate.sh codex proved bot-task reaches Bot-Office "
+                       "(else they are refused to Needs-you: bot-task/bot-msg/desk would fail)"},
+            "defaults": "strict profile (watcher triggers always; routine, wake-up, assignment and bot-to-bot "
+                        "turns only for bots with scheduled_runs 'gated'): outbound and destructive ask; "
+                        "everything else, incl. your own chat: allow; bot-msg: allow; secrets: never everywhere"}
+
+    @app.post("/v1/rules", status_code=201, dependencies=[Depends(auth)])
+    async def add_rule(body: RuleCreate) -> dict:
+        if body.bot_id is not None:
+            _bot(body.bot_id)
+        try:
+            return rules.add_rule(bot_id=body.bot_id, effect=body.effect, kind=body.kind, pattern=body.pattern,
+                                  scope=body.scope, note=body.note)
+        except action_rules.RuleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/v1/rules/{rule_id}", status_code=204, dependencies=[Depends(auth)])
+    async def delete_rule(rule_id: int) -> None:
+        if not rules.delete_rule(rule_id):
+            raise HTTPException(status_code=404, detail="rule not found")
+
+    @app.get("/v1/approvals", dependencies=[Depends(auth)])
+    async def list_approvals(status: str | None = None) -> list[dict]:
+        rules.expire()
+        return rules.list(status)
+
+    def _approval_call(fn, *args):
+        try:
+            return fn(*args)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (action_rules.RuleError, AssignmentError) as exc:
+            raise HTTPException(status_code=409, detail=getattr(exc, "detail", str(exc))) from exc
+
+    @app.post("/v1/approvals/{approval_id}/approve", dependencies=[Depends(auth)])
+    async def approve(approval_id: int) -> dict:
+        """Approve once (also Re-run of an expired request): one-shot grant + resume turn."""
+        rules.expire()
+        return _approval_call(rules.approve, approval_id, assignments)
+
+    @app.post("/v1/approvals/{approval_id}/deny", dependencies=[Depends(auth)])
+    async def deny(approval_id: int) -> dict:
+        return _approval_call(rules.deny, approval_id)
+
+    @app.post("/v1/gate-alerts/{alert_id}/dismiss", status_code=204, dependencies=[Depends(auth)])
+    async def dismiss_alert(alert_id: int) -> None:
+        if not rules.dismiss_alert(alert_id):
+            raise HTTPException(status_code=404, detail="alert not found")
+
+    # --- 0.11.0 watchers (master token; webhooks use their own per-watcher secret) ---
+    watchers = scheduler.watchers
+
+    def _watcher_call(fn, *args):
+        try:
+            return fn(*args)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except WatcherError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/bots/{bot_id}/watchers", status_code=201, dependencies=[Depends(auth)])
+    async def create_watcher(bot_id: UUID, body: WatcherCreate) -> dict:
+        """The secret of a webhook watcher is in this response only (stored as a sha256)."""
+        bot = _bot(bot_id)
+        watcher, secret = _watcher_call(
+            lambda: watchers.create(bot, body.kind, body.name, body.prompt, body.config, debounce_s=body.debounce_s,
+                                    max_per_hour=body.max_per_hour, enabled=body.enabled))
+        return {**watcher, **({"secret": secret, "url": f"/v1/hooks/{watcher['id']}"} if secret else {})}
+
+    @app.get("/v1/bots/{bot_id}/watchers", dependencies=[Depends(auth)])
+    async def list_watchers(bot_id: UUID) -> list[dict]:
+        _bot(bot_id)
+        return watchers.list(bot_id)
+
+    @app.patch("/v1/watchers/{watcher_id}", dependencies=[Depends(auth)])
+    async def update_watcher(watcher_id: UUID, body: WatcherUpdate) -> dict:
+        fields = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
+        return _watcher_call(watchers.update, str(watcher_id), fields)
+
+    @app.delete("/v1/watchers/{watcher_id}", status_code=204, dependencies=[Depends(auth)])
+    async def delete_watcher(watcher_id: UUID) -> None:
+        if not watchers.delete(str(watcher_id)):
+            raise HTTPException(status_code=404, detail="watcher not found")
+
+    @app.post("/v1/watchers/{watcher_id}/test", dependencies=[Depends(auth)])
+    async def test_watcher(watcher_id: UUID) -> dict:
+        outcome, job_id = _watcher_call(watchers.test, str(watcher_id))
+        return {"outcome": outcome, "job_id": job_id}
+
+    @app.post("/v1/watchers/{watcher_id}/secret", dependencies=[Depends(auth)])
+    async def rotate_watcher_secret(watcher_id: UUID) -> dict:
+        return {"secret": _watcher_call(watchers.rotate_secret, str(watcher_id))}
+
+    @app.get("/v1/watchers/{watcher_id}/runs", dependencies=[Depends(auth)])
+    async def watcher_runs(watcher_id: UUID) -> list[dict]:
+        if not watchers.get(str(watcher_id)):
+            raise HTTPException(status_code=404, detail="watcher not found")
+        return watchers.runs(str(watcher_id))
+
+    @app.post("/v1/hooks/{watcher_id}", status_code=202)
+    async def webhook(watcher_id: str, request: Request) -> JSONResponse:
+        """A webhook watcher: Bearer <its secret>, body up to 64 kB (untrusted data for the bot).
+        202 means accepted: the outcome says whether a run was queued ("fired") or folded into
+        one already pending or running ("debounced", "busy"); it never means the work is done."""
+        header = request.headers.get("authorization", "")
+        secret = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        body = await _read_capped(request, WATCHER_BODY_LIMIT, "body")
+        try:
+            outcome = await asyncio.to_thread(watchers.webhook, watcher_id, secret, body,
+                                              request.headers.get("content-type", ""))
+        except LookupError as exc:
+            raise HTTPException(status_code=401, detail="unknown watcher or wrong secret") from exc
+        status = {"fired": 202, "debounced": 202, "busy": 202, "capped": 429, "global_cap": 429}.get(outcome, 409)
+        return JSONResponse({"outcome": outcome}, status_code=status)
+
+    # --- 0.11.0 usage, budgets and timelines (master token) ---
+
+    @app.get("/v1/usage", dependencies=[Depends(auth)])
+    async def get_usage(days: int = Query(default=7, ge=1, le=60)) -> list[dict]:
+        """Per bot and New York day: runs, minutes, tokens and cost (unknown usage is counted, not zero)."""
+        return await asyncio.to_thread(store.usage_by_day, days)
+
+    @app.post("/v1/bots/{bot_id}/budget/allow", dependencies=[Depends(auth)])
+    async def allow_budget(bot_id: UUID, body: BudgetAllow | None = None) -> dict:
+        """"Allow +N today": more unattended budget until 00:00 New York time; held jobs run."""
+        _bot(bot_id)
+        body = body or BudgetAllow()
+        return {"released": store.allow_budget(bot_id, body.turns, body.minutes, body.tokens)}
+
+    @app.get("/v1/routines/{routine_id}/runs", dependencies=[Depends(auth)])
+    async def routine_runs(routine_id: UUID) -> list[dict]:
+        if not store.get_routine(routine_id):
+            raise HTTPException(status_code=404, detail="routine not found")
+        return store.routine_runs(routine_id)
+
+    @app.get("/v1/assignments/{assignment_id}/timeline", dependencies=[Depends(auth)])
+    async def assignment_timeline(assignment_id: UUID) -> list[dict]:
+        if not assignments.get(assignment_id):
+            raise HTTPException(status_code=404, detail="assignment not found")
+        return store.assignment_timeline(assignment_id)
+
+    @app.get("/v1/gate", dependencies=[Depends(auth)])
+    async def gate_status() -> dict:
+        """Per provider: enforced (probe passed on this host), advisory (wired, not proven) or none.
+        Unattended runs need enforced."""
+        return {name: {"state": action_rules.gate_state(settings.control_dir, name),
+                       **action_rules.read_capabilities(settings.control_dir).get(name, {})}
+                for name in action_rules.WIRED}
+
+    @app.get("/v1/isolation", dependencies=[Depends(auth)])
+    async def isolation_status() -> dict:
+        """C1: whether the controller/bots split is installed (paths and modes only, no secrets)."""
+        return isolation.status(settings)
+
+    @app.post("/v1/needs-you/dismiss", response_model=Assignment, dependencies=[Depends(auth)])
+    async def dismiss_needs_you(body: NeedsYouDismiss) -> Assignment:
+        return _assignment_call(assignments.dismiss, body.assignment_id)
+
+    @app.post("/v1/jobs/{job_id}/dismiss", status_code=204, dependencies=[Depends(auth)])
+    async def dismiss_job(job_id: UUID) -> None:
+        if not needs_you.dismiss_job(store, str(job_id)):
+            raise HTTPException(status_code=404, detail="no finished job with that id")
+
+    @app.post("/v1/desktops/{name}/hand-back", dependencies=[Depends(auth)])
+    async def desktop_hand_back(name: str) -> dict:
+        """Joshua finished a step on a desktop: the bot that last used it continues."""
+        if name not in settings.desktops:
+            raise HTTPException(status_code=404, detail="desktop not found")
+        job_id = needs_you.last_desk_job(store, name)
+        job = store.get(job_id) if job_id else None
+        bot = store.get_bot(job.bot_id) if job and job.bot_id else None
+        if bot is None:
+            raise HTTPException(status_code=404, detail="no bot has used this desktop")
+        text = f"Joshua finished the step on {name}; continue."
+        item = assignments.get(job.assignment_id) if job.assignment_id else None
+        if item and item.status not in ("done", "dropped"):
+            queued = _assignment_call(assignments.reply, item.id, text)
+        else:
+            try:
+                _, posted = _post_owner_message(bot, text)
+            except TurnError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            queued = str(posted.id)
+        return {"bot_id": str(bot.id), "job_id": queued}
+
+    @app.post("/v1/assignments/{assignment_id}/stop", response_model=Assignment, dependencies=[Depends(auth)])
+    async def stop_assignment(assignment_id: UUID) -> Assignment:
+        """Pause the assignment and its children: queued turns and pending wake-ups are
+        cancelled, running turns are stopped."""
+        _cancel_jobs(_assignment_call(assignments.stop, assignment_id))
+        return assignments.get(assignment_id)
+
+    @app.post("/v1/assignments/{assignment_id}/reply", dependencies=[Depends(auth)])
+    async def reply_assignment(assignment_id: UUID, body: AssignmentReply) -> dict:
+        job_id = _assignment_call(assignments.reply, assignment_id, body.text)
+        return {"job_id": job_id, "assignment": assignments.get(assignment_id).model_dump(mode="json")}
+
+    @app.get("/v1/bots/{bot_id}/wakeups", response_model=list[Wakeup], dependencies=[Depends(auth)])
+    async def list_wakeups(bot_id: UUID, include_done: bool = False) -> list[Wakeup]:
+        _bot(bot_id)
+        return assignments.wakeups(bot_id, include_done=include_done)
+
+    @app.delete("/v1/bots/{bot_id}/wakeups/{wakeup_id}", status_code=204, dependencies=[Depends(auth)])
+    async def cancel_wakeup(bot_id: UUID, wakeup_id: UUID) -> None:
+        _assignment_call(assignments.cancel_wakeup, wakeup_id, bot_id)
+
+    return app
+
+
+app = create_app()

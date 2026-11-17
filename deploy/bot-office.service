@@ -1,0 +1,20 @@
+[Unit]
+Description=Bot-Office controller
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/printpilot-agentdesk
+Environment=BOT_OFFICE_TOKEN_FILE=%h/printpilot-agentdesk/data/token
+Environment=BOT_OFFICE_DATA_DIR=%h/printpilot-agentdesk/data
+Environment=AGENTDESK_TOKEN_FILE=%h/printpilot-agentdesk/data/token
+Environment=AGENTDESK_DATA_DIR=%h/printpilot-agentdesk/data
+Environment=PATH=%h/printpilot-agentdesk/bin:%h/.local/bin:%h/.grok/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/printpilot-agentdesk/.venv/bin/python -m botoffice
+Restart=on-failure
+# stop/restart kills every process the controller started (provider CLIs included)
+KillMode=control-group
+RestartSec=5
+
+[Install]
+WantedBy=default.target
