@@ -84,22 +84,27 @@ def test_failed_job_posts_short_error(settings):
         assert messages[1]["role"] == "system" and "needs_login" in messages[1]["text"]
 
 
-def test_claude_requires_reason_and_is_logged(settings):
+def test_claude_reason_is_optional_and_use_is_logged(settings):
+    # 0.11.8: Claude no longer needs a reason; a reason given is still stored and logged
     providers = {"codex": FakeAdapter(), "claude": FakeAdapter()}
     with TestClient(create_app(settings, providers)) as client:
-        assert client.post("/v1/jobs", json={"prompt": "x", "provider": "claude"}, headers=H).status_code == 400
-        assert client.post("/v1/jobs", json={"prompt": "x", "provider": "claude", "reason": " "}, headers=H).status_code == 400
-        assert client.post("/v1/bots", json={"name": "c", "default_provider": "claude"}, headers=H).status_code == 400
+        bare_job = client.post("/v1/jobs", json={"prompt": "x", "provider": "claude"}, headers=H)
+        assert bare_job.status_code == 201 and bare_job.json()["reason"] is None
+        blank = client.post("/v1/jobs", json={"prompt": "x", "provider": "claude", "reason": " "}, headers=H)
+        assert blank.status_code == 201 and blank.json()["reason"] is None
+        plain = client.post("/v1/bots", json={"name": "c0", "default_provider": "claude"}, headers=H)
+        assert plain.status_code == 201
+        assert client.post(f"/v1/bots/{plain.json()['id']}/messages", json={"text": "hi"}, headers=H).status_code == 201
         bot = make_bot(client, name="c", default_provider="claude", reason="needs deep review")
         assert client.post(f"/v1/bots/{bot['id']}/messages", json={"text": "hi"}, headers=H).status_code == 201
         bare = make_bot(client, name="d")
-        assert client.patch(f"/v1/bots/{bare['id']}", json={"default_provider": "claude"}, headers=H).status_code == 400
+        assert client.patch(f"/v1/bots/{bare['id']}", json={"default_provider": "claude"}, headers=H).status_code == 200
         job = client.post("/v1/jobs", json={"prompt": "SECRET PROMPT", "provider": "claude", "reason": "audit"}, headers=H)
         assert job.status_code == 201 and job.json()["reason"] == "audit"
         log = settings.data_dir / "claude-use-log.tsv"
         assert log.stat().st_mode & 0o777 == 0o600
         lines = log.read_text().splitlines()
-        assert [line.split("\t")[2] for line in lines] == ["needs deep review", "audit"]
+        assert [line.split("\t")[2] for line in lines] == ["", "", "", "needs deep review", "audit"]
         assert "SECRET" not in log.read_text() and "test-token" not in log.read_text()
 
 

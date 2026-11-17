@@ -279,7 +279,6 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </div>
     <form id="composer" class="composer" hidden>
       <div class="composer-inner">
-        <input id="send-reason" maxlength="1000" placeholder="Reason for using Claude (required for this bot)" hidden>
         <div id="attachment-list" class="attachment-list"></div>
         <label id="queue-option" hidden><input id="queue-next" type="checkbox"> Send after this turn instead of steering</label>
         <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
@@ -380,7 +379,6 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <label class="check"><input id="f-digest" type="checkbox"> Post the daily digest in this chat (built without a model call)</label>
     </div>
     <p class="hint" id="f-model-hint">Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.</p>
-    <label id="f-reason-row">Reason for using Claude<input id="f-reason" maxlength="1000" placeholder="Required for Claude models"></label>
     <label>Instructions<textarea id="f-instructions" maxlength="50000" placeholder="Profile and standing instructions"></textarea></label>
     <div class="danger-zone" id="delete-zone">
       <div><button type="button" id="delete-start" class="danger">Delete bot…</button></div>
@@ -685,9 +683,6 @@ function renderHeader() {
   $("head-effort").hidden = !bot.effort;
   $("head-effort").textContent = bot.effort ? "effort: " + bot.effort : "";
   $("head-tier").textContent = bot.capability_tier || "";
-  const needsReason = bot.engine === "claude" && !(bot.reason || "").trim();
-  $("send-reason").hidden = !needsReason;
-  $("send-reason").required = needsReason;
   const busy = bot.activity === "running" || bot.activity === "queued";
   // a running turn on an engine that cannot take input mid-run: said up front, not found out later
   const forced = bot.activity === "running" && bot.steering === "queue";
@@ -1268,11 +1263,6 @@ function showAttachment(wrap, botId, id) {
 /* #10: a job parked on a usage limit; the owner may run it on another provider now (never automatic) */
 async function switchProvider(jobId, provider) {
   const body = {provider};
-  if (provider === "claude") {
-    const reason = prompt("Reason for using Claude for this turn");
-    if (!reason || !reason.trim()) return false;
-    body.reason = reason.trim();
-  }
   await api("/v1/jobs/" + jobId + "/switch-provider", {method: "POST", body: JSON.stringify(body)});
   return true;
 }
@@ -1557,11 +1547,6 @@ async function saveEdit(editing, button) {
   if (!text) { editing.input.focus(); return; }
   if (!confirm(REWIND_CONFIRM)) return;
   const body = { text, attachments: editing.attachments };
-  if (!$("send-reason").hidden) {
-    const reason = $("send-reason").value.trim();
-    if (!reason) { handleError(new Error("Claude needs a reason before sending.")); $("send-reason").focus(); return; }
-    body.reason = reason;
-  }
   const url = "/v1/bots/" + editing.bot + "/messages/" + editing.id + "/edit";
   button.disabled = true;
   try {
@@ -1598,11 +1583,6 @@ $("composer").onsubmit = async (event) => {
   const sentImages = [...pendingImages];
   const body = { text: text || "Please see attached images.", attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
-  if (!$("send-reason").hidden) {
-    const reason = $("send-reason").value.trim();
-    if (!reason) { handleError(new Error("Claude needs a reason before sending.")); $("send-reason").focus(); return; }
-    body.reason = reason;
-  }
   sendingImages = true; for (const item of sentImages) item.sending = true; updateImages();
   try {
     const posted = await api("/v1/bots/" + bot.id + "/messages", { method: "POST", body: JSON.stringify(body) });
@@ -2057,7 +2037,6 @@ function fillModelSelect(bot) {
     ? (state.choices ? "No engine is signed in yet. Sign in to a CLI on the host, then reopen this dialog." : "Loading models…")
     : "Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.";
   $("dialog-save").disabled = none;
-  updateReasonRow();
   fillEffortSelect();
   updateTier();
 }
@@ -2096,12 +2075,6 @@ function updateTier() {
   $("f-tier").textContent = tier ? "Capability tier: " + tier + " (derived from the model; it changes when the model does)" : "";
 }
 
-function updateReasonRow() {
-  const bot = state.editing;
-  const show = selectedEngine() === "claude" || !!(bot && (bot.reason || "").trim());
-  $("f-reason-row").hidden = !show;
-}
-
 function updateIconPreview() {
   const bot = state.editing || { id: "", name: $("f-name").value, icon: "", icon_image: null, updated_at: "" };
   const preview = $("f-icon-preview");
@@ -2127,7 +2100,6 @@ async function openDialog(bot) {
   $("f-icon").value = bot ? bot.icon || "" : "";
   $("f-desc").value = bot ? bot.description || "" : "";
   $("f-instructions").value = bot ? bot.instructions || "" : "";
-  $("f-reason").value = bot ? bot.reason || "" : "";
   $("f-custom").value = bot && bot.engine === "opencode" ? bot.model || "" : "";
   $("f-image").value = "";
   $("f-effort").dataset.engine = "";
@@ -2205,7 +2177,7 @@ $("f-models-refresh").onclick = async () => {
     if (err instanceof AuthError) handleError(err); else $("dialog-error").textContent = String(err && err.message || err);
   } finally { button.disabled = false; }
 };
-$("f-model").onchange = () => { $("f-custom").value = ""; updateReasonRow(); fillEffortSelect(); updateTier(); };
+$("f-model").onchange = () => { $("f-custom").value = ""; fillEffortSelect(); updateTier(); };
 $("f-icon").oninput = updateIconPreview;
 $("f-name").oninput = () => { if (!state.editing) updateIconPreview(); };
 
@@ -2233,13 +2205,6 @@ $("bot-form").onsubmit = async (event) => {
   if (!engine || !model) { err.textContent = "Pick a model."; return; }
   const name = $("f-name").value.trim();
   if (!name) { err.textContent = "Name is required."; return; }
-  const reason = $("f-reason").value.trim();
-  const storedReason = bot ? (bot.reason || "").trim() : "";
-  if (engine === "claude" && !reason) {
-    err.textContent = "Claude models need a reason. Say why this bot should use Claude.";
-    $("f-reason").focus();
-    return;
-  }
   const body = {
     name,
     icon: $("f-icon").value.trim() || (bot ? bot.icon : "") || "🤖",
@@ -2247,7 +2212,6 @@ $("bot-form").onsubmit = async (event) => {
     instructions: $("f-instructions").value,
   };
   if (!bot || engine !== bot.engine || model !== bot.model) { body.engine = engine; body.model = model; }
-  if (!$("f-reason-row").hidden && (reason !== storedReason || !bot)) body.reason = reason || null;
   if (!$("f-effort-row").hidden && (!bot || $("f-effort").value !== (bot.effort || "") || engine !== bot.engine)) body.effort = $("f-effort").value || null;
   if (!bot || $("f-cli-access").value !== (bot.cli_access || "full")) body.cli_access = $("f-cli-access").value;
   if (bot) {

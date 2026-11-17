@@ -39,8 +39,6 @@ class Turns:
             raise TurnError("provider is disabled or unavailable")
         reason = (reason or "").strip() or (bot.reason if bot else None)
         reason = (reason or "").strip() or None
-        if provider == "claude" and not reason:
-            raise TurnError("provider claude requires a non-empty reason")
         return provider, reason
 
     def _log_claude_use(self, job: Job) -> None:
