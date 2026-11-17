@@ -23,6 +23,7 @@ from ..catalog import (
     valid_model_id,
 )
 from ..domain import Job
+from ..store import STEER_ENDED_NOTE
 from ..streaming import current_sink, emit_event
 from .base import RunResult
 from .streams import SESSION_ID_RE, StreamParser, parser_for, session_id_from
@@ -253,6 +254,22 @@ class CliAdapter:
 
     def _can_resume(self, job: Job | None) -> bool:
         return self.supports_resume and job is not None and job.bot_id is not None
+
+    def steering(self, job: Job | None) -> str:
+        """How a message sent while *job* runs reaches this CLI (0.11.6): ``"live"`` (written into the
+        running process), ``"interrupt"`` (the step is interrupted and the same session resumed with the
+        message) or ``"queue"`` (cannot take input mid-run; the message becomes the next turn)."""
+        return "interrupt" if self._can_resume(job) else "queue"
+
+    def steer_unavailable_note(self, job: Job | None) -> str | None:
+        """Why a message cannot reach *job* while it runs (None: it can)."""
+        if self.steering(job) != "queue":
+            return None
+        if not self.supports_resume:
+            why = f"{self.label} cannot take a message while it works"
+        else:
+            why = f"{self.label} cannot take a message while it works in restricted access mode"
+        return f"{why}, so yours is queued as the next turn."
 
     def _valid_session(self, session: str | None) -> bool:
         return bool(session and SESSION_ID_RE.fullmatch(session))
@@ -521,8 +538,9 @@ class CliAdapter:
                 pending_since = None
                 return
             if not self._can_resume(job):
-                for message_id in sink.store.queue_steers(job.id):
-                    sink.emit("steer", message_id=message_id, status="queued")
+                note = self.steer_unavailable_note(job) or STEER_ENDED_NOTE
+                for message_id in sink.store.queue_steers(job.id, note):
+                    sink.emit("steer", message_id=message_id, status="queued", note=note)
                 pending_since = None
                 return
             if pending_since is None:
