@@ -18,10 +18,28 @@ class CursorAdapter(CliAdapter):
     confine_home = False
 
     supports_resume = True
+    tracks_tools = True
 
     def _can_resume(self, job) -> bool:
-        # resuming needs the stable per-bot --workspace; restricted bots keep the job workspace
+        # resuming needs the stable per-bot --workspace; restricted bots keep the job workspace (a message
+        # to one still steers it: the run is started again there with the same flags, see steering())
         return super()._can_resume(job) and self._full_access(job)
+
+    def _tool_signal(self, obj):
+        if obj.get("type") != "tool_call":
+            return None
+        key = str(obj.get("call_id") or "")
+        if obj.get("subtype") == "started":
+            return "start", key
+        if obj.get("subtype") in ("completed", "finished"):
+            return "end", key
+        return None
+
+    def _restart_exec_args(self, workspace: Path, job: Job, suffix: str) -> list[str]:
+        args = self._exec_args(workspace, job, None)
+        if args[-1] == PROMPT_POINTER:  # the prompt is the file in the workspace: add the note after it
+            args[-1] = PROMPT_POINTER + suffix
+        return args
 
     def _exec_args(self, workspace: Path, job=None, session: str | None = None) -> list[str]:
         stable = self._can_resume(job)

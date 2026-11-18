@@ -24,7 +24,15 @@ class AntigravityAdapter(CliAdapter):
         return "error"
 
     supports_resume = True
+    tracks_tools = True
     STABLE_MARKER = ".stable"
+
+    def _tool_signal(self, obj):
+        step = obj.get("step_update")
+        if obj.get("event") != "step_update" or not isinstance(step, dict) or step.get("step_type") != "tool":
+            return None
+        key = str(step.get("step_id") or step.get("id") or step.get("tool_name") or "")
+        return ("end" if step.get("state") == "DONE" else "start"), key
 
     def _can_resume(self, job) -> bool:
         # a conversation is bound to the directory it was created in, so resuming needs the stable

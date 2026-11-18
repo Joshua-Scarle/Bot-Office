@@ -97,6 +97,31 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .msg.assistant .body { background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
 .msg.system { align-self: center; max-width: 95%; }
 .msg.system .body { font-size: 13px; color: var(--muted); background: transparent; border: 1px dashed var(--line); padding: 6px 12px; }
+/* 0.11.10: messages between bots: a time and "N messages with <bot>"; click opens #agent-chat */
+.agent-group { align-self: center; display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: 95%; }
+.agent-when { font-size: 12px; color: var(--muted); }
+.agent-open { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 999px; padding: 3px 10px; max-width: 100%; }
+.agent-open:hover, .agent-open:focus-visible { color: var(--text); border-color: var(--line); }
+.agent-peer { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.avatar.xs { width: 20px; height: 20px; border-radius: 6px; font-size: 12px; display: inline-grid; }
+#agent-chat { width: min(760px, calc(100vw - 16px)); max-height: calc(100vh - 32px); background: var(--bg, #111); }
+#agent-chat[open] { display: flex; flex-direction: column; }
+#agent-chat-title { align-self: center; display: inline-flex; align-items: center; gap: 8px; margin: 12px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 14px; max-width: calc(100% - 24px); overflow: hidden; }
+.agent-swap { color: var(--muted); }
+#agent-chat-list { flex: 1; overflow-y: auto; padding: 4px 16px 12px; display: flex; flex-direction: column; gap: 14px; }
+.agent-msg .agent-name { font-size: 12px; margin: 0 0 4px 30px; }
+.agent-msg .agent-row { display: flex; align-items: flex-end; gap: 8px; }
+.agent-bubble { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; border-bottom-left-radius: 4px; padding: 8px 14px; overflow-wrap: anywhere; min-width: 0; }
+.agent-bubble .md p { margin: 0 0 8px; } .agent-bubble .md p:last-child { margin-bottom: 0; }
+.agent-bubble .md ul, .agent-bubble .md ol { margin: 0 0 8px; padding-left: 20px; }
+.agent-bubble .md pre { white-space: pre-wrap; background: rgba(0,0,0,.25); padding: 8px; border-radius: 8px; margin: 0 0 8px; }
+.agent-bubble .md .md-h { font-weight: 700; }
+.agent-chat-foot { display: flex; justify-content: center; padding: 10px; }
+#agent-chat-close { border-radius: 999px; padding: 8px 18px; }
+.msg.system.office .body { text-align: left; }
+.msg .body.folded { max-height: 5.6em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
+.msg button.mini.fold { align-self: flex-start; font-size: 12px; padding: 2px 8px; margin-top: 2px; background: transparent; border-color: transparent; color: var(--muted); }
+.msg.system button.mini.fold { align-self: center; }
 .msg .who button.mini { font-size: 12px; padding: 0 6px; margin-left: 6px; background: transparent; border-color: transparent; color: var(--muted); }
 .msg .who button.mini:hover { color: var(--text); border-color: var(--line); }
 .msg .tag { margin-left: 6px; font-style: italic; }
@@ -108,8 +133,6 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .edit-box .note { font-size: 12px; color: var(--muted); margin: 0; }
 .edit-box .imgs { display: flex; flex-wrap: wrap; gap: 6px; }
 .edit-box .actions { justify-content: flex-end; }
-.msg.live .body.waiting { color: var(--muted); font-style: italic; }
-.msg.live .who::after { content: " · live"; color: var(--ok); }
 .steps { margin: 0 0 6px; font-size: 12px; color: var(--muted); max-width: 100%; }
 .steps > summary { cursor: pointer; user-select: none; padding: 2px 0; }
 .steps > summary:hover { color: var(--text); }
@@ -141,6 +164,20 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 
 /* Settings dialog */
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(520px, calc(100vw - 24px)); }
+#settings-dialog { width: min(780px, calc(100vw - 24px)); }
+.settings-content { padding: 18px; display: grid; gap: 14px; max-height: calc(100vh - 48px); overflow-y: auto; }
+.settings-head { justify-content: space-between; }
+.settings-section { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 8px; }
+.settings-section h3 { margin: 0; font-size: 16px; }
+.settings-section p { margin: 0; }
+.settings-section textarea { min-height: 200px; font: 13px/1.45 ui-monospace, monospace; }
+.settings-section .check { display: flex; gap: 8px; align-items: flex-start; color: var(--text); font-size: 15px; }
+.settings-section .inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--text); font-size: 15px; }
+.settings-section input[type=checkbox] { width: auto; margin-top: 4px; }
+.settings-section input[type=number] { width: 6em; }
+.settings-section summary { cursor: pointer; font-weight: 600; }
+details.settings-section[open] > summary { margin-bottom: 4px; }
+.engine-row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
 dialog::backdrop { background: rgba(0, 0, 0, .6); }
 dialog form { display: grid; gap: 12px; padding: 20px; max-height: calc(100vh - 48px); overflow-y: auto; }
 dialog h2 { margin: 0; font-size: 18px; }
@@ -184,10 +221,58 @@ dialog textarea { min-height: 90px; resize: vertical; }
 }
 .question-card { margin-top: 8px; padding: 12px; border: 1px solid #465063; border-radius: 10px; background: #1b202a; display: grid; gap: 8px; }
 .question-card button, .question-card input { max-width: 100%; }
+.approval-card { margin-top: 8px; padding: 12px; border: 1px solid #8a6d2b; border-radius: 10px; background: #221d12; display: grid; gap: 8px; }
+.approval-card.approved, .approval-card.consumed { border-color: #2f6b45; background: #142019; }
+.approval-card.denied, .approval-card.expired { border-color: var(--line); background: transparent; }
+.approval-command { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; font: 13px/1.45 ui-monospace, monospace; }
+.approval-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.approval-row input[type=checkbox] { margin-top: 4px; }
+.approval-row .muted { font-size: 13px; }
+.approval-warn { padding: 8px 10px; border: 1px solid #8a6d2b; border-radius: 8px; background: #221d12; font-size: 14px; }
 .question-option { display: block; text-align: left; }
 .question-option small { display: block; opacity: .75; }
 .question-prompt { white-space: pre-wrap; }
 .msg.progress { opacity: .72; font-size: .88em; }
+
+/* live turn indicator (0.11.6): animated dots, a shimmering status line and the elapsed time */
+.msg.turn .working { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 14px; border-bottom-left-radius: 4px; background: var(--panel); color: var(--muted); font-size: 13px; }
+.msg.turn .body { margin-top: 6px; }
+.working .elapsed { font-variant-numeric: tabular-nums; }
+.working .more { color: var(--warn); }
+.working button.mini { font-size: 12px; padding: 0 6px; }
+.dots { display: inline-flex; gap: 3px; align-items: center; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); opacity: .3; animation: dot-pulse 1.2s infinite ease-in-out; }
+.dots i:nth-child(2) { animation-delay: .15s; }
+.dots i:nth-child(3) { animation-delay: .3s; }
+.is-waiting .dots i { background: var(--warn); animation-duration: 2.4s; }
+.shimmer { background: linear-gradient(90deg, var(--muted) 0%, var(--text) 45%, var(--muted) 90%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 2.2s linear infinite; }
+@keyframes dot-pulse { 0%, 80%, 100% { opacity: .25; transform: scale(.8); } 40% { opacity: 1; transform: scale(1.1); } }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .dots i { animation: none; opacity: .8; } .shimmer { animation: none; background: none; color: var(--text); } }
+/* a steering message is a normal user message with a delivery mark */
+.msg .delivery { margin-left: 6px; font-size: 11px; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; font-style: normal; }
+.msg .delivery.delivered { color: var(--ok); border-color: #2f5a3d; }
+.msg .delivery.pending, .msg .delivery.queued { color: var(--warn); border-color: #5a4f2a; }
+.msg .delivery-note { font-size: 12px; color: var(--warn); margin-top: 3px; }
+.msg.user.steered .body { border-right: 3px solid var(--accent); }
+.steer-hint { font-size: 12px; color: var(--muted); margin: 0; }
+/* details drawer: jobs, steps and logs are reached from here, never shown as cards in the chat */
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); z-index: 40; display: flex; flex-direction: column; background: var(--side); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0, 0, 0, .35); }
+.drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.drawer-head h2 { margin: 0; font-size: 16px; }
+.drawer-body { flex: 1; overflow-y: auto; padding: 12px 16px; display: grid; gap: 10px; align-content: start; }
+.drawer-body h3 { margin: 6px 0 0; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+.drawer-job { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: grid; gap: 6px; background: var(--panel); }
+.drawer-job-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.drawer-job-head .mini { margin-left: auto; }
+.drawer-meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.drawer-meta.bad { color: var(--danger); }
+.drawer details > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.drawer pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; margin: 4px 0 0; font: 12px/1.4 ui-monospace, monospace; }
+.pill { font-size: 11px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
+.pill.running { color: var(--ok); }
+.pill.queued { color: var(--warn); }
+.pill.failed, .pill.needs_login { color: var(--danger); }
 </style>
 </head>
 <body>
@@ -210,7 +295,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <div id="needs-list"></div>
     </section>
     <nav id="bot-list" class="bot-list"></nav>
-    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
+    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="office-settings" class="ghost" type="button" title="Settings for all bots">⚙ Settings</button><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
   </aside>
 
   <main class="chat">
@@ -233,6 +318,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <button id="routines-open">Routines</button>
       <button id="watchers-open" title="Wake this bot when something changes">Watchers</button>
       <button id="assignments-open" title="Goals this bot works on until done">Assignments</button>
+      <button id="activity-open" type="button" title="What this bot is doing, its steps, log and recent turns">Activity</button>
       <button id="edit-bot" title="Bot settings">Settings</button>
     </header>
     <div id="messages" class="messages" role="log" aria-live="polite">
@@ -240,19 +326,24 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </div>
     <form id="composer" class="composer" hidden>
       <div class="composer-inner">
-        <input id="send-reason" maxlength="1000" placeholder="Reason for using Claude (required for this bot)" hidden>
         <div id="attachment-list" class="attachment-list"></div>
-        <label id="queue-option" hidden><input id="queue-next" type="checkbox"> Queue as next turn</label>
+        <label id="queue-option" hidden><input id="queue-next" type="checkbox"> Send after this turn instead of steering</label>
         <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
         <div class="composer-row">
           <button id="attach" type="button" title="Attach images" aria-label="Attach images">📎</button>
           <textarea id="text" rows="1" placeholder="Message (Ctrl+V to paste images)" aria-label="Message"></textarea>
           <button id="mic" type="button" title="Dictate (Ctrl+Shift+M)" aria-label="Dictate" aria-pressed="false" hidden>🎤</button>
+          <button id="stop" type="button" class="danger" title="Stop the turn that is running" hidden>Stop</button>
           <button id="send" class="primary">Send</button>
         </div>
+        <p id="steer-hint" class="steer-hint" hidden></p>
         <div id="status" class="status" role="status"></div>
       </div>
     </form>
+    <aside id="job-drawer" class="drawer" aria-labelledby="drawer-title" hidden>
+      <div class="drawer-head"><h2 id="drawer-title">Activity</h2><button id="drawer-close" type="button" class="ghost" aria-label="Close activity">Close</button></div>
+      <div id="drawer-body" class="drawer-body"></div>
+    </aside>
   </main>
 </div>
 
@@ -292,6 +383,58 @@ dialog textarea { min-height: 90px; resize: vertical; }
   </div>
 </dialog>
 
+<dialog id="settings-dialog" aria-labelledby="settings-title">
+  <div class="settings-content">
+    <div class="tools-bar settings-head"><h2 id="settings-title">Settings</h2><button id="settings-close" type="button">Close</button></div>
+    <p class="muted">These apply to every bot. Each bot's own profile, model and limits are under Settings in its chat.</p>
+    <section class="settings-section" id="set-rules" aria-labelledby="set-rules-title">
+      <h3 id="set-rules-title">Rules for all bots</h3>
+      <p class="muted">Every bot follows these rules. Edit them to change how all your bots work. A bot's own instructions and your standing rules can override them, and Bot-Office's safety rules always apply.</p>
+      <textarea id="rules-text" rows="14" aria-label="Rules for all bots"></textarea>
+      <div class="tools-bar"><button id="rules-save" type="button" class="primary">Save rules</button><button id="rules-reset" type="button">Reset to default</button><span id="rules-state" class="muted" role="status"></span></div>
+    </section>
+    <section class="settings-section" id="set-behavior" aria-labelledby="set-behavior-title">
+      <h3 id="set-behavior-title">Bot behavior</h3>
+      <label class="check"><input id="auto-continue" type="checkbox"> Keep going automatically when a bot stops before its task is done</label>
+      <label class="inline">At most <input id="auto-continue-max" type="number" min="1" max="50" aria-label="Most automatic continuations in a row"> continuations in a row, then the bot waits for you</label>
+      <p class="muted">A message from you or Stop ends the run. Continuations run quietly: the bot stays "Working" in the chat. Assignments use the same loop, within the turn budget set on each assignment (20 turns by default).</p>
+      <div class="tools-bar"><button id="behavior-save" type="button" class="primary">Save</button><span id="behavior-state" class="muted" role="status"></span></div>
+    </section>
+    <section class="settings-section" id="set-approvals" aria-labelledby="set-approvals-title">
+      <h3 id="set-approvals-title">Approvals</h3>
+      <p class="muted">Bots work on their own and rarely ask. Turn on the kinds of action you want done, but not without your yes. When a bot tries one, it pauses that one step and its chat shows an Approve / Deny card.</p>
+      <div id="approval-classes"></div>
+      <details id="approval-add">
+        <summary>Add your own</summary>
+        <label>Name<input id="approval-label" maxlength="80" placeholder="Deploys"></label>
+        <label>It matches<select id="approval-kind"><option value="shell">a command (a pattern, e.g. \bmake deploy\b)</option><option value="tool">a tool or connector name (a pattern, e.g. create_event)</option></select></label>
+        <label>Pattern<input id="approval-pattern" maxlength="500"></label>
+        <div class="tools-bar"><button id="approval-add-btn" type="button">Add</button></div>
+      </details>
+      <label class="inline">If you don't answer within <input id="approval-timeout" type="number" min="0" max="10080" aria-label="Minutes to wait for an answer"> minutes, the bot leaves that task stopped (0 = wait until you answer)</label>
+      <p class="muted" id="approval-gates"></p>
+      <p class="approval-warn" id="approval-unpausable" role="note" hidden></p>
+      <div class="tools-bar"><button id="approvals-save" type="button" class="primary">Save</button><span id="approvals-state" class="muted" role="status"></span></div>
+    </section>
+    <section class="settings-section" id="set-engines" aria-labelledby="set-engines-title">
+      <h3 id="set-engines-title">Engines</h3>
+      <p class="muted">The official CLIs your bots run on, with your own subscriptions. Pick a bot's engine and model in its own settings.</p>
+      <div id="engines-list"></div>
+    </section>
+    <section class="settings-section" id="set-voice" aria-labelledby="set-voice-title">
+      <h3 id="set-voice-title">Voice</h3>
+      <div class="tools-bar"><button id="settings-voice" type="button">Voice and dictation…</button></div>
+    </section>
+    <details class="settings-section" id="set-advanced">
+      <summary>Advanced</summary>
+      <h3>System prompt</h3>
+      <p class="muted">How Bot-Office works for every bot: turns, memory files, messaging other bots, trust and safety. It comes prebuilt and rarely needs changing.</p>
+      <textarea id="system-text" rows="16" aria-label="System prompt"></textarea>
+      <div class="tools-bar"><button id="system-save" type="button">Save system prompt</button><button id="system-reset" type="button">Reset to default</button><span id="system-state" class="muted" role="status"></span></div>
+    </details>
+  </div>
+</dialog>
+
 <dialog id="bot-dialog" aria-labelledby="dialog-title">
   <form id="bot-form" autocomplete="off">
     <h2 id="dialog-title">Bot settings</h2>
@@ -317,6 +460,8 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <div id="loop-zone" hidden>
       <label>Turn time limit in minutes<input id="f-timeout" type="number" min="1" max="60" placeholder="default"></label>
       <label class="check"><input id="f-notify" type="checkbox"> Notify me when this bot needs me</label>
+      <label class="check"><input id="f-bot-steer" type="checkbox"> Other bots' messages reach it while it works</label>
+      <p class="hint">On by default, like your own messages. Off: their messages wait for a turn of their own. A bot can also choose to wait (bot-msg --queue).</p>
       <p class="hint" id="f-gate">Action gate: checking…</p>
       <p class="hint" id="f-isolation">Isolation: checking…</p>
       <label class="check"><input id="f-allow-sudo" type="checkbox"> Allow sudo for this bot</label>
@@ -328,7 +473,6 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <label class="check"><input id="f-digest" type="checkbox"> Post the daily digest in this chat (built without a model call)</label>
     </div>
     <p class="hint" id="f-model-hint">Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.</p>
-    <label id="f-reason-row">Reason for using Claude<input id="f-reason" maxlength="1000" placeholder="Required for Claude models"></label>
     <label>Instructions<textarea id="f-instructions" maxlength="50000" placeholder="Profile and standing instructions"></textarea></label>
     <div class="danger-zone" id="delete-zone">
       <div><button type="button" id="delete-start" class="danger">Delete bot…</button></div>
@@ -349,6 +493,11 @@ dialog textarea { min-height: 90px; resize: vertical; }
   </form>
 </dialog>
 
+<dialog id="agent-chat" aria-labelledby="agent-chat-title">
+  <div id="agent-chat-title"></div>
+  <div id="agent-chat-list" role="log"></div>
+  <div class="agent-chat-foot"><button type="button" id="agent-chat-close">Close Chat</button></div>
+</dialog>
 <dialog id="image-view"><button type="button" id="image-close">Close</button><div><img id="image-full" alt="Attached image"></div></dialog>
 <script>
 "use strict";
@@ -366,7 +515,11 @@ const state = {
   timer: null, tick: 0, live: new Map(),
   // newest message ids rendered for the selected bot (all / counted as unread)
   shown: { bot: null, max: 0, counted: 0 }, readSent: new Map(),
+  // 0.11.10: the selected bot's last message list (the bot-to-bot overlay reads it)
+  lastMessages: [],
   showArchived: false, editingMsg: null,
+  // details drawer (0.11.6) and the current queued/running placeholders of the selected bot
+  drawerOpen: false, drawerOpener: null, drawerSteps: false, drawerLogs: new Set(), pendingJobs: [],
 };
 // mirrors the server's catalog; /v1/model-choices is authoritative once loaded
 const FALLBACK_EFFORTS = {
@@ -631,17 +784,39 @@ function renderHeader() {
   $("head-effort").hidden = !bot.effort;
   $("head-effort").textContent = bot.effort ? "effort: " + bot.effort : "";
   $("head-tier").textContent = bot.capability_tier || "";
-  const needsReason = bot.engine === "claude" && !(bot.reason || "").trim();
-  $("send-reason").hidden = !needsReason;
-  $("send-reason").required = needsReason;
   const busy = bot.activity === "running" || bot.activity === "queued";
-  $("queue-option").hidden = !busy;
+  // a running turn on an engine that cannot take input mid-run: said up front, not found out later
+  const forced = bot.activity === "running" && bot.steering === "queue";
+  $("queue-option").hidden = !busy || forced;
   if (!busy) $("queue-next").checked = false;
-  const steering = busy && !$("queue-next").checked;
-  $("send").textContent = steering ? "Steer" : "Send";
-  $("text").placeholder = steering ? "Steer the current task, running or queued (Ctrl+V to paste images)" : "Message (Ctrl+V to paste images)";
+  const queueing = busy && ($("queue-next").checked || forced);
+  $("send").textContent = !busy ? "Send" : queueing ? "Queue" : "Steer";
+  $("text").placeholder = composerPlaceholder(bot, busy, queueing);
+  const hint = busy ? steerHint(bot, queueing) : "";
+  $("steer-hint").textContent = hint;
+  $("steer-hint").hidden = !hint;
+  $("stop").hidden = !busy;
+}
+/* what a message sent now does, per engine (bot.steering comes from the server) */
+function composerPlaceholder(bot, busy, queueing) {
+  if (!busy) return "Message (Ctrl+V to paste images)";
+  if (queueing) return "Message " + bot.name + " (it runs after the current turn)";
+  return "Steer " + bot.name + " while it works (Ctrl+V to paste images)";
+}
+function steerHint(bot, queueing) {
+  if (!queueing && bot.activity === "queued") return "Your message joins the waiting turn and is delivered when it starts.";
+  if (queueing && bot.steering === "queue" && bot.activity === "running") return bot.name + "'s engine cannot take a message while it works, so yours runs as the next turn.";
+  if (queueing) return "Your message waits until the current turn is finished.";
+  if (bot.steering === "live") return "Live: " + bot.name + " gets your message right away and carries on.";
+  if (bot.steering === "interrupt") return bot.name + " pauses within a second or two (a running command gets up to 5 s to finish), reads your message in the same conversation and carries on.";
+  if (bot.steering === "restart") return bot.name + " cannot take a message mid-run, so its step is stopped within a second or two and the same task starts again with your message and a note of what it had done. Files already changed are kept; its earlier reasoning is not.";
+  return "Your message goes to " + bot.name + " as soon as it can take it.";
 }
 $("queue-next").onchange = renderHeader;
+$("stop").onclick = () => {
+  const job = state.pendingJobs.find((m) => m.job_status === "running") || state.pendingJobs[0];
+  if (job) stopJob(job.job_id, $("stop"));
+};
 
 async function selectBot(id) {
   // the read revision this click saw, plus a fresh copy requested right now (see markRead)
@@ -663,11 +838,140 @@ async function selectBot(id) {
 }
 
 /* ---- messages ---- */
+/* 0.11.10: who wrote a message (m.author from the server). Only the owner's own typed messages get
+   the "You" label and the right-hand bubble; bot-to-bot messages read "A → B" on the left, and lines
+   Bot-Office wrote (routines, wake-ups, assignment steps, automatic continuations) are compact notes */
+const OFFICE_SOURCES = { routine: "Routine", wakeup: "Wake-up", trigger: "Watcher", assignment: "Bot-Office", inbox: "Inbox" };
 function senderLabel(m, bot) {
-  if (m.sender) return m.sender;
-  if (m.role === "assistant") return bot.name;
-  if (m.role === "system") return "System";
-  return m.source === "routine" ? "Routine" : "You";
+  const peer = m.peer || "another bot";
+  switch (m.author) {
+    case "owner": return "You";
+    case "bot_out": return bot.name + " → " + peer;
+    case "bot_in": return peer + " → " + bot.name;
+    case "bot_reply": return peer + " → " + bot.name + " (reply)";
+    case "office": return m.sender || OFFICE_SOURCES[m.source] || "Bot-Office";
+    case "system": return "System";
+    default: return m.role === "assistant" ? bot.name : (m.sender || "System");
+  }
+}
+function isOwnerMessage(m) { return m.author === "owner" && m.role === "user"; }
+/* what the bot side said: counts toward Unread (matches the server's rule) */
+function countsUnread(m) { return m.role !== "user" || m.author === "bot_out"; }
+function bubbleClass(m) {
+  if (m.author === "office") return "system office";
+  return m.role === "user" && !isOwnerMessage(m) ? "system office" : m.role;
+}
+/* 0.11.10: messages between bots (bot-msg, inbox drops, reply copies, assignment hand-offs), as in
+   Grok Bot: the chat shows only a time and "2 messages with <bot>"; consecutive messages with the same
+   bot (sent and received) share one row. Clicking it opens that conversation in an overlay.
+   Restyle through the .agent-group and #agent-chat classes. */
+function isAgentRow(m) { return m.author === "bot_out" || m.author === "bot_in" || m.author === "bot_reply"; }
+function agentGroups(messages) {
+  const groups = new Map(); // first message id -> group; later members map to null
+  let current = null;
+  for (const m of messages) {
+    if (m.pending) continue;
+    if (isAgentRow(m)) {
+      const key = (m.peer || "") + (m.archived_at ? "|archived" : "");
+      if (current && current.key === key) { current.items.push(m); groups.set(m.id, null); continue; }
+      current = { key, peer: m.peer || "another bot", items: [m] };
+      groups.set(m.id, current);
+    } else current = null; // anything else in between starts a new row
+  }
+  return groups;
+}
+function botByName(name) { return state.bots.find((b) => b.name === name) || { id: "peer:" + name, name, icon: null }; }
+function accentColor(name) {
+  let h = 0;
+  for (const c of name || "") h = (h * 31 + c.charCodeAt(0)) % 360;
+  return "hsl(" + h + " 70% 72%)";
+}
+function smallAvatar(bot) { const av = el("span", "avatar xs"); fillAvatar(av, bot); return av; }
+function agentGroupRow(group, bot) {
+  const first = group.items[0];
+  const wrap = el("div", "agent-group" + (first.archived_at ? " archived" : ""));
+  wrap.append(el("div", "agent-when", new Date(first.created_at).toLocaleString([],
+    { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })));
+  const open = el("button", "agent-open");
+  open.type = "button";
+  const n = group.items.length;
+  open.append(el("span", "", n + (n === 1 ? " message with" : " messages with")), smallAvatar(botByName(group.peer)),
+    el("span", "agent-peer", group.peer));
+  open.title = "Show the messages between " + bot.name + " and " + group.peer;
+  open.onclick = () => openAgentChat(bot, group.peer, first.id);
+  wrap.append(open);
+  return wrap;
+}
+/* a small, safe Markdown subset for the overlay (DOM nodes only, never innerHTML) */
+function mdInline(parent, text) {
+  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*)/g;
+  let last = 0, hit;
+  while ((hit = re.exec(text))) {
+    if (hit.index > last) parent.append(text.slice(last, hit.index));
+    const t = hit[0];
+    if (t[0] === "`") parent.append(el("code", "", t.slice(1, -1)));
+    else if (t.startsWith("**")) parent.append(el("strong", "", t.slice(2, -2)));
+    else parent.append(el("em", "", t.slice(1, -1)));
+    last = hit.index + t.length;
+  }
+  if (last < text.length) parent.append(text.slice(last));
+}
+function renderMarkdown(text) {
+  const root = el("div", "md");
+  const lines = text.split("\n");
+  let list = null, para = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("```")) {
+      const code = [];
+      for (i++; i < lines.length && !lines[i].startsWith("```"); i++) code.push(lines[i]);
+      root.append(el("pre", "", code.join("\n")));
+      list = para = null;
+      continue;
+    }
+    const bullet = /^\s*(?:[-*•]|\d+[.)])\s+(.*)$/.exec(line);
+    const heading = /^#{1,6}\s+(.*)$/.exec(line);
+    if (bullet) {
+      if (!list) { list = el(/^\s*\d/.test(line) ? "ol" : "ul"); root.append(list); }
+      const li = el("li"); mdInline(li, bullet[1]); list.append(li); para = null;
+    } else if (heading) {
+      const h = el("p", "md-h"); mdInline(h, heading[1]); root.append(h); list = para = null;
+    } else if (!line.trim()) {
+      list = para = null;
+    } else {
+      if (!para) { para = el("p"); root.append(para); } else para.append(document.createElement("br"));
+      mdInline(para, line); list = null;
+    }
+  }
+  return root;
+}
+function openAgentChat(bot, peerName, focusId) {
+  const peer = botByName(peerName);
+  const title = $("agent-chat-title");
+  title.replaceChildren(smallAvatar(bot), el("span", "", bot.name), el("span", "agent-swap", "⇄"),
+    smallAvatar(peer), el("span", "", peerName));
+  const list = $("agent-chat-list");
+  list.replaceChildren();
+  let focus = null;
+  for (const m of state.lastMessages) {
+    if (!isAgentRow(m) || (m.peer || "another bot") !== peerName || m.pending) continue;
+    const sender = m.author === "bot_out" ? bot : peer;
+    const item = el("div", "agent-msg");
+    const name = el("div", "agent-name", sender.name + " · " + new Date(m.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" }));
+    name.style.color = accentColor(sender.name);
+    if (m.steer_job_id) name.append(" · " + (m.steer_status === "queued" ? "waited for its own turn" : "sent while " + bot.name + " was working" + (m.steer_status === "delivered" ? ", delivered" : "")));
+    const row = el("div", "agent-row");
+    const bubble = el("div", "agent-bubble");
+    bubble.append(renderMarkdown(m.text));
+    for (const id of (m.attachments || [])) showAttachment(bubble, bot.id, id);
+    row.append(smallAvatar(sender), bubble);
+    item.append(name, row);
+    list.append(item);
+    if (m.id === focusId) focus = item;
+  }
+  $("agent-chat").showModal();
+  (focus || list.lastElementChild || list).scrollIntoView({ block: "start" });
+  $("agent-chat-close").focus();
 }
 
 /* ---- live streaming (fetch + ReadableStream; the bearer token is only ever a header) ---- */
@@ -678,50 +982,120 @@ function stopStreams() {
 
 function clip(text, n) { return text.length > n ? text.slice(0, n - 1) + "…" : text; }
 
+/* ---- the working indicator: what the bot is doing right now, in words (no job cards in the chat) ---- */
+const TOOL_VERBS = [
+  [/^(bash|shell|command|exec|run)/i, "Running", "a command"],
+  [/^(read|view|cat|open)/i, "Reading", "a file"],
+  [/^(edit|write|multiedit|notebook|file_change|apply|patch)/i, "Editing", "files"],
+  [/^(grep|glob|ls|list|search|find)/i, "Searching", "the workspace"],
+  [/^(web|fetch|browser|http)/i, "Browsing", "the web"],
+  [/^(task|agent|delegate)/i, "Delegating", "a task"],
+  [/^(todo|plan)/i, "Planning", "the next steps"],
+];
+function describeTool(name, summary) {
+  const label = String(name || "tool");
+  const detail = summary ? clip(String(summary).replace(/\s+/g, " ").trim(), 90) : "";
+  const hit = TOOL_VERBS.find((entry) => entry[0].test(label));
+  if (hit) return hit[1] + " " + (detail || hit[2]);
+  return "Using " + label + (detail ? ": " + detail : "");
+}
+
+/* the short status line of a live turn, from its state and the latest stream event */
+function liveStatus(view, now) {
+  const at = typeof now === "number" ? now : Date.now();
+  if (view.status === "queued") {
+    if (view.notBefore && new Date(view.notBefore).getTime() > at)
+      return "Waiting to retry at " + new Date(view.notBefore).toLocaleTimeString([], { timeStyle: "short" });
+    return "Waiting to start";
+  }
+  if (view.phase === "thinking") return "Thinking";
+  if (view.phase === "tool") return view.tool ? describeTool(view.tool.name, view.tool.summary) : "Working";
+  if (view.phase === "writing") return "Writing the reply";
+  if (view.phase === "steered") return "Got your message, adjusting";
+  return view.phase ? "Working" : "Starting up";
+}
+
+/* "12 s", "1 min 05 s", "1 h 02 min" */
+function formatElapsed(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < 60) return total + " s";
+  const minutes = Math.floor(total / 60), seconds = total % 60;
+  if (minutes < 60) return minutes + " min " + String(seconds).padStart(2, "0") + " s";
+  return Math.floor(minutes / 60) + " h " + String(minutes % 60).padStart(2, "0") + " min";
+}
+function tickElapsed() {
+  const now = Date.now();
+  for (const node of document.querySelectorAll(".elapsed[data-since]")) {
+    const since = Number(node.dataset.since);
+    if (since) node.textContent = formatElapsed(now - since);
+  }
+}
+setInterval(tickElapsed, 1000);
+
+function workingRow() {
+  const row = el("div", "working");
+  const dots = el("span", "dots");
+  dots.setAttribute("aria-hidden", "true");
+  dots.append(el("i"), el("i"), el("i"));
+  const status = el("span", "status-text shimmer", "");
+  const elapsed = el("span", "elapsed", "");
+  const more = el("span", "more", "");
+  more.hidden = true;
+  row.append(dots, status, elapsed, more);
+  return { row, status, elapsed, more };
+}
+
+/* the bot's current turn: one bubble with the live indicator, then the reply as it streams in */
 function newView(m) {
-  const wrap = el("div", "msg assistant live");
+  const wrap = el("div", "msg assistant live turn");
   const who = el("div", "who");
-  const steps = document.createElement("details");
-  steps.className = "steps";
-  steps.hidden = true;
-  const summary = el("summary", "", "");
-  const list = el("div", "step-list");
-  steps.append(summary, list);
+  const working = workingRow();
+  const stop = el("button", "mini ghost", "Stop");
+  stop.type = "button";
+  stop.title = "Stop this turn";
+  const details = el("button", "mini ghost", "Details");
+  details.type = "button";
+  details.title = "Show what the bot is doing, its steps and the queue";
+  working.row.append(stop, details);
   const body = el("div", "body", "");
-  const cancel = el("button", "ghost", "Cancel job");
-  cancel.onclick = async () => {
-    try { await api("/v1/jobs/" + m.job_id + "/cancel", {method: "POST"}); cancel.disabled = true; }
-    catch (e) { setStatus(e.message, true); }
-  };
-  wrap.append(who, steps, body, cancel);
-  return { jobId: m.job_id, wrap, who, steps, summary, list, body, text: m.text || "", status: m.job_status,
-           notBefore: m.not_before || null, attempt: 0,
-           tools: 0, thinks: 0, errors: 0, lastStep: null, after: 0, ctrl: null, done: false, stopped: false };
+  body.hidden = true;
+  wrap.append(who, working.row, body);
+  const view = { jobId: m.job_id, wrap, who, body, statusText: working.status, elapsed: working.elapsed,
+                 more: working.more, text: m.text || "", status: m.job_status, notBefore: m.not_before || null,
+                 attempt: 0, tools: 0, thinks: 0, errors: 0, steps: [], tool: null, phase: m.text ? "writing" : null,
+                 queuedAfter: 0, after: 0, ctrl: null, done: false, stopped: false };
+  stop.onclick = () => stopJob(view.jobId, stop);
+  details.onclick = () => openDrawer(details);
+  setSince(view, m.created_at);
+  return view;
+}
+
+function setSince(view, created) {
+  const since = Date.parse(created);
+  if (since) { view.elapsed.dataset.since = String(since); view.elapsed.textContent = formatElapsed(Date.now() - since); }
+}
+
+async function stopJob(jobId, button) {
+  if (button) button.disabled = true;
+  try { await api("/v1/jobs/" + jobId + "/cancel", { method: "POST" }); setStatus("Stopped."); state.msgSig = ""; loadMessages().catch(() => {}); }
+  catch (e) { if (button) button.disabled = false; handleError(e); }
 }
 
 function refreshView(view) {
-  const waiting = view.status === "queued" && view.notBefore && new Date(view.notBefore) > new Date();
-  view.body.textContent = view.text || (waiting
-    ? "Waiting to retry until " + new Date(view.notBefore).toLocaleTimeString([], { timeStyle: "short" }) + "…"
-    : view.status === "queued" ? "Queued…" : "Working…");
-  view.body.classList.toggle("waiting", !view.text);
-  const parts = [];
-  if (view.thinks) parts.push("thinking");
-  if (view.tools) parts.push(view.tools + (view.tools === 1 ? " tool call" : " tool calls"));
-  if (view.errors) parts.push(view.errors + (view.errors === 1 ? " error" : " errors"));
-  view.steps.hidden = !parts.length;
-  view.summary.textContent = parts.join(" · ");
+  view.body.textContent = view.text || "";
+  view.body.hidden = !view.text;
+  view.statusText.textContent = liveStatus(view) + (view.continuing ? " · continuing, " + view.continuing : "");
+  view.wrap.classList.toggle("is-waiting", view.status === "queued");
+  view.more.hidden = !view.queuedAfter;
+  view.more.textContent = view.queuedAfter ? "· " + view.queuedAfter + " more queued" : "";
 }
 
 function addStep(view, kind, text, cls) {
-  if (kind === "thinking" && view.lastStep && view.lastStep.kind === "thinking") {
-    view.lastStep.text += text;
-    view.lastStep.node.textContent = "💭 " + clip(view.lastStep.text, 600);
-    return;
-  }
-  const node = el("div", "step" + (cls ? " " + cls : ""), (kind === "thinking" ? "💭 " : "") + clip(text, 600));
-  view.list.append(node);
-  view.lastStep = { kind, node, text };
+  const last = view.steps[view.steps.length - 1];
+  if (kind === "thinking" && last && last.kind === "thinking") last.text += text;
+  else view.steps.push({ kind, text, cls: cls || "" });
+  if (view.steps.length > 400) view.steps.splice(0, view.steps.length - 400);
+  scheduleDrawer();
 }
 
 function applyEvent(view, ev) {
@@ -733,23 +1107,24 @@ function applyEvent(view, ev) {
   if (newer) view.attempt = ev.attempt;
   if (ev.kind === "retry" || newer) {
     // the same job runs again: drop the old attempt's draft and steps
-    Object.assign(view, { text: "", tools: 0, thinks: 0, errors: 0, lastStep: null, done: false });
-    view.list.replaceChildren();
+    Object.assign(view, { text: "", tools: 0, thinks: 0, errors: 0, steps: [], tool: null, phase: null, done: false });
   }
   if (ev.kind === "retry") {
     Object.assign(view, { status: "queued", notBefore: ev.not_before || null });
     state.msgSig = "";
     loadMessages().catch(() => {});
   }
-  else if (ev.kind === "start") view.status = "running";
-  else if (ev.kind === "text") view.text = ev.replace ? (ev.text || "") : view.text + (ev.text || "");
+  else if (ev.kind === "start") { view.status = "running"; view.phase = view.phase || "starting"; }
+  else if (ev.kind === "text") { view.text = ev.replace ? (ev.text || "") : view.text + (ev.text || ""); if (ev.text) view.phase = "writing"; }
   else if (ev.kind === "final") { if (ev.text) view.text = ev.text; }
-  else if (ev.kind === "thinking") { view.thinks += 1; addStep(view, "thinking", ev.text || ""); }
-  else if (ev.kind === "tool") { view.tools += 1; addStep(view, "tool", "🔧 " + (ev.name || "tool") + (ev.summary ? ": " + ev.summary : "")); }
+  else if (ev.kind === "thinking") { view.thinks += 1; view.phase = "thinking"; addStep(view, "thinking", ev.text || ""); }
+  else if (ev.kind === "tool") {
+    view.tools += 1; view.phase = "tool"; view.tool = { name: ev.name || "tool", summary: ev.summary || "" };
+    addStep(view, "tool", "🔧 " + (ev.name || "tool") + (ev.summary ? ": " + ev.summary : ""));
+  }
   else if (ev.kind === "error") { view.errors += 1; addStep(view, "error", "⚠ " + (ev.message || "error"), "bad"); }
-  else if (ev.kind === "steer") { state.msgSig = ""; loadMessages().catch(() => {}); }
+  else if (ev.kind === "steer") { if (ev.status === "delivered") view.phase = "steered"; state.msgSig = ""; loadMessages().catch(() => {}); }
   else if (ev.kind === "done") view.done = (ev.attempt ?? view.attempt) >= view.attempt;
-  if (ev.kind === "tool" || ev.kind === "error") view.lastStep = null;
   refreshView(view);
   if (stick) box.scrollTop = box.scrollHeight;
 }
@@ -802,6 +1177,128 @@ async function runStream(view) {
   } else {
     setTimeout(() => runStream(view), 1500); // dropped connection: resume after the last seq
   }
+}
+
+/* ---- details drawer: the turn's jobs, steps, log and queue live here, not in the chat ---- */
+const SOURCE_LABELS = { chat: "Chat turn", api: "API turn", routine: "Routine run", wakeup: "Wake-up",
+                        assignment: "Assignment turn", inbox: "Message from another bot" };
+const drawerCache = new Map();
+let drawerSeq = 0, drawerTimer = null;
+
+function scheduleDrawer() {
+  if (!state.drawerOpen || drawerTimer) return;
+  drawerTimer = setTimeout(() => { drawerTimer = null; refreshDrawer().catch(() => {}); }, 500);
+}
+function openDrawer(opener) {
+  state.drawerOpen = true;
+  state.drawerOpener = opener || null;
+  $("job-drawer").hidden = false;
+  $("drawer-close").focus();
+  refreshDrawer().catch(handleError);
+}
+function closeDrawer() {
+  state.drawerOpen = false;
+  $("job-drawer").hidden = true;
+  drawerCache.clear();
+  const opener = state.drawerOpener;
+  state.drawerOpener = null;
+  if (opener && opener.isConnected) opener.focus(); else $("text").focus();
+}
+$("drawer-close").onclick = closeDrawer;
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && state.drawerOpen && !$("bot-dialog").open) closeDrawer(); });
+$("activity-open").onclick = (event) => openDrawer(event.currentTarget);
+
+async function jobDetail(jobId) {
+  const hit = drawerCache.get(jobId);
+  if (hit && Date.now() - hit.at < 3000) return hit.data;
+  const data = await api("/v1/jobs/" + jobId);
+  drawerCache.set(jobId, { at: Date.now(), data });
+  return data;
+}
+
+function logDetails(jobId) {
+  const box = document.createElement("details");
+  box.append(el("summary", "", "Log"));
+  const pre = el("pre", "", "");
+  box.append(pre);
+  const load = async () => {
+    pre.textContent = "Loading…";
+    try { pre.textContent = (await api("/v1/jobs/" + jobId)).log_tail || "(empty)"; }
+    catch (e) { pre.textContent = e.message; }
+  };
+  box.ontoggle = () => {
+    if (box.open) { state.drawerLogs.add(jobId); load(); } else state.drawerLogs.delete(jobId);
+  };
+  if (state.drawerLogs.has(jobId)) { box.open = true; load(); }
+  return box;
+}
+
+function stepsDetails(view) {
+  const box = document.createElement("details");
+  const parts = [];
+  if (view.thinks) parts.push("thinking");
+  if (view.tools) parts.push(view.tools + (view.tools === 1 ? " tool call" : " tool calls"));
+  if (view.errors) parts.push(view.errors + (view.errors === 1 ? " error" : " errors"));
+  box.append(el("summary", "", "Steps" + (parts.length ? ": " + parts.join(" · ") : "")));
+  const list = el("div", "step-list");
+  for (const step of view.steps.slice(-120)) {
+    list.append(el("div", "step" + (step.cls ? " " + step.cls : ""), (step.kind === "thinking" ? "💭 " : "") + clip(step.text, 600)));
+  }
+  if (!view.steps.length) list.append(el("div", "muted", "No steps yet."));
+  box.append(list);
+  box.open = state.drawerSteps === true;
+  box.ontoggle = () => { state.drawerSteps = box.open; };
+  return box;
+}
+
+function jobRow(job, view, current) {
+  const box = el("section", "drawer-job");
+  const head = el("div", "drawer-job-head");
+  head.append(el("strong", "", SOURCE_LABELS[job.source] || "Turn"), el("span", "pill " + job.status, job.status));
+  const active = job.status === "running" || job.status === "queued";
+  if (active) {
+    const stop = el("button", "mini danger", "Stop");
+    stop.type = "button";
+    stop.onclick = () => stopJob(job.id, stop);
+    head.append(stop);
+  }
+  const meta = [modelLabel(job.provider, job.model), job.effort ? "effort " + job.effort : "",
+                job.attempts > 1 ? "attempt " + job.attempts : "",
+                job.started_at ? "started " + new Date(job.started_at).toLocaleTimeString([], { timeStyle: "short" })
+                  : "created " + new Date(job.created_at).toLocaleTimeString([], { timeStyle: "short" })].filter(Boolean);
+  box.append(head, el("div", "drawer-meta", meta.join(" · ")));
+  if (current && view) box.append(el("div", "drawer-meta", "Now: " + liveStatus(view)));
+  if (job.not_before && new Date(job.not_before) > new Date())
+    box.append(el("div", "drawer-meta", "Retry at " + new Date(job.not_before).toLocaleTimeString([], { timeStyle: "short" })));
+  if (job.error) box.append(el("div", "drawer-meta bad", clip(job.error, 300)));
+  if (view) box.append(stepsDetails(view));
+  box.append(logDetails(job.id));
+  return box;
+}
+
+async function refreshDrawer() {
+  if (!state.drawerOpen) return;
+  const bot = currentBot();
+  const body = $("drawer-body");
+  if (!bot) { body.replaceChildren(el("p", "muted", "Select a bot.")); return; }
+  const ticket = ++drawerSeq;
+  const active = state.pendingJobs.filter((m) => m.job_id);
+  const details = await Promise.all(active.map((m) => jobDetail(m.job_id).catch(() => null)));
+  let recent = [];
+  try { recent = (await api("/v1/jobs")).filter((j) => j.bot_id === bot.id).slice(-9).reverse(); } catch (e) { /* the list is optional */ }
+  if (ticket !== drawerSeq || !state.drawerOpen || currentBot() !== bot) return;
+  const nodes = [];
+  nodes.push(el("h3", "", active.length ? "Working now" : "Nothing is running"));
+  active.forEach((m, index) => {
+    if (details[index]) nodes.push(jobRow(details[index].job, state.live.get(m.job_id), index === 0));
+  });
+  const activeIds = new Set(active.map((m) => m.job_id));
+  const earlier = recent.filter((j) => !activeIds.has(j.id));
+  if (earlier.length) {
+    nodes.push(el("h3", "", "Recent turns"));
+    for (const job of earlier) nodes.push(jobRow(job, null, false));
+  }
+  body.replaceChildren(...nodes);
 }
 
 const pendingImages = [];
@@ -973,6 +1470,9 @@ for (const zone of [$("composer"), $("messages")]) {
   zone.addEventListener("drop", (event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addImages(event.dataTransfer.files); } });
 }
 $("image-close").onclick = () => $("image-view").close();
+$("agent-chat-close").onclick = () => $("agent-chat").close();
+// a click on the backdrop (outside the panel) closes it too; Esc is the dialog's own
+$("agent-chat").addEventListener("click", (e) => { if (e.target === $("agent-chat")) $("agent-chat").close(); });
 async function imageUrl(botId, id) {
   const key = botId + "/" + id;
   if (imageCache.has(key)) {
@@ -996,11 +1496,6 @@ function showAttachment(wrap, botId, id) {
 /* #10: a job parked on a usage limit; the owner may run it on another provider now (never automatic) */
 async function switchProvider(jobId, provider) {
   const body = {provider};
-  if (provider === "claude") {
-    const reason = prompt("Reason for using Claude for this turn");
-    if (!reason || !reason.trim()) return false;
-    body.reason = reason.trim();
-  }
   await api("/v1/jobs/" + jobId + "/switch-provider", {method: "POST", body: JSON.stringify(body)});
   return true;
 }
@@ -1032,6 +1527,38 @@ function renderUsageNotice(notice) {
 
 const questionUi = new Map();  // open card id -> {index, answers, selected, custom}; survives re-renders
 
+/* 0.11.10: an action that waits for the owner's yes (Settings > Approvals), shown in the chat */
+function approvalState(a) {
+  if (a.status === "pending") return "Waiting for you" + (a.expires_at ? " · until " + new Date(a.expires_at).toLocaleTimeString([], { timeStyle: "short" }) : "");
+  if (a.status === "approved") return "Approved · the bot runs it once";
+  if (a.status === "consumed") return "Approved · run once";
+  if (a.status === "denied") return "Denied · the task is stopped";
+  return a.resumed ? "Approved · the bot didn't use it within a day" : "No answer in time · the task is stopped";
+}
+function renderApproval(a, bot) {
+  const card = el("div", "approval-card " + a.status);
+  card.setAttribute("role", "group");
+  card.setAttribute("aria-label", "Approval " + a.id);
+  card.append(el("strong", "", bot.name + " wants to: " + a.label));
+  card.append(el("pre", "approval-command", a.summary));
+  card.append(el("div", "muted", approvalState(a)));
+  if (a.status === "pending" || (a.status === "expired" && !a.resumed)) {
+    const bar = el("div", "tools-bar");
+    const yes = el("button", "primary", a.status === "pending" ? "Approve" : "Approve and run");
+    const no = el("button", "", "Deny");
+    for (const [button, action] of [[yes, "approve"], [no, "deny"]]) {
+      button.type = "button";
+      button.onclick = async () => {
+        yes.disabled = no.disabled = true;
+        try { await api("/v1/approvals/" + a.id + "/" + action, { method: "POST" }); state.msgSig = ""; await loadMessages(); }
+        catch (e) { yes.disabled = no.disabled = false; setStatus(e.message, true); }
+      };
+    }
+    bar.append(yes, no);
+    card.append(bar);
+  }
+  return card;
+}
 function renderQuestion(question, botId) {
   const card = el("div", "question-card");
   const steps = question.payload.steps;
@@ -1106,45 +1633,69 @@ function renderQuestion(question, botId) {
   draw(); return card;
 }
 
+/* a steering message is an ordinary user message; this is its delivery mark */
+function steerMark(m, bot) {
+  if (m.steer_status === "delivered")
+    return { cls: "delivered", text: "✓ Delivered to " + bot.name + (m.steer_delivered_at ? " " + new Date(m.steer_delivered_at).toLocaleTimeString([], { timeStyle: "short" }) : "") };
+  if (m.steer_status === "queued") return { cls: "queued", text: "Queued, runs next" };
+  return { cls: "pending", text: bot.steering === "interrupt" || bot.steering === "restart" ? "Delivering in a moment" : "Delivering" };
+}
+
 async function loadMessages() {
   const bot = currentBot();
   if (!bot) return;
   const id = bot.id;
   const messages = await api("/v1/bots/" + id + "/messages?pending=true" + (state.showArchived ? "&archived=true" : ""));
   if (state.selected !== id) return;
+  state.pendingJobs = messages.filter((m) => m.pending && m.job_id);
+  if (state.drawerOpen) scheduleDrawer();
   const done = messages.filter((m) => !m.pending && m.id > 0 && !m.archived_at);
   state.shown = { bot: id, max: Math.max(0, ...done.map((m) => m.id)),
-    counted: Math.max(0, ...done.filter((m) => m.role !== "user").map((m) => m.id)) };
-  const sig = messages.map((m) => m.id + (m.pending ? ":" + m.job_id + ":" + m.job_status : "") + (m.archived_at ? "a" : "") + (m.steer_status || "") + (m.steer_delivered_at || "") + (m.question ? JSON.stringify(m.question) : "") + (m.notice ? JSON.stringify(m.notice) : "")).join(",") + "|" + (bot.activity || "") + "|" + (state.editingMsg ? state.editingMsg.id : "");
+    counted: Math.max(0, ...done.filter(countsUnread).map((m) => m.id)) };
+  const sig = messages.map((m) => m.id + (m.pending ? ":" + m.job_id + ":" + m.job_status : "") + (m.archived_at ? "a" : "") + (m.steer_status || "") + (m.steer_delivered_at || "") + (m.steer_note || "") + (m.question ? JSON.stringify(m.question) : "") + (m.notice ? JSON.stringify(m.notice) : "") + (m.approval ? JSON.stringify(m.approval) : "")).join(",") + "|" + (bot.activity || "") + "|" + (state.editingMsg ? state.editingMsg.id : "");
   if (sig === state.msgSig) return;
   state.msgSig = sig;
   const box = $("messages");
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  // the chat shows the bot's turn, not its jobs: one live bubble for the current turn (running first);
+  // anything queued behind it is a count in that bubble and a row in the details drawer
+  const live = state.pendingJobs;
+  const current = live.find((m) => m.job_status === "running") || live[0] || null;
+  for (const [jobId, view] of state.live) {
+    if (!current || jobId !== current.job_id) { view.stopped = true; if (view.ctrl) view.ctrl.abort(); state.live.delete(jobId); }
+  }
+  state.lastMessages = messages;
+  const groups = agentGroups(messages);
   const nodes = messages.map((m) => {
     let who = senderLabel(m, bot);
-    if (m.source === "inbox" || m.source === "routine" || m.source === "assignment" || m.source === "wakeup") who += " · " + (m.source === "wakeup" ? "wake-up" : m.source);
+    if (m.source === "routine" || m.source === "assignment" || m.source === "wakeup" || (m.source === "inbox" && m.author === "bot")) who += " · " + (m.source === "wakeup" ? "wake-up" : m.source);
     who += " · " + new Date(m.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
     if (m.pending && m.job_id) {
+      if (m !== current) return null;
       let view = state.live.get(m.job_id);
       if (!view) {
         view = newView(m);
         state.live.set(m.job_id, view);
-        refreshView(view);
         runStream(view); // replays buffered events from seq 0 after a reload, then continues live
       }
       view.status = m.job_status;
       view.notBefore = m.not_before || null;
+      view.continuing = m.continuing || null; // 0.11.10: an automatic continuation ("3 of 10")
+      view.queuedAfter = live.length - 1;
       view.who.textContent = who;
-      if (!view.text) refreshView(view);
+      setSince(view, m.created_at);
+      refreshView(view);
       return view.wrap;
     }
     if (state.editingMsg && state.editingMsg.id === m.id && !m.archived_at) return state.editingMsg.wrap;
-    const wrap = el("div", "msg " + (m.kind === "say" ? "progress " : "") + m.role + (m.source === "inbox" ? " inbox" : "") + (m.archived_at ? " archived" : ""));
+    if (isAgentRow(m)) { const group = groups.get(m.id); return group ? agentGroupRow(group, bot) : null; }
+    const wrap = el("div", "msg " + (m.kind === "say" ? "progress " : "") + bubbleClass(m) + (m.source === "inbox" ? " inbox" : "") + (m.archived_at ? " archived" : ""));
     const whoLine = el("div", "who", who);
     if (m.kind === "say") whoLine.append(el("span", "tag", "progress"));
     if (m.steer_job_id) {
-      const status = m.steer_status === "delivered" ? "received by bot ✓ " + new Date(m.steer_delivered_at).toLocaleTimeString([], {timeStyle: "short"}) : m.steer_status === "queued" ? "queued as next turn" : "sending…";
-      whoLine.append(el("span", "tag", "Steer · " + status));
+      const mark = steerMark(m, bot);
+      whoLine.append(el("span", "delivery " + mark.cls, mark.text));
+      wrap.classList.add("steered");
     }
     if (m.edit_of) whoLine.append(el("span", "tag", "edited"));
     if (m.unverified) {
@@ -1161,7 +1712,7 @@ async function loadMessages() {
       edit.onclick = () => startEdit(bot, m);
       whoLine.append(edit);
     }
-    if (m.role === "user" && !m.sender && !m.archived_at) {
+    if (isOwnerMessage(m) && !m.archived_at) {
       const assign = el("button", "mini", "⚑");
       assign.type = "button";
       assign.title = "Make assignment from this message";
@@ -1181,12 +1732,28 @@ async function loadMessages() {
       };
       whoLine.append(retry);
     }
-    wrap.append(whoLine, el("div", "body", m.text));
+    if (m.approval) { wrap.append(whoLine, renderApproval(m.approval, bot)); return wrap; }
+    const body = el("div", "body", m.text);
+    wrap.append(whoLine, body);
+    if (wrap.classList.contains("office") && (m.text.length > 280 || m.text.split("\n").length > 4)) {
+      // long Bot-Office notes (a routine's prompt, an assignment start) start folded
+      body.classList.add("folded");
+      const more = el("button", "mini fold", "Show more");
+      more.type = "button";
+      more.setAttribute("aria-expanded", "false");
+      more.onclick = () => {
+        const open = body.classList.toggle("folded") === false;
+        more.textContent = open ? "Show less" : "Show more";
+        more.setAttribute("aria-expanded", String(open));
+      };
+      wrap.append(more);
+    }
+    if (m.steer_job_id && m.steer_status === "queued" && m.steer_note) wrap.append(el("div", "delivery-note", m.steer_note));
     if (m.question) wrap.append(renderQuestion(m.question, bot.id));
     if (m.notice && m.notice.open) wrap.append(renderUsageNotice(m.notice));
     for (const id of (m.attachments || [])) showAttachment(wrap, bot.id, id);
     return wrap;
-  });
+  }).filter(Boolean);
   const hasPending = messages.some((m) => m.pending);
   if (!messages.length) {
     const box2 = el("div", "empty");
@@ -1195,7 +1762,13 @@ async function loadMessages() {
     box2.append(av, el("p", "", "Say hello to " + bot.name + "."));
     nodes.push(box2);
   }
-  if (bot.activity && !hasPending) nodes.push(el("div", "typing", bot.name + " is " + (bot.activity === "running" ? "working…" : "queued…")));
+  if (bot.activity && !hasPending) {
+    const turn = el("div", "msg assistant live turn" + (bot.activity === "running" ? "" : " is-waiting"));
+    const row = workingRow();
+    row.status.textContent = bot.activity === "running" ? "Working" : "Waiting to start";
+    turn.append(row.row);
+    nodes.push(turn);
+  }
   $("thread").replaceChildren(...nodes);
   if (atBottom || messages.length < 3) box.scrollTop = box.scrollHeight;
   markRead(id, false);
@@ -1213,7 +1786,7 @@ function canRetry(m, messages) {
 const REWIND_CONFIRM = "Rewind the chat to this message? Later messages are archived and the bot restarts from the remaining chat. " +
   "Files changed, desktop actions, messages sent to other bots and memory updates are NOT undone.";
 function canEdit(m) {
-  return m.role === "user" && !m.sender && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending && !m.steer_job_id && m.id > 0 && !m.archived_at;
+  return isOwnerMessage(m) && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending && !m.steer_job_id && m.id > 0 && !m.archived_at;
 }
 function startEdit(bot, m) {
   const wrap = el("div", "msg user");
@@ -1258,11 +1831,6 @@ async function saveEdit(editing, button) {
   if (!text) { editing.input.focus(); return; }
   if (!confirm(REWIND_CONFIRM)) return;
   const body = { text, attachments: editing.attachments };
-  if (!$("send-reason").hidden) {
-    const reason = $("send-reason").value.trim();
-    if (!reason) { handleError(new Error("Claude needs a reason before sending.")); $("send-reason").focus(); return; }
-    body.reason = reason;
-  }
   const url = "/v1/bots/" + editing.bot + "/messages/" + editing.id + "/edit";
   button.disabled = true;
   try {
@@ -1299,11 +1867,6 @@ $("composer").onsubmit = async (event) => {
   const sentImages = [...pendingImages];
   const body = { text: text || "Please see attached images.", attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
-  if (!$("send-reason").hidden) {
-    const reason = $("send-reason").value.trim();
-    if (!reason) { handleError(new Error("Claude needs a reason before sending.")); $("send-reason").focus(); return; }
-    body.reason = reason;
-  }
   sendingImages = true; for (const item of sentImages) item.sending = true; updateImages();
   try {
     const posted = await api("/v1/bots/" + bot.id + "/messages", { method: "POST", body: JSON.stringify(body) });
@@ -1315,6 +1878,7 @@ $("composer").onsubmit = async (event) => {
     autoGrow();
     setStatus("");
     if (!posted?.message?.steer_job_id) bot.activity = bot.activity === "running" ? "running" : "queued";
+    if (posted?.delivery === "queue" && posted.delivery_note) setStatus(posted.delivery_note);  // never a silent queue
     renderBots();
     state.msgSig = "";
     const box = $("messages");
@@ -1757,7 +2321,6 @@ function fillModelSelect(bot) {
     ? (state.choices ? "No engine is signed in yet. Sign in to a CLI on the host, then reopen this dialog." : "Loading models…")
     : "Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.";
   $("dialog-save").disabled = none;
-  updateReasonRow();
   fillEffortSelect();
   updateTier();
 }
@@ -1796,12 +2359,6 @@ function updateTier() {
   $("f-tier").textContent = tier ? "Capability tier: " + tier + " (derived from the model; it changes when the model does)" : "";
 }
 
-function updateReasonRow() {
-  const bot = state.editing;
-  const show = selectedEngine() === "claude" || !!(bot && (bot.reason || "").trim());
-  $("f-reason-row").hidden = !show;
-}
-
 function updateIconPreview() {
   const bot = state.editing || { id: "", name: $("f-name").value, icon: "", icon_image: null, updated_at: "" };
   const preview = $("f-icon-preview");
@@ -1827,7 +2384,6 @@ async function openDialog(bot) {
   $("f-icon").value = bot ? bot.icon || "" : "";
   $("f-desc").value = bot ? bot.description || "" : "";
   $("f-instructions").value = bot ? bot.instructions || "" : "";
-  $("f-reason").value = bot ? bot.reason || "" : "";
   $("f-custom").value = bot && bot.engine === "opencode" ? bot.model || "" : "";
   $("f-image").value = "";
   $("f-effort").dataset.engine = "";
@@ -1850,6 +2406,7 @@ async function openDialog(bot) {
   $("loop-zone").hidden = !bot;
   $("f-timeout").value = bot && bot.job_timeout ? Math.round(bot.job_timeout / 60) : "";
   $("f-notify").checked = !bot || bot.notify !== false;
+  $("f-bot-steer").checked = !bot || bot.bot_steer !== false;
   $("f-allow-sudo").checked = Boolean(bot && bot.allow_sudo);
   $("f-scheduled-runs").value = bot && bot.scheduled_runs === "gated" ? "gated" : "full";
   $("f-digest").checked = Boolean(bot && bot.digest);
@@ -1905,7 +2462,7 @@ $("f-models-refresh").onclick = async () => {
     if (err instanceof AuthError) handleError(err); else $("dialog-error").textContent = String(err && err.message || err);
   } finally { button.disabled = false; }
 };
-$("f-model").onchange = () => { $("f-custom").value = ""; updateReasonRow(); fillEffortSelect(); updateTier(); };
+$("f-model").onchange = () => { $("f-custom").value = ""; fillEffortSelect(); updateTier(); };
 $("f-icon").oninput = updateIconPreview;
 $("f-name").oninput = () => { if (!state.editing) updateIconPreview(); };
 
@@ -1933,13 +2490,6 @@ $("bot-form").onsubmit = async (event) => {
   if (!engine || !model) { err.textContent = "Pick a model."; return; }
   const name = $("f-name").value.trim();
   if (!name) { err.textContent = "Name is required."; return; }
-  const reason = $("f-reason").value.trim();
-  const storedReason = bot ? (bot.reason || "").trim() : "";
-  if (engine === "claude" && !reason) {
-    err.textContent = "Claude models need a reason. Say why this bot should use Claude.";
-    $("f-reason").focus();
-    return;
-  }
   const body = {
     name,
     icon: $("f-icon").value.trim() || (bot ? bot.icon : "") || "🤖",
@@ -1947,13 +2497,13 @@ $("bot-form").onsubmit = async (event) => {
     instructions: $("f-instructions").value,
   };
   if (!bot || engine !== bot.engine || model !== bot.model) { body.engine = engine; body.model = model; }
-  if (!$("f-reason-row").hidden && (reason !== storedReason || !bot)) body.reason = reason || null;
   if (!$("f-effort-row").hidden && (!bot || $("f-effort").value !== (bot.effort || "") || engine !== bot.engine)) body.effort = $("f-effort").value || null;
   if (!bot || $("f-cli-access").value !== (bot.cli_access || "full")) body.cli_access = $("f-cli-access").value;
   if (bot) {
     const timeout = $("f-timeout").value ? Math.round(Number($("f-timeout").value) * 60) : null;
     if (timeout !== (bot.job_timeout || null)) body.job_timeout = timeout;
     if ($("f-notify").checked !== (bot.notify !== false)) body.notify = $("f-notify").checked;
+    if ($("f-bot-steer").checked !== (bot.bot_steer !== false)) body.bot_steer = $("f-bot-steer").checked;
     if ($("f-digest").checked !== Boolean(bot.digest)) body.digest = $("f-digest").checked;
     if ($("f-scheduled-runs").value !== (bot.scheduled_runs || "full")) body.scheduled_runs = $("f-scheduled-runs").value;
     const cap = (id) => $(id).value === "" ? null : Math.round(Number($(id).value));
@@ -2105,6 +2655,111 @@ function showToolPanel(panel, title) {
   $("tools-title").textContent = title;
   $("tools-dialog").showModal();
 }
+/* ---- Settings for all bots (0.11.10) ---- */
+const ENGINE_STATUS = { ok: "signed in", needs_login: "needs sign-in", disabled: "not enabled" };
+function showLayer(prefix, data) {
+  $(prefix + "-text").value = data.text;
+  $(prefix + "-text").maxLength = data.max_chars;
+  $(prefix + "-state").textContent = data.customized ? "Customized" : "Default";
+  $(prefix + "-reset").disabled = !data.customized;
+}
+function showBehavior(data) {
+  $("auto-continue").checked = !!data.auto_continue.enabled;
+  $("auto-continue-max").value = data.auto_continue.max;
+  $("auto-continue-max").max = data.auto_continue_max_limit;
+}
+const GATE_WORDS = { enforced: "can pause", advisory: "can pause (not yet proven on this computer)", none: "can't pause" };
+function showApprovals(data) {
+  const box = $("approval-classes");
+  box.replaceChildren(...data.classes.map((c) => {
+    const row = el("label", "approval-row");
+    const box2 = el("input");
+    box2.type = "checkbox"; box2.checked = !!c.enabled; box2.dataset.key = c.key;
+    const text = el("div");
+    text.append(el("div", "", c.label), el("div", "muted", c.builtin ? c.description : (c.kind === "tool" ? "Tool name matches " : "Command matches ") + c.pattern));
+    row.append(box2, text);
+    if (!c.builtin) {
+      const remove = el("button", "mini", "Remove");
+      remove.type = "button";
+      remove.onclick = (event) => { event.preventDefault(); changeApprovals({remove: [c.key]}, "Removed."); };
+      row.append(remove);
+    } else row.append(el("span"));
+    return row;
+  }));
+  $("approval-timeout").value = data.timeout_min;
+  const gates = Object.entries(data.gates || {}).map(([name, st]) => (ENGINE_LABELS[name] || name) + " " + (GATE_WORDS[st] || st));
+  $("approval-gates").textContent = gates.length ? "Engines: " + gates.join("; ") + ". Codex with restricted access can't pause either; its own sandbox applies." : "";
+  const loose = data.unpausable_bots || [];
+  $("approval-unpausable").hidden = !loose.length;
+  $("approval-unpausable").textContent = loose.length ? "Approvals can't pause " + loose.map((b) => b.name + " (" +
+    (ENGINE_LABELS[b.engine] || b.engine) + (b.engine === "codex" ? ", restricted" : "") + ")").join(", ") +
+    ". These bots are told never to do the actions above themselves and to ask you in their reply instead, " +
+    "but Bot-Office can't stop them. Switch them to an engine that can pause if that matters." : "";
+}
+async function changeApprovals(change, done) {
+  try {
+    const data = await api("/v1/settings", {method: "PUT", body: JSON.stringify({approvals: change})});
+    showApprovals(data.approvals);
+    $("approvals-state").textContent = done;
+    return true;
+  } catch (e) { $("approvals-state").textContent = e.message; return false; }
+}
+async function loadSettings() {
+  const [rules, system, settings, engines] = await Promise.all([
+    api("/v1/rules-for-all-bots"), api("/v1/system-prompt"), api("/v1/settings"),
+    api("/v1/providers").catch(() => [])]);
+  showLayer("rules", rules); showLayer("system", system); showBehavior(settings); showApprovals(settings.approvals);
+  $("engines-list").replaceChildren(...engines.map((e) => {
+    const row = el("div", "engine-row");
+    row.append(el("span", "", ENGINE_LABELS[e.name] || e.name), el("span", "muted", ENGINE_STATUS[e.login_status] || e.login_status));
+    return row;
+  }));
+}
+$("office-settings").onclick = async () => {
+  for (const id of ["rules-state", "system-state", "behavior-state", "approvals-state"]) $(id).textContent = "";
+  $("set-advanced").open = false;
+  $("settings-dialog").showModal();
+  try { await loadSettings(); } catch (e) { if (e instanceof AuthError) return handleError(e); $("rules-state").textContent = e.message; }
+};
+$("settings-close").onclick = () => $("settings-dialog").close();
+function layerButtons(prefix, path, label) {
+  $(prefix + "-save").onclick = async () => {
+    try { showLayer(prefix, await api(path, {method: "PUT", body: JSON.stringify({text: $(prefix + "-text").value})})); $(prefix + "-state").textContent = "Saved. Bots use it from their next turn."; }
+    catch (e) { $(prefix + "-state").textContent = e.message; }
+  };
+  $(prefix + "-reset").onclick = async () => {
+    if (!confirm("Reset " + label + " to the Bot-Office default? Your edits are discarded.")) return;
+    try { showLayer(prefix, await api(path, {method: "DELETE"})); $(prefix + "-state").textContent = "Reset to the default."; }
+    catch (e) { $(prefix + "-state").textContent = e.message; }
+  };
+}
+layerButtons("rules", "/v1/rules-for-all-bots", "the rules for all bots");
+layerButtons("system", "/v1/system-prompt", "the system prompt");
+$("behavior-save").onclick = async () => {
+  const max = Number($("auto-continue-max").value);
+  try {
+    showBehavior(await api("/v1/settings", {method: "PUT", body: JSON.stringify({auto_continue: {enabled: $("auto-continue").checked, max}})}));
+    $("behavior-state").textContent = "Saved.";
+  } catch (e) { $("behavior-state").textContent = e.message; }
+};
+$("approvals-save").onclick = () => {
+  const enabled = {};
+  for (const box of $("approval-classes").querySelectorAll("input[type=checkbox]")) enabled[box.dataset.key] = box.checked;
+  changeApprovals({enabled, timeout_min: Number($("approval-timeout").value)}, "Saved. It applies from the next action.");
+};
+$("approval-add-btn").onclick = async () => {
+  const label = $("approval-label").value.trim(), pattern = $("approval-pattern").value.trim();
+  if (!label || !pattern) { $("approvals-state").textContent = "Give the class a name and a pattern."; return; }
+  if (await changeApprovals({add: [{label, kind: $("approval-kind").value, pattern}]}, "Added and switched on.")) {
+    $("approval-label").value = ""; $("approval-pattern").value = "";
+  }
+};
+$("settings-voice").onclick = async () => {
+  $("settings-dialog").close();
+  showToolPanel("voice-panel", "Voice");
+  try { await loadVoice(); } catch (e) { if (e instanceof AuthError) return handleError(e); }
+  fillVoicePanel();
+};
 $("memory-open").onclick = async () => {
   showToolPanel("memory-panel", "Memory");
   try { $("memory-text").value = (await api("/v1/bots/" + currentBot().id + "/memory")).text; }

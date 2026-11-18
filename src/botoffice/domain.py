@@ -47,6 +47,9 @@ class Slot(StrEnum):
 
 class Job(BaseModel):
     self_extra: str | None = Field(default=None, exclude=True)
+    # 0.11.10: the owner-side layers this turn's prompt carried, by layer key (snapshots are saved once
+    # the turn succeeds)
+    layer_texts: dict[str, str] | None = Field(default=None, exclude=True)
     id: UUID
     prompt: str
     status: JobStatus
@@ -83,6 +86,9 @@ class Job(BaseModel):
     origin_job_id: UUID | None = None
     # 0.11.0: the watcher that started this turn
     watcher_id: str | None = None
+    # 0.11.10: automatic continuation number (0 = not one) and the turn its chain started from
+    continue_count: int = 0
+    continued_from: UUID | None = None
     bot_name: str | None = Field(default=None, exclude=True)
     api_url: str | None = Field(default=None, exclude=True)
     agent_token: str | None = Field(default=None, exclude=True)
@@ -171,11 +177,19 @@ class Bot(BaseModel):
     # 0.11.0: daily unattended budget (stored JSON; see daily_budget) and the daily digest opt-in
     daily_budget_json: str | None = Field(default=None, exclude=True)
     digest: bool = False
+    # 0.11.10: other bots' messages may steer this bot's running turn (off: they wait for a turn of their own)
+    bot_steer: bool = True
     # unread state for the owner (filled by GET /v1/bots and the read/unread endpoints)
     unread_count: int = 0
     unread_since: datetime | None = None
     marked_unread: bool = False
     read_revision: int = 0
+    # How a message sent while this bot works reaches it: "live" (written into the running CLI),
+    # "interrupt" (the CLI is interrupted promptly and its session resumed with it), "restart" (0.11.7:
+    # interrupted promptly and run again as the same turn with a note of what it had done, for engines or
+    # access modes that cannot resume), "queue" (an engine that cannot take input mid-run: it becomes the
+    # next turn). Filled by the bot endpoints.
+    steering: Literal["live", "interrupt", "restart", "queue"] | None = None
 
     @computed_field
     @property
@@ -237,6 +251,7 @@ class BotUpdate(_BotFields):
     scheduled_runs: Literal["full", "gated"] | None = None
     daily_budget: dict | None = None
     digest: bool | None = None
+    bot_steer: bool | None = None
 
 
 class ModelOption(BaseModel):
@@ -307,6 +322,8 @@ class Message(BaseModel):
     steer_job_id: UUID | None = None
     steer_status: Literal["pending", "delivered", "queued"] | None = None
     steer_delivered_at: datetime | None = None
+    # 0.11.6: why a steer became a queued turn instead of reaching the running one
+    steer_note: str | None = None
     created_at: datetime
     # True for the in-flight placeholder of a queued or running job; text is the
     # live draft and the stream is at /v1/jobs/{job_id}/events
@@ -319,11 +336,30 @@ class Message(BaseModel):
     edit_of: int | None = None
     # the reply's job succeeded but the bot gave no BOT-OFFICE-STATUS line (shown as a subtle label)
     unverified: bool = False
+    # 0.11.10: who wrote it, so only the owner's own typed messages look like the owner's.
+    # owner: typed by the owner; bot: this bot's reply; bot_out: this bot's message to another bot;
+    # bot_in: another bot's (or a bridge sender's) message to this bot; bot_reply: the other bot's
+    # reply copied back; office: written by Bot-Office (routine, wake-up, watcher, assignment step,
+    # automatic continuation); system: a notice. peer names the other bot where there is one.
+    author: Literal["owner", "bot", "bot_out", "bot_in", "bot_reply", "office", "system"] = "owner"
+    peer: str | None = None
+    # 0.11.10: Bot-Office machinery, listed only with ?archived=true (debugging)
+    hidden: bool = False
+    # 0.11.10: on the live placeholder of an automatic continuation, e.g. "3 of 10"
+    continuing: str | None = None
+    # 0.11.10: an approval request's card ({id, status, label, summary, tool, scope, expires_at,
+    # decided_at, resumed}); the chat shows Approve / Deny while status is pending
+    approval_id: int | None = None
+    approval: dict | None = None
 
 
 class MessagePosted(BaseModel):
     message: Message
     job: Job
+    # 0.11.6: "start" (idle bot, a new turn), "steer" (attached to the working turn, delivered live or at
+    # its next step) or "queue" (a new turn behind the working one; delivery_note says why)
+    delivery: Literal["start", "steer", "queue"] = "start"
+    delivery_note: str | None = None
 
 
 def _check_cron(value: str) -> str:

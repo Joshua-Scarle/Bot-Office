@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from botoffice import desk, say, store as store_module, workspace
+from botoffice import baseline, desk, say, store as store_module, workspace
 from botoffice.api import create_app
 from botoffice.providers.base import RunResult
 from botoffice.providers.fake import FakeAdapter
@@ -124,6 +124,7 @@ def test_scheduler_final_and_rewind(settings):
     adapter = SayingAdapter()
     app = create_app(settings, {"codex": adapter})
     adapter.store = app.state.store
+    baseline.set_auto_continue(app.state.store, enabled=False)  # 0.11.10: one turn only here
     with TestClient(app) as client:
         bot = client.post("/v1/bots", headers=H, json={"name": "Ada"}).json()
         msg = client.post(f"/v1/bots/{bot['id']}/messages", headers=H, json={"text": "work"}).json()["message"]

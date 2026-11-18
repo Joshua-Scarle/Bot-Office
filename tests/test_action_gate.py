@@ -124,8 +124,11 @@ def test_scheduled_runs_full_keeps_0_10_behaviour_and_triggers_stay_strict(tmp_p
     for source in ("routine", "wakeup", "assignment", "inbox", "chat"):
         job = running(store, bot, source)
         assert not rules_mod.is_unattended(job, "full") and not rules.strict(job)
-        assert rules.decide(job, bash("git push origin main")).decision == "allow"
-        assert rules.decide(job, bash("sudo systemctl restart x")).decision == "allow"
+        assert rules.decide(job, bash("git push origin feature")).decision == "allow"
+        assert rules.decide(job, bash("rm -rf build")).decision == "allow"
+        # 0.11.10: the owner's approval classes (on by default: release, system...) ask in every run
+        assert rules.decide(job, bash("git push origin main")).preset == "release"
+        assert rules.decide(job, bash("sudo systemctl restart x")).preset == "system"
         assert rules.decide(job, bash("cat /srv/bo/data/token")).effect == "never"
         assert rules_mod.is_unattended(job, "gated") == (source != "chat")
     trigger = running(store, bot, "trigger")
@@ -185,11 +188,16 @@ def test_grant_is_one_shot_bound_to_the_resume_turn_and_expires(tmp_path):
                    ((now() - timedelta(seconds=1)).isoformat(), late["id"]))
         db.execute("UPDATE jobs SET status='running' WHERE id=?", (late["resume_job_id"],))
     assert rules.decide(store.get(late["resume_job_id"]), bash("git push origin main")).decision == "deny"
-    # attended requests do not expire
+    # attended requests wait for the owner's approval timeout (0.11.10: 60 min by default; 0 = until answered)
     chat = running(store, bot, "chat")
     rules.add_rule(bot_id=bot.id, effect="ask", kind="shell", pattern="deploy", scope="attended")
     attended = rules.get(rules.decide(chat, bash("make deploy")).approval_id)
-    assert attended["expires_at"] is None and attended["scope"] == "attended"
+    assert attended["scope"] == "attended"
+    waited = datetime.fromisoformat(attended["expires_at"]) - datetime.fromisoformat(attended["created_at"])
+    assert waited == timedelta(minutes=60)
+    from botoffice import approval_classes
+    approval_classes.update(store, timeout_min=0)
+    assert rules.get(rules.decide(chat, bash("make deploy now")).approval_id)["expires_at"] is None
 
 
 def test_concurrent_consumption_has_one_winner(tmp_path):

@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from . import attachments, failures, isolation, needs_you, procs, safefs
+from . import attachments, baseline, failures, isolation, needs_you, procs, safefs
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
 from .catalog import ENGINE_LABELS
@@ -62,6 +62,18 @@ def _mark_handoff_pending(bot_dir: Path) -> None:
     directory = isolation.state_dir(bot_dir)
     safefs.mkdir(directory, isolation.dir_mode())
     safefs.touch(directory / ".handoff-pending", fsync=True)
+
+
+# 0.11.10 auto-continue: turns of these sources that end not_done are continued (assignment turns have
+# their own loop; bot-to-bot replies go back to the sender; watcher runs have their own quotas). The
+# continuation keeps the source, so it runs under the same attended/unattended rules as the turn it continues.
+AUTO_CONTINUE_SOURCES = ("chat", "api", "routine", "wakeup")
+AUTO_CONTINUE_LINE = "Continuing automatically ({n} of {max})"
+AUTO_CONTINUE_PROMPT = (
+    "Automatic continuation {n} of {max}: your previous turn ended not_done, so carry on with the same task "
+    "from where you stopped (WORKING.md and your last reply have the state). Keep going until it is done, you "
+    "are stuck and need the user, or a rule or instruction tells you to stop. Do not start work beyond that "
+    "task. If it is still unfinished when you stop, end with the BOT-OFFICE-STATUS line.")
 
 
 class Scheduler:
@@ -624,6 +636,12 @@ class Scheduler:
                     save_rules_snapshot(shared, self.memory.bot_dir(bot.id))
                 except OSError:
                     log.warning("Could not save rules snapshot for bot %s", bot.id, exc_info=True)
+                for layer in baseline.LAYERS:
+                    if job.layer_texts and layer.key in job.layer_texts:
+                        try:
+                            layer.save_snapshot(job.layer_texts[layer.key], self.memory.bot_dir(bot.id))
+                        except OSError:
+                            log.warning("Could not save %s snapshot for bot %s", layer.key, bot.id, exc_info=True)
                 await asyncio.to_thread(self._prepare_memory, job, workspace)
             # only failures the adapter classified itself are retried automatically
             retryable = bool(result.failure_kind)
@@ -746,6 +764,9 @@ class Scheduler:
             with contextlib.suppress(Exception):
                 self._log_work(job, status, audit or error or "")
         agent_message = self.store.agent_message_for_job(job.id)
+        if agent_message and agent_message.get("reply_to"):
+            # 0.11.10: this turn read another bot's answer to a steer; the answer needs no answer back
+            agent_message = None
         if agent_message:
             sender = self.store.get_bot(agent_message["from_bot"])
             target = self.store.get_bot(agent_message["to_bot"])
@@ -778,11 +799,61 @@ class Scheduler:
             with contextlib.suppress(Exception):
                 self._record_outcome(job, workspace, status, log_path, error, audit, kind=kind, reset=reset,
                                      stated=stated)
+            if status == JobStatus.INCOMPLETE and stated[0] == "not_done":
+                try:
+                    self._auto_continue(job)
+                except Exception:
+                    log.exception("could not decide auto-continue for job %s", job.id)
         self._settle(job)
         if sink is not None:
             with contextlib.suppress(Exception):
                 sink.emit("final", text=audit)
                 sink.emit("done", status=status.value, exit_code=exit_code, error=error)
+
+    def _auto_continue(self, job: Job) -> str:
+        """0.11.10: a turn that ended ``not_done`` is continued in the same session, up to the owner's
+        limit. Not for assignment turns (their own loop), bot-to-bot or watcher turns, nor when the owner
+        has a turn waiting, a question or approval is open, or the turn's chat line was withdrawn by an
+        edit. A message the owner steered into the turn starts a new chain. Returns the decision."""
+        assert job.bot_id
+        if job.assignment_id or job.source not in AUTO_CONTINUE_SOURCES or self.store.agent_message_for_job(job.id):
+            return "not eligible"
+        settings = baseline.auto_continue(self.store)
+        if not settings["enabled"]:
+            return "off"
+        bot = self.store.get_bot(job.bot_id)
+        line = self.store.job_message(job.bot_id, job.id)
+        if bot is None or line is None or line.archived_at is not None:
+            return "withdrawn"
+        if (self.store.user_turn_waiting(bot.id) or self.store.has_open_question(job.id)
+                or self.store.pending_approval(job.id)):
+            return "waiting"
+        steered = self.store.delivered_steers(job.id) > 0
+        number = 1 if steered else job.continue_count + 1
+        root = job.id if steered or not job.continued_from else job.continued_from
+        limit = int(settings["max"])
+        if number > limit:
+            self.store.add_message(bot.id, "system", f"Stopped continuing automatically after {limit} "
+                                   "continuations. Send a message to keep it going.", source=job.source)
+            return "limit"
+        text = AUTO_CONTINUE_LINE.format(n=number, max=limit)
+
+        def mark(db, new_job: Job) -> None:
+            db.execute("UPDATE jobs SET continue_count=?, continued_from=? WHERE id=?",
+                       (number, str(root), str(new_job.id)))
+            # the owner sees the working bubble carry on ("continuing, n of max"), not these lines
+            db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='user' AND sender='Bot-Office'",
+                       (str(new_job.id),))
+            db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='system' AND text LIKE 'Not done%'",
+                       (str(job.id),))
+
+        try:
+            self.turns.post_message(bot, text, source=job.source, sender="Bot-Office",
+                                    prompt=AUTO_CONTINUE_PROMPT.format(n=number, max=limit), hook=mark)
+        except TurnError as exc:
+            self.store.add_message(bot.id, "system", f"Could not continue automatically: {exc}", source=job.source)
+            return "error"
+        return "continued"
 
     def _log_work(self, job: Job, status: JobStatus, result: str) -> None:
         assert job.bot_id
@@ -883,7 +954,11 @@ class Scheduler:
                     if bot:
                         _image_index(self.store, bot)
             if status == JobStatus.INCOMPLETE:
-                self.store.publish_outcome(job.bot_id, job.id, "system", error or "Not done", source=job.source)
+                # an assignment step that carries on is machinery: the next turn shows it (0.11.10)
+                # waiting on an approval: the chat's Approve / Deny card already says so
+                waiting_card = stated[0] == "waiting_on_user" and self.store.pending_approval(job.id)
+                self.store.publish_outcome(job.bot_id, job.id, "system", error or "Not done", source=job.source,
+                                           hidden=(bool(job.assignment_id) and stated[0] == "continue") or waiting_card)
             self._write_memory(job, workspace)
 
     @staticmethod
@@ -961,11 +1036,13 @@ class Scheduler:
         for message_id in self.store.queue_steers(key):
             self._log_steer_turn(message_id)
             active = sink or self._sinks.get(key)
+            queued = self.store.get_message(message_id)
+            note = queued.steer_note if queued else None
             if active:
-                active.emit("steer", message_id=message_id, status="queued")
+                active.emit("steer", message_id=message_id, status="queued", note=note)
             else:
                 self.store.add_event(key, self.store.last_event_seq(key) + 1, "steer",
-                                     {"message_id": message_id, "status": "queued"})
+                                     {"message_id": message_id, "status": "queued", "note": note})
 
     @contextlib.contextmanager
     def defer_steers_for_edit(self, jobs: list[Job]):

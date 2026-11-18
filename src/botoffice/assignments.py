@@ -102,6 +102,16 @@ def _parse(row: sqlite3.Row | dict | None) -> Assignment | None:
     return Assignment.model_validate(values)
 
 
+
+def _handoff_text(fields: dict) -> str:
+    """The chat text of an assignment one bot gives another (shown when the owner opens the row)."""
+    parts = [f'Assignment "{fields["title"].strip()}"']
+    if fields.get("goal"):
+        parts.append(f"Goal: {fields['goal'].strip()}")
+    if fields.get("done_when"):
+        parts.append(f"Done when: {fields['done_when'].strip()}")
+    return "\n".join(parts)[:4000]
+
 class Assignments:
     def __init__(self, store: JobStore):
         self.store = store
@@ -193,22 +203,24 @@ class Assignments:
     @staticmethod
     def _insert_turn(db: sqlite3.Connection, bot: sqlite3.Row, prompt: str, text: str, *, sender: str | None,
                      priority: int, source: str, message_source: str | None = None, title: str = "",
-                     assignment_id: str | None = None, turn: int | None = None) -> str:
+                     assignment_id: str | None = None, turn: int | None = None, hidden: bool = False) -> str:
         job_id, stamp = str(uuid4()), now().isoformat()
-        # Claude needs a reason on every run; a loop turn names its assignment
+        # the reason is optional; a loop turn names its assignment so the Claude-use log says why it ran
         reason = bot["reason"] or f"Bot-Office {source}: {(title or 'scheduled turn')[:200]}"
         db.execute(
             "INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority,"
             "assignment_id,assignment_turn) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (job_id, prompt, "queued", bot["default_provider"], stamp, bot["id"], reason, source, bot["model"],
              bot["effort"] or default_effort(bot["default_provider"]), priority, assignment_id, turn))
-        db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments) "
-                   "VALUES (?,?,?,?,?,?,?,'[]')", (bot["id"], "user", sender, message_source or source, text, job_id, stamp))
+        # hidden: Bot-Office's own step prompts (Continue, Check, wake-ups) stay out of the chat (0.11.10)
+        db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments,hidden) "
+                   "VALUES (?,?,?,?,?,?,?,'[]',?)",
+                   (bot["id"], "user", sender, message_source or source, text, job_id, stamp, int(hidden)))
         return job_id
 
     def _enqueue_turn(self, db: sqlite3.Connection, row: sqlite3.Row, prompt: str, text: str, *,
                       sender: str | None, priority: int, source: str = "assignment",
-                      message_source: str | None = None) -> str | None:
+                      message_source: str | None = None, hidden: bool = False) -> str | None:
         """Queue the assignment's next turn (job + chat line); None if its bot is gone."""
         bot = db.execute("SELECT * FROM bots WHERE id=?", (row["bot_id"],)).fetchone()
         if bot is None:
@@ -217,7 +229,7 @@ class Assignments:
         db.execute("UPDATE assignments SET next_turn=? WHERE id=?", (turn, row["id"]))
         job_id = self._insert_turn(db, bot, prompt, text, sender=sender, priority=priority, source=source,
                                    message_source=message_source, title=row["title"], assignment_id=row["id"],
-                                   turn=turn)
+                                   turn=turn, hidden=hidden)
         self._event(db, row["id"], "queued", f"turn {turn}", job_id)
         return job_id
 
@@ -257,8 +269,19 @@ class Assignments:
                      int(bool(fields.get("verify", False))), fields.get("escalate", "on_block"), created_by,
                      str(parent_id) if parent_id else None, stamp, stamp, stamp))
                 self._event(db, assignment_id, "created", f"by {created_by}")
+                handoff = self._handoff(db, created_by, str(bot_id))
+                if handoff:
+                    # 0.11.10: a hand-off between bots shows in the delegating bot's chat as "Assigned a
+                    # task to <bot>" (one collapsed row; the text opens on click)
+                    creator, target_name = handoff
+                    db.execute("INSERT INTO messages (bot_id,role,sender,source,text,created_at,attachments) "
+                               "VALUES (?,?,?,?,?,?,'[]')",
+                               (creator["id"], "user", f"to {target_name}", "assignment",
+                                _handoff_text(fields), stamp))
                 if start:
-                    self._start(db, self._row(db, assignment_id), priority=USER_PRIORITY if created_by == "user" else LOOP_PRIORITY)
+                    self._start(db, self._row(db, assignment_id), priority=USER_PRIORITY if created_by == "user" else LOOP_PRIORITY,
+                                sender=f"bot {handoff[0]['name']}" if handoff else "Bot-Office",
+                                text=_handoff_text(fields) if handoff else None)
                 db.commit()
             except BaseException:
                 db.rollback()
@@ -307,7 +330,17 @@ class Assignments:
                 raise
         return self.get(assignment_id)
 
-    def _start(self, db: sqlite3.Connection, row: sqlite3.Row, *, priority: int, note: str = "started") -> str | None:
+    @staticmethod
+    def _handoff(db: sqlite3.Connection, created_by: str, target_id: str) -> tuple[sqlite3.Row, str] | None:
+        """(creating bot row, target bot name) when another bot created this assignment."""
+        if not created_by.startswith("bot:") or created_by[4:] == target_id:
+            return None
+        creator = db.execute("SELECT * FROM bots WHERE id=?", (created_by[4:],)).fetchone()
+        target = db.execute("SELECT name FROM bots WHERE id=?", (target_id,)).fetchone()
+        return (creator, target["name"]) if creator and target else None
+
+    def _start(self, db: sqlite3.Connection, row: sqlite3.Row, *, priority: int, note: str = "started",
+               sender: str = "Bot-Office", text: str | None = None) -> str | None:
         if row["status"] in CLOSED_STATUSES:
             raise AssignmentError(409, f"assignment is {row['status']}")
         if not self._budget_left(row):
@@ -317,7 +350,7 @@ class Assignments:
         if self._has_open_job(db, row["id"]):
             return None
         return self._enqueue_turn(db, self._row(db, row["id"]), f'Work on assignment {_quoted(row)}.',
-                                  f'Start assignment "{row["title"]}"', sender="Bot-Office", priority=priority)
+                                  text or f'Start assignment "{row["title"]}"', sender=sender, priority=priority)
 
     def start(self, assignment_id: UUID | str, add_turns: int = 0, add_minutes: int = 0) -> Assignment:
         with closing(self._tx()) as db:
@@ -632,7 +665,8 @@ class Assignments:
                     self._enqueue_turn(
                         db, row, f'Check assignment {_quoted(row)} against its "done when" before it is closed: '
                         f'{_quoted(row, row["done_when"] or row["goal"])}. Report done only if it holds; otherwise continue or blocked.',
-                        f'Check "{row["title"]}" against done-when', sender="Bot-Office", priority=LOOP_PRIORITY)
+                        f'Check "{row["title"]}" against done-when', sender="Bot-Office", priority=LOOP_PRIORITY,
+                        hidden=True)
                 return "verify"
             self._set_status(db, row, "done", reason, job_id=job_id)
             return "done"
@@ -649,7 +683,7 @@ class Assignments:
             if self._has_open_job(db, row["id"]):
                 return "continue"  # a queued turn (e.g. the user's reply) carries on
             self._enqueue_turn(db, row, f'Continue assignment {_quoted(row)} (next step).',
-                               f'Continue "{row["title"]}"', sender="Bot-Office", priority=LOOP_PRIORITY)
+                               f'Continue "{row["title"]}"', sender="Bot-Office", priority=LOOP_PRIORITY, hidden=True)
             return "continue"
         self._set_status(db, row, state, reason, job_id=job_id)
         return state
@@ -798,10 +832,10 @@ class Assignments:
             if row["status"] != "active":
                 self._set_status(db, row, "active", "wake-up", announce=False)
             job_id = self._enqueue_turn(db, self._row(db, row["id"]), prompt, text, sender="Bot-Office",
-                                        priority=LOOP_PRIORITY, source="wakeup")
+                                        priority=LOOP_PRIORITY, source="wakeup", hidden=True)
         else:
             job_id = self._insert_turn(db, bot, prompt, text, sender="Bot-Office", priority=LOOP_PRIORITY,
-                                       source="wakeup", title=wakeup["note"][:80])
+                                       source="wakeup", title=wakeup["note"][:80], hidden=True)
         db.execute("UPDATE wakeups SET status='fired', fired_at=?, job_id=? WHERE id=?",
                    (stamp.isoformat(), job_id, wakeup["id"]))
         return 1

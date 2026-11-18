@@ -22,6 +22,10 @@ from .catalog import DEFAULT_ICON, DEFAULT_ICONS, default_effort, default_model
 from .domain import Bot, Job, JobStatus, Message, Routine
 
 BOT_DATES = ("created_at", "updated_at")
+# 0.11.6: shown on a message that could not steer the running turn and became the next one
+BUSY_WITH_BOT_NOTE = ("The bot is answering another bot, and a message to that turn would go to the other bot, "
+                      "so yours is queued as the next turn.")
+STEER_ENDED_NOTE = "It could not be delivered before the turn ended, so it runs as the next turn."
 BOT_FIELDS = {
     "name",
     "instructions",
@@ -39,6 +43,7 @@ BOT_FIELDS = {
     "scheduled_runs",
     "daily_budget_json",
     "digest",
+    "bot_steer",
 }
 IDENTITY_MIGRATION = "crewdeck-identity-v1"
 EFFORT_MIGRATION = "crewdeck-effort-v1"
@@ -47,6 +52,7 @@ READS_MIGRATION = "reads-seeded-v1"
 BRIDGE_IMPORT = "bridge_json_import"
 BRIDGE_JSON = ("grok_bridge_rate.json", "grok_bridge_threads.json")
 # roles that count as unread: what the bot (or the system) said, never the prompts it received
+# (0.11.10: plus the bot's own messages to other bots, see _UNREAD_WHERE)
 UNREAD_ROLES = ("assistant", "system")
 LEGACY_RENAMES = {("Cursor Bot", "cursor"): "Scout"}
 # A rewound turn is seeded with the complete remaining chat. These bound that seed
@@ -101,7 +107,11 @@ def _inbox_limit(db: sqlite3.Connection, caps: tuple[int, int], *, sender: str |
     inbox files share one count)."""
     per_sender, overall = caps
     since = (now() - timedelta(hours=1)).isoformat()
-    if db.execute("SELECT count(*) FROM jobs WHERE source='inbox' AND created_at>=?", (since,)).fetchone()[0] >= overall:
+    # 0.11.10: bot messages steered into a running turn count like inbox turns (until one becomes a turn)
+    turns = db.execute("SELECT (SELECT count(*) FROM jobs WHERE source='inbox' AND created_at>=?) + "
+                       "(SELECT count(*) FROM agent_messages WHERE job_id LIKE 'steer:%' AND created_at>=?)",
+                       (since, since)).fetchone()[0]
+    if turns >= overall:
         raise InboxLimit(f"inbox limit of {overall} turns per hour reached")
     if from_bot is not None:
         count = db.execute("SELECT count(*) FROM agent_messages WHERE from_bot=? AND created_at>=?",
@@ -322,10 +332,47 @@ def _minute(moment: datetime) -> datetime:
     return moment.astimezone(UTC).replace(second=0, microsecond=0)
 
 
+def message_author(values: dict) -> tuple[str, str | None]:
+    """(author, peer) of a messages row; see Message.author. ``agent_from`` is the sending bot of the
+    row's job when that job is a bot-to-bot message (agent_messages.from_bot), else None."""
+    role, sender, source = values.get("role"), values.get("sender"), values.get("source")
+    if role == "system":
+        return "system", None
+    if role == "assistant":
+        if source == "inbox" and sender and sender.startswith("from "):
+            return "bot_reply", sender[5:]
+        return "bot", None
+    if sender is None and source in EDITABLE_SOURCES:
+        return "owner", None
+    if source == "assignment" and sender and sender.startswith(("to ", "bot ")):
+        # a hand-off between bots (assignments.Assignments.create): only code sets these senders
+        return ("bot_out", sender[3:]) if sender.startswith("to ") else ("bot_in", sender[4:])
+    if source == "inbox" and sender:
+        if values.get("agent_from") and values["agent_from"] == str(values.get("bot_id")):
+            return "bot_out", sender[3:] if sender.startswith("to ") else sender
+        return "bot_in", sender[4:] if sender.startswith("bot ") else sender
+    return "office", None
+
+
+PRESET_LABELS = {"outbound": "Outbound action in an unattended run", "destructive":
+                 "Destructive action in an unattended run", None: "An action rule you set"}
+
+
+def approval_card(store: JobStore, item: dict) -> dict:
+    """0.11.10: what the chat's Approve / Deny card shows for one approval."""
+    from . import approval_classes
+    label = approval_classes.label(store, item["preset"]) or PRESET_LABELS.get(item["preset"]) or item["preset"]
+    return {"id": item["id"], "status": item["status"], "label": label, "summary": item["summary"],
+            "tool": item["tool"], "scope": item["scope"], "expires_at": item["expires_at"],
+            "decided_at": item["decided_at"], "resumed": bool(item["resume_job_id"])}
+
+
 def _model(cls, row: sqlite3.Row | None, dates: tuple[str, ...]):
     if row is None:
         return None
     values = dict(row)
+    if cls is Message:
+        values["author"], values["peer"] = message_author(values)
     for field in dates:
         if values[field]:
             values[field] = datetime.fromisoformat(values[field])
@@ -409,6 +456,9 @@ class JobStore:
                 ("origin_job_id", "TEXT"),
                 # 0.11.0: the watcher that started this turn (source trigger)
                 ("watcher_id", "TEXT"),
+                # 0.11.10: automatic continuation number (0 = not one) and the turn the chain started from
+                ("continue_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("continued_from", "TEXT"),
             ):
                 if column not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
@@ -451,6 +501,8 @@ class JobStore:
                 ("daily_budget_json", "TEXT"),
                 ("budget_extra_json", "TEXT"),
                 ("digest", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.11.10: messages from other bots may steer this bot's running turn
+                ("bot_steer", "INTEGER NOT NULL DEFAULT 1"),
             ):
                 if column not in bot_columns:
                     db.execute(f"ALTER TABLE bots ADD COLUMN {column} {ddl}")
@@ -485,6 +537,12 @@ class JobStore:
                 ("steer_status", "TEXT"),
                 ("steer_delivered_at", "TEXT"),
                 ("steer_reason", "TEXT"),  # the API reason, used if the steer becomes a queued turn
+                ("steer_note", "TEXT"),  # 0.11.6: why a steer became a queued turn (shown in the chat)
+                # 0.11.10: Bot-Office machinery (automatic continuations, assignment "Continue" steps,
+                # wake-up prompts, "Not done (continuing)" lines): kept, but not shown in the chat
+                ("hidden", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.11.10: the chat line that carries an approval's Approve / Deny card
+                ("approval_id", "INTEGER"),
             ):
                 if column not in message_columns:
                     db.execute(f"ALTER TABLE messages ADD COLUMN {column} {ddl}")
@@ -527,6 +585,18 @@ class JobStore:
                 hop INTEGER NOT NULL, created_at TEXT NOT NULL
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS agent_messages_pair ON agent_messages (from_bot, to_bot, created_at)")
+            agent_columns = {row["name"] for row in db.execute("PRAGMA table_info(agent_messages)")}
+            for column, kind in (
+                # 0.11.10: a message steered into the receiver's running job (job_id is then "steer:<id>"
+                # until it becomes a turn of its own), the steer it answers, and its two chat rows
+                ("steered_into", "TEXT"), ("reply_to", "TEXT"),
+                ("sender_message_id", "INTEGER"), ("target_message_id", "INTEGER"),
+            ):
+                if column not in agent_columns:
+                    db.execute(f"ALTER TABLE agent_messages ADD COLUMN {column} {kind}")
+            db.execute("CREATE INDEX IF NOT EXISTS agent_messages_steered ON agent_messages (steered_into)")
+            db.execute("CREATE INDEX IF NOT EXISTS agent_messages_sent ON agent_messages (sender_message_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS agent_messages_received ON agent_messages (target_message_id)")
 
             # one row per finished attempt that was re-queued (automatic or manual retry)
             db.execute(
@@ -830,15 +900,30 @@ class JobStore:
 
     def post_steer(self, bot_id: UUID | str, text: str, attachments: list[str],
                    reason: str | None = None, job_id: UUID | str | None = None) -> tuple[Message, Job] | None:
+        """See :meth:`post_steer_explained`; this returns only the result (None: nothing to steer)."""
+        return self.post_steer_explained(bot_id, text, attachments, reason, job_id)[0]
+
+    def post_steer_explained(
+        self, bot_id: UUID | str, text: str, attachments: list[str], reason: str | None = None,
+        job_id: UUID | str | None = None, *, unsteerable: Callable[[Job], str | None] | None = None,
+    ) -> tuple[tuple[Message, Job] | None, str | None]:
         """Attach an owner message to the bot's current turn atomically with checking its state.
 
         The turn is, in order: the bot's running job (a chat/API one first), else its oldest queued
         chat/API job (not started yet, or parked between attempts; the steer is delivered when it starts).
+        Assignment turns are steerable too (0.11.6): the message is part of that turn, is not a turn of its
+        own and costs no budget; if it is still undelivered when the turn ends it runs as a chat turn.
         Never steered into: bot-to-bot turns (``inbox``, anything with an agent message row), whose reply
-        goes back to the sending bot and must not carry the owner's chat text; and assignment turns, whose
-        status line, checkpoint and budget accounting (0.10.0) stay separate, so the owner's message
-        stays a plain queued chat turn that runs before the next continuation.
+        goes back to the sending bot and must not carry the owner's chat text.
+
+        Returns ``(result, note)``. *result* is None when there is nothing to steer, and then *note*
+        says why when the bot was busy (it answers another bot) so the caller can tell the owner; None
+        for an idle bot. *unsteerable* (job -> reason or None) is asked for a RUNNING job: when the
+        engine cannot take a message mid-run the steer is attached and turned into a queued turn in the
+        same transaction, so it is never a pending message that quietly waits (the note is then returned
+        with the result and stored on the message as ``steer_note``).
         """
+        note = None
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             if job_id:
@@ -846,28 +931,59 @@ class JobStore:
                                  (str(bot_id), str(job_id))).fetchone()
             else:
                 row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='running' AND source!='inbox' "
-                                 "AND assignment_id IS NULL AND NOT EXISTS (SELECT 1 FROM agent_messages a WHERE a.job_id=jobs.id) "
+                                 "AND NOT EXISTS (SELECT 1 FROM agent_messages a WHERE a.job_id=jobs.id) "
                                  "ORDER BY source IN ('chat','api') DESC, started_at LIMIT 1",
                                  (str(bot_id),)).fetchone()
                 if not row:
                     row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='queued' "
                                      "AND source IN ('chat','api') ORDER BY created_at, id LIMIT 1",
                                      (str(bot_id),)).fetchone()
+                if not row:
+                    busy = db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='running' LIMIT 1",
+                                      (str(bot_id),)).fetchone()
+                    db.rollback()
+                    return None, (BUSY_WITH_BOT_NOTE if busy else None)
             if not row:
                 db.rollback()
-                return None
+                return None, None
             cur = db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,attachments,steer_job_id,"
                              "steer_status,steer_reason) VALUES (?,'user','chat',?,?,?,?,'pending',?)",
                              (str(bot_id), text, now().isoformat(), json.dumps(attachments), row['id'], reason))
+            if unsteerable is not None and row['status'] == JobStatus.RUNNING.value:
+                note = unsteerable(self._job(row))
+                if note:
+                    self._queue_steers(db, row['id'], note)
             message = db.execute("SELECT * FROM messages WHERE id=?", (cur.lastrowid,)).fetchone()
+            queued_job = (db.execute("SELECT * FROM jobs WHERE id=?", (message['job_id'],)).fetchone()
+                          if note and message['job_id'] else None)
             db.commit()
-            return _model(Message, message, ("created_at",)), self._job(row)
+            result_job = self._job(queued_job) if queued_job is not None else self._job(row)
+            return (_model(Message, message, ("created_at",)), result_job), note
 
     def pending_steers(self, job_id: UUID | str) -> list[Message]:
         with closing(self._connect()) as db:
+            # the owner's messages first, then other bots' (0.11.10), each in the order sent
             rows = db.execute("SELECT * FROM messages WHERE steer_job_id=? AND steer_status='pending' "
-                              "AND archived_at IS NULL ORDER BY id", (str(job_id),)).fetchall()
+                              "AND archived_at IS NULL ORDER BY source='inbox', id", (str(job_id),)).fetchall()
         return [_model(Message, row, ("created_at",)) for row in rows]
+
+    def delivered_steers(self, job_id: UUID | str) -> int:
+        """How many owner messages were steered into *job_id* while it ran."""
+        with closing(self._connect()) as db:
+            # another bot's steer (source inbox) never restarts the owner's auto-continue count
+            return db.execute("SELECT COUNT(*) FROM messages WHERE steer_job_id=? AND steer_status='delivered' "
+                              "AND source!='inbox'", (str(job_id),)).fetchone()[0]
+
+    def user_turn_waiting(self, bot_id: UUID | str) -> bool:
+        """A chat or API turn of the owner is queued for this bot (it runs next and decides)."""
+        with closing(self._connect()) as db:
+            return db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='queued' AND source IN ('chat','api') "
+                              "LIMIT 1", (str(bot_id),)).fetchone() is not None
+
+    def pending_approval(self, job_id: UUID | str) -> bool:
+        with closing(self._connect()) as db:
+            return db.execute("SELECT 1 FROM approvals WHERE job_id=? AND status='pending' LIMIT 1",
+                              (str(job_id),)).fetchone() is not None
 
     def has_open_question(self, job_id: UUID | str) -> bool:
         """The job is waiting on an unanswered blocking ``desk ask`` question."""
@@ -886,11 +1002,11 @@ class JobStore:
             db.execute("BEGIN IMMEDIATE")
             claimed = [(row["id"], stamp) for row in db.execute(
                 "SELECT id FROM messages WHERE steer_job_id=? AND steer_status='pending' AND archived_at IS NULL "
-                "ORDER BY id", (str(job_id),)).fetchall()]
+                "ORDER BY source='inbox', id", (str(job_id),)).fetchall()]
             db.executemany("UPDATE messages SET steer_status='delivered', steer_delivered_at=? WHERE id=?",
                            [(stamp, mid) for mid, _ in claimed])
             rows = db.execute("SELECT * FROM messages WHERE steer_job_id=? AND steer_status IN ('pending','delivered') "
-                              "AND archived_at IS NULL ORDER BY id", (str(job_id),)).fetchall()
+                              "AND archived_at IS NULL ORDER BY source='inbox', id", (str(job_id),)).fetchall()
             db.commit()
         return [_model(Message, row, ("created_at",)) for row in rows], claimed
 
@@ -903,7 +1019,7 @@ class JobStore:
         return stamp if changed else None
 
     @staticmethod
-    def _queue_steers(db: sqlite3.Connection, job_id: str) -> list[int]:
+    def _queue_steers(db: sqlite3.Connection, job_id: str, note: str | None = None) -> list[int]:
         # the steered job's settings; the bot's if that job row is gone
         rows = db.execute("SELECT m.*, j.id AS steered, COALESCE(j.provider, b.default_provider) AS provider, "
                           "COALESCE(m.steer_reason, j.reason, b.reason) AS turn_reason, "
@@ -920,11 +1036,21 @@ class JobStore:
             created = (datetime.fromisoformat(row['steered_at']) + timedelta(milliseconds=index)
                        if row['steered_at'] else now())
             effort = row['turn_effort'] or (None if row['steered'] else default_effort(row['provider']))
+            source, prompt = 'chat', row['text']
+            if row['source'] == 'inbox':
+                # 0.11.10: another bot's steer becomes an inbox turn of its own: its reply goes back to
+                # that bot, and its text stays marked as a bot's (never an owner's chat turn)
+                source, prompt = 'inbox', f"(from {row['sender']}) {row['text']}"
+                db.execute("UPDATE agent_messages SET job_id=?, steered_into=NULL WHERE target_message_id=?",
+                           (key, row['id']))
+                db.execute("UPDATE messages SET job_id=? WHERE id=(SELECT sender_message_id FROM agent_messages "
+                           "WHERE target_message_id=?)", (key, row['id']))
             db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority) "
                        "VALUES (?,?,'queued',?,?,?,?,?,?,?,?)",
-                       (key, row['text'], row['provider'], created.isoformat(), row['bot_id'], row['turn_reason'],
-                        'chat', row['turn_model'], effort, _priority('chat')))
-            db.execute("UPDATE messages SET job_id=?, steer_status='queued' WHERE id=?", (key, row['id']))
+                       (key, prompt, row['provider'], created.isoformat(), row['bot_id'], row['turn_reason'],
+                        source, row['turn_model'], effort, _priority(source)))
+            db.execute("UPDATE messages SET job_id=?, steer_status='queued', steer_note=? WHERE id=?",
+                       (key, note or STEER_ENDED_NOTE, row['id']))
         return [row['id'] for row in rows]
 
     def steered_reply_id(self, message: Message) -> int | None:
@@ -936,10 +1062,10 @@ class JobStore:
                              (str(message.bot_id), str(message.steer_job_id))).fetchone()
         return row[0] if row else None
 
-    def queue_steers(self, job_id: UUID | str) -> list[int]:
+    def queue_steers(self, job_id: UUID | str, note: str | None = None) -> list[int]:
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
-            ids = self._queue_steers(db, str(job_id))
+            ids = self._queue_steers(db, str(job_id), note)
             db.commit()
         return ids
 
@@ -963,7 +1089,7 @@ class JobStore:
                 rows = db.execute("SELECT * FROM jobs WHERE status=?", (JobStatus.RUNNING.value,)).fetchall()
                 for row in rows:
                     key = row["id"]
-                    made.extend(self._queue_steers(db, key))
+                    made.extend(self._queue_steers(db, key, "Bot-Office restarted during the turn, so it runs as the next turn."))
                     stopped = row["assignment_id"] and not db.execute(
                         "SELECT 1 FROM assignments WHERE id=? AND status='active'", (row["assignment_id"],)).fetchone()
                     if stopped:
@@ -1477,7 +1603,11 @@ class JobStore:
     # unread = bot-originated, not archived, newer than the read watermark; a usage-limit notice
     # whose job is no longer parked is hidden from the chat (list_messages), so it never counts
     _UNREAD_WHERE = (
-        "m.bot_id = bots.id AND m.role IN ('assistant','system') AND m.archived_at IS NULL"
+        "m.bot_id = bots.id AND (m.role IN ('assistant','system') OR (m.role='user' AND m.source='inbox'"
+        " AND EXISTS (SELECT 1 FROM agent_messages a WHERE (a.job_id=m.job_id OR a.sender_message_id=m.id)"
+        " AND a.from_bot=m.bot_id))"
+        " OR (m.role='user' AND m.source='assignment' AND m.sender LIKE 'to %'))"
+        " AND m.archived_at IS NULL AND m.hidden=0"
         " AND m.id > COALESCE(r.last_read_message_id, 0)"
         " AND NOT EXISTS (SELECT 1 FROM usage_notices n JOIN jobs j ON j.id=n.job_id WHERE n.message_id=m.id"
         f" AND NOT ({PARKED_SQL} AND n.attempt=j.attempts))"
@@ -1668,48 +1798,128 @@ class JobStore:
             db.execute("DELETE FROM agent_tokens WHERE job_id=?", (str(job_id),))
 
     def enqueue_agent_message(self, sender: Bot, target: Bot, text: str, origin_id: str | None, since: str,
-                              inbox_caps: tuple[int, int] | None = None) -> tuple[Message, Job, dict]:
+                              inbox_caps: tuple[int, int] | None = None, *, mode: str = "steer",
+                              can_steer: Callable[[Job], bool] | None = None) -> tuple[Message, Job, dict]:
+        """Send *text* from *sender* to *target* (bot-msg, desk message, the message-agent API).
+
+        *mode* "steer" (the default, 0.11.10): when *target* is running a turn its engine can take a
+        message in (*can_steer*), and *target* lets bots steer it (``bot_steer``), the message joins that
+        turn the way an owner's steer does (delivered in order after the owner's own). The agent message
+        then has no turn of its own: its job_id is ``steer:<id>`` and ``steered_into`` names the turn; its
+        reply is not copied back (the turn belongs to the receiver's own task), so the receiver answers
+        with a message of its own. If the turn ends before the message reaches it, it becomes a queued
+        inbox turn like any other (JobStore._queue_steers). Never steered into: a turn that is itself
+        answering a bot (inbox), so a third bot's text never lands in that reply. Otherwise, and for
+        *mode* "queue", the message is a new queued inbox turn whose reply is copied back to *sender*.
+
+        Hops: a message sent from a job continues the exchange that reached that job as a queued inbox turn,
+        or, to the bot that steered into that job, that pair's exchange; at most 3 deep. The first message back to the bot whose steer
+        reached the job is that steer's answer and takes the steer's hop (a queued turn's reply is free in
+        the same way), so ask, answer, follow-up, answer... allows three asks. The item returned carries
+        ``delivery``: "steer", "start" (the receiver was idle) or "queue" (behind its other work)."""
         job_id, message_id, stamp = str(uuid4()), str(uuid4()), now().isoformat()
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                parent = None
+                rows: list[sqlite3.Row] = []
                 if origin_id:
                     origin = db.execute("SELECT bot_id FROM jobs WHERE id=?", (origin_id,)).fetchone()
                     if not origin or origin["bot_id"] != str(sender.id):
                         raise ValueError("invalid originating job")
-                    parent = db.execute("SELECT * FROM agent_messages WHERE job_id=?", (origin_id,)).fetchone()
-                hop = parent["hop"] + 1 if parent else 1
+                    rows = db.execute("SELECT * FROM agent_messages WHERE job_id=? OR steered_into=? "
+                                      "ORDER BY created_at DESC, rowid DESC", (origin_id, origin_id)).fetchall()
+                answered = next((r for r in rows if r["steered_into"] == origin_id and r["from_bot"] == str(target.id)
+                                 and r["reply_to"] is None and not db.execute(
+                                     "SELECT 1 FROM agent_messages WHERE reply_to=? LIMIT 1", (r["id"],)).fetchone()),
+                                None)
+                if answered is not None:
+                    hop, thread, reply_to = answered["hop"], answered["thread_id"], answered["id"]
+                else:
+                    # a steer into the origin job belongs to its own task, so only that pair's exchange
+                    # continues from it; a queued inbox turn's chain continues to any bot (as before)
+                    parent = max((r for r in rows if r["job_id"] == origin_id or r["from_bot"] == str(target.id)),
+                                 key=lambda r: r["hop"], default=None)
+                    hop = parent["hop"] + 1 if parent else 1
+                    thread, reply_to = (parent["thread_id"] if parent else None), None
                 if hop > 3:
-                    raise ValueError("maximum message hop depth reached")
+                    raise ValueError("maximum message hop depth reached: three messages back and forth "
+                                     "in one exchange; carry on with what you have")
                 if db.execute("SELECT 1 FROM agent_messages WHERE from_bot=? AND to_bot=? AND created_at>?", (str(sender.id), str(target.id), since)).fetchone():
                     raise ValueError("message rate limit reached")
                 if inbox_caps:
                     _inbox_limit(db, inbox_caps, from_bot=str(sender.id))
-                prompt = f"(from bot {sender.name}) {text}"
-                db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (job_id, prompt, 'queued', target.default_provider, stamp, str(target.id), target.reason, 'inbox', target.model, target.effort or default_effort(target.default_provider), _priority('inbox')))
-                db.execute("INSERT INTO agent_messages VALUES (?,?,?,?,?,?,?,?)", (message_id, str(sender.id), str(target.id), text, job_id, parent['thread_id'] if parent else job_id, hop, stamp))
-                cursor = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at) VALUES (?,?,?,?,?,?,?)", (str(target.id), 'user', f'bot {sender.name}', 'inbox', text, job_id, stamp))
-                row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
-                db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at) VALUES (?,?,?,?,?,?,?)", (str(sender.id), 'user', f'to {target.name}', 'inbox', text, job_id, stamp))
+                running = None
+                if mode == "steer" and getattr(target, "bot_steer", True):
+                    row = db.execute(
+                        "SELECT * FROM jobs WHERE bot_id=? AND status='running' AND source!='inbox' "
+                        "AND NOT EXISTS (SELECT 1 FROM agent_messages a WHERE a.job_id=jobs.id) "
+                        "ORDER BY source IN ('chat','api') DESC, started_at LIMIT 1", (str(target.id),)).fetchone()
+                    if row is not None and (can_steer is None or can_steer(self._job(row))):
+                        running = row
+                if running is not None:
+                    cursor = db.execute(
+                        "INSERT INTO messages (bot_id,role,sender,source,text,created_at,steer_job_id,steer_status) "
+                        "VALUES (?,'user',?,'inbox',?,?,?,'pending')",
+                        (str(target.id), f'bot {sender.name}', text, stamp, running["id"]))
+                    target_row = cursor.lastrowid
+                    sent = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,created_at) "
+                                      "VALUES (?,'user',?,'inbox',?,?)",
+                                      (str(sender.id), f'to {target.name}', text, stamp)).lastrowid
+                    db.execute("INSERT INTO agent_messages (id,from_bot,to_bot,body,job_id,thread_id,hop,created_at,"
+                               "steered_into,reply_to,sender_message_id,target_message_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                               (message_id, str(sender.id), str(target.id), text, f"steer:{message_id}",
+                                thread or message_id, hop, stamp, running["id"], reply_to, sent, target_row))
+                    delivery, job = "steer", running
+                else:
+                    busy = db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status IN ('queued','running') LIMIT 1",
+                                      (str(target.id),)).fetchone()
+                    prompt = f"(from bot {sender.name}) {text}"
+                    db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (job_id, prompt, 'queued', target.default_provider, stamp, str(target.id), target.reason, 'inbox', target.model, target.effort or default_effort(target.default_provider), _priority('inbox')))
+                    target_row = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at) VALUES (?,?,?,?,?,?,?)", (str(target.id), 'user', f'bot {sender.name}', 'inbox', text, job_id, stamp)).lastrowid
+                    sent = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at) VALUES (?,?,?,?,?,?,?)", (str(sender.id), 'user', f'to {target.name}', 'inbox', text, job_id, stamp)).lastrowid
+                    db.execute("INSERT INTO agent_messages (id,from_bot,to_bot,body,job_id,thread_id,hop,created_at,"
+                               "reply_to,sender_message_id,target_message_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                               (message_id, str(sender.id), str(target.id), text, job_id, thread or job_id, hop, stamp,
+                                reply_to, sent, target_row))
+                    delivery, job = ("queue" if busy else "start"), db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+                row = db.execute("SELECT * FROM messages WHERE id=?", (target_row,)).fetchone()
                 db.commit()
             except BaseException:
                 db.rollback()
                 raise
-        return _model(Message, row, ("created_at",)), self.get(job_id), self.get_agent_message(message_id)
+        item = self.get_agent_message(message_id)
+        item["delivery"] = delivery
+        return _model(Message, row, ("created_at",)), self._job(job), item
 
     def create_agent_message(self, from_bot: UUID, to_bot: UUID, body: str, job_id: UUID,
                              thread_id: str, hop: int) -> dict:
         message_id = str(uuid4())
         with closing(self._connect()) as db:
-            db.execute("INSERT INTO agent_messages VALUES (?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO agent_messages (id,from_bot,to_bot,body,job_id,thread_id,hop,created_at) "
+                       "VALUES (?,?,?,?,?,?,?,?)",
                        (message_id, str(from_bot), str(to_bot), body, str(job_id),
                         thread_id, hop, now().isoformat()))
         return self.get_agent_message(message_id)
 
+    # a message steered into a running turn has no job of its own: "sent" until that turn reads it,
+    # then "delivered"; its reply is never the receiver's turn's reply (that turn is the receiver's task)
+    _AGENT_SELECT = ("SELECT m.*, j.status AS job_status, CASE WHEN j.id IS NULL THEN NULL ELSE j.reply_text END AS reply, "
+                     "j.finished_at, (SELECT t.steer_status FROM messages t WHERE t.id=m.target_message_id) AS steer_status "
+                     "FROM agent_messages m LEFT JOIN jobs j ON j.id=m.job_id")
+
+    @staticmethod
+    def _agent_item(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        status, steer = item.pop("job_status"), item.pop("steer_status")
+        if status is None and item["job_id"].startswith("steer:"):
+            item["status"] = "delivered" if steer == "delivered" else "sent"
+        else:
+            item["status"] = AGENT_STATUS.get(status, status)
+        item["mode"] = "steer" if item.get("steered_into") or item["job_id"].startswith("steer:") else "queue"
+        return item
+
     def list_agent_messages(self, bot: str | None = None) -> list[dict]:
-        query = ("SELECT m.*, j.status AS job_status, j.reply_text AS reply, j.finished_at "
-                 "FROM agent_messages m JOIN jobs j ON j.id=m.job_id")
+        query = self._AGENT_SELECT
         args = ()
         if bot:
             query += " WHERE m.from_bot=? OR m.to_bot=?"
@@ -1717,26 +1927,12 @@ class JobStore:
         query += " ORDER BY m.created_at DESC LIMIT 500"
         with closing(self._connect()) as db:
             rows = db.execute(query, args).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            status = item.pop("job_status")
-            item["status"] = AGENT_STATUS.get(status, status)
-            result.append(item)
-        return result
+        return [self._agent_item(row) for row in rows]
 
     def get_agent_message(self, message_id: str) -> dict | None:
         with closing(self._connect()) as db:
-            row = db.execute(
-                "SELECT m.*, j.status AS job_status, j.reply_text AS reply, j.finished_at "
-                "FROM agent_messages m JOIN jobs j ON j.id=m.job_id WHERE m.id=?", (message_id,)
-            ).fetchone()
-        if row is None:
-            return None
-        item = dict(row)
-        status = item.pop("job_status")
-        item["status"] = AGENT_STATUS.get(status, status)
-        return item
+            row = db.execute(self._AGENT_SELECT + " WHERE m.id=?", (message_id,)).fetchone()
+        return None if row is None else self._agent_item(row)
 
     def agent_message_for_job(self, job_id: UUID | str) -> dict | None:
         with closing(self._connect()) as db:
@@ -1833,9 +2029,12 @@ class JobStore:
 
     def list_messages(
         self, bot_id: UUID | str, limit: int | None = None, *, include_archived: bool = False,
-        up_to: int | None = None, include_progress: bool = True,
+        up_to: int | None = None, include_progress: bool = True, include_hidden: bool | None = None,
     ) -> list[Message]:
+        """*include_hidden* (default: same as *include_archived*) also returns Bot-Office machinery rows."""
         where = "bot_id=?" + ("" if include_archived else " AND archived_at IS NULL")
+        if not (include_archived if include_hidden is None else include_hidden):
+            where += " AND hidden=0"
         if not include_progress:
             where += " AND kind!='say'"
         args: tuple = (str(bot_id),)
@@ -1844,7 +2043,10 @@ class JobStore:
         with closing(self._connect()) as db:
             # a succeeded reply without a BOT-OFFICE-STATUS line is marked "unverified" (subtle label)
             rows = db.execute(
-                f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified"
+                f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified,"
+                " COALESCE((SELECT a.from_bot FROM agent_messages a WHERE a.job_id=m.job_id LIMIT 1),"
+                " (SELECT a.from_bot FROM agent_messages a WHERE a.sender_message_id=m.id OR a.target_message_id=m.id"
+                " LIMIT 1)) AS agent_from"
                 f" FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) AS m"
                 " LEFT JOIN jobs AS j ON j.id=m.job_id ORDER BY m.id",
                 (*args, limit if limit is not None else -1),
@@ -1856,8 +2058,17 @@ class JobStore:
                 f"SELECT n.*, ({PARKED_SQL} AND n.attempt=j.attempts) AS parked FROM usage_notices n "
                 "JOIN jobs j ON j.id=n.job_id "
                 "WHERE n.bot_id=? AND n.message_id IS NOT NULL", (str(bot_id),))}
+            approval_ids = [row["approval_id"] for row in rows if row["approval_id"]]
+            approvals = {row["id"]: dict(row) for row in db.execute(
+                f"SELECT * FROM approvals WHERE id IN ({','.join('?' * len(approval_ids))})",
+                approval_ids)} if approval_ids else {}
         out = []
         for row in rows:
+            approval = approvals.get(row["approval_id"]) if row["approval_id"] else None
+            card = approval_card(self, approval) if approval else None
+            if card is not None:
+                out.append(_model(Message, row, ("created_at", "archived_at")).model_copy(update={"approval": card}))
+                continue
             notice = notices.get(row["id"])
             if notice is not None and not notice["parked"]:
                 continue  # the job started, was switched or cancelled: the notice is gone
@@ -2135,6 +2346,7 @@ class JobStore:
     def publish_outcome(
         self, bot_id: UUID | str, job_id: UUID | str, role: str, text: str, *,
         sender: str | None = None, source: str = "chat", attachments: list[str] | None = None,
+        hidden: bool = False,
     ) -> Message | None:
         """Add a job's result to *bot_id*'s chat unless the turn that asked for it has been
         archived by an edit (checked and inserted in one transaction). Returns None if
@@ -2155,9 +2367,9 @@ class JobStore:
                     db.rollback()
                     return None
                 cursor = db.execute(
-                    "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
-                    (key, role, sender, source, text, job_key, now().isoformat(), json.dumps(ids)),
+                    "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments,hidden)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (key, role, sender, source, text, job_key, now().isoformat(), json.dumps(ids), int(hidden)),
                 )
                 row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
                 db.commit()
@@ -2174,6 +2386,10 @@ class JobStore:
     def set_meta(self, key: str, value: str) -> None:
         with closing(self._connect()) as db:
             db.execute("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def delete_meta(self, key: str) -> None:
+        with closing(self._connect()) as db:
+            db.execute("DELETE FROM meta WHERE key=?", (key,))
 
     @staticmethod
     def _routine(row: sqlite3.Row | None) -> Routine | None:

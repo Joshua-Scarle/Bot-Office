@@ -46,7 +46,7 @@ def test_opencode_effort_can_be_unset(settings):
         assert response.status_code == 200 and response.json()["effort"] is None
         page = client.get("/").text
         assert 'default (unset)' in page
-        assert '$("f-custom").value = ""; updateReasonRow()' in page
+        assert '$("f-custom").value = ""; fillEffortSelect()' in page
 
 
 def test_image_composer_smoke():
@@ -76,7 +76,7 @@ def test_sending_preserves_changed_draft_and_new_images():
     handler = page[start:end]
     script = r'''
 const assert = require('assert');
-const elements = { composer: {}, text: {value: 'first'}, 'send-reason': {hidden: true}, 'queue-next': {checked: false}, messages: {} };
+const elements = { composer: {}, text: {value: 'first'}, 'queue-next': {checked: false}, messages: {} };
 const $ = (id) => elements[id];
 let bot = {id: 'one'}, state = {selected: 'one'}, draftRevision = 0, sendingImages = false;
 const first = {id: 'a', bot: 'one'}, pendingImages = [first];
@@ -259,7 +259,8 @@ def test_edit_gui_smoke():
     assert "are NOT undone" in page
     assert 'setAttribute("aria-label", "archived")' in page
     # only the owner's own, completed, visible messages are editable
-    assert '!m.sender && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending' in page
+    assert 'isOwnerMessage(m) && (m.source === "chat" || m.source === "api" || m.source === "assignment") && !m.pending' in page
+    assert 'function isOwnerMessage(m) { return m.author === "owner" && m.role === "user"; }' in page
 
 
 def test_dictation_gui_smoke():

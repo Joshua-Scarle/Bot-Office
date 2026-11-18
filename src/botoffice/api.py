@@ -11,7 +11,8 @@ import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -20,7 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import attachments, grok_bridge, isolation, needs_you, safefs, vnc
+from . import approval_classes, attachments, baseline, grok_bridge, isolation, needs_you, safefs, vnc
 from . import rules as action_rules
 from . import usage as budgets
 from .auth import auth_dependency, bearer
@@ -88,9 +89,37 @@ from .voice.text import chunks as speech_chunks
 from .voice.wav import WavError, parse_pcm16_mono
 
 
+class AutoContinueBody(BaseModel):
+    enabled: bool | None = None
+    max: int | None = None
+
+
+class ApprovalClassCreate(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+    kind: Literal["shell", "tool"]
+    pattern: str = Field(min_length=1, max_length=500)
+
+
+class ApprovalsBody(BaseModel):
+    # class key -> on/off
+    enabled: dict[str, bool] | None = Field(default=None, max_length=100)
+    add: list[ApprovalClassCreate] | None = Field(default=None, max_length=10)
+    remove: list[str] | None = Field(default=None, max_length=100)
+    # minutes an approval in your own chat waits for an answer; 0 = until answered
+    timeout_min: int | None = Field(default=None, ge=0)
+
+
+class SettingsBody(BaseModel):
+    auto_continue: AutoContinueBody | None = None
+    approvals: ApprovalsBody | None = None
+
+
 class AgentMessageCreate(BaseModel):
     to: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=10000)
+    # 0.11.10: "steer" reaches the receiver's running turn now (else starts or queues a turn);
+    # "queue" waits for its next turn and its reply comes back to the sender
+    mode: Literal["steer", "queue"] = "steer"
     wait: bool = False
     timeout: float = Field(default=30, gt=0, le=120)
 
@@ -390,27 +419,51 @@ def create_app(
             if job:
                 scheduler.cancel(job)
 
-    def _post_owner_message(bot: Bot, text: str, *, reason: str | None = None,
-                            attachments: list[str] | None = None, queue: bool = False) -> tuple[Message, Job]:
+    def _steer_blocked(bot: Bot):
+        """For store.post_steer_explained: why this engine cannot take a message while *job* runs."""
+        def note(job: Job) -> str | None:
+            adapter = providers.get(job.provider)
+            check = getattr(adapter, "steer_unavailable_note", None)
+            return check(job.model_copy(update={"cli_access": bot.cli_access})) if check else None
+        return note
+
+    def _post_owner_message_ex(bot: Bot, text: str, *, reason: str | None = None,
+                               attachments: list[str] | None = None,
+                               queue: bool = False) -> tuple[Message, Job, str, str | None]:
         """An owner chat post: steered into the bot's running or queued turn (see JobStore.post_steer)
-        unless the caller asks for a separate queued turn (mode "queue"). Bot-to-bot inbox messages,
-        routines, wakeups and assignment steps are not owner posts and never come through here."""
+        unless the caller asks for a separate queued turn (mode "queue"). Returns (message, job, delivery,
+        note): delivery "steer" (attached to the working turn), "queue" (a new turn behind other work, the
+        note says why: the owner asked, the engine cannot take input mid-run, the bot is answering another
+        bot) or "start" (idle bot). Bot-to-bot inbox messages, routines, wakeups and assignment steps are
+        not owner posts and never come through here."""
+        note = None
         if not queue:
             _, steer_reason = scheduler.turns._validate(bot.default_provider, reason, bot)
-            result = store.post_steer(bot.id, text, attachments or [], steer_reason)
+            result, note = store.post_steer_explained(bot.id, text, attachments or [], steer_reason,
+                                                      unsteerable=_steer_blocked(bot))
             if result:
-                return result
-        return scheduler.turns.post_message(bot, text, reason=reason, attachments=attachments)
+                message, job = result
+                if message.steer_status == "queued":  # the engine cannot take it mid-run: said at once
+                    return message, job, "queue", message.steer_note
+                return message, job, "steer", None
+        message, job = scheduler.turns.post_message(bot, text, reason=reason, attachments=attachments)
+        others = [item for item in store.pending_jobs(bot.id) if str(item.id) != str(job.id)]
+        if not others:
+            return message, job, "start", None
+        if queue:
+            note = "Queued as the next turn, as you chose."
+        return message, job, "queue", note or "Queued behind the bot's other turns; it runs when they finish."
+
+    def _post_owner_message(bot: Bot, text: str, *, reason: str | None = None,
+                            attachments: list[str] | None = None, queue: bool = False) -> tuple[Message, Job]:
+        message, job, _, _ = _post_owner_message_ex(bot, text, reason=reason, attachments=attachments, queue=queue)
+        return message, job
 
     def _bot(bot_id: UUID | str) -> Bot:
         bot = store.get_bot(bot_id)
         if not bot:
             raise HTTPException(status_code=404, detail="bot not found")
         return bot
-
-    def _check_claude_reason(provider: str, reason: str | None) -> None:
-        if provider == "claude" and not (reason or "").strip():
-            raise HTTPException(status_code=400, detail="provider claude requires a non-empty reason")
 
     @app.get("/", response_class=HTMLResponse)
     async def chat_page() -> HTMLResponse:
@@ -656,7 +709,6 @@ def create_app(
     @app.post("/v1/bots", response_model=Bot, status_code=201, dependencies=[Depends(auth)])
     async def create_bot(body: BotCreate) -> Bot:
         _check_model(body.default_provider, body.model)
-        _check_claude_reason(body.default_provider, body.reason)
         _check_effort(body.default_provider, body.effort)
         try:
             bot = store.create_bot(
@@ -673,7 +725,15 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         memory.write_bot(bot.id, "")
-        return bot
+        return _with_steering([bot])[0]
+
+    def _with_steering(bots: list[Bot]) -> list[Bot]:
+        """Set each bot's ``steering``: how a message sent while it works reaches the CLI."""
+        for bot in bots:
+            check = getattr(providers.get(bot.default_provider), "steering", None)
+            if check:
+                bot.steering = check(SimpleNamespace(bot_id=bot.id, cli_access=bot.cli_access))
+        return bots
 
     def _with_status(bots: list[Bot]) -> list[Bot]:
         """Set each bot's ``status`` (offline/working/queued/blocked/waiting/error, else idle)."""
@@ -686,6 +746,7 @@ def create_app(
             else:
                 latest = {job.bot_id: job for job in store.list() if job.bot_id}
         waiting = assignments.bot_states()
+        _with_steering(bots)
         for bot in bots:
             adapter = providers.get(bot.default_provider)
             if not adapter or not adapter.enabled or bot.default_provider not in settings.enabled_providers:
@@ -738,7 +799,7 @@ def create_app(
         if "description" in fields:
             fields["description"] = (fields["description"] or "").strip()
         for key in ("name", "instructions", "default_provider", "model", "icon", "cli_access", "notify", "allow_sudo",
-                    "scheduled_runs", "daily_budget", "digest"):
+                    "scheduled_runs", "daily_budget", "digest", "bot_steer"):
             if key in fields and fields[key] is None:
                 del fields[key]
         if "daily_budget" in fields:
@@ -748,6 +809,8 @@ def create_app(
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
         if "digest" in fields:
             fields["digest"] = int(fields["digest"])
+        if "bot_steer" in fields:
+            fields["bot_steer"] = int(fields["bot_steer"])
         if fields.get("job_timeout") is not None and fields["job_timeout"] > settings.max_turn_timeout:
             raise HTTPException(status_code=422, detail=f"job_timeout must be at most {settings.max_turn_timeout} seconds")
         if "notify" in fields:
@@ -769,7 +832,6 @@ def create_app(
             # keep the level if the new engine accepts it, else that engine's default (or none)
             keep = bot.effort if bot.effort and valid_effort(engine, bot.effort) else None
             fields["effort"] = keep or default_effort(engine)
-        _check_claude_reason(engine, fields.get("reason", bot.reason))
         try:
             updated = store.update_bot(bot_id, **fields)
         except ValueError as exc:
@@ -943,6 +1005,58 @@ def create_app(
     async def put_shared_memory(body: TextBody) -> dict[str, str]:
         memory.write_shared(body.text)
         return {"text": body.text}
+
+    # 0.11.9/0.11.10: the owner-side layers every bot gets (Rules for all bots; the System prompt, which
+    # /v1/baseline has edited since 0.11.9). Owner only (master token): bots read them as files in their
+    # job directory but cannot change them.
+    def _layer_routes(layer: baseline.Layer, *paths: str) -> None:
+        async def get_layer() -> dict[str, object]:
+            return layer.state(store)
+
+        async def put_layer(body: TextBody) -> dict[str, object]:
+            try:
+                layer.set_override(store, body.text)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            return layer.state(store)
+
+        async def reset_layer() -> dict[str, object]:
+            layer.reset(store)
+            return layer.state(store)
+
+        for path in paths:
+            app.get(path, dependencies=[Depends(auth)])(get_layer)
+            app.put(path, dependencies=[Depends(auth)])(put_layer)
+            app.delete(path, dependencies=[Depends(auth)])(reset_layer)
+
+    _layer_routes(baseline.SYSTEM, "/v1/baseline", "/v1/system-prompt")
+    _layer_routes(baseline.RULES, "/v1/rules-for-all-bots")
+
+    @app.get("/v1/settings", dependencies=[Depends(auth)])
+    async def get_settings() -> dict[str, object]:
+        """Settings for all bots (0.11.10). The two layers have their own routes (large texts)."""
+        gates = {name: action_rules.gate_state(settings.control_dir, name) for name in action_rules.WIRED}
+        return {"auto_continue": baseline.auto_continue(store),
+                "auto_continue_max_limit": baseline.AUTO_CONTINUE_MAX,
+                "approvals": {**approval_classes.settings(store), "gates": gates,
+                              "unpausable_bots": approval_classes.unpausable_bots(store)}}
+
+    @app.put("/v1/settings", dependencies=[Depends(auth)])
+    async def put_settings(body: SettingsBody) -> dict[str, object]:
+        if body.auto_continue is not None:
+            try:
+                baseline.set_auto_continue(store, body.auto_continue.enabled, body.auto_continue.max)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if body.approvals is not None:
+            change = body.approvals
+            try:
+                approval_classes.update(store, enabled=change.enabled,
+                                        add=[item.model_dump() for item in change.add or []],
+                                        remove=change.remove, timeout_min=change.timeout_min)
+            except approval_classes.ApprovalClassError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return await get_settings()
 
     @app.get("/v1/desktops", dependencies=[Depends(auth)])
     async def list_desktops() -> list[dict]:
@@ -1227,13 +1341,24 @@ def create_app(
             raise HTTPException(status_code=404, detail="bot not found")
         if binding and binding.bot_id != sender.id:
             raise HTTPException(status_code=403, detail="token is bound to another bot")
+        blocked = _steer_blocked(target)
         try:
-            _, _, item = scheduler.turns.post_agent_message(sender, target, body.body, str(binding.id) if binding else None)
+            _, _, item = scheduler.turns.post_agent_message(
+                sender, target, body.body, str(binding.id) if binding else None, mode=body.mode,
+                can_steer=lambda job: blocked(job) is None)
         except TurnError as exc:
             status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        if item.get("delivery") == "steer":
+            item["note"] = (f"Delivered to {target.name} while it works; it reads it within its current task and "
+                            "answers with a message to you if you asked something (it appears in your chat).")
+            return item
+        if body.mode == "steer" and not target.bot_steer:
+            item["note"] = f"{target.name} takes messages from bots as turns of their own, so yours was queued."
         if body.wait and binding:
-            item["note"] = "Queued asynchronously: agent turns cannot wait for another worker; the reply will appear in chat."
+            prefix = (item["note"] + " ") if item.get("note") else ""
+            item["note"] = prefix + ("Queued asynchronously: agent turns cannot wait for another worker; "
+                                     "the reply will appear in chat.")
             return item
         if body.wait:
             deadline = asyncio.get_running_loop().time() + body.timeout
@@ -1314,11 +1439,11 @@ def create_app(
                             raise ValueError("invalid image")
                     except (ValueError, OSError) as exc:
                         raise HTTPException(status_code=400, detail="attachment not found") from exc
-                message, job = _post_owner_message(bot, body.text, reason=body.reason, attachments=ids,
-                                                   queue=body.mode == "queue")
+                message, job, delivery, note = _post_owner_message_ex(
+                    bot, body.text, reason=body.reason, attachments=ids, queue=body.mode == "queue")
         except TurnError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return MessagePosted(message=message, job=job)
+        return MessagePosted(message=message, job=job, delivery=delivery, delivery_note=note)
 
     async def _check_attachments(bot_id: UUID, ids: list[str]) -> None:
         for attachment_id in ids:
@@ -1432,6 +1557,9 @@ def create_app(
                     pending=True,
                     job_status=job.status.value,
                     not_before=job.not_before,
+                    author="bot",
+                    continuing=(f"{job.continue_count} of {baseline.auto_continue(store)['max']}"
+                                if job.continue_count else None),
                 )
             )
         return messages
@@ -1666,7 +1794,6 @@ def create_app(
             raise HTTPException(status_code=400, detail=f"the job already runs on {target}")
         if target not in ENGINES or target not in {item["provider"] for item in await _switch_options(job.provider, fresh=True)}:
             raise HTTPException(status_code=400, detail=f"{target} is not enabled and signed in")
-        _check_claude_reason(target, body.reason)
         reason = (body.reason or "").strip() or None
         try:
             switched = await asyncio.to_thread(store.switch_provider, job.id, target, default_model(target),
@@ -1715,7 +1842,9 @@ def create_app(
                        "(else they are refused to Needs-you: bot-task/bot-msg/desk would fail)"},
             "defaults": "strict profile (watcher triggers always; routine, wake-up, assignment and bot-to-bot "
                         "turns only for bots with scheduled_runs 'gated'): outbound and destructive ask; "
-                        "everything else, incl. your own chat: allow; bot-msg: allow; secrets: never everywhere"}
+                        "everything else, incl. your own chat: allow; bot-msg: allow; secrets: never everywhere. "
+                        "0.11.10: the approval classes switched on in Settings ask in every run, after your own "
+                        "rules (GET /v1/settings, approvals)"}
 
     @app.post("/v1/rules", status_code=201, dependencies=[Depends(auth)])
     async def add_rule(body: RuleCreate) -> dict:
