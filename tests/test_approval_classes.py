@@ -242,3 +242,22 @@ def test_a_real_turn_waits_on_the_card_and_approve_finishes_it(settings):
     visible = store.list_messages(bot.id)
     assert [m.approval["status"] for m in visible if m.approval] == ["consumed"]
     assert visible[-1].text == "Sent." and [m.text for m in visible if m.author == "owner"] == ["email Joe the report"]
+
+
+def test_engines_that_cannot_pause_are_named_and_told_not_to_act(tmp_path):
+    from botoffice.workspace import self_extra
+    store = JobStore(tmp_path / "db.sqlite3")
+    claude = store.create_bot("Cleo", "", "claude", None)
+    loose = store.create_bot("Opal", "", "opencode", None)
+    store.update_bot(loose.id, cli_access="full")
+    names = {item["name"] for item in approval_classes.unpausable_bots(store)}
+    assert "Opal" in names and "Cleo" not in names
+    assert approval_classes.can_pause("codex", "full") and not approval_classes.can_pause("codex", "restricted")
+    for bot, expect in ((claude, "Bot-Office pauses that one step"), (loose, "never do these yourself")):
+        bot = store.get_bot(bot.id)
+        job = store.create("work", bot.default_provider, bot_id=bot.id, source="chat")
+        extra, _, stable = self_extra(store, bot, job, "", now())
+        assert expect in extra and "Sending email or messages" in extra and "Sending email" in stable
+    for item in approval_classes.BUILTIN:
+        approval_classes.update(store, enabled={item.key: False})
+    assert approval_classes.self_note(store, "opencode", "full") == ""

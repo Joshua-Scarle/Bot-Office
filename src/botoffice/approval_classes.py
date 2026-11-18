@@ -269,3 +269,29 @@ def label(store: JobStore, key: str | None) -> str | None:
 
 def timeout_min(store: JobStore) -> int:
     return settings(store)["timeout_min"]
+
+
+def can_pause(provider: str, cli_access: str) -> bool:
+    """Whether Bot-Office's gate hook is wired for this engine and access (docs/APPROVALS.md):
+    opencode has no hook; restricted Codex runs under Codex's own sandbox and approval policy."""
+    return provider != "opencode" and not (provider == "codex" and cli_access != "full")
+
+
+def self_note(store: JobStore, provider: str, cli_access: str) -> str:
+    """The SELF.md line telling a bot which actions wait for the owner's yes, and how."""
+    labels = [item["label"] for item in settings(store)["classes"] if item["enabled"]]
+    if not labels:
+        return ""
+    kinds = "; ".join(labels)
+    if can_pause(provider, cli_access):
+        return (f"- Approvals: the user wants these done only with their yes: {kinds}. Don't ask first: go ahead, "
+                "and Bot-Office pauses that one step and asks them.\n")
+    return (f"- Approvals: the user wants these done only with their yes: {kinds}. Your engine can't be paused for "
+            "approval, so never do these yourself. Prepare everything (a draft, the exact command), then end with "
+            "BOT-OFFICE-STATUS: waiting_on_user — needs your approval: <what>. The user will do it or tell you to.\n")
+
+
+def unpausable_bots(store: JobStore) -> list[dict]:
+    """Bots whose engine the approval classes cannot pause, for the Settings warning."""
+    return [{"id": str(bot.id), "name": bot.name, "engine": bot.default_provider, "cli_access": bot.cli_access}
+            for bot in store.list_bots() if not can_pause(bot.default_provider, bot.cli_access)]

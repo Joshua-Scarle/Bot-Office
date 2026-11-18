@@ -7,21 +7,22 @@ Two modes:
   and a scripted engine (no CLI, no subscription used), then drives Chromium through the real UI:
 
     .venv/bin/pip install playwright && .venv/bin/python -m playwright install chromium
-    .venv/bin/python scripts/e2e_gui.py [--headed] [--out e2e-shots]
+    .venv/bin/python scripts/e2e_gui.py [--headed] [--channel chrome] [--out e2e-shots]
 
-  Live: checks a running install read-only (unlock, Settings and Approvals load). With --send-to
-  it also sends one short message to that bot with the Enter key and waits for its reply (this is
-  a real turn on that bot's engine):
+  Live (e.g. a staged copy): checks a running install read-only (unlock, Settings and Approvals
+  load). With --send-to it also sends one short message with the Enter key to that bot and waits for
+  its reply. That is a real turn on its engine, so the bot's name must start with "E2E test":
 
     .venv/bin/python scripts/e2e_gui.py --url http://127.0.0.1:8787 --token "$(cat ~/.config/bot-office/token)" \
-        [--send-to "Bot name"]
+        [--send-to "E2E test bot"]
 
 Checked (local mode): Enter sends (bubble shows, box clears, Send comes back; Shift+Enter adds a
 line), the bot's reply arrives, continuation prompts never look like the owner's messages,
 Settings (rules, behavior, approvals: switch a class, add and remove your own, timeout), the
 Approve / Deny card in the chat (deny leaves a short note; approve runs it once and hides the
 resume prompt), and the bot-to-bot row and its "A ⇄ B" panel with Close Chat. Screenshots of each
-step go to --out. Exit code 0 means every check passed.
+step go to --out. It ends with a plain PASS/FAIL list; exit code 0 means every check passed.
+Browser: Playwright's Chromium by default, or an installed Chrome with --channel chrome.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -41,12 +43,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 TOKEN = "e2e-token"
+# every bot this script makes or messages is labelled as a test bot
+ADA, BEA = "E2E test bot Ada", "E2E test bot Bea"
+TEST_PREFIX = "E2E test"
 REPLY = "Hello from the e2e bot."
 FAILURES: list[str] = []
+RESULTS: list[tuple[bool, str]] = []
 
 
 def check(ok: bool, what: str) -> None:
     print(("  ok    " if ok else "  FAIL  ") + what, flush=True)
+    RESULTS.append((ok, what))
     if not ok:
         FAILURES.append(what)
 
@@ -130,11 +137,12 @@ def call(base: str, token: str, method: str, path: str, body: dict | None = None
 
 # --- browser ---
 
-def launch(pw, headed: bool):
+def launch(pw, headed: bool, channel: str | None):
     try:
-        return pw.chromium.launch(headless=not headed)
+        return pw.chromium.launch(headless=not headed, channel=channel)
     except Exception as exc:
-        raise SystemExit(f"Chromium is not available ({exc}). Run: python -m playwright install chromium") from exc
+        hint = "install Google Chrome" if channel else "run: python -m playwright install chromium"
+        raise SystemExit(f"The browser is not available ({exc}); {hint}") from exc
 
 
 def unlock(page, base: str, token: str) -> None:
@@ -254,8 +262,9 @@ def approvals_in_chat(page, out: Path, base: str, app) -> None:
 
 def bot_to_bot(page, out: Path, base: str, token: str) -> None:
     print("Bot-to-bot row and panel")
-    call(base, token, "POST", "/v1/bots/Bea/message-agent", {"to": "Ada", "body": "Ada, **can you** check the logs?"})
-    open_bot(page, "Bea")
+    call(base, token, "POST", "/v1/bots/" + urllib.parse.quote(BEA) + "/message-agent",
+         {"to": ADA, "body": "Ada, **can you** check the logs?"})
+    open_bot(page, BEA)
     row = page.locator(".agent-group .agent-open").first
     row.wait_for(timeout=30000)
     check(" with" in row.inner_text() and "Ada" in row.inner_text(), f"Bea's chat shows a row: {row.inner_text()!r}")
@@ -268,7 +277,7 @@ def bot_to_bot(page, out: Path, base: str, token: str) -> None:
     shot(page, out, "07-agent-panel")
     page.get_by_role("button", name="Close Chat").click()
     check(page.locator("#agent-chat[open]").count() == 0, "Close Chat closes the panel")
-    open_bot(page, "Ada")
+    open_bot(page, ADA)
     page.locator(".agent-group .agent-open").first.wait_for(timeout=30000)
     check(True, "the receiving bot's chat shows the row too")
     shot(page, out, "08-received-row")
@@ -280,13 +289,15 @@ def main() -> int:
     parser.add_argument("--token", help="its API token (live mode)")
     parser.add_argument("--send-to", help="live mode: send one short message to this bot with Enter")
     parser.add_argument("--headed", action="store_true", help="show the browser window")
+    parser.add_argument("--channel", choices=("chrome", "chromium", "msedge"),
+                        help="use an installed browser instead of Playwright's Chromium")
     parser.add_argument("--out", default="e2e-shots", help="folder for screenshots")
     args = parser.parse_args()
     from playwright.sync_api import sync_playwright
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as pw:
-        browser = launch(pw, args.headed)
+        browser = launch(pw, args.headed, None if args.channel == "chromium" else args.channel)
         page = browser.new_page(viewport={"width": 1280, "height": 860})
         errors: list[str] = []
         page.on("pageerror", lambda exc: errors.append(str(exc)))
@@ -298,15 +309,17 @@ def main() -> int:
             check(True, "unlocked " + base)
             settings_page(page, out, base, args.token, write=False)
             if args.send_to:
+                if not args.send_to.startswith(TEST_PREFIX):
+                    raise SystemExit(f'--send-to only messages test bots: the name must start with "{TEST_PREFIX}"')
                 open_bot(page, args.send_to)
                 enter_to_send(page, out, "e2e check from Bot-Office: please reply with just OK.", "OK")
         else:
             with tempfile.TemporaryDirectory(prefix="bot-office-e2e-") as tmp:
                 base, app, server = start_local(Path(tmp) / "data")
-                for name in ("Ada", "Bea"):
+                for name in (ADA, BEA):
                     call(base, TOKEN, "POST", "/v1/bots", {"name": name, "default_provider": "codex"})
                 unlock(page, base, TOKEN)
-                open_bot(page, "Ada")
+                open_bot(page, ADA)
                 enter_to_send(page, out, "hello from the e2e test", REPLY)
                 settings_page(page, out, base, TOKEN, write=True)
                 approvals_in_chat(page, out, base, app)
@@ -314,7 +327,11 @@ def main() -> int:
                 server.should_exit = True
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()
-    print(f"\n{'PASSED' if not FAILURES else 'FAILED'}: {len(FAILURES)} failed check(s). Screenshots in {out}/")
+    print("\nResults:")
+    for ok, what in RESULTS:
+        print(("PASS  " if ok else "FAIL  ") + what)
+    print(f"\n{'PASSED' if not FAILURES else 'FAILED'}: {len(RESULTS) - len(FAILURES)} passed, {len(FAILURES)} failed. "
+          f"Screenshots in {out}/")
     return 1 if FAILURES else 0
 
 
