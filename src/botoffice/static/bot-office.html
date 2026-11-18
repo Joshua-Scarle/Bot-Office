@@ -448,24 +448,41 @@ function rememberBot(id) {
 
 class AuthError extends Error {}
 
+// A request that never completes (a stalled tunnel or server) used to leave the composer greyed out for good.
+// Every call now has a deadline; voice calls decode or synthesise audio and get a longer one. Pass timeoutMs: 0 for none.
+const API_TIMEOUT_MS = 30000;
+const API_VOICE_TIMEOUT_MS = 120000;
 async function api(path, options = {}) {
+  const { timeoutMs, ...fetchOptions } = options;
   const headers = { "Authorization": "Bearer " + getToken() };
-  if (options.body !== undefined && !(options.body instanceof Blob)) headers["Content-Type"] = "application/json";
-  if (options.body instanceof Blob) headers["Content-Type"] = options.body.type || "application/octet-stream";
-  const response = await fetch(path, { ...options, headers, cache: "no-store", credentials: "omit" });
-  if (response.status === 401) throw new AuthError("Token rejected");
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    let detail = body.detail;
-    if (Array.isArray(detail)) detail = detail.map((d) => d.msg).join("; ");
-    const error = new Error(detail || response.statusText || ("HTTP " + response.status));
-    error.status = response.status;
-    error.body = body;
-    throw error;
-  }
-  if (response.status === 204) return null;
-  const type = response.headers.get("content-type") || "";
-  return type.includes("application/json") ? response.json() : response.blob();
+  if (fetchOptions.body !== undefined && !(fetchOptions.body instanceof Blob)) headers["Content-Type"] = "application/json";
+  if (fetchOptions.body instanceof Blob) headers["Content-Type"] = fetchOptions.body.type || "application/octet-stream";
+  const limit = timeoutMs !== undefined ? timeoutMs : (path.startsWith("/v1/voice/") ? API_VOICE_TIMEOUT_MS : API_TIMEOUT_MS);
+  const ctrl = new AbortController();
+  const timer = limit > 0 ? setTimeout(() => ctrl.abort(), limit) : null;
+  try {
+    const response = await fetch(path, { ...fetchOptions, headers, cache: "no-store", credentials: "omit", signal: ctrl.signal });
+    if (response.status === 401) throw new AuthError("Token rejected");
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      let detail = body.detail;
+      if (Array.isArray(detail)) detail = detail.map((d) => d.msg).join("; ");
+      const error = new Error(detail || response.statusText || ("HTTP " + response.status));
+      error.status = response.status;
+      error.body = body;
+      throw error;
+    }
+    if (response.status === 204) return null;
+    const type = response.headers.get("content-type") || "";
+    return type.includes("application/json") ? await response.json() : await response.blob();
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      const error = new Error("No answer from the server after " + Math.round(limit / 1000) + " s. Check the connection and try again.");
+      error.status = 0; error.timeout = true;
+      throw error;
+    }
+    throw err;
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 function handleError(err, where) {
@@ -1579,7 +1596,9 @@ $("composer").onsubmit = async (event) => {
   const revision = draftRevision;
   const draft = $("text").value;
   const text = draft.trim();
-  if (!bot || (!text && !pendingImages.length) || pendingImages.some((item) => !item.id || item.bot !== bot.id) || sendingImages) return;
+  if (!bot || (!text && !pendingImages.length)) return;
+  if (sendingImages) { setStatus("Still sending the previous message… it gives up after " + Math.round(API_TIMEOUT_MS / 1000) + " s."); return; }
+  if (pendingImages.some((item) => !item.id || item.bot !== bot.id)) { setStatus("Waiting for the image upload to finish."); return; }
   const sentImages = [...pendingImages];
   const body = { text: text || "Please see attached images.", attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
@@ -1597,10 +1616,18 @@ $("composer").onsubmit = async (event) => {
     if (posted?.delivery === "queue" && posted.delivery_note) setStatus(posted.delivery_note);  // never a silent queue
     renderBots();
     state.msgSig = "";
-    const box = $("messages");
-    await loadMessages();
-    box.scrollTop = box.scrollHeight;
-  } catch (err) { handleError(err); }
+    // the message is in: free the composer now, so a slow or stuck chat refresh cannot leave Send greyed out
+    for (const item of sentImages) item.sending = false;
+    sendingImages = false; updateImages();
+    loadMessages().then(() => { const box = $("messages"); box.scrollTop = box.scrollHeight; }).catch(handleError);
+  } catch (err) {
+    if (err && err.timeout) {
+      // the server may have accepted it even though no answer came back: refresh the chat and warn before a retry duplicates it
+      err.message = "No answer from the server. The message may have been sent: check the chat before sending it again.";
+      loadMessages().catch(() => {});
+    }
+    handleError(err);
+  }
   finally { for (const item of sentImages) { item.sending = false; if (item.removed && !item.idSent) deleteUpload(item); } sendingImages = false; updateImages(); }
 };
 
