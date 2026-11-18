@@ -460,6 +460,8 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <div id="loop-zone" hidden>
       <label>Turn time limit in minutes<input id="f-timeout" type="number" min="1" max="60" placeholder="default"></label>
       <label class="check"><input id="f-notify" type="checkbox"> Notify me when this bot needs me</label>
+      <label class="check"><input id="f-bot-steer" type="checkbox"> Other bots' messages reach it while it works</label>
+      <p class="hint">On by default, like your own messages. Off: their messages wait for a turn of their own. A bot can also choose to wait (bot-msg --queue).</p>
       <p class="hint" id="f-gate">Action gate: checking…</p>
       <p class="hint" id="f-isolation">Isolation: checking…</p>
       <label class="check"><input id="f-allow-sudo" type="checkbox"> Allow sudo for this bot</label>
@@ -957,6 +959,7 @@ function openAgentChat(bot, peerName, focusId) {
     const item = el("div", "agent-msg");
     const name = el("div", "agent-name", sender.name + " · " + new Date(m.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" }));
     name.style.color = accentColor(sender.name);
+    if (m.steer_job_id) name.append(" · " + (m.steer_status === "queued" ? "waited for its own turn" : "sent while " + bot.name + " was working" + (m.steer_status === "delivered" ? ", delivered" : "")));
     const row = el("div", "agent-row");
     const bubble = el("div", "agent-bubble");
     bubble.append(renderMarkdown(m.text));
@@ -2403,6 +2406,7 @@ async function openDialog(bot) {
   $("loop-zone").hidden = !bot;
   $("f-timeout").value = bot && bot.job_timeout ? Math.round(bot.job_timeout / 60) : "";
   $("f-notify").checked = !bot || bot.notify !== false;
+  $("f-bot-steer").checked = !bot || bot.bot_steer !== false;
   $("f-allow-sudo").checked = Boolean(bot && bot.allow_sudo);
   $("f-scheduled-runs").value = bot && bot.scheduled_runs === "gated" ? "gated" : "full";
   $("f-digest").checked = Boolean(bot && bot.digest);
@@ -2499,6 +2503,7 @@ $("bot-form").onsubmit = async (event) => {
     const timeout = $("f-timeout").value ? Math.round(Number($("f-timeout").value) * 60) : null;
     if (timeout !== (bot.job_timeout || null)) body.job_timeout = timeout;
     if ($("f-notify").checked !== (bot.notify !== false)) body.notify = $("f-notify").checked;
+    if ($("f-bot-steer").checked !== (bot.bot_steer !== false)) body.bot_steer = $("f-bot-steer").checked;
     if ($("f-digest").checked !== Boolean(bot.digest)) body.digest = $("f-digest").checked;
     if ($("f-scheduled-runs").value !== (bot.scheduled_runs || "full")) body.scheduled_runs = $("f-scheduled-runs").value;
     const cap = (id) => $(id).value === "" ? null : Math.round(Number($(id).value));
