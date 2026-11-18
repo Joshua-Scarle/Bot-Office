@@ -63,6 +63,9 @@ class ClaudeAdapter(CliAdapter):
 
     supports_resume = True
 
+    def steering(self, job) -> str:
+        return "live"  # stream-json stdin stays open for the whole turn (CliAdapter._exec feed loop)
+
     def _exec_args(self, workspace: Path, job=None, session: str | None = None) -> list[str]:
         full = self._full_access(job)
         # unattended full-access runs drop bypass: dontAsk refuses anything not allowed above

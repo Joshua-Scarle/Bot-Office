@@ -39,11 +39,12 @@ def test_generated_files_and_persistent_user_content(settings):
         assert text == (bot_dir / name).read_text()
         assert text.count(CLI_DELEGATION_START) == 1
         assert CLI_DELEGATION_SECTION in text
-        for expected in ("codex exec -m gpt-6.1-terra", "claude -p --model claude-sonnet-5-5",
+        for expected in ("codex exec -m <model>", "claude -p --model <model>",
                          "cursor-agent -p --force --sandbox disabled", "agy -p --dangerously-skip-permissions",
                          "opencode run --auto", "Cursor's built-in subagents", "background agents",
-                         "model switching", "Claude only for domain-heavy or critical work"):
+                         "model switching", "If the owner's standing rules"):
             assert expected in text
+        assert "state the reason" not in text and "gpt-6.1-terra" not in text
     assert CLI_DELEGATION_SECTION not in (workspace / "prompt.txt").read_text()
     assert CLI_DELEGATION_SECTION not in (workspace / "prompt-resume.txt").read_text()
 

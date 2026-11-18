@@ -47,6 +47,8 @@ class Slot(StrEnum):
 
 class Job(BaseModel):
     self_extra: str | None = Field(default=None, exclude=True)
+    # 0.11.9: the baseline text this turn's prompt carried (its snapshot is saved once the turn succeeds)
+    baseline_text: str | None = Field(default=None, exclude=True)
     id: UUID
     prompt: str
     status: JobStatus
@@ -176,6 +178,12 @@ class Bot(BaseModel):
     unread_since: datetime | None = None
     marked_unread: bool = False
     read_revision: int = 0
+    # How a message sent while this bot works reaches it: "live" (written into the running CLI),
+    # "interrupt" (the CLI is interrupted promptly and its session resumed with it), "restart" (0.11.7:
+    # interrupted promptly and run again as the same turn with a note of what it had done, for engines or
+    # access modes that cannot resume), "queue" (an engine that cannot take input mid-run: it becomes the
+    # next turn). Filled by the bot endpoints.
+    steering: Literal["live", "interrupt", "restart", "queue"] | None = None
 
     @computed_field
     @property
@@ -307,6 +315,8 @@ class Message(BaseModel):
     steer_job_id: UUID | None = None
     steer_status: Literal["pending", "delivered", "queued"] | None = None
     steer_delivered_at: datetime | None = None
+    # 0.11.6: why a steer became a queued turn instead of reaching the running one
+    steer_note: str | None = None
     created_at: datetime
     # True for the in-flight placeholder of a queued or running job; text is the
     # live draft and the stream is at /v1/jobs/{job_id}/events
@@ -324,6 +334,10 @@ class Message(BaseModel):
 class MessagePosted(BaseModel):
     message: Message
     job: Job
+    # 0.11.6: "start" (idle bot, a new turn), "steer" (attached to the working turn, delivered live or at
+    # its next step) or "queue" (a new turn behind the working one; delivery_note says why)
+    delivery: Literal["start", "steer", "queue"] = "start"
+    delivery_note: str | None = None
 
 
 def _check_cron(value: str) -> str:

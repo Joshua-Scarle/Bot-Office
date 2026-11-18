@@ -204,7 +204,6 @@ def test_switch_provider_endpoint(settings):
         assert client.post(url, json={"provider": "codex"}, headers=H).status_code == 400  # same provider
         assert client.post(url, json={"provider": "cursor"}, headers=H).status_code == 400  # signed out
         assert client.post(url, json={"provider": "opencode"}, headers=H).status_code == 400  # disabled
-        assert client.post(url, json={"provider": "claude"}, headers=H).status_code == 400  # claude needs a reason
         assert client.post(url, json={"provider": "claude", "reason": "r"}).status_code == 401  # owner only
         options = client.get(f"/v1/jobs/{parked.id}/switch-options", headers=H).json()
         assert options == [{"provider": "claude", "label": "Claude"}]

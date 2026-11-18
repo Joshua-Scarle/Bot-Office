@@ -55,7 +55,7 @@ def messages(client, bot_id):
 
 
 def test_version_is_0_7_0():
-    assert botoffice.__version__ == "0.11.5"
+    assert botoffice.__version__ == "0.11.9"
 
 
 def test_model_choices_lists_only_signed_in_engines(settings):
@@ -151,19 +151,23 @@ def test_bot_model_validation(settings):
         assert job.status_code == 422
 
 
-def test_claude_model_still_requires_reason(settings):
+def test_claude_model_needs_no_reason(settings):
+    # 0.11.8: creating or switching a bot to Claude works with no reason; an old client's reason is still kept
     providers = {"codex": FakeAdapter(), "claude": FakeAdapter()}
     with TestClient(create_app(settings, providers)) as client:
-        no_reason = {"name": "Sage", "engine": "claude", "model": "claude-sonnet-5-5"}
-        assert client.post("/v1/bots", json=no_reason, headers=H).status_code == 400
+        no_reason = {"name": "Plain", "engine": "claude", "model": "claude-sonnet-5-5"}
+        created = client.post("/v1/bots", json=no_reason, headers=H)
+        assert created.status_code == 201 and created.json()["model"] == "claude-sonnet-5-5"
         bot = client.post("/v1/bots", json={"name": "Sage"}, headers=H).json()
         switch = {"engine": "claude", "model": "claude-opus-5-5"}
-        assert client.patch(f"/v1/bots/{bot['id']}", json=switch, headers=H).status_code == 400
-        assert client.patch(f"/v1/bots/{bot['id']}", json=switch | {"reason": "  "}, headers=H).status_code == 400
+        switched = client.patch(f"/v1/bots/{bot['id']}", json=switch, headers=H)
+        assert switched.status_code == 200 and switched.json()["model"] == "claude-opus-5-5"
         ok = client.patch(f"/v1/bots/{bot['id']}", json=switch | {"reason": "long review"}, headers=H)
-        assert ok.status_code == 200 and ok.json()["model"] == "claude-opus-5-5"
+        assert ok.status_code == 200 and ok.json()["reason"] == "long review"
+        posted = client.post(f"/v1/bots/{bot['id']}/messages", json={"text": "first"}, headers=H)
+        assert posted.status_code == 201
         cleared = client.patch(f"/v1/bots/{bot['id']}", json={"reason": None}, headers=H)
-        assert cleared.status_code == 400
+        assert cleared.status_code == 200
         posted = client.post(f"/v1/bots/{bot['id']}/messages", json={"text": "SECRET PROMPT"}, headers=H)
         assert posted.status_code == 201 and posted.json()["job"]["model"] == "claude-opus-5-5"
         log = settings.data_dir / "claude-use-log.tsv"

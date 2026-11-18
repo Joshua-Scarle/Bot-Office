@@ -195,7 +195,7 @@ class Assignments:
                      priority: int, source: str, message_source: str | None = None, title: str = "",
                      assignment_id: str | None = None, turn: int | None = None) -> str:
         job_id, stamp = str(uuid4()), now().isoformat()
-        # Claude needs a reason on every run; a loop turn names its assignment
+        # the reason is optional; a loop turn names its assignment so the Claude-use log says why it ran
         reason = bot["reason"] or f"Bot-Office {source}: {(title or 'scheduled turn')[:200]}"
         db.execute(
             "INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority,"

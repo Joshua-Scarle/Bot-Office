@@ -22,6 +22,10 @@ from .catalog import DEFAULT_ICON, DEFAULT_ICONS, default_effort, default_model
 from .domain import Bot, Job, JobStatus, Message, Routine
 
 BOT_DATES = ("created_at", "updated_at")
+# 0.11.6: shown on a message that could not steer the running turn and became the next one
+BUSY_WITH_BOT_NOTE = ("The bot is answering another bot, and a message to that turn would go to the other bot, "
+                      "so yours is queued as the next turn.")
+STEER_ENDED_NOTE = "It could not be delivered before the turn ended, so it runs as the next turn."
 BOT_FIELDS = {
     "name",
     "instructions",
@@ -485,6 +489,7 @@ class JobStore:
                 ("steer_status", "TEXT"),
                 ("steer_delivered_at", "TEXT"),
                 ("steer_reason", "TEXT"),  # the API reason, used if the steer becomes a queued turn
+                ("steer_note", "TEXT"),  # 0.11.6: why a steer became a queued turn (shown in the chat)
             ):
                 if column not in message_columns:
                     db.execute(f"ALTER TABLE messages ADD COLUMN {column} {ddl}")
@@ -830,15 +835,30 @@ class JobStore:
 
     def post_steer(self, bot_id: UUID | str, text: str, attachments: list[str],
                    reason: str | None = None, job_id: UUID | str | None = None) -> tuple[Message, Job] | None:
+        """See :meth:`post_steer_explained`; this returns only the result (None: nothing to steer)."""
+        return self.post_steer_explained(bot_id, text, attachments, reason, job_id)[0]
+
+    def post_steer_explained(
+        self, bot_id: UUID | str, text: str, attachments: list[str], reason: str | None = None,
+        job_id: UUID | str | None = None, *, unsteerable: Callable[[Job], str | None] | None = None,
+    ) -> tuple[tuple[Message, Job] | None, str | None]:
         """Attach an owner message to the bot's current turn atomically with checking its state.
 
         The turn is, in order: the bot's running job (a chat/API one first), else its oldest queued
         chat/API job (not started yet, or parked between attempts; the steer is delivered when it starts).
+        Assignment turns are steerable too (0.11.6): the message is part of that turn, is not a turn of its
+        own and costs no budget; if it is still undelivered when the turn ends it runs as a chat turn.
         Never steered into: bot-to-bot turns (``inbox``, anything with an agent message row), whose reply
-        goes back to the sending bot and must not carry the owner's chat text; and assignment turns, whose
-        status line, checkpoint and budget accounting (0.10.0) stay separate, so the owner's message
-        stays a plain queued chat turn that runs before the next continuation.
+        goes back to the sending bot and must not carry the owner's chat text.
+
+        Returns ``(result, note)``. *result* is None when there is nothing to steer, and then *note*
+        says why when the bot was busy (it answers another bot) so the caller can tell the owner; None
+        for an idle bot. *unsteerable* (job -> reason or None) is asked for a RUNNING job: when the
+        engine cannot take a message mid-run the steer is attached and turned into a queued turn in the
+        same transaction, so it is never a pending message that quietly waits (the note is then returned
+        with the result and stored on the message as ``steer_note``).
         """
+        note = None
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             if job_id:
@@ -846,22 +866,34 @@ class JobStore:
                                  (str(bot_id), str(job_id))).fetchone()
             else:
                 row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='running' AND source!='inbox' "
-                                 "AND assignment_id IS NULL AND NOT EXISTS (SELECT 1 FROM agent_messages a WHERE a.job_id=jobs.id) "
+                                 "AND NOT EXISTS (SELECT 1 FROM agent_messages a WHERE a.job_id=jobs.id) "
                                  "ORDER BY source IN ('chat','api') DESC, started_at LIMIT 1",
                                  (str(bot_id),)).fetchone()
                 if not row:
                     row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='queued' "
                                      "AND source IN ('chat','api') ORDER BY created_at, id LIMIT 1",
                                      (str(bot_id),)).fetchone()
+                if not row:
+                    busy = db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='running' LIMIT 1",
+                                      (str(bot_id),)).fetchone()
+                    db.rollback()
+                    return None, (BUSY_WITH_BOT_NOTE if busy else None)
             if not row:
                 db.rollback()
-                return None
+                return None, None
             cur = db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,attachments,steer_job_id,"
                              "steer_status,steer_reason) VALUES (?,'user','chat',?,?,?,?,'pending',?)",
                              (str(bot_id), text, now().isoformat(), json.dumps(attachments), row['id'], reason))
+            if unsteerable is not None and row['status'] == JobStatus.RUNNING.value:
+                note = unsteerable(self._job(row))
+                if note:
+                    self._queue_steers(db, row['id'], note)
             message = db.execute("SELECT * FROM messages WHERE id=?", (cur.lastrowid,)).fetchone()
+            queued_job = (db.execute("SELECT * FROM jobs WHERE id=?", (message['job_id'],)).fetchone()
+                          if note and message['job_id'] else None)
             db.commit()
-            return _model(Message, message, ("created_at",)), self._job(row)
+            result_job = self._job(queued_job) if queued_job is not None else self._job(row)
+            return (_model(Message, message, ("created_at",)), result_job), note
 
     def pending_steers(self, job_id: UUID | str) -> list[Message]:
         with closing(self._connect()) as db:
@@ -903,7 +935,7 @@ class JobStore:
         return stamp if changed else None
 
     @staticmethod
-    def _queue_steers(db: sqlite3.Connection, job_id: str) -> list[int]:
+    def _queue_steers(db: sqlite3.Connection, job_id: str, note: str | None = None) -> list[int]:
         # the steered job's settings; the bot's if that job row is gone
         rows = db.execute("SELECT m.*, j.id AS steered, COALESCE(j.provider, b.default_provider) AS provider, "
                           "COALESCE(m.steer_reason, j.reason, b.reason) AS turn_reason, "
@@ -924,7 +956,8 @@ class JobStore:
                        "VALUES (?,?,'queued',?,?,?,?,?,?,?,?)",
                        (key, row['text'], row['provider'], created.isoformat(), row['bot_id'], row['turn_reason'],
                         'chat', row['turn_model'], effort, _priority('chat')))
-            db.execute("UPDATE messages SET job_id=?, steer_status='queued' WHERE id=?", (key, row['id']))
+            db.execute("UPDATE messages SET job_id=?, steer_status='queued', steer_note=? WHERE id=?",
+                       (key, note or STEER_ENDED_NOTE, row['id']))
         return [row['id'] for row in rows]
 
     def steered_reply_id(self, message: Message) -> int | None:
@@ -936,10 +969,10 @@ class JobStore:
                              (str(message.bot_id), str(message.steer_job_id))).fetchone()
         return row[0] if row else None
 
-    def queue_steers(self, job_id: UUID | str) -> list[int]:
+    def queue_steers(self, job_id: UUID | str, note: str | None = None) -> list[int]:
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
-            ids = self._queue_steers(db, str(job_id))
+            ids = self._queue_steers(db, str(job_id), note)
             db.commit()
         return ids
 
@@ -963,7 +996,7 @@ class JobStore:
                 rows = db.execute("SELECT * FROM jobs WHERE status=?", (JobStatus.RUNNING.value,)).fetchall()
                 for row in rows:
                     key = row["id"]
-                    made.extend(self._queue_steers(db, key))
+                    made.extend(self._queue_steers(db, key, "Bot-Office restarted during the turn, so it runs as the next turn."))
                     stopped = row["assignment_id"] and not db.execute(
                         "SELECT 1 FROM assignments WHERE id=? AND status='active'", (row["assignment_id"],)).fetchone()
                     if stopped:
@@ -2174,6 +2207,10 @@ class JobStore:
     def set_meta(self, key: str, value: str) -> None:
         with closing(self._connect()) as db:
             db.execute("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def delete_meta(self, key: str) -> None:
+        with closing(self._connect()) as db:
+            db.execute("DELETE FROM meta WHERE key=?", (key,))
 
     @staticmethod
     def _routine(row: sqlite3.Row | None) -> Routine | None:

@@ -23,6 +23,7 @@ from ..catalog import (
     valid_model_id,
 )
 from ..domain import Job
+from ..store import STEER_ENDED_NOTE
 from ..streaming import current_sink, emit_event
 from .base import RunResult
 from .streams import SESSION_ID_RE, StreamParser, parser_for, session_id_from
@@ -35,8 +36,18 @@ STREAM_LINE_LIMIT = 16 * 1024 * 1024
 STDERR_LIMIT = 1024 * 1024
 EXIT_TIMEOUT = 124
 EXIT_IDLE = 125  # killed by the no-output guard (CliAdapter.idle_timeout)
-STEER_BOUNDARY_TIMEOUT = 15.0
-STEER_INTERRUPT_GRACE = 5.0  # after the SIGINT, then SIGTERM/SIGKILL
+# 0.11.7: a steering message interrupts the CLI almost at once. Only a tool step that is known to be
+# running (a command, an MCP call) is given STEER_BOUNDARY_TIMEOUT seconds to finish first, so that a
+# half-done command is not cut; an engine that does not announce when a tool starts waits at most
+# STEER_UNKNOWN_WAIT seconds for a step boundary. Messages sent within STEER_COALESCE seconds of each
+# other are delivered together (one interrupt).
+STEER_BOUNDARY_TIMEOUT = 5.0
+STEER_UNKNOWN_WAIT = 1.5
+STEER_COALESCE = 0.3
+STEER_INTERRUPT_GRACE = 5.0  # after the SIGINT, then SIGTERM/SIGKILL (a session is saved on a clean exit)
+STEER_RESTART_GRACE = 2.0  # same, when the next invocation starts from scratch and nothing needs saving
+RESTART_PROMPT_LIMIT = 120_000  # bytes of one prompt argument (the OS allows 128 KiB)
+RESTART_PROGRESS_LINES = 60
 CLAUDE_UNPARSED_GRACE = 5.0  # an unparsed line followed by this much silence may have been the result
 STEER_CONTINUE_PROMPT = ("The previous step was interrupted by Bot-Office; the steering message it was "
                          "interrupted for is no longer pending. Continue the current task from where it "
@@ -67,6 +78,8 @@ class SteeringRun:
     resume_messages: list = field(default_factory=list)
     result_at: float | None = None
     unparsed_at: float | None = None  # Claude: last stdout line could not be parsed (maybe the result)
+    restart: bool = False  # this interrupt is answered by a new invocation, not a session resume
+    history: list = field(default_factory=list)  # what earlier interrupted invocations did (restart)
     sent: dict = field(default_factory=dict)  # Claude: message id -> steer text written, not yet echoed
     reply_before_resume: tuple[int, int] | None = None
 
@@ -81,6 +94,28 @@ def _steer_prompt(message, workspace: Path) -> str:
     return ("[Steering message from the user, sent while you were working on the current task] "
             + message.text + images + "\nAdjust what you are doing accordingly. Work already done is kept; "
             "continue in this same task and reply as usual when finished.")
+
+
+def _restart_suffix(history: list[str], messages: list, workspace: Path, base: str) -> str:
+    """What a restarted invocation (a new CLI process of the same job, no session resume) is told after
+    the job's own prompt: what the interrupted one had done so far, then the steering messages. Kept so
+    that *base* + this stays under RESTART_PROMPT_LIMIT bytes (the oldest progress lines go first)."""
+    steer = ("\n\n".join(_steer_prompt(m, workspace) for m in messages) if messages else STEER_CONTINUE_PROMPT)
+    head = ("\n\n---\nBot-Office: this task was stopped part-way so that a message from the user could reach "
+            "you, and it is running again in the same workspace. Files and anything else already done are "
+            "kept, but you do not remember the earlier run beyond this list of its steps (the last one may "
+            "have been cut off: re-check it before relying on it):\n")
+    room = RESTART_PROMPT_LIMIT - len(base.encode()) - len(head.encode()) - len(steer.encode()) - 64
+    lines, used = [], 0
+    for line in reversed(history[-RESTART_PROGRESS_LINES:]):
+        cost = len(line.encode()) + 3
+        if used + cost > room:
+            lines.append("(earlier steps left out)")
+            break
+        lines.append("- " + line)
+        used += cost
+    body = "\n".join(reversed(lines)) if lines else "(no steps were recorded)"
+    return head + body + "\n\n" + steer
 
 
 def _echo_text(obj: dict) -> str | None:
@@ -253,6 +288,37 @@ class CliAdapter:
 
     def _can_resume(self, job: Job | None) -> bool:
         return self.supports_resume and job is not None and job.bot_id is not None
+
+    # 0.11.7: an engine that cannot resume its session (or may not: restricted access, no bot) is still
+    # steered: the running invocation is interrupted and a new one of the same job starts with the job's
+    # prompt, what the first one had done, and the message. False: such a message is queued instead.
+    restart_steering: bool = True
+    # True if _tool_signal() tells when a tool step starts and ends (see _exec: a running tool is waited for)
+    tracks_tools: bool = False
+
+    def _tool_signal(self, obj: dict) -> tuple[str, str] | None:
+        """("start" | "end", key of the step) for a stream line that starts or ends a tool step."""
+        return None
+
+    def _restart_exec_args(self, workspace: Path, job: Job, suffix: str) -> list[str]:
+        """argv of a steering restart; *job*.prompt already is the job's prompt plus *suffix*."""
+        return self._exec_args(workspace, job, None)
+
+    def steering(self, job: Job | None) -> str:
+        """How a message sent while *job* runs reaches this CLI: ``"live"`` (written into the running
+        process), ``"interrupt"`` (interrupted promptly and the same session resumed with the message),
+        ``"restart"`` (0.11.7: interrupted promptly and run again as the same job, without a session
+        resume, with a note of what it had done) or ``"queue"`` (cannot take input mid-run; the message
+        becomes the next turn)."""
+        if self._can_resume(job):
+            return "interrupt"
+        return "restart" if self.restart_steering else "queue"
+
+    def steer_unavailable_note(self, job: Job | None) -> str | None:
+        """Why a message cannot reach *job* while it runs (None: it can)."""
+        if self.steering(job) != "queue":
+            return None
+        return f"{self.label} cannot take a message while it works, so yours is queued as the next turn."
 
     def _valid_session(self, session: str | None) -> bool:
         return bool(session and SESSION_ID_RE.fullmatch(session))
@@ -460,6 +526,7 @@ class CliAdapter:
         if parser.session_id is None:
             parser.session_id = session_id_from(obj)
         for kind, data in parser.feed(obj):
+            parser.record(kind, data)
             emit_event(kind, **data)
 
     async def _exec(
@@ -494,6 +561,8 @@ class CliAdapter:
         out_lines: list[bytes] = []
         err_chunks: list[bytes] = []
         pending_since: float | None = None
+        boundary_since: bool = False  # a step boundary went by while a steer was pending
+        open_tools: set[str] = set()  # steps a tool_signal() engine has started and not ended
         interrupted_at: float | None = None
         stdout_done = False
         initial_text = ""
@@ -510,28 +579,45 @@ class CliAdapter:
             except sqlite3.Error:
                 return None
 
+        def in_flight() -> bool | None:
+            """Is a tool step running now? None: this engine does not say."""
+            return bool(open_tools) if self.tracks_tools else None
+
         def interrupt_if_ready(boundary: bool = False) -> None:
-            nonlocal pending_since, interrupted_at
+            nonlocal pending_since, interrupted_at, boundary_since
             if not state or state.interrupted or self.name == "claude":
                 return
             messages = pending()
             if messages is None:
                 return
             if not messages:
+                pending_since, boundary_since = None, False
+                return
+            mode = self.steering(job)
+            if mode == "queue":
+                note = self.steer_unavailable_note(job) or STEER_ENDED_NOTE
+                for message_id in sink.store.queue_steers(job.id, note):
+                    sink.emit("steer", message_id=message_id, status="queued", note=note)
                 pending_since = None
                 return
-            if not self._can_resume(job):
-                for message_id in sink.store.queue_steers(job.id):
-                    sink.emit("steer", message_id=message_id, status="queued")
-                pending_since = None
-                return
+            now = time.monotonic()
             if pending_since is None:
-                pending_since = time.monotonic()
+                pending_since = now
+            boundary_since = boundary_since or boundary
             session = parser.session_id or state.session
-            if self._valid_session(session) and (boundary or time.monotonic() - pending_since >= STEER_BOUNDARY_TIMEOUT):
-                state.session = session
+            if mode == "interrupt" and not self._valid_session(session):
+                return  # resuming needs the session id the CLI announces first
+            running = in_flight()
+            if running is False or boundary_since:
+                wait = STEER_COALESCE
+            else:
+                wait = STEER_BOUNDARY_TIMEOUT if running else STEER_UNKNOWN_WAIT
+            if now - pending_since >= wait:
+                if mode == "interrupt":
+                    state.session = session
+                state.restart = mode == "restart"
                 state.interrupted = True
-                interrupted_at = time.monotonic()
+                interrupted_at = now
                 self._signal_group(proc, signal.SIGINT)
 
         async def feed() -> None:
@@ -580,7 +666,7 @@ class CliAdapter:
             while proc.returncode is None:
                 if interrupted_at is None:
                     interrupt_if_ready()
-                elif time.monotonic() - interrupted_at >= STEER_INTERRUPT_GRACE:
+                elif time.monotonic() - interrupted_at >= (STEER_RESTART_GRACE if state.restart else STEER_INTERRUPT_GRACE):
                     await self._kill_process_group(proc, str(job.id))  # it ignored the SIGINT
                     return
                 await asyncio.sleep(0.05)
@@ -664,10 +750,18 @@ class CliAdapter:
                             claude_echo(obj)
                     else:
                         kind, subtype = obj.get("type") or obj.get("event"), obj.get("subtype")
+                        if self.tracks_tools and (signal_ := self._tool_signal(obj)):
+                            what, key = signal_
+                            if what == "start":
+                                open_tools.add(key)
+                            elif key in open_tools:
+                                open_tools.discard(key)
+                            elif open_tools:
+                                open_tools.pop()
                         content = (obj.get("message") or {}).get("content") if isinstance(obj.get("message"), dict) else None
                         tool_result = isinstance(content, list) and any(
                             isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
-                        boundary = (kind in ("item.completed", "step.completed", "step_finish", "tool_result") or tool_result
+                        boundary = (kind in ("item.completed", "step.completed", "step_finish", "tool_result", "tool_use") or tool_result
                                     or (kind == "tool_call" and subtype in ("completed", "finished"))
                                     or (self.name == "antigravity" and (kind == "result" or _agy_tool_done(obj))))
                         if boundary:
@@ -746,10 +840,12 @@ class CliAdapter:
         logs: list[bytes] = []
         resume_retried = False
         steer_turn = None
+        restart_suffix: str | None = None  # set for a steering restart (see _restart_suffix)
         segments: list[Segment] = []
         while True:
             parser = self._new_parser()
             state.session, state.interrupted, state.result_at, state.sent = session, False, None, {}
+            state.restart = False
             started_with = session
             turn = steer_turn or (job.model_copy(update={"prompt": job.resume_prompt}) if session and job.resume_prompt else job)
             remaining = deadline - time.monotonic()
@@ -757,10 +853,13 @@ class CliAdapter:
                 code, stdout, stderr = EXIT_TIMEOUT, b"", b"job timed out"
                 break
             try:
-                code, stdout, stderr = await self._exec(
-                    self._steer_exec_args(workspace, turn, session) if steer_turn else self._exec_args(workspace, turn, session),
-                    workspace, remaining, turn, parser
-                )
+                if restart_suffix is not None:
+                    argv = self._restart_exec_args(workspace, turn, restart_suffix)
+                elif steer_turn:
+                    argv = self._steer_exec_args(workspace, turn, session)
+                else:
+                    argv = self._exec_args(workspace, turn, session)
+                code, stdout, stderr = await self._exec(argv, workspace, remaining, turn, parser)
             except (OSError, ValueError) as exc:
                 logs.append(f"\n{self.label} launch failed: {exc}\n".encode())
                 log_path.write_bytes(b"".join(logs))
@@ -774,13 +873,28 @@ class CliAdapter:
             with contextlib.suppress(OSError):
                 log_path.chmod(0o600)
             if state.interrupted and code != EXIT_TIMEOUT:
-                session = state.session
-                self._save_session(workspace, job, session)
+                if not state.restart:
+                    session = state.session
+                    self._save_session(workspace, job, session)
                 with contextlib.suppress(OSError):
                     reply_stat = (workspace / "reply.txt").stat()
                     state.reply_before_resume = (reply_stat.st_mtime_ns, reply_stat.st_size)
                 sink = current_sink()
                 messages = sink.store.pending_steers(job.id) if sink else []
+                if state.restart:
+                    # no session to resume: the same job runs again from its own prompt, told what the
+                    # interrupted invocation had done and what the user wrote (the same access flags)
+                    parser.flush_said()
+                    state.history.extend(parser.progress)
+                    restart_suffix = _restart_suffix(state.history, messages, workspace, job.prompt)
+                    steer_turn = job.model_copy(update={"prompt": job.prompt + restart_suffix, "resume_prompt": None})
+                    state.history.extend("the user sent: " + " ".join(m.text.split())[:400] for m in messages)
+                    state.resume_messages = messages
+                    logs.append(b"\n--- Bot-Office: restarting after steering ---\n")
+                    if sink:
+                        sink.final_text = None
+                        sink.emit("text", text="", replace=True)
+                    continue
                 if not self._valid_session(session):
                     # cannot happen (an interrupt needs a session), but never fail or retry the turn for it
                     log_path.write_bytes(b"".join(logs))
@@ -799,7 +913,7 @@ class CliAdapter:
                     sink.emit("text", text="", replace=True)
                 continue
             was_steer = steer_turn is not None
-            steer_turn = None
+            steer_turn = restart_suffix = None
             if was_steer and (code != 0 or parser.error_text):
                 break  # never replace the session after an unsuccessful steering resume
             if session and code not in (0, EXIT_TIMEOUT) and parser.final_text is None:
