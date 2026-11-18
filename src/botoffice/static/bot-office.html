@@ -228,6 +228,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
 .approval-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--line); }
 .approval-row input[type=checkbox] { margin-top: 4px; }
 .approval-row .muted { font-size: 13px; }
+.approval-warn { padding: 8px 10px; border: 1px solid #8a6d2b; border-radius: 8px; background: #221d12; font-size: 14px; }
 .question-option { display: block; text-align: left; }
 .question-option small { display: block; opacity: .75; }
 .question-prompt { white-space: pre-wrap; }
@@ -412,6 +413,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       </details>
       <label class="inline">If you don't answer within <input id="approval-timeout" type="number" min="0" max="10080" aria-label="Minutes to wait for an answer"> minutes, the bot leaves that task stopped (0 = wait until you answer)</label>
       <p class="muted" id="approval-gates"></p>
+      <p class="approval-warn" id="approval-unpausable" role="note" hidden></p>
       <div class="tools-bar"><button id="approvals-save" type="button" class="primary">Save</button><span id="approvals-state" class="muted" role="status"></span></div>
     </section>
     <section class="settings-section" id="set-engines" aria-labelledby="set-engines-title">
@@ -2682,6 +2684,12 @@ function showApprovals(data) {
   $("approval-timeout").value = data.timeout_min;
   const gates = Object.entries(data.gates || {}).map(([name, st]) => (ENGINE_LABELS[name] || name) + " " + (GATE_WORDS[st] || st));
   $("approval-gates").textContent = gates.length ? "Engines: " + gates.join("; ") + ". Codex with restricted access can't pause either; its own sandbox applies." : "";
+  const loose = data.unpausable_bots || [];
+  $("approval-unpausable").hidden = !loose.length;
+  $("approval-unpausable").textContent = loose.length ? "Approvals can't pause " + loose.map((b) => b.name + " (" +
+    (ENGINE_LABELS[b.engine] || b.engine) + (b.engine === "codex" ? ", restricted" : "") + ")").join(", ") +
+    ". These bots are told never to do the actions above themselves and to ask you in their reply instead, " +
+    "but Bot-Office can't stop them. Switch them to an engine that can pause if that matters." : "";
 }
 async function changeApprovals(change, done) {
   try {
