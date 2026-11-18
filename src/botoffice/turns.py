@@ -87,7 +87,12 @@ class Turns:
             self._log_claude_use(job)
         return job
 
-    def post_agent_message(self, sender: Bot, target: Bot, text: str, origin_id: str | None = None) -> tuple[Message, Job, dict]:
+    def post_agent_message(self, sender: Bot, target: Bot, text: str, origin_id: str | None = None, *,
+                           mode: str = "steer", can_steer: Callable[[Job], bool] | None = None,
+                           ) -> tuple[Message, Job, dict]:
+        """See JobStore.enqueue_agent_message: *mode* "steer" (default) or "queue"."""
+        if mode not in ("steer", "queue"):
+            raise TurnError("mode must be steer or queue")
         if sender.id == target.id:
             raise TurnError("cannot message the same bot")
         if not text.strip() or len(text) > 10000:
@@ -95,13 +100,14 @@ class Turns:
         self._validate(target.default_provider, None, target)
         since = (datetime.now(UTC) - timedelta(seconds=10)).isoformat()
         try:
-            result = self.store.enqueue_agent_message(sender, target, text, origin_id, since, self._inbox_caps())
+            result = self.store.enqueue_agent_message(sender, target, text, origin_id, since, self._inbox_caps(),
+                                                      mode=mode, can_steer=can_steer)
         except InboxLimit as exc:
             raise InboxLimitError(str(exc)) from exc
         except ValueError as exc:
             raise TurnError(str(exc)) from exc
-        if target.default_provider == "claude":
-            self._log_claude_use(result[1])
+        if target.default_provider == "claude" and result[2].get("delivery") != "steer":
+            self._log_claude_use(result[1])  # a steer is part of a turn already logged
         return result
 
     def post_message(

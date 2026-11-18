@@ -176,12 +176,16 @@ def main(argv: list[str] | None = None) -> int:
                 from urllib.parse import quote
 
                 from . import grok_bridge
+                mode = "steer"
+                if rest and rest[0] in ("--queue", "--steer"):
+                    mode, rest = rest[0][2:], rest[1:]
                 if len(rest) < 2:
                     raise DeskError("message needs BOT and TEXT")
-                body = {"to": _require(rest[0], "bot"), "body": _require(" ".join(rest[1:]), "text")}
+                body = {"to": _require(rest[0], "bot"), "body": _require(" ".join(rest[1:]), "text"), "mode": mode}
                 path = f"/v1/bots/{quote(os.environ['BOT_OFFICE_BOT_ID'], safe='')}/message-agent"
                 result = grok_bridge.call_api(path, body)
-                print(f"Message {result.get('id')}: {result.get('status')}")
+                note = f" {result['note']}" if result.get("note") else ""
+                print(f"Message {result.get('id')}: {result.get('status')}.{note}")
                 return 0
             inbox = first_env("BOT_OFFICE_INBOX_DIR", "AGENTDESK_INBOX_DIR")
             if not inbox:

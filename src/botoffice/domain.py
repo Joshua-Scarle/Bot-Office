@@ -177,6 +177,8 @@ class Bot(BaseModel):
     # 0.11.0: daily unattended budget (stored JSON; see daily_budget) and the daily digest opt-in
     daily_budget_json: str | None = Field(default=None, exclude=True)
     digest: bool = False
+    # 0.11.10: other bots' messages may steer this bot's running turn (off: they wait for a turn of their own)
+    bot_steer: bool = True
     # unread state for the owner (filled by GET /v1/bots and the read/unread endpoints)
     unread_count: int = 0
     unread_since: datetime | None = None
@@ -249,6 +251,7 @@ class BotUpdate(_BotFields):
     scheduled_runs: Literal["full", "gated"] | None = None
     daily_budget: dict | None = None
     digest: bool | None = None
+    bot_steer: bool | None = None
 
 
 class ModelOption(BaseModel):

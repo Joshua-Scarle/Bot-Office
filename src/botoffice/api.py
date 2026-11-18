@@ -117,6 +117,9 @@ class SettingsBody(BaseModel):
 class AgentMessageCreate(BaseModel):
     to: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=10000)
+    # 0.11.10: "steer" reaches the receiver's running turn now (else starts or queues a turn);
+    # "queue" waits for its next turn and its reply comes back to the sender
+    mode: Literal["steer", "queue"] = "steer"
     wait: bool = False
     timeout: float = Field(default=30, gt=0, le=120)
 
@@ -796,7 +799,7 @@ def create_app(
         if "description" in fields:
             fields["description"] = (fields["description"] or "").strip()
         for key in ("name", "instructions", "default_provider", "model", "icon", "cli_access", "notify", "allow_sudo",
-                    "scheduled_runs", "daily_budget", "digest"):
+                    "scheduled_runs", "daily_budget", "digest", "bot_steer"):
             if key in fields and fields[key] is None:
                 del fields[key]
         if "daily_budget" in fields:
@@ -806,6 +809,8 @@ def create_app(
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
         if "digest" in fields:
             fields["digest"] = int(fields["digest"])
+        if "bot_steer" in fields:
+            fields["bot_steer"] = int(fields["bot_steer"])
         if fields.get("job_timeout") is not None and fields["job_timeout"] > settings.max_turn_timeout:
             raise HTTPException(status_code=422, detail=f"job_timeout must be at most {settings.max_turn_timeout} seconds")
         if "notify" in fields:
@@ -1336,13 +1341,24 @@ def create_app(
             raise HTTPException(status_code=404, detail="bot not found")
         if binding and binding.bot_id != sender.id:
             raise HTTPException(status_code=403, detail="token is bound to another bot")
+        blocked = _steer_blocked(target)
         try:
-            _, _, item = scheduler.turns.post_agent_message(sender, target, body.body, str(binding.id) if binding else None)
+            _, _, item = scheduler.turns.post_agent_message(
+                sender, target, body.body, str(binding.id) if binding else None, mode=body.mode,
+                can_steer=lambda job: blocked(job) is None)
         except TurnError as exc:
             status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        if item.get("delivery") == "steer":
+            item["note"] = (f"Delivered to {target.name} while it works; it reads it within its current task and "
+                            "answers with a message to you if you asked something (it appears in your chat).")
+            return item
+        if body.mode == "steer" and not target.bot_steer:
+            item["note"] = f"{target.name} takes messages from bots as turns of their own, so yours was queued."
         if body.wait and binding:
-            item["note"] = "Queued asynchronously: agent turns cannot wait for another worker; the reply will appear in chat."
+            prefix = (item["note"] + " ") if item.get("note") else ""
+            item["note"] = prefix + ("Queued asynchronously: agent turns cannot wait for another worker; "
+                                     "the reply will appear in chat.")
             return item
         if body.wait:
             deadline = asyncio.get_running_loop().time() + body.timeout
