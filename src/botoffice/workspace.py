@@ -373,7 +373,8 @@ Current message:
 
 
 ESCALATE_RULES = {
-    "never": "Do not ask the user; decide yourself, or report blocked with the reason.",
+    "never": "Do not ask the user questions; decide yourself, or report blocked with the reason. Actions the owner "
+             "chose to approve still wait for their yes; Bot-Office asks for you.",
     "on_block": "Ask the user only when you are blocked or need a decision only they can make (waiting_on_user).",
     "always": "Ask the user whenever their input would help (waiting_on_user); waiting on another bot is shown to them too.",
 }

@@ -952,8 +952,10 @@ class Scheduler:
                         _image_index(self.store, bot)
             if status == JobStatus.INCOMPLETE:
                 # an assignment step that carries on is machinery: the next turn shows it (0.11.10)
+                # waiting on an approval: the chat's Approve / Deny card already says so
+                waiting_card = stated[0] == "waiting_on_user" and self.store.pending_approval(job.id)
                 self.store.publish_outcome(job.bot_id, job.id, "system", error or "Not done", source=job.source,
-                                           hidden=bool(job.assignment_id) and stated[0] == "continue")
+                                           hidden=(bool(job.assignment_id) and stated[0] == "continue") or waiting_card)
             self._write_memory(job, workspace)
 
     @staticmethod

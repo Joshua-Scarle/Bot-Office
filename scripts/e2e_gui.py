@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""Live end-to-end test of the Bot-Office web UI in a real browser (0.11.10).
+
+Two modes:
+
+  Local (default): starts a throwaway Bot-Office on 127.0.0.1 with its own temporary data folder
+  and a scripted engine (no CLI, no subscription used), then drives Chromium through the real UI:
+
+    .venv/bin/pip install playwright && .venv/bin/python -m playwright install chromium
+    .venv/bin/python scripts/e2e_gui.py [--headed] [--out e2e-shots]
+
+  Live: checks a running install read-only (unlock, Settings and Approvals load). With --send-to
+  it also sends one short message to that bot with the Enter key and waits for its reply (this is
+  a real turn on that bot's engine):
+
+    .venv/bin/python scripts/e2e_gui.py --url http://127.0.0.1:8787 --token "$(cat ~/.config/bot-office/token)" \
+        [--send-to "Bot name"]
+
+Checked (local mode): Enter sends (bubble shows, box clears, Send comes back; Shift+Enter adds a
+line), the bot's reply arrives, continuation prompts never look like the owner's messages,
+Settings (rules, behavior, approvals: switch a class, add and remove your own, timeout), the
+Approve / Deny card in the chat (deny leaves a short note; approve runs it once and hides the
+resume prompt), and the bot-to-bot row and its "A ⇄ B" panel with Close Chat. Screenshots of each
+step go to --out. Exit code 0 means every check passed.
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import json
+import socket
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+TOKEN = "e2e-token"
+REPLY = "Hello from the e2e bot."
+FAILURES: list[str] = []
+
+
+def check(ok: bool, what: str) -> None:
+    print(("  ok    " if ok else "  FAIL  ") + what, flush=True)
+    if not ok:
+        FAILURES.append(what)
+
+
+# --- local server with a scripted engine ---
+
+class E2EEngine:
+    """Answers like a bot would. "send the report email" tries a gated connector action through
+    Bot-Office's own gate decision, exactly as the CLI hook would."""
+
+    name = "codex"
+    enabled = True
+
+    def __init__(self) -> None:
+        self.app = None
+
+    async def login_status(self) -> str:
+        return "ok"
+
+    async def run(self, job, workspace, log_path, timeout):
+        from botoffice.providers.base import RunResult
+        log_path.write_text("e2e run\n", encoding="utf-8")
+        await asyncio.sleep(1.5)  # long enough to see the working state
+        prompt = job.prompt or ""
+        if job.source == "inbox":
+            text = "Got it, thanks.\n\nBOT-OFFICE-STATUS: done"
+        elif "send the report email" in prompt or "granted by the user" in prompt:
+            event = {"hook_event_name": "PreToolUse", "tool_name": "mcp__gmail__send_message",
+                     "tool_input": {"to": "joe@example.com", "subject": "Weekly report"}}
+            rules = self.app.state.scheduler.rules
+            decision = await asyncio.to_thread(rules.decide, job, event, "codex")
+            if decision.decision == "allow":
+                text = "Sent the weekly report to joe@example.com.\n\nBOT-OFFICE-STATUS: done"
+            elif decision.effect == "ask":
+                text = (f"The email is drafted; it waits for your approval.\n\n"
+                        f"BOT-OFFICE-STATUS: waiting_on_user — approval #{decision.approval_id}")
+            else:
+                text = f"I couldn't send it: {decision.reason}\n\nBOT-OFFICE-STATUS: blocked — refused"
+        else:
+            text = f"{REPLY}\n\nBOT-OFFICE-STATUS: done"
+        return RunResult("succeeded", exit_code=0, final_text=text)
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def start_local(data_dir: Path):
+    import uvicorn
+
+    from botoffice.api import create_app
+    from botoffice.config import Settings
+    port = free_port()
+    settings = Settings(data_dir=data_dir, token=TOKEN, port=port, job_timeout=60,
+                        enabled_providers=frozenset({"codex"}), voice_mode="off")
+    engine = E2EEngine()
+    app = create_app(settings, {"codex": engine})
+    engine.app = app
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        with contextlib.suppress(OSError):
+            urllib.request.build_opener(urllib.request.ProxyHandler({})).open(base + "/", timeout=1)
+            return base, app, server
+        time.sleep(0.1)
+    raise SystemExit("the local Bot-Office did not start")
+
+
+def call(base: str, token: str, method: str, path: str, body: dict | None = None):
+    request = urllib.request.Request(base + path, method=method, data=json.dumps(body).encode() if body else None,
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never through a proxy
+    with opener.open(request, timeout=20) as response:
+        raw = response.read()
+    return json.loads(raw) if raw else None
+
+
+# --- browser ---
+
+def launch(pw, headed: bool):
+    try:
+        return pw.chromium.launch(headless=not headed)
+    except Exception as exc:
+        raise SystemExit(f"Chromium is not available ({exc}). Run: python -m playwright install chromium") from exc
+
+
+def unlock(page, base: str, token: str) -> None:
+    page.goto(base + "/")
+    page.fill("#token", token)
+    page.click("#lock-form button")
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+
+
+def open_bot(page, name: str) -> None:
+    page.locator("#bot-list").get_by_text(name, exact=True).first.click()
+    page.wait_for_selector("#text", timeout=10000)
+
+
+def shot(page, out: Path, name: str) -> None:
+    page.screenshot(path=str(out / f"{name}.png"), full_page=False)
+
+
+def send_with_enter(page, text: str) -> None:
+    box = page.locator("#text")
+    box.click()
+    box.fill(text)
+    box.press("Enter")
+
+
+def wait_text(page, text: str, timeout: float = 30000) -> bool:
+    try:
+        page.locator("#messages").get_by_text(text).first.wait_for(timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def enter_to_send(page, out: Path, text: str, reply: str | None) -> None:
+    print("Enter to send")
+    box = page.locator("#text")
+    box.click()
+    box.fill("first line")
+    box.press("Shift+Enter")
+    box.type("second line")
+    check(box.input_value() == "first line\nsecond line", "Shift+Enter adds a new line instead of sending")
+    box.fill("")
+    started = time.monotonic()
+    send_with_enter(page, text)
+    check(wait_text(page, text, 10000), "Enter sends: the message appears in the chat")
+    with contextlib.suppress(Exception):
+        page.wait_for_function("() => document.getElementById('text').value === ''", timeout=10000)
+    check(box.input_value() == "", "the message box clears after sending")
+    with contextlib.suppress(Exception):
+        page.wait_for_function("() => !document.getElementById('send').disabled", timeout=10000)
+    check(page.locator("#send").is_enabled(), f"Send is usable again ({time.monotonic() - started:.1f} s)")
+    shot(page, out, "01-sent")
+    if reply is not None:
+        check(wait_text(page, reply, 120000), "the bot's reply arrives")
+        shot(page, out, "02-reply")
+
+
+def settings_page(page, out: Path, base: str, token: str, write: bool) -> None:
+    print("Settings")
+    page.click("#office-settings")
+    page.wait_for_selector("#settings-dialog[open]", timeout=10000)
+    page.wait_for_function("() => document.getElementById('rules-text').value.length > 100", timeout=10000)
+    check(True, "Settings opens with the rules for all bots")
+    rows = page.locator("#approval-classes .approval-row")
+    rows.first.wait_for(timeout=10000)
+    check(rows.count() >= 9, f"Approvals lists the classes ({rows.count()})")
+    check("Sending email or messages" in page.locator("#approval-classes").inner_text(), "the email class is listed")
+    check(page.locator("#approval-gates").inner_text().startswith("Engines:"), "it says which engines can pause")
+    shot(page, out, "03-settings")
+    if write:
+        remote = page.locator("#approval-classes .approval-row", has_text="Logging in to other computers")
+        remote.locator("input[type=checkbox]").check()
+        page.fill("#approval-timeout", "15")
+        page.click("#approvals-save")
+        page.wait_for_function("() => document.getElementById('approvals-state').textContent.startsWith('Saved')",
+                               timeout=10000)
+        saved = call(base, token, "GET", "/v1/settings")["approvals"]
+        by_key = {item["key"]: item for item in saved["classes"]}
+        check(by_key["remote"]["enabled"] and saved["timeout_min"] == 15, "Save switches a class on and sets the timeout")
+        page.click("#approval-add summary")
+        page.fill("#approval-label", "Deploys")
+        page.fill("#approval-pattern", r"\bmake\s+deploy\b")
+        page.click("#approval-add-btn")
+        page.locator("#approval-classes .approval-row", has_text="Deploys").wait_for(timeout=10000)
+        check(True, "adding your own class shows it, switched on")
+        shot(page, out, "04-approvals-custom")
+        page.locator("#approval-classes .approval-row", has_text="Deploys").get_by_role("button", name="Remove").click()
+        page.locator("#approval-classes .approval-row", has_text="Deploys").wait_for(state="detached", timeout=10000)
+        check(True, "Remove takes your class away")
+        call(base, token, "PUT", "/v1/settings", {"approvals": {"enabled": {"remote": False}, "timeout_min": 60}})
+    page.click("#settings-close")
+
+
+def approvals_in_chat(page, out: Path, base: str, app) -> None:
+    print("Approve / Deny card")
+    send_with_enter(page, "Please send the report email to Joe.")
+    card = page.locator(".approval-card").last
+    card.wait_for(timeout=60000)
+    check("wants to: Sending email or messages" in card.inner_text(), "the card names the bot and the class")
+    check("joe@example.com" in card.inner_text(), "the card shows the whole action")
+    shot(page, out, "05-approval-card")
+    card.get_by_role("button", name="Deny").click()
+    page.wait_for_function("() => [...document.querySelectorAll('.approval-card')].pop().classList.contains('denied')",
+                           timeout=15000)
+    check(wait_text(page, "denied, so the task is stopped", 15000), "Deny leaves a short note; the task is stopped")
+    send_with_enter(page, "OK, send the report email after all.")
+    page.wait_for_function("() => document.querySelectorAll('.approval-card').length >= 2", timeout=60000)
+    page.locator(".approval-card").last.get_by_role("button", name="Approve").click()
+    check(wait_text(page, "Sent the weekly report", 90000), "Approve runs the action once and the bot finishes")
+    shot(page, out, "06-approved")
+    owner_texts = page.evaluate("""() => state.lastMessages.filter((m) => m.author === 'owner').map((m) => m.text)""")
+    check(not any(text.startswith("Approval #") for text in owner_texts),
+          "the resume prompt never shows as your message")
+    check(not any("continue" in text.lower() and "BOT-OFFICE" in text for text in owner_texts),
+          "no continuation prompt shows as your message")
+
+
+def bot_to_bot(page, out: Path, base: str, token: str) -> None:
+    print("Bot-to-bot row and panel")
+    call(base, token, "POST", "/v1/bots/Bea/message-agent", {"to": "Ada", "body": "Ada, **can you** check the logs?"})
+    open_bot(page, "Bea")
+    row = page.locator(".agent-group .agent-open").first
+    row.wait_for(timeout=30000)
+    check(" with" in row.inner_text() and "Ada" in row.inner_text(), f"Bea's chat shows a row: {row.inner_text()!r}")
+    check(page.locator("#messages").get_by_text("check the logs").count() == 0, "the message stays folded in the chat")
+    row.click()
+    page.wait_for_selector("#agent-chat[open]", timeout=10000)
+    title = page.locator("#agent-chat-title").inner_text()
+    check("⇄" in title and "Bea" in title and "Ada" in title, f"the panel title reads 'Bea ⇄ Ada' ({title!r})")
+    check(page.locator("#agent-chat-list strong").filter(has_text="can you").count() >= 1, "markdown renders in the panel")
+    shot(page, out, "07-agent-panel")
+    page.get_by_role("button", name="Close Chat").click()
+    check(page.locator("#agent-chat[open]").count() == 0, "Close Chat closes the panel")
+    open_bot(page, "Ada")
+    page.locator(".agent-group .agent-open").first.wait_for(timeout=30000)
+    check(True, "the receiving bot's chat shows the row too")
+    shot(page, out, "08-received-row")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--url", help="a running Bot-Office (live mode, read-only unless --send-to)")
+    parser.add_argument("--token", help="its API token (live mode)")
+    parser.add_argument("--send-to", help="live mode: send one short message to this bot with Enter")
+    parser.add_argument("--headed", action="store_true", help="show the browser window")
+    parser.add_argument("--out", default="e2e-shots", help="folder for screenshots")
+    args = parser.parse_args()
+    from playwright.sync_api import sync_playwright
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as pw:
+        browser = launch(pw, args.headed)
+        page = browser.new_page(viewport={"width": 1280, "height": 860})
+        errors: list[str] = []
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
+        if args.url:
+            if not args.token:
+                raise SystemExit("--token is required with --url")
+            base = args.url.rstrip("/")
+            unlock(page, base, args.token)
+            check(True, "unlocked " + base)
+            settings_page(page, out, base, args.token, write=False)
+            if args.send_to:
+                open_bot(page, args.send_to)
+                enter_to_send(page, out, "e2e check from Bot-Office: please reply with just OK.", "OK")
+        else:
+            with tempfile.TemporaryDirectory(prefix="bot-office-e2e-") as tmp:
+                base, app, server = start_local(Path(tmp) / "data")
+                for name in ("Ada", "Bea"):
+                    call(base, TOKEN, "POST", "/v1/bots", {"name": name, "default_provider": "codex"})
+                unlock(page, base, TOKEN)
+                open_bot(page, "Ada")
+                enter_to_send(page, out, "hello from the e2e test", REPLY)
+                settings_page(page, out, base, TOKEN, write=True)
+                approvals_in_chat(page, out, base, app)
+                bot_to_bot(page, out, base, TOKEN)
+                server.should_exit = True
+        check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
+        browser.close()
+    print(f"\n{'PASSED' if not FAILURES else 'FAILED'}: {len(FAILURES)} failed check(s). Screenshots in {out}/")
+    return 1 if FAILURES else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

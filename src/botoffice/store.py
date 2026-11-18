@@ -349,6 +349,19 @@ def message_author(values: dict) -> tuple[str, str | None]:
     return "office", None
 
 
+PRESET_LABELS = {"outbound": "Outbound action in an unattended run", "destructive":
+                 "Destructive action in an unattended run", None: "An action rule you set"}
+
+
+def approval_card(store: JobStore, item: dict) -> dict:
+    """0.11.10: what the chat's Approve / Deny card shows for one approval."""
+    from . import approval_classes
+    label = approval_classes.label(store, item["preset"]) or PRESET_LABELS.get(item["preset"]) or item["preset"]
+    return {"id": item["id"], "status": item["status"], "label": label, "summary": item["summary"],
+            "tool": item["tool"], "scope": item["scope"], "expires_at": item["expires_at"],
+            "decided_at": item["decided_at"], "resumed": bool(item["resume_job_id"])}
+
+
 def _model(cls, row: sqlite3.Row | None, dates: tuple[str, ...]):
     if row is None:
         return None
@@ -521,6 +534,8 @@ class JobStore:
                 # 0.11.10: Bot-Office machinery (automatic continuations, assignment "Continue" steps,
                 # wake-up prompts, "Not done (continuing)" lines): kept, but not shown in the chat
                 ("hidden", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.11.10: the chat line that carries an approval's Approve / Deny card
+                ("approval_id", "INTEGER"),
             ):
                 if column not in message_columns:
                     db.execute(f"ALTER TABLE messages ADD COLUMN {column} {ddl}")
@@ -1944,8 +1959,17 @@ class JobStore:
                 f"SELECT n.*, ({PARKED_SQL} AND n.attempt=j.attempts) AS parked FROM usage_notices n "
                 "JOIN jobs j ON j.id=n.job_id "
                 "WHERE n.bot_id=? AND n.message_id IS NOT NULL", (str(bot_id),))}
+            approval_ids = [row["approval_id"] for row in rows if row["approval_id"]]
+            approvals = {row["id"]: dict(row) for row in db.execute(
+                f"SELECT * FROM approvals WHERE id IN ({','.join('?' * len(approval_ids))})",
+                approval_ids)} if approval_ids else {}
         out = []
         for row in rows:
+            approval = approvals.get(row["approval_id"]) if row["approval_id"] else None
+            card = approval_card(self, approval) if approval else None
+            if card is not None:
+                out.append(_model(Message, row, ("created_at", "archived_at")).model_copy(update={"approval": card}))
+                continue
             notice = notices.get(row["id"])
             if notice is not None and not notice["parked"]:
                 continue  # the job started, was switched or cancelled: the notice is gone

@@ -221,6 +221,13 @@ dialog textarea { min-height: 90px; resize: vertical; }
 }
 .question-card { margin-top: 8px; padding: 12px; border: 1px solid #465063; border-radius: 10px; background: #1b202a; display: grid; gap: 8px; }
 .question-card button, .question-card input { max-width: 100%; }
+.approval-card { margin-top: 8px; padding: 12px; border: 1px solid #8a6d2b; border-radius: 10px; background: #221d12; display: grid; gap: 8px; }
+.approval-card.approved, .approval-card.consumed { border-color: #2f6b45; background: #142019; }
+.approval-card.denied, .approval-card.expired { border-color: var(--line); background: transparent; }
+.approval-command { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; font: 13px/1.45 ui-monospace, monospace; }
+.approval-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.approval-row input[type=checkbox] { margin-top: 4px; }
+.approval-row .muted { font-size: 13px; }
 .question-option { display: block; text-align: left; }
 .question-option small { display: block; opacity: .75; }
 .question-prompt { white-space: pre-wrap; }
@@ -391,6 +398,21 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <label class="inline">At most <input id="auto-continue-max" type="number" min="1" max="50" aria-label="Most automatic continuations in a row"> continuations in a row, then the bot waits for you</label>
       <p class="muted">A message from you or Stop ends the run. Continuations run quietly: the bot stays "Working" in the chat. Assignments use the same loop, within the turn budget set on each assignment (20 turns by default).</p>
       <div class="tools-bar"><button id="behavior-save" type="button" class="primary">Save</button><span id="behavior-state" class="muted" role="status"></span></div>
+    </section>
+    <section class="settings-section" id="set-approvals" aria-labelledby="set-approvals-title">
+      <h3 id="set-approvals-title">Approvals</h3>
+      <p class="muted">Bots work on their own and rarely ask. Turn on the kinds of action you want done, but not without your yes. When a bot tries one, it pauses that one step and its chat shows an Approve / Deny card.</p>
+      <div id="approval-classes"></div>
+      <details id="approval-add">
+        <summary>Add your own</summary>
+        <label>Name<input id="approval-label" maxlength="80" placeholder="Deploys"></label>
+        <label>It matches<select id="approval-kind"><option value="shell">a command (a pattern, e.g. \bmake deploy\b)</option><option value="tool">a tool or connector name (a pattern, e.g. create_event)</option></select></label>
+        <label>Pattern<input id="approval-pattern" maxlength="500"></label>
+        <div class="tools-bar"><button id="approval-add-btn" type="button">Add</button></div>
+      </details>
+      <label class="inline">If you don't answer within <input id="approval-timeout" type="number" min="0" max="10080" aria-label="Minutes to wait for an answer"> minutes, the bot leaves that task stopped (0 = wait until you answer)</label>
+      <p class="muted" id="approval-gates"></p>
+      <div class="tools-bar"><button id="approvals-save" type="button" class="primary">Save</button><span id="approvals-state" class="muted" role="status"></span></div>
     </section>
     <section class="settings-section" id="set-engines" aria-labelledby="set-engines-title">
       <h3 id="set-engines-title">Engines</h3>
@@ -1517,6 +1539,38 @@ function renderUsageNotice(notice) {
 
 const questionUi = new Map();  // open card id -> {index, answers, selected, custom}; survives re-renders
 
+/* 0.11.10: an action that waits for the owner's yes (Settings > Approvals), shown in the chat */
+function approvalState(a) {
+  if (a.status === "pending") return "Waiting for you" + (a.expires_at ? " · until " + new Date(a.expires_at).toLocaleTimeString([], { timeStyle: "short" }) : "");
+  if (a.status === "approved") return "Approved · the bot runs it once";
+  if (a.status === "consumed") return "Approved · run once";
+  if (a.status === "denied") return "Denied · the task is stopped";
+  return a.resumed ? "Approved · the bot didn't use it within a day" : "No answer in time · the task is stopped";
+}
+function renderApproval(a, bot) {
+  const card = el("div", "approval-card " + a.status);
+  card.setAttribute("role", "group");
+  card.setAttribute("aria-label", "Approval " + a.id);
+  card.append(el("strong", "", bot.name + " wants to: " + a.label));
+  card.append(el("pre", "approval-command", a.summary));
+  card.append(el("div", "muted", approvalState(a)));
+  if (a.status === "pending" || (a.status === "expired" && !a.resumed)) {
+    const bar = el("div", "tools-bar");
+    const yes = el("button", "primary", a.status === "pending" ? "Approve" : "Approve and run");
+    const no = el("button", "", "Deny");
+    for (const [button, action] of [[yes, "approve"], [no, "deny"]]) {
+      button.type = "button";
+      button.onclick = async () => {
+        yes.disabled = no.disabled = true;
+        try { await api("/v1/approvals/" + a.id + "/" + action, { method: "POST" }); state.msgSig = ""; await loadMessages(); }
+        catch (e) { yes.disabled = no.disabled = false; setStatus(e.message, true); }
+      };
+    }
+    bar.append(yes, no);
+    card.append(bar);
+  }
+  return card;
+}
 function renderQuestion(question, botId) {
   const card = el("div", "question-card");
   const steps = question.payload.steps;
@@ -1610,7 +1664,7 @@ async function loadMessages() {
   const done = messages.filter((m) => !m.pending && m.id > 0 && !m.archived_at);
   state.shown = { bot: id, max: Math.max(0, ...done.map((m) => m.id)),
     counted: Math.max(0, ...done.filter(countsUnread).map((m) => m.id)) };
-  const sig = messages.map((m) => m.id + (m.pending ? ":" + m.job_id + ":" + m.job_status : "") + (m.archived_at ? "a" : "") + (m.steer_status || "") + (m.steer_delivered_at || "") + (m.steer_note || "") + (m.question ? JSON.stringify(m.question) : "") + (m.notice ? JSON.stringify(m.notice) : "")).join(",") + "|" + (bot.activity || "") + "|" + (state.editingMsg ? state.editingMsg.id : "");
+  const sig = messages.map((m) => m.id + (m.pending ? ":" + m.job_id + ":" + m.job_status : "") + (m.archived_at ? "a" : "") + (m.steer_status || "") + (m.steer_delivered_at || "") + (m.steer_note || "") + (m.question ? JSON.stringify(m.question) : "") + (m.notice ? JSON.stringify(m.notice) : "") + (m.approval ? JSON.stringify(m.approval) : "")).join(",") + "|" + (bot.activity || "") + "|" + (state.editingMsg ? state.editingMsg.id : "");
   if (sig === state.msgSig) return;
   state.msgSig = sig;
   const box = $("messages");
@@ -1690,6 +1744,7 @@ async function loadMessages() {
       };
       whoLine.append(retry);
     }
+    if (m.approval) { wrap.append(whoLine, renderApproval(m.approval, bot)); return wrap; }
     const body = el("div", "body", m.text);
     wrap.append(whoLine, body);
     if (wrap.classList.contains("office") && (m.text.length > 280 || m.text.split("\n").length > 4)) {
@@ -2633,11 +2688,41 @@ function showBehavior(data) {
   $("auto-continue-max").value = data.auto_continue.max;
   $("auto-continue-max").max = data.auto_continue_max_limit;
 }
+const GATE_WORDS = { enforced: "can pause", advisory: "can pause (not yet proven on this computer)", none: "can't pause" };
+function showApprovals(data) {
+  const box = $("approval-classes");
+  box.replaceChildren(...data.classes.map((c) => {
+    const row = el("label", "approval-row");
+    const box2 = el("input");
+    box2.type = "checkbox"; box2.checked = !!c.enabled; box2.dataset.key = c.key;
+    const text = el("div");
+    text.append(el("div", "", c.label), el("div", "muted", c.builtin ? c.description : (c.kind === "tool" ? "Tool name matches " : "Command matches ") + c.pattern));
+    row.append(box2, text);
+    if (!c.builtin) {
+      const remove = el("button", "mini", "Remove");
+      remove.type = "button";
+      remove.onclick = (event) => { event.preventDefault(); changeApprovals({remove: [c.key]}, "Removed."); };
+      row.append(remove);
+    } else row.append(el("span"));
+    return row;
+  }));
+  $("approval-timeout").value = data.timeout_min;
+  const gates = Object.entries(data.gates || {}).map(([name, st]) => (ENGINE_LABELS[name] || name) + " " + (GATE_WORDS[st] || st));
+  $("approval-gates").textContent = gates.length ? "Engines: " + gates.join("; ") + ". Codex with restricted access can't pause either; its own sandbox applies." : "";
+}
+async function changeApprovals(change, done) {
+  try {
+    const data = await api("/v1/settings", {method: "PUT", body: JSON.stringify({approvals: change})});
+    showApprovals(data.approvals);
+    $("approvals-state").textContent = done;
+    return true;
+  } catch (e) { $("approvals-state").textContent = e.message; return false; }
+}
 async function loadSettings() {
   const [rules, system, settings, engines] = await Promise.all([
     api("/v1/rules-for-all-bots"), api("/v1/system-prompt"), api("/v1/settings"),
     api("/v1/providers").catch(() => [])]);
-  showLayer("rules", rules); showLayer("system", system); showBehavior(settings);
+  showLayer("rules", rules); showLayer("system", system); showBehavior(settings); showApprovals(settings.approvals);
   $("engines-list").replaceChildren(...engines.map((e) => {
     const row = el("div", "engine-row");
     row.append(el("span", "", ENGINE_LABELS[e.name] || e.name), el("span", "muted", ENGINE_STATUS[e.login_status] || e.login_status));
@@ -2645,7 +2730,7 @@ async function loadSettings() {
   }));
 }
 $("office-settings").onclick = async () => {
-  for (const id of ["rules-state", "system-state", "behavior-state"]) $(id).textContent = "";
+  for (const id of ["rules-state", "system-state", "behavior-state", "approvals-state"]) $(id).textContent = "";
   $("set-advanced").open = false;
   $("settings-dialog").showModal();
   try { await loadSettings(); } catch (e) { if (e instanceof AuthError) return handleError(e); $("rules-state").textContent = e.message; }
@@ -2670,6 +2755,18 @@ $("behavior-save").onclick = async () => {
     showBehavior(await api("/v1/settings", {method: "PUT", body: JSON.stringify({auto_continue: {enabled: $("auto-continue").checked, max}})}));
     $("behavior-state").textContent = "Saved.";
   } catch (e) { $("behavior-state").textContent = e.message; }
+};
+$("approvals-save").onclick = () => {
+  const enabled = {};
+  for (const box of $("approval-classes").querySelectorAll("input[type=checkbox]")) enabled[box.dataset.key] = box.checked;
+  changeApprovals({enabled, timeout_min: Number($("approval-timeout").value)}, "Saved. It applies from the next action.");
+};
+$("approval-add-btn").onclick = async () => {
+  const label = $("approval-label").value.trim(), pattern = $("approval-pattern").value.trim();
+  if (!label || !pattern) { $("approvals-state").textContent = "Give the class a name and a pattern."; return; }
+  if (await changeApprovals({add: [{label, kind: $("approval-kind").value, pattern}]}, "Added and switched on.")) {
+    $("approval-label").value = ""; $("approval-pattern").value = "";
+  }
 };
 $("settings-voice").onclick = async () => {
   $("settings-dialog").close();
