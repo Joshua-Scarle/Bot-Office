@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Send a message as the bot whose turn is running."""
+"""Send a message as the bot whose turn is running.
+
+By default the message steers: if the other bot is working, it reads the message within its current
+task (and answers with a message of its own); if it is idle, the message starts a turn. With --queue
+the message waits for the other bot's next turn and that turn's reply comes back to you.
+"""
 import json
 import os
 import sys
@@ -7,16 +12,22 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+USAGE = 'Usage: bot-msg [--queue] <to-bot> "<message>"'
+
 
 def main():
-    if len(sys.argv) != 3:
-        print('Usage: bot-msg <to-bot> "<message>"', file=sys.stderr)
+    args = sys.argv[1:]
+    mode = "steer"
+    if args and args[0] in ("--queue", "--steer"):
+        mode = args.pop(0)[2:]
+    if len(args) != 2:
+        print(USAGE, file=sys.stderr)
         return 2
     try:
         bot = urllib.parse.quote(os.environ["BOT_OFFICE_BOT_NAME"], safe="")
         url = os.environ["BOT_OFFICE_API_URL"] + "/v1/bots/" + bot + "/message-agent"
         token = os.environ["BOT_OFFICE_AGENT_TOKEN"]
-        body = json.dumps({"to": sys.argv[1], "body": sys.argv[2], "wait": True,
+        body = json.dumps({"to": args[0], "body": args[1], "mode": mode, "wait": True,
                            "timeout": 60}).encode()
         request = urllib.request.Request(url, data=body, headers={
             "Authorization": "Bearer " + token, "Content-Type": "application/json"})
@@ -24,6 +35,14 @@ def main():
             result = json.load(response)
         print(result.get("reply") or f'Message {result["id"]}: {result["status"]}. {result.get("note", "")}')
         return 0
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.load(exc).get("detail", "")
+        except (ValueError, OSError):
+            pass
+        print(f"bot-msg failed: {detail or exc}", file=sys.stderr)
+        return 1
     except (KeyError, OSError, urllib.error.URLError) as exc:
         print(f"bot-msg failed: {exc}", file=sys.stderr)
         return 1

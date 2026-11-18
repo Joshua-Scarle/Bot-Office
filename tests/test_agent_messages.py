@@ -196,9 +196,11 @@ def test_waits_never_block_workers_or_cycles(settings):
     ac = client.post(f"/v1/bots/{a.id}/message-agent", headers=a_header, json={"to": "C", "body": "three", "wait": True, "timeout": 30}).json()
     bc = client.post(f"/v1/bots/{b.id}/message-agent", headers=b_header, json={"to": "C", "body": "four", "wait": True, "timeout": 30}).json()
     assert time.monotonic() - start < 2
-    assert [ab["status"], ba["status"], ac["status"], bc["status"]] == ["queued"] * 4
+    # B -> A steers A's running turn (0.11.10): "sent", never waited on
+    assert [ab["status"], ba["status"], ac["status"], bc["status"]] == ["queued", "sent", "queued", "queued"]
     assert ba["hop"] == 2
-    assert all("asynchronously" in item["note"] for item in (ab, ba, ac, bc))
+    assert all("asynchronously" in item["note"] for item in (ab, ac, bc))
+    assert ba["delivery"] == "steer" and "while it works" in ba["note"] and ac["hop"] == 1
 
 
 def test_delayed_desk_file_keeps_parent_depth(settings, tmp_path):

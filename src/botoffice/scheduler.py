@@ -764,6 +764,9 @@ class Scheduler:
             with contextlib.suppress(Exception):
                 self._log_work(job, status, audit or error or "")
         agent_message = self.store.agent_message_for_job(job.id)
+        if agent_message and agent_message.get("reply_to"):
+            # 0.11.10: this turn read another bot's answer to a steer; the answer needs no answer back
+            agent_message = None
         if agent_message:
             sender = self.store.get_bot(agent_message["from_bot"])
             target = self.store.get_bot(agent_message["to_bot"])
