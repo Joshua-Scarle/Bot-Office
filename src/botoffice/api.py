@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -21,7 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import attachments, baseline, grok_bridge, isolation, needs_you, safefs, vnc
+from . import approval_classes, attachments, baseline, grok_bridge, isolation, needs_you, safefs, vnc
 from . import rules as action_rules
 from . import usage as budgets
 from .auth import auth_dependency, bearer
@@ -94,8 +94,24 @@ class AutoContinueBody(BaseModel):
     max: int | None = None
 
 
+class ApprovalClassCreate(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+    kind: Literal["shell", "tool"]
+    pattern: str = Field(min_length=1, max_length=500)
+
+
+class ApprovalsBody(BaseModel):
+    # class key -> on/off
+    enabled: dict[str, bool] | None = Field(default=None, max_length=100)
+    add: list[ApprovalClassCreate] | None = Field(default=None, max_length=10)
+    remove: list[str] | None = Field(default=None, max_length=100)
+    # minutes an approval in your own chat waits for an answer; 0 = until answered
+    timeout_min: int | None = Field(default=None, ge=0)
+
+
 class SettingsBody(BaseModel):
     auto_continue: AutoContinueBody | None = None
+    approvals: ApprovalsBody | None = None
 
 
 class AgentMessageCreate(BaseModel):
@@ -1014,8 +1030,10 @@ def create_app(
     @app.get("/v1/settings", dependencies=[Depends(auth)])
     async def get_settings() -> dict[str, object]:
         """Settings for all bots (0.11.10). The two layers have their own routes (large texts)."""
+        gates = {name: action_rules.gate_state(settings.control_dir, name) for name in action_rules.WIRED}
         return {"auto_continue": baseline.auto_continue(store),
-                "auto_continue_max_limit": baseline.AUTO_CONTINUE_MAX}
+                "auto_continue_max_limit": baseline.AUTO_CONTINUE_MAX,
+                "approvals": {**approval_classes.settings(store), "gates": gates}}
 
     @app.put("/v1/settings", dependencies=[Depends(auth)])
     async def put_settings(body: SettingsBody) -> dict[str, object]:
@@ -1023,6 +1041,14 @@ def create_app(
             try:
                 baseline.set_auto_continue(store, body.auto_continue.enabled, body.auto_continue.max)
             except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if body.approvals is not None:
+            change = body.approvals
+            try:
+                approval_classes.update(store, enabled=change.enabled,
+                                        add=[item.model_dump() for item in change.add or []],
+                                        remove=change.remove, timeout_min=change.timeout_min)
+            except approval_classes.ApprovalClassError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
         return await get_settings()
 
@@ -1799,7 +1825,9 @@ def create_app(
                        "(else they are refused to Needs-you: bot-task/bot-msg/desk would fail)"},
             "defaults": "strict profile (watcher triggers always; routine, wake-up, assignment and bot-to-bot "
                         "turns only for bots with scheduled_runs 'gated'): outbound and destructive ask; "
-                        "everything else, incl. your own chat: allow; bot-msg: allow; secrets: never everywhere"}
+                        "everything else, incl. your own chat: allow; bot-msg: allow; secrets: never everywhere. "
+                        "0.11.10: the approval classes switched on in Settings ask in every run, after your own "
+                        "rules (GET /v1/settings, approvals)"}
 
     @app.post("/v1/rules", status_code=201, dependencies=[Depends(auth)])
     async def add_rule(body: RuleCreate) -> dict:

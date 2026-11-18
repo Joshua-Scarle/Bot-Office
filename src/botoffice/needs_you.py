@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 from .assignments import utc_time
 from .catalog import ENGINE_LABELS
-from .store import PARKED_SQL, JobStore, now
+from .store import PARKED_SQL, JobStore, approval_card, now
 
 FAILED_WINDOW = timedelta(hours=72)
 REPEAT_FAILURES = 3
@@ -121,7 +121,7 @@ def needs_you(store: JobStore) -> list[dict]:
                     "ask": f"{bot['name']} failed {REPEAT_FAILURES} times in a row ({kind})", "at": None,
                     "actions": ["dismiss"],
                 })
-        _approvals(db, bots, items)
+        _approvals(db, bots, items, store)
         for row in db.execute(
                 f"SELECT n.*, j.not_before FROM usage_notices n JOIN jobs j ON j.id=n.job_id "
                 f"WHERE {PARKED_SQL} AND n.attempt=j.attempts AND n.dismissed_at IS NULL ORDER BY n.created_at DESC"):
@@ -222,7 +222,7 @@ def _preview(text: str, limit: int = 160) -> str:
     return line if len(line) <= limit else line[:limit] + "…"
 
 
-def _approvals(db, bots: dict, items: list[dict]) -> None:
+def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None) -> None:
     """0.11.0: approval cards (Approve once / Deny; Re-run once expired) and tripwire alerts."""
     since = (now() - FAILED_WINDOW).isoformat()
     for row in db.execute("SELECT * FROM approvals WHERE status='pending' OR (status='expired' AND "
@@ -235,6 +235,7 @@ def _approvals(db, bots: dict, items: list[dict]) -> None:
             "id": f"p:{row['id']}:{row['status']}", "kind": "approval", "state": row["status"],
             "bot_id": row["bot_id"], "bot_name": bot["name"], "notify": bool(bot["notify"]),
             "approval_id": row["id"], "job_id": row["job_id"], "title": f"Approval #{row['id']}",
+            "class": (approval_card(store, dict(row))["label"] if store is not None else row["preset"]),
             "ask": (f"{bot['name']} asks to run ({row['source']}, {row['preset'] or 'rule'}): {_preview(row['summary'])} "
                     f"({len(row['summary'])} characters, fingerprint {row['input_hash'][:12]}; the whole command is below)"
                     + (" — expired; Re-run approves it now" if expired else "")),

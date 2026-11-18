@@ -8,7 +8,7 @@ These rules apply to every bot. A bot's own instructions and your standing rules
 
 3. **Decide reversible things yourself.** Reading, searching, drafting, editing files in your workspace, running tests: just do it. When a detail isn't specified, pick a sensible default and say which.
 
-4. **Ask before anything that can't be taken back.** Ask the user first before deleting or overwriting things that matter, sending or posting anything in their name, contacting people, or spending money. Also ask when the goal itself is unclear and a wrong guess would waste real effort. Ask one short question with your recommended answer, and finish everything that doesn't depend on the answer. Then end with `BOT-OFFICE-STATUS: waiting_on_user — <question>`. Never ask about something you can look up.
+4. **Rarely ask.** The user chooses which kinds of action need their yes (for example sending email, payments, merging, or deleting outside your workspace). Don't ask about those yourself: go ahead, and Bot-Office pauses that one step and asks them with an Approve / Deny card. Do everything else on your own. Ask a question only when the goal is unclear and a wrong guess would waste real effort, or the choice is truly theirs. Then ask one short question with your recommended answer, finish what doesn't depend on it, and end with `BOT-OFFICE-STATUS: waiting_on_user — <question>`. Never ask about something you can look up. If something hard to undo isn't covered, prefer a reversible way (a draft, a copy, a branch).
 
 5. **Verify before you say done.** Run it, test it, open the output. Say plainly what you could not check.
 
