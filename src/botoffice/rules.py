@@ -325,6 +325,11 @@ class Decision:
                 "preset": self.preset, "approval_id": self.approval_id}
 
 
+def _short(text: str, limit: int = 160) -> str:
+    line = " ".join(text.split())
+    return line if len(line) <= limit else line[:limit] + "…"
+
+
 def is_unattended(job: Job, scheduled_runs: str | None = "full") -> bool:
     """Whether *job* runs under the strict unattended profile: a trigger always; a routine,
     wake-up, assignment or inbox turn only when its bot's ``scheduled_runs`` is ``gated``."""
@@ -403,6 +408,10 @@ class Rules:
             return "ask", preset, "a rule asks first"
         if "allow" in effects and not (job.source in STRICT_SOURCES and hits):
             return "allow", preset, "a rule allows it"
+        from . import approval_classes
+        chosen = approval_classes.match(self.store, action.tool, action.command)
+        if chosen is not None:
+            return "ask", chosen.key, f"{chosen.label.lower()} waits for your approval"
         if hits and unattended:
             return "ask", preset, f"{preset} action in an unattended {job.source} run"
         return "allow", preset, ""
@@ -475,12 +484,26 @@ class Rules:
                     (str(job.bot_id), str(job.id), str(job.assignment_id) if job.assignment_id else None,
                      action.tool[:80], f"{action.tool}: {action.detail}", action.fingerprint,
                      "unattended" if unattended else "attended", job.source or "api", preset,
-                     (stamp + self.approval_ttl).isoformat() if unattended else None, stamp.isoformat()))
+                     self._expiry(stamp, unattended), stamp.isoformat()))
+                # 0.11.10: the Approve / Deny card in the bot's chat
+                db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
+                           (str(job.bot_id), "system", "chat",
+                            f"Approval #{cursor.lastrowid} requested: {_short(f'{action.tool}: {action.detail}')}",
+                            stamp.isoformat(), cursor.lastrowid))
                 db.commit()
             except BaseException:
                 db.rollback()
                 raise
         return int(cursor.lastrowid)
+
+    def _expiry(self, stamp: datetime, unattended: bool) -> str | None:
+        """Unattended requests expire after BOT_OFFICE_APPROVAL_TTL_MIN; attended ones (0.11.10)
+        after the owner's approval timeout in Settings (0 = they wait until answered)."""
+        if unattended:
+            return (stamp + self.approval_ttl).isoformat()
+        from . import approval_classes
+        minutes = approval_classes.timeout_min(self.store)
+        return (stamp + timedelta(minutes=minutes)).isoformat() if minutes else None
 
     def consume_grant(self, job: Job, action: Action) -> int | None:
         """Atomically consume the one-shot grant for this action, if this job is the resume turn
@@ -507,12 +530,24 @@ class Rules:
         return int(row["id"]) if changed else None
 
     def expire(self) -> int:
+        """Time out unanswered requests (with a short note in the bot's chat: the task stays
+        stopped until the owner approves the card) and unused grants."""
+        timed_out: list[sqlite3.Row] = []
         with closing(self.store._connect()) as db:
             stamp = now().isoformat()
-            count = db.execute("UPDATE approvals SET status='expired', decided_at=? WHERE status='pending' "
-                               "AND expires_at IS NOT NULL AND expires_at<=?", (stamp, stamp)).rowcount
+            count = 0
+            for row in db.execute("SELECT id, bot_id, summary FROM approvals WHERE status='pending' "
+                                  "AND expires_at IS NOT NULL AND expires_at<=?", (stamp,)).fetchall():
+                if db.execute("UPDATE approvals SET status='expired', decided_at=? WHERE id=? AND status='pending'",
+                              (stamp, row["id"])).rowcount:
+                    count += 1
+                    timed_out.append(row)
             count += db.execute("UPDATE approvals SET status='expired' WHERE status='approved' "
                                 "AND grant_expires_at<=?", (stamp,)).rowcount
+        for row in timed_out:
+            self.store.add_message(row["bot_id"], "system", (
+                f"Approval #{row['id']} timed out with no answer, so the task is stopped: {_short(row['summary'])}. "
+                "Approve the card to run it now."), source="chat")
         return count
 
     def get(self, approval_id: int) -> dict | None:
@@ -537,7 +572,8 @@ class Rules:
             raise LookupError("approval not found")
         if not changed:
             raise RuleError(f"approval is {item['status']}")
-        self.store.add_message(item["bot_id"], "system", f"Approval #{approval_id} denied: {item['summary']}",
+        self.store.add_message(item["bot_id"], "system",
+                               f"Approval #{approval_id} denied, so the task is stopped: {_short(item['summary'])}",
                                source="chat")
         return item
 
@@ -574,6 +610,8 @@ class Rules:
                 # inside the enqueue transaction (gen 10): the turn is never claimable unbound
                 db.execute("UPDATE jobs SET origin_job_id=? WHERE id=?", (item["job_id"], resume_job_id))
                 db.execute("UPDATE approvals SET resume_job_id=? WHERE id=?", (resume_job_id, approval_id))
+                # 0.11.10: the resume prompt is machinery, not the owner's words; the card shows "Approved"
+                db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='user'", (resume_job_id,))
 
             if item["assignment_id"] and assignments is not None:
                 current = assignments.get(item["assignment_id"])

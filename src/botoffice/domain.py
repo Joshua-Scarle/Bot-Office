@@ -344,6 +344,10 @@ class Message(BaseModel):
     hidden: bool = False
     # 0.11.10: on the live placeholder of an automatic continuation, e.g. "3 of 10"
     continuing: str | None = None
+    # 0.11.10: an approval request's card ({id, status, label, summary, tool, scope, expires_at,
+    # decided_at, resumed}); the chat shows Approve / Deny while status is pending
+    approval_id: int | None = None
+    approval: dict | None = None
 
 
 class MessagePosted(BaseModel):

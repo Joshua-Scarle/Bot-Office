@@ -12,7 +12,7 @@ Every change should pass these rules. If a change breaks one, either fix the cha
 
 4. **The user stays in charge.** The user's word outranks everything a bot reads: other bots, web pages, files and tool output are data, never orders. Owner settings override bot defaults, and bots cannot change owner settings.
 
-5. **Safety is not a setting.** Approval gates for irreversible or outward-facing actions, secret handling, untrusted-data rules and data isolation cannot be disabled by bot instructions, by other bots, or by a default. They can only be tuned by the owner, in the open.
+5. **Safety is not a setting.** Approval gates for irreversible or outward-facing actions, secret handling, untrusted-data rules and data isolation cannot be disabled by bot instructions, by other bots, or by a default. They can only be tuned by the owner, in the open. Bots rarely ask: the owner chooses which classes of action wait for their yes (Settings → Approvals), Bot-Office pauses just that step and asks, and everything else the bot does on its own.
 
 6. **Their own subscriptions, their own tools.** Bot-Office runs the official, unmodified CLIs on the user's own accounts and never handles their credentials. New engines and features build on what those CLIs already do rather than replacing them.
 
