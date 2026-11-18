@@ -1033,7 +1033,8 @@ def create_app(
         gates = {name: action_rules.gate_state(settings.control_dir, name) for name in action_rules.WIRED}
         return {"auto_continue": baseline.auto_continue(store),
                 "auto_continue_max_limit": baseline.AUTO_CONTINUE_MAX,
-                "approvals": {**approval_classes.settings(store), "gates": gates}}
+                "approvals": {**approval_classes.settings(store), "gates": gates,
+                              "unpausable_bots": approval_classes.unpausable_bots(store)}}
 
     @app.put("/v1/settings", dependencies=[Depends(auth)])
     async def put_settings(body: SettingsBody) -> dict[str, object]:

@@ -41,4 +41,6 @@ Bot-Office runs every engine headless, with its own permission prompts turned of
 | Antigravity | yes | `.agents/hooks.json` `PreToolUse` hook |
 | opencode | no | no hook mechanism; classes do not apply |
 
+For a bot that can't pause, Bot-Office does what it can without a hook. Its SELF.md lists the switched-on classes and tells it never to do them itself: it prepares a draft or the exact command and ends with `waiting_on_user — needs your approval`. Settings → Approvals names every such bot in a warning, because this is an instruction, not something Bot-Office can enforce. Restricted Codex and restricted opencode also keep their own sandbox and permission limits; opencode with full access runs with `--auto` and has neither.
+
 Settings → Approvals shows each engine's state on this computer: "can pause" once `scripts/probe_gate.sh <engine>` has proven the hook, "not yet proven" when it is wired but untested, "can't pause" when there is no hook. In your own chat the gate fails open if the engine cannot reach Bot-Office (protected paths are still refused); unattended runs fail closed.

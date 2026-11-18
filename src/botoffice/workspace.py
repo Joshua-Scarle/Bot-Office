@@ -598,7 +598,11 @@ def self_extra(store: JobStore, bot: Bot, job: Job, working: str, moment: dateti
              + untrusted_data('self-context', peer_text + _list_lines('Your schedule', schedule, budget=350)
                               + _list_lines('Project paths in WORKING.md', paths, budget=350)) + "\n"
              + f"- Your tasks: {counts}\n" + _list_lines('Last job directories', dirs, budget=350))
-    stable = json.dumps([stable_peers, peer_count, stable_routines, len(tasks), not_started, paths], ensure_ascii=False)
+    from . import approval_classes
+    approvals = approval_classes.self_note(store, job.provider or bot.default_provider, bot.cli_access)
+    extra += approvals
+    stable = json.dumps([stable_peers, peer_count, stable_routines, len(tasks), not_started, paths, approvals],
+                        ensure_ascii=False)
     return extra, tasks, stable
 
 
