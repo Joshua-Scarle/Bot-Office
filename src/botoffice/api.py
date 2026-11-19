@@ -41,7 +41,22 @@ from .catalog import (
 from .config import Settings
 from .cron import min_gap
 from .desktop import run_desktop_command
-from .assignments import BOT_ROUTINE_MIN_GAP, MAX_BOT_ROUTINES, AssignmentError, drop_rule, tasks_label
+from .assignments import (
+    BOT_EDIT_OWNER_TASKS,
+    BOT_ROUTINE_MIN_GAP,
+    CROSS_BOT_SUBTASK_START,
+    DROP_CANCELS_TURNS,
+    FORM_TASKS_START,
+    MAX_BOT_ROUTINES,
+    PRIORITIES,
+    TASK_DEFAULT_PRIORITY,
+    TASK_WRITES_PER_HOUR,
+    AssignmentError,
+    _limit,
+    choice,
+    drop_rule,
+    tasks_label,
+)
 from .domain import (
     _check_cron,
     Assignment,
@@ -138,6 +153,8 @@ class AgentAssignmentCreate(BaseModel):
     budget_turns: int = Field(default=20, ge=1, le=200)
     budget_minutes: int = Field(default=120, ge=1, le=24 * 60)
     start: bool = True
+    # G7: None = BOT_OFFICE_TASK_DEFAULT_PRIORITY (normal)
+    priority: Literal["urgent", "high", "normal", "low"] | None = None
 
 
 TASK_STAGES = {"not_started", "in_progress", "completed", "dropped"}
@@ -150,12 +167,16 @@ class AgentTaskCreate(AgentAssignmentCreate):
 
 
 class AgentTaskEdit(BaseModel):
+    # fix 11: other fields are kept so Assignments.agent_edit refuses them (400 unknown, 403 not
+    # allowed) instead of a partial success
+    model_config = ConfigDict(extra="allow")
     version: int = Field(ge=1)
     title: str | None = Field(default=None, min_length=1, max_length=200)
     goal: str | None = Field(default=None, max_length=20_000)
     done_when: str | None = Field(default=None, max_length=4000)
     due_at: datetime | None = None
     position: float | None = None
+    priority: Literal["urgent", "high", "normal", "low"] | None = None
 
 
 class AgentTaskDrop(BaseModel):
@@ -1335,8 +1356,11 @@ def create_app(
                                  job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
         """What others changed on your tasks (and on tasks you created) since your last prompt
         (or since event *since*). Reading does not mark them seen."""
-        changes, last = assignments.changes(job.bot_id, since)
-        return {"changes": changes, "last_event": last}
+        changes, last, total = assignments.changes(job.bot_id, since)
+        # last_event: pass it as *since* for the next page while more is true
+        if len(changes) < total:
+            last = changes[-1]["id"]
+        return {"changes": changes, "last_event": last, "more": len(changes) < total}
 
     @app.get("/v1/agent/tasks/{ref}")
     async def agent_get_task(ref: str, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
@@ -1360,8 +1384,8 @@ def create_app(
     @app.patch("/v1/agent/tasks/{ref}", response_model=Task)
     async def agent_edit_task(ref: str, body: AgentTaskEdit, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
         fields = body.model_dump(exclude_unset=True, exclude={"version"})
-        for key in ("title", "goal", "done_when"):
-            if key in fields and fields[key] is None:
+        for key in ("title", "goal", "done_when", "priority"):
+            if key in fields and fields[key] is None and key not in (body.model_extra or {}):
                 del fields[key]
         return assignments.agent_edit(_agent_task_id(job, ref), job.bot_id, fields, body.version)
 
@@ -1875,8 +1899,16 @@ def create_app(
 
     @app.get("/v1/tasks/settings", dependencies=[Depends(auth)])
     async def task_settings() -> dict:
-        """Read-only task-list settings for the GUI: its label (G8) and the drop rule (G5)."""
+        """Read-only task-list settings for the GUI: its label (G8), the answers to the plan's
+        questions as they are set now (environment), the stages and priorities."""
         return {"label": tasks_label(), "bot_drop_owner_tasks": drop_rule(),
+                "cross_bot_subtask_start": choice(CROSS_BOT_SUBTASK_START),
+                "drop_cancels_turns": choice(DROP_CANCELS_TURNS),
+                "bot_edit_owner_tasks": choice(BOT_EDIT_OWNER_TASKS),
+                "form_tasks_start": choice(FORM_TASKS_START),
+                "default_priority": choice(TASK_DEFAULT_PRIORITY),
+                "task_writes_per_hour": _limit(TASK_WRITES_PER_HOUR),
+                "priorities": list(PRIORITIES),
                 "stages": ["not_started", "in_progress", "completed", "dropped"]}
 
     @app.get("/v1/tasks", dependencies=[Depends(auth)])
@@ -1901,7 +1933,7 @@ def create_app(
         bot = store.find_bot(body.bot_id)
         if not bot:
             raise HTTPException(status_code=404, detail="bot not found")
-        return assignments.reorder(bot.id, body.order, actor="user")
+        return assignments.reorder(bot.id, body.order, actor="user", versions=body.versions)
 
     @app.get("/v1/bots/{bot_ref}/tasks", response_model=list[Task], dependencies=[Depends(auth)])
     async def list_bot_tasks(bot_ref: str, include_closed: bool = True) -> list[Task]:
@@ -1915,7 +1947,11 @@ def create_app(
         bot = store.find_bot(bot_ref)
         if not bot:
             raise HTTPException(status_code=404, detail="bot not found")
-        return assignments.task(assignments.create(bot.id, body.model_dump(), origin="form").id)
+        fields = body.model_dump()
+        if fields["start"] is None:
+            # G10: a task from the form starts on its own like a chat task, unless the owner unticks it
+            fields["start"] = choice(FORM_TASKS_START) == "auto"
+        return assignments.task(assignments.create(bot.id, fields, origin="form").id)
 
     @app.get("/v1/tasks/{task_id}", dependencies=[Depends(auth)])
     async def get_task(task_id: UUID) -> dict:

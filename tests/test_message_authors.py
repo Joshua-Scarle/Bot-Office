@@ -116,7 +116,9 @@ def test_live_bubble_says_continuing(settings):
     assert live and live[-1]["continuing"] == "3 of 10" and live[-1]["author"] == "bot"
 
 
-def test_bot_hands_off_an_assignment(settings):
+@pytest.mark.parametrize("subtask_start", ["wait", "allow"])
+def test_bot_hands_off_an_assignment(settings, monkeypatch, subtask_start):
+    monkeypatch.setenv("BOT_OFFICE_CROSS_BOT_SUBTASK_START", subtask_start)
     store, scheduler = _office(settings)
     writer, lead = store.create_bot("Writer", "", "codex", None), store.create_bot("Lead", "", "codex", None)
     parent = scheduler.assignments.create(writer.id, {"title": "Print job", "goal": "print it"})
@@ -124,9 +126,14 @@ def test_bot_hands_off_an_assignment(settings):
                                        for_bot=lead.id, parent_id=parent.id)
     [out] = [m for m in store.list_messages(writer.id) if m.role == "user"]
     assert (out.author, out.peer, out.source) == ("bot_out", "Lead", "assignment") and "Goal: find why" in out.text
-    [incoming] = [m for m in store.list_messages(lead.id) if m.role == "user"]
-    assert (incoming.author, incoming.peer) == ("bot_in", "Writer") and incoming.job_id
     assert store.bot_unread(writer.id).unread_count == 1
+    incoming = [m for m in store.list_messages(lead.id) if m.role == "user"]
+    if subtask_start == "wait":
+        # review fix 1: the child lands open on Lead's list and waits for Lead to pick it up
+        assert incoming == []
+        return
+    [incoming] = incoming
+    assert (incoming.author, incoming.peer) == ("bot_in", "Writer") and incoming.job_id
 
 
 def test_chat_renders_by_author():
