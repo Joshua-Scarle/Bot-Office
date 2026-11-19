@@ -455,6 +455,164 @@ def needs_you_sidebar(page, out: Path, expect_items: bool) -> None:
 
 # --- 0.11.13: bot search, resizable sidebar, files of any type in the chat ---
 
+def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
+    """0.12.0: sidebar sections (create, rename, collapse, drag, reorder, delete) and bot avatars."""
+    print("Sidebar sections and avatars")
+    names = ["E2E test bot Gia", "E2E test bot Hal", "E2E test bot Ivy"]
+    ids = {n: call(base, token, "POST", "/v1/bots", {"name": n, "default_provider": "codex"})["id"] for n in names}
+    page.evaluate("() => localStorage.clear()")
+    page.reload()
+    page.wait_for_selector("#bot-list .bot-item", timeout=15000)
+    layout = lambda: call(base, token, "GET", "/v1/sections")  # noqa: E731
+    heads = lambda: page.locator("#bot-list .sec-head .sec-name").evaluate_all("(n) => n.map((e) => e.textContent)")  # noqa: E731
+    row = lambda n: page.locator("#bot-list .bot-row", has_text=n)  # noqa: E731
+    section_of = lambda n: page.locator("#bot-list .sec", has=page.locator(".bot-row", has_text=n)).get_attribute("data-section")  # noqa: E731
+    check(page.locator("#bot-list .sec-head").count() == 0, "with no sections the list is flat, as before")
+    before_bots = page.locator("#bot-list .bot-item").count()
+    # every bot has an avatar image (default generated), the emoji stays as data
+    page.wait_for_function("() => document.querySelectorAll('#bot-list .avatar img').length >= " + str(before_bots), timeout=10000)
+    check(True, "every bot shows an avatar image by default (%d bots)" % before_bots)
+    # create two sections from the UI
+    for name in ("Work", "Play"):
+        page.click("#new-section")
+        page.fill("#bot-list .sec-rename", name)
+        page.press("#bot-list .sec-rename", "Enter")
+        page.wait_for_function("(n) => [...document.querySelectorAll('.sec-name')].some((e) => e.textContent === n)", arg=name)
+    check(heads()[:2] == ["Work", "Play"] and heads()[-1] == "Ungrouped", f"two sections were created, Ungrouped is last ({heads()})")
+    page.click("#new-section")
+    page.press("#bot-list .sec-rename", "Escape")
+    check(page.locator("#bot-list .sec-rename").count() == 0 and len(layout()["sections"]) == 2, "Escape cancels a new section")
+    page.click("#new-section")
+    page.fill("#bot-list .sec-rename", "work")
+    page.press("#bot-list .sec-rename", "Enter")
+    page.wait_for_timeout(400)
+    check(len(layout()["sections"]) == 2 and "already exists" in page.locator("#status").inner_text(), "a duplicate name is refused with a message")
+    # rename through the menu, keyboard only
+    page.locator('.sec-head:has-text("Play") .sec-menu').focus()
+    page.keyboard.press("Enter")
+    page.get_by_role("menuitem", name="Rename").press("Enter")
+    page.fill("#bot-list .sec-rename", "Fun")
+    page.press("#bot-list .sec-rename", "Enter")
+    page.wait_for_function("() => [...document.querySelectorAll('.sec-name')].some((e) => e.textContent === 'Fun')")
+    check("Fun" in heads() and "Play" not in heads(), "a section is renamed from its menu")
+    work, fun = (s["id"] for s in layout()["sections"])
+    # drag a bot onto a section header
+    row(names[0]).drag_to(page.locator(f'.sec-head[data-section="{work}"]'))
+    page.wait_for_timeout(500)
+    check(layout()["sections"][0]["bot_ids"] == [ids[names[0]]], "dragging a bot onto a section header moves it there")
+    row(names[1]).drag_to(page.locator(f'.sec-head[data-section="{work}"]'))
+    page.wait_for_timeout(500)
+    row(names[1]).drag_to(row(names[0]), target_position={"x": 40, "y": 4})      # top half: before
+    page.wait_for_timeout(500)
+    check(layout()["sections"][0]["bot_ids"] == [ids[names[1]], ids[names[0]]], "dragging onto the top half of a row reorders within the section")
+    # hold a drag to show the insertion line
+    box = row(names[0]).bounding_box()
+    page.mouse.move(*(box["x"] + 60, box["y"] + 20))
+    page.mouse.down()
+    dest = row(names[2]).bounding_box()
+    page.mouse.move(dest["x"] + 60, dest["y"] + 8, steps=8)
+    page.mouse.move(dest["x"] + 62, dest["y"] + 9, steps=3)   # dragover needs a move after the drag has entered the target
+    page.wait_for_timeout(200)
+    check(page.locator(".drop-before, .drop-after, .drop-into").count() >= 1, "an insertion marker shows while dragging")
+    shot(page, out, "sections-drag")
+    page.mouse.move(box["x"] + 60, box["y"] + 20, steps=6)     # back over its own row: dropping there changes nothing
+    page.mouse.move(box["x"] + 62, box["y"] + 21, steps=2)
+    page.mouse.up()
+    page.wait_for_timeout(500)
+    check(layout()["sections"][0]["bot_ids"] == [ids[names[1]], ids[names[0]]], "dropping a bot on itself changes nothing")
+    # reorder sections by dragging a header
+    page.locator(f'.sec-head[data-section="{fun}"]').drag_to(page.locator(f'.sec-head[data-section="{work}"]'), target_position={"x": 60, "y": 3})
+    page.wait_for_timeout(500)
+    check([s["id"] for s in layout()["sections"]] == [fun, work], "dragging a section header reorders the sections")
+    # keyboard: Alt+ArrowDown moves a bot down, M opens the move menu
+    first = page.locator(f'.sec[data-section="{work}"] .bot-item').first
+    first.focus()
+    page.keyboard.press("Alt+ArrowDown")
+    page.wait_for_timeout(500)
+    check(layout()["sections"][1]["bot_ids"] == [ids[names[0]], ids[names[1]]], "Alt+ArrowDown moves the focused bot down")
+    page.locator(f'.bot-row[data-bot="{ids[names[2]]}"] .bot-item').focus()
+    page.keyboard.press("m")
+    page.get_by_role("menuitem", name="Fun").press("Enter")
+    page.wait_for_timeout(500)
+    check(ids[names[2]] in layout()["sections"][0]["bot_ids"], "the M menu moves a bot to a section without dragging")
+    check("moved to" in page.locator("#sidebar-live").inner_text(), "a move is announced to screen readers")
+    # collapse, persisted over a reload
+    page.locator(f'.sec-head[data-section="{work}"] .sec-toggle').click()
+    page.wait_for_timeout(300)
+    check(page.locator(f'.sec[data-section="{work}"] .bot-item').count() == 0 and layout()["sections"][1]["collapsed"] is True, "collapsing hides the bots and is saved")
+    page.reload()
+    page.wait_for_selector("#bot-list .sec-head", timeout=15000)
+    check(page.locator(f'.sec-head[data-section="{work}"] .sec-toggle').get_attribute("aria-expanded") == "false", "the collapsed state survives a reload")
+    page.fill("#bot-search", names[0].split()[-1])
+    check(page.locator(f'.sec[data-section="{work}"] .bot-item').count() == 1, "search shows matches inside a collapsed section")
+    page.fill("#bot-search", "")
+    shot(page, out, "sections-collapsed")
+    page.locator(f'.sec-head[data-section="{work}"] .sec-toggle').click()
+    page.wait_for_timeout(300)
+    # delete with a confirm step
+    page.locator(f'.sec-head[data-section="{work}"] .sec-menu').focus()
+    page.keyboard.press("Enter")
+    page.get_by_role("menuitem", name="Delete").press("Enter")
+    check(page.locator("#section-dialog").is_visible() and "Ungrouped" in page.locator("#section-dialog-text").inner_text(), "delete asks first and says the bots move to Ungrouped")
+    page.click("#section-delete-cancel")
+    check(len(layout()["sections"]) == 2, "Cancel keeps the section")
+    page.locator(f'.sec-head[data-section="{work}"] .sec-menu').focus()
+    page.keyboard.press("Enter")
+    page.get_by_role("menuitem", name="Delete").press("Enter")
+    page.click("#section-delete-go")
+    page.wait_for_timeout(500)
+    lay = layout()
+    check(len(lay["sections"]) == 1 and ids[names[0]] in lay["ungrouped"]["bot_ids"], "confirming deletes the section and its bots go to Ungrouped")
+    check({b["id"] for b in call(base, token, "GET", "/v1/bots")} >= set(ids.values()), "no bot was deleted")
+    # avatars: upload, generate, preset, emoji fallback
+    from botoffice import avatars as av
+    open_bot(page, names[0])
+    bot_id = ids[names[0]]
+    state = lambda: next(b for b in call(base, token, "GET", "/v1/bots") if b["id"] == bot_id)  # noqa: E731
+    page.click("#edit-bot")
+    page.wait_for_selector("#f-presets button", timeout=10000)
+    check(page.locator("#f-presets button").count() == 12, "the dialog offers 12 default avatars")
+    page.set_input_files("#f-image", {"name": "me.png", "mimeType": "image/png", "buffer": av.render_png("preset-5")})
+    page.wait_for_selector("#f-icon-preview img")
+    shot(page, out, "avatar-upload")
+    page.click("#dialog-save")
+    page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)
+    check(state()["avatar"] == "upload", "an uploaded image becomes the avatar")
+    page.wait_for_selector("#head-icon img", timeout=10000)
+    check(page.locator("#head-icon img").evaluate("(i) => i.naturalWidth") == 256, "the header shows the 256 px image")
+    page.click("#edit-bot")
+    page.click("#f-avatar-shuffle")
+    page.wait_for_function("() => document.querySelector('#f-icon-preview img')")
+    page.locator("#f-presets button").nth(3).click()
+    check(page.locator("#f-presets button").nth(3).get_attribute("aria-pressed") == "true", "choosing a default avatar marks it")
+    page.click("#f-avatar-shuffle")
+    shot(page, out, "avatar-generated")
+    page.click("#dialog-save")
+    page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)
+    after = state()
+    check(after["avatar"] == "generated" and after["icon_image"] is None and after["avatar_seed"] not in (None, "preset-3"), f"generate replaces the upload ({after['avatar_seed']})")
+    page.click("#edit-bot")
+    page.click("#f-image-remove")
+    check(page.locator("#f-icon-preview img").count() == 0, "Use emoji only shows the emoji in the preview")
+    page.click("#dialog-save")
+    page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)
+    check(state()["avatar"] == "emoji", "the emoji becomes the avatar again")
+    page.wait_for_timeout(300)
+    check(page.locator("#head-icon img").count() == 0 and page.locator("#head-icon").inner_text().strip() != "", "the emoji fallback shows in the header")
+    # a failing image falls back to the emoji
+    page.route(f"**/v1/bots/{ids[names[1]]}/icon*", lambda route: route.fulfill(status=500, body="x"))
+    page.reload()
+    page.wait_for_selector("#bot-list .bot-item", timeout=15000)
+    page.wait_for_timeout(500)
+    check(row(names[1]).locator(".avatar img").count() == 0 and row(names[1]).locator(".avatar").inner_text().strip() != "", "if the image cannot load the emoji shows")
+    page.unroute(f"**/v1/bots/{ids[names[1]]}/icon*")
+    # clean up the throwaway section and bots
+    for s in layout()["sections"]:
+        call(base, token, "DELETE", f"/v1/sections/{s['id']}")
+    for bid in ids.values():
+        call(base, token, "DELETE", f"/v1/bots/{bid}")
+
+
 def sidebar_search(page, out: Path) -> None:
     print("Sidebar bot search")
     page.evaluate("() => localStorage.clear()")
@@ -805,6 +963,7 @@ def main() -> int:
                 needs_you_sidebar(page, out, expect_items=True)
                 sidebar_search(page, out)
                 sidebar_resize(page, out)
+                groups_and_avatars(page, out, base, TOKEN)
                 open_bot(page, ADA)
                 file_uploads(page, out, base, TOKEN)
                 slash_commands(page, out, base, TOKEN)
