@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 """Mark an image for the current bot's final reply."""
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Re-exec under the app's own virtualenv when started by another interpreter (e.g. the system
+# python3 a `#!/usr/bin/env python3` shebang finds), so `botoffice` and its dependencies import.
+_ROOT = Path(__file__).resolve().parent.parent
+_VENV_PYTHON = _ROOT / ".venv" / "bin" / "python"
+if (_VENV_PYTHON.exists() and Path(sys.prefix).resolve() != (_ROOT / ".venv").resolve()
+        and not os.environ.get("BOT_OFFICE_VENV_REEXEC")):
+    os.environ["BOT_OFFICE_VENV_REEXEC"] = "1"  # loop guard
+    try:
+        os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+    except OSError:
+        pass  # fall through: try with the current interpreter
+
+sys.path.insert(0, str(_ROOT / "src"))
 
 from botoffice.outgoing_images import attach_file  # noqa: E402
 
