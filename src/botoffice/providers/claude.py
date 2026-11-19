@@ -93,6 +93,7 @@ class ClaudeAdapter(CliAdapter):
             args += ["--settings", json.dumps(settings)]
         if job is not None and job.bot_id is not None:
             args += ["--add-dir", str(self._bot_dir(workspace, job) / "attachments")]
+            args += ["--add-dir", str(self._bot_dir(workspace, job) / "uploads")]  # files of any type the owner sent
         if session:
             args += ["--resume", session]
         model = self._job_model(job)

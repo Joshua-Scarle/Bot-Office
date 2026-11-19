@@ -116,7 +116,7 @@ assert(!/15 s/.test(steerHint(bot('interrupt'), false)));
 assert(/cannot take a message while it works/.test(steerHint(bot('queue'), true)));
 assert(/joins the waiting turn/.test(steerHint(bot('queue', 'queued'), false)));
 assert(/waits until/.test(steerHint(bot('live'), true)));
-assert.strictEqual(composerPlaceholder(bot('live'), false, false), 'Message (Ctrl+V to paste images)');
+assert.strictEqual(composerPlaceholder(bot('live'), false, false), 'Message (Ctrl+V or drop files to attach)');
 assert(/^Steer Ada while it works/.test(composerPlaceholder(bot('live'), true, false)));
 assert(/after the current turn/.test(composerPlaceholder(bot('queue'), true, true)));
 const done = steerMark({ steer_status: 'delivered', steer_delivered_at: '2026-11-17T10:00:00Z' }, bot('live'));

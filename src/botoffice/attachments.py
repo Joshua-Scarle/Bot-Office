@@ -25,6 +25,105 @@ GLOBAL_MAX_TOTAL = 2 * 1024 * 1024 * 1024
 UNREFERENCED_TTL = 24 * 60 * 60
 ID_RE = re.compile(r"\d{4}-\d{2}-\d{2}-[0-9a-f]{32}\.(?:png|jpg|gif|webp)\Z")
 EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+
+# 0.11.13: files of any type. They are stored apart from the images, in data/bots/<id>/uploads/, under a
+# unique, sanitized name: <date>-<32 hex>-<name>. Never executable, never extracted, never served inline.
+UPLOADS_DIR = "uploads"
+FILE_ID_RE = re.compile(r"\d{4}-\d{2}-\d{2}-[0-9a-f]{32}-[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
+DEFAULT_MAX_FILE_MB = 50
+FILE_MAX_COUNT = 1000
+FILE_MAX_TOTAL = 1024 * 1024 * 1024
+
+
+def max_file_bytes() -> int:
+    """Per-file upload limit: BOT_OFFICE_MAX_UPLOAD_MB (default 50)."""
+    try:
+        mb = float(os.environ.get("BOT_OFFICE_MAX_UPLOAD_MB", DEFAULT_MAX_FILE_MB))
+    except ValueError:
+        mb = DEFAULT_MAX_FILE_MB
+    return int(max(mb, 0.001) * 1024 * 1024)
+
+
+def stored_limit(name: str) -> int:
+    """The largest stored file that is still read. The upload limit applies when a file arrives; lowering it
+    later must not make files already sent unreadable, so reads allow the larger of it and the default."""
+    return max(max_file_bytes(), DEFAULT_MAX_FILE_MB * 1024 * 1024) if is_file_id(name) else MAX_BYTES
+
+
+def safe_name(raw: str) -> str:
+    """A file name that is safe on disk: no directory part, no path tricks, plain characters only."""
+    name = re.split(r"[\\/]", raw.replace("\x00", ""))[-1]
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
+    if not name:
+        return "file"
+    if len(name) > 100:
+        stem, dot, ext = name.rpartition(".")
+        ext = ext[:12] if dot else ""
+        name = (stem[: 99 - len(ext)] + "." + ext) if ext else name[:100]
+        name = name[:100].strip("._-") or "file"
+    return name
+
+
+def display_name(name: str) -> str:
+    """The file's own (sanitized) name inside a file id; an image id is returned as is."""
+    return name[len("0000-00-00-") + 33:] if is_file_id(name) else name
+
+
+def is_file_id(name: str) -> bool:
+    return bool(FILE_ID_RE.fullmatch(name))
+
+
+def is_valid_id(name: str) -> bool:
+    return bool(ID_RE.fullmatch(name) or FILE_ID_RE.fullmatch(name))
+
+
+def uploads_directory(data_dir: Path, bot_id, create: bool = False) -> Path:
+    root = data_dir / "bots"
+    workspace = root / str(bot_id)
+    path = workspace / UPLOADS_DIR
+    for part in (root, workspace, path):
+        if create:
+            part.mkdir(mode=isolation.dir_mode(), parents=True, exist_ok=True)
+        try:
+            info = part.lstat()
+        except FileNotFoundError:
+            if create:
+                raise
+            break
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise ValueError("invalid upload directory")
+    return path
+
+
+def folder_for(data_dir: Path, bot_id, name: str, create: bool = False) -> Path:
+    """The directory holding the stored image or file called *name*."""
+    return uploads_directory(data_dir, bot_id, create) if is_file_id(name) else directory(data_dir, bot_id, create)
+
+
+def save_file(data_dir: Path, bot_id, data: bytes, raw_name: str,
+              referenced: dict[str, set[str]] | None = None) -> str:
+    """Store an uploaded file of any type as uploads/<date>-<uuid>-<safe name>, mode 0400, never overwriting."""
+    if len(data) > max_file_bytes():
+        raise ValueError("file too large")
+    prune(data_dir, referenced or {})
+    path = uploads_directory(data_dir, bot_id, create=True)
+    entries = [p for p in path.iterdir() if FILE_ID_RE.fullmatch(p.name)]
+    if len(entries) >= FILE_MAX_COUNT or sum(p.lstat().st_size for p in entries) + len(data) > FILE_MAX_TOTAL:
+        raise OverflowError(
+            f"This bot's file storage is full ({FILE_MAX_COUNT} files or {FILE_MAX_TOTAL // (1024 * 1024)} MiB). "
+            "Files sent in a message are kept; remove unsent uploads or ask for old files to be deleted."
+        )
+    name = f"{datetime.now(UTC):%Y-%m-%d}-{uuid4().hex}-{safe_name(raw_name)}"
+    fd = os.open(path / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fchmod(stream.fileno(), 0o440 if isolation.active() else 0o400)  # readable, never executable
+    except BaseException:
+        (path / name).unlink(missing_ok=True)
+        raise
+    return name
 IMAGE_SIGNATURES: tuple[tuple[str, bytes, int], ...] = (
     ("image/png", b"\x89PNG\r\n\x1a\n", 0),
     ("image/jpeg", b"\xff\xd8\xff", 0),
@@ -172,29 +271,35 @@ def directory(data_dir: Path, bot_id, create: bool = False) -> Path:
     return path
 
 
+def _prune_folder(folder: Path, pattern: re.Pattern, kept: set[str], cutoff: float) -> None:
+    if not folder.exists():
+        return
+    for entry in folder.iterdir():
+        if pattern.fullmatch(entry.name) and entry.name not in kept:
+            info = entry.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+
+
 def prune(data_dir: Path, referenced: dict[str, set[str]]) -> None:
+    """Remove unsent uploads (images and files) older than a day; anything a message references stays."""
     root = data_dir / "bots"
     if not root.exists():
         return
     cutoff = time.time() - UNREFERENCED_TTL
     for bot in root.iterdir():
-        try:
-            path = directory(data_dir, bot.name)
-            if not path.exists():
+        kept = referenced.get(bot.name, set())
+        for folder_of, pattern in ((directory, ID_RE), (uploads_directory, FILE_ID_RE)):
+            try:  # a bot may have only one of the two folders
+                _prune_folder(folder_of(data_dir, bot.name), pattern, kept, cutoff)
+            except (OSError, ValueError):
                 continue
-            for entry in path.iterdir():
-                if ID_RE.fullmatch(entry.name) and entry.name not in referenced.get(bot.name, set()):
-                    info = entry.lstat()
-                    if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
-                        entry.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            continue
 
 
 def delete(data_dir: Path, bot_id, attachment_id: str) -> None:
-    if not ID_RE.fullmatch(attachment_id):
+    if not is_valid_id(attachment_id):
         raise ValueError("invalid attachment id")
-    path = directory(data_dir, bot_id) / attachment_id
+    path = folder_for(data_dir, bot_id, attachment_id) / attachment_id
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode):
         raise ValueError("invalid attachment file")
@@ -203,26 +308,27 @@ def delete(data_dir: Path, bot_id, attachment_id: str) -> None:
 
 def size(data_dir: Path, bot_id, attachment_id: str) -> int:
     """Size of a stored attachment; raises ValueError/OSError if it is invalid or missing."""
-    if not ID_RE.fullmatch(attachment_id):
+    if not is_valid_id(attachment_id):
         raise ValueError("invalid attachment id")
-    info = (directory(data_dir, bot_id) / attachment_id).lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:
+    info = (folder_for(data_dir, bot_id, attachment_id) / attachment_id).lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > stored_limit(attachment_id):
         raise ValueError("invalid attachment file")
     return info.st_size
 
 
 def read(data_dir: Path, bot_id, attachment_id: str) -> bytes:
-    if not ID_RE.fullmatch(attachment_id):
+    if not is_valid_id(attachment_id):
         raise ValueError("invalid attachment id")
-    path = directory(data_dir, bot_id) / attachment_id
+    path = folder_for(data_dir, bot_id, attachment_id) / attachment_id
+    limit = stored_limit(attachment_id)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             raise ValueError("invalid attachment file")
         with os.fdopen(fd, "rb") as stream:
             fd = -1
-            return stream.read(MAX_BYTES + 1)
+            return stream.read(limit + 1)
     finally:
         if fd != -1:
             os.close(fd)
@@ -269,9 +375,9 @@ def write_index(data_dir: Path, bot_id, rows: list[tuple]) -> Path:
     """Write ``attachments/INDEX.md`` (date, message id, file, message excerpt) for the bot."""
     path = directory(data_dir, bot_id, create=True)
     lines = [
-        "# Images sent to and from this bot",
+        "# Images and files sent to and from this bot",
         "",
-        f"Every image is kept permanently in {path}/ . Open files from here, never from an old job directory.",
+        f"Every image is kept permanently in {path}/ and every other uploaded file in {path.parent / UPLOADS_DIR}/ . Open files from there, never from an old job directory.",
         "Newest last. Columns: date (UTC) | message id | direction | file | message text.",
         "",
     ]
@@ -279,7 +385,8 @@ def write_index(data_dir: Path, bot_id, rows: list[tuple]) -> Path:
         stamp, message_id, name, text = row[:4]
         direction = row[4] if len(row) > 4 else "from user"
         excerpt = " ".join(text.split())[:100].replace("|", "/")
-        lines.append(f"- {stamp} | message {message_id} | {direction} | {path / name} | {excerpt}")
+        where = uploads_directory(data_dir, bot_id) if is_file_id(name) else path
+        lines.append(f"- {stamp} | message {message_id} | {direction} | {where / name} | {excerpt}")
     target = path / INDEX_FILE
     tmp = path / f".{INDEX_FILE}.tmp"
     tmp.unlink(missing_ok=True)

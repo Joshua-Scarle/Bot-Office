@@ -31,7 +31,7 @@ DEFAULT_MODELS: dict[str, str] = {
 # (model id, human label). Used when a CLI cannot list models cheaply.
 STATIC_MODELS: dict[str, tuple[tuple[str, str], ...]] = {
     "opencode": (("opencode/big-pickle", "opencode/big-pickle"), ("openai/gpt-5", "openai/gpt-5"), ("anthropic/claude-sonnet-4-5", "anthropic/claude-sonnet-4-5")),
-    "codex": (("gpt-6.1-terra", "gpt-6.1-terra"),),
+    "codex": (("gpt-6.1-terra", "gpt-6.1-terra"), ("gpt-6.2-sol", "gpt-6.2-sol")),
     "claude": (
         ("claude-opus-5-5", "Opus 5.5"),
         ("claude-sonnet-5-5", "Sonnet 5.5"),
