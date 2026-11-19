@@ -162,7 +162,7 @@ Both are inlined in every fresh prompt (system prompt first) and written as `SYS
 
 - Tasks have a priority (urgent, high, normal, low). Lists, prompts and the queue put higher priority first. Set it with `bot-task add/edit --priority` or the badge and selector in the panel.
 - A task added from the form starts on its own; untick "Start now" to leave it open. Start appears only on open tasks that never started.
-- A task one bot adds to another bot's list lands open and waits for that bot.
+- A task one bot adds to another bot's list lands open and waits for that bot. It gets at most normal priority and no position of the sender's choosing, so one bot cannot reorder another's queue.
 - On its own list, a bot may edit the title and goal of a task you created, never its done-when. Such edits are marked "Edited by a bot", and prompts show them as untrusted text until you rewrite them.
 - Dropping a task (by you or a bot) cancels its queued and running turns, and they do not come back.
 - A bot's task writes are capped per hour.
@@ -175,6 +175,7 @@ Settings (environment, read on every call; unknown values fall back to the defau
 - `BOT_OFFICE_BOT_EDIT_OWNER_TASKS` = `title_goal` (default) or `off`.
 - `BOT_OFFICE_FORM_TASKS_START` = `auto` (default) or `manual`.
 - `BOT_OFFICE_TASK_DEFAULT_PRIORITY` = `normal` (default), `urgent`, `high` or `low`.
+- `BOT_OFFICE_CROSS_BOT_MAX_PRIORITY` = `normal` (default), `urgent`, `high` or `low`: the highest priority a bot may give a task on another bot's list.
 - `BOT_OFFICE_TASK_WRITES_PER_HOUR` = `200` (default).
 - `BOT_OFFICE_TASKS_LABEL` = `Assignments` (default).
 
