@@ -150,7 +150,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 
 Both are inlined in every fresh prompt (system prompt first) and written as `SYSTEM-PROMPT.md` and `RULES-FOR-ALL-BOTS.md` in the job directory (no more `BASELINE.md`). Resumed sessions get a one-line nudge when either changes. The owner's standing rules and the bot's `instructions.md` override both; the numbered rules always apply.
 
-**The chat shows who wrote what.** Only messages you type use your bubble. Messages between bots (bot-msg, inbox drops, reply copies, one bot handing another an assignment), sent or received, show in the chat only as a time and a row like "2 messages with Bot-Office Lead", with that bot's icon; back-to-back messages with the same bot share one row. Click it to read that conversation in an overlay (both bots' icons and names, formatted text, Close Chat or Esc). A bot's own messages to other bots count toward Unread. Bot-Office's machinery (automatic continuations, assignment "Continue" and "Check" steps, wake-up prompts and "Not done (continuing)" lines) stays out of the chat and the Unread count; Show archived and the Details drawer still show it. Routine prompts, watcher runs and assignment starts appear as small notes, never as your messages. Messages carry `author` (owner, bot, bot_out, bot_in, bot_reply, office, system) and `peer` in the API.
+**The chat shows who wrote what.** Only messages you type use your bubble. Messages between bots (bot-msg, inbox drops, reply copies, one bot handing another an assignment), sent or received, show in the chat only as a time and a row like "2 messages with Research Bot", with that bot's icon; back-to-back messages with the same bot share one row. Click it to read that conversation in an overlay (both bots' icons and names, formatted text, Close Chat or Esc). A bot's own messages to other bots count toward Unread. Bot-Office's machinery (automatic continuations, assignment "Continue" and "Check" steps, wake-up prompts and "Not done (continuing)" lines) stays out of the chat and the Unread count; Show archived and the Details drawer still show it. Routine prompts, watcher runs and assignment starts appear as small notes, never as your messages. Messages carry `author` (owner, bot, bot_out, bot_in, bot_reply, office, system) and `peer` in the API.
 
 **A real Settings page.** The sidebar's ⚙ Settings opens settings for all bots: Rules for all bots, Bot behavior (auto-continue, its limits and the automatic-turn caps; `GET`/`PUT /v1/settings`), Approvals, Engines (sign-in status), Voice, and Advanced (system prompt). Each bot's own settings stay in its chat.
 
@@ -223,6 +223,14 @@ sqlite3 data/agentdesk.sqlite3 "UPDATE messages SET steer_status='delivered' WHE
 ```
 
 The first statement drains bot messages still waiting to steer a turn (0.11.9 would re-queue them as if you had typed them). The second cancels automatic turns held by a cap (0.11.9 would run them without the cap check). Hidden machinery rows and approval cards show as plain lines in 0.11.9.
+
+Then mark the text a bot edited on a task you created:
+
+```bash
+sqlite3 data/agentdesk.sqlite3 "UPDATE assignments SET title='[bot-edited] '||title WHERE created_by='user' AND ','||bot_edited||',' LIKE '%,title,%' AND title NOT LIKE '[bot-edited] %'; UPDATE assignments SET goal='[bot-edited] '||goal WHERE created_by='user' AND ','||bot_edited||',' LIKE '%,goal,%' AND goal NOT LIKE '[bot-edited] %'; UPDATE assignments SET done_when='[bot-edited] '||done_when WHERE created_by='user' AND ','||bot_edited||',' LIKE '%,done_when,%' AND done_when NOT LIKE '[bot-edited] %';"
+```
+
+Why: 0.11.10 remembers which fields of your task a bot rewrote (`assignments.bot_edited`) and shows those fields to bots as untrusted data, not as your instructions. 0.11.9 does not know that column, so it would quote a bot's rewrite as if you had written it. The prefix keeps it visibly marked in the task panel and in prompts. Running the statements twice changes nothing.
 
 Not built, by design: quiet hours, a general done gate for physical or irreversible results, and a loop that starts open tasks by itself.
 
