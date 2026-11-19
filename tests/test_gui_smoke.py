@@ -82,7 +82,7 @@ const $ = (id) => elements[id];
 let bot = {id: 'one'}, state = {selected: 'one'}, draftRevision = 0, sendingImages = false;
 const first = {id: 'a', bot: 'one'}, pendingImages = [first];
 let resolveRequest;
-function currentBot() { return bot; }
+function currentBot() { return bot; } function showEcho() { return {}; } function clearEcho() {}
 function api() { return new Promise(resolve => { resolveRequest = resolve; }); }
 function removeImage(item) { pendingImages.splice(pendingImages.indexOf(item), 1); item.removed = true; }
 function updateImages() {} function autoGrow() {} function setStatus() {} function renderBots() {}
@@ -350,7 +350,7 @@ let bot = {id: 'one'}, state = {selected: 'one'}, draftRevision = 0, sendingImag
 const pendingImages = [];
 let posts = 0, statuses = [], resolvePost;
 const API_TIMEOUT_MS = 30000;
-function currentBot() { return bot; }
+function currentBot() { return bot; } function showEcho() { return {}; } function clearEcho() {}
 function api() { posts++; return new Promise((resolve) => { resolvePost = resolve; }); }
 function removeImage() {} function updateImages() {} function autoGrow() {} function renderBots() {} function renderHeader() {}
 function setStatus(t) { statuses.push(t); } function handleError(e) { throw e; } function deleteUpload() {}
@@ -395,7 +395,7 @@ let bot = {id: 'one'}, state = {selected: 'one'}, draftRevision = 0, sendingImag
 const pendingImages = [];
 let shown = null, refreshed = 0;
 const API_TIMEOUT_MS = 30000;
-function currentBot() { return bot; }
+function currentBot() { return bot; } function showEcho() { return {}; } function clearEcho() {}
 function api() { const e = new Error('No answer from the server after 30 s.'); e.timeout = true; e.status = 0; return Promise.reject(e); }
 function removeImage() {} function updateImages() {} function autoGrow() {} function renderBots() {} function renderHeader() {}
 function setStatus() {} function handleError(e) { shown = e.message; } function deleteUpload() {}

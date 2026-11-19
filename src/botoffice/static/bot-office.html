@@ -349,6 +349,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
 .msg .delivery { margin-left: 6px; font-size: 11px; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; font-style: normal; }
 .msg .delivery.delivered { color: var(--ok); border-color: #2f5a3d; }
 .msg .delivery.pending, .msg .delivery.queued { color: var(--warn); border-color: #5a4f2a; }
+.msg.user.sending { opacity: .8; }
 .msg .delivery-note { font-size: 12px; color: var(--warn); margin-top: 3px; }
 .msg.user.steered .body { border-right: 3px solid var(--accent); }
 .steer-hint { font-size: 12px; color: var(--muted); margin: 0; }
@@ -647,7 +648,7 @@ const MAX_ICON_BYTES = 2 * 1024 * 1024;
 const state = {
   bots: [], choices: null, selected: sessionStorage.getItem(BOT_KEY) || sessionStorage.getItem("crewdeck-bot"),
   msgSig: "", iconUrls: new Map(), editing: null, pendingImage: null, pendingSeed: null, removeImage: false,
-  timer: null, tick: 0, live: new Map(),
+  timer: null, tick: 0, live: new Map(), echo: null,
   // newest message ids rendered for the selected bot (all / counted as unread)
   shown: { bot: null, max: 0, counted: 0 }, readSent: new Map(),
   // 0.11.10: the selected bot's last message list (the bot-to-bot overlay reads it)
@@ -726,8 +727,24 @@ async function api(path, options = {}) {
 function handleError(err, where) {
   if (err instanceof AuthError) { lock("Token rejected. Enter it again."); return; }
   const target = where || $("status");
-  target.textContent = err.message;
+  target.textContent = friendlyError(err);
   target.classList.add("bad");
+}
+
+/* 0.12.1: what went wrong and what to do, instead of the browser's or fetch's raw words */
+function friendlyError(err) {
+  const message = String((err && err.message) || err || "Something went wrong.");
+  const status = err && err.status;
+  if (err && err.timeout) return message;
+  if (/^(Failed to fetch|NetworkError|Load failed)/i.test(message))
+    return "Can't reach Bot-Office. Check that the SSH tunnel or your connection is up, then try again. Anything you typed is still in the box.";
+  const stream = /^stream HTTP (\d+)/.exec(message);
+  if (stream) return "The live view lost its connection (HTTP " + stream[1] + "). It reconnects by itself; the reply is safe on the server.";
+  if (status === 413) return "That is too large to send. Try a smaller file or message.";
+  if (status === 429) return "Too many requests just now. Wait a few seconds and try again.";
+  if (status >= 500 || status === 502 || status === 503 || status === 504)
+    return "Bot-Office had a problem (" + message + "). Try again in a moment; if it keeps happening, check the Activity panel or the service log.";
+  return message;
 }
 
 function setStatus(text) { $("status").textContent = text || ""; $("status").classList.remove("bad"); }
@@ -1760,8 +1777,29 @@ function applyEvent(view, ev) {
   else if (ev.kind === "error") { view.errors += 1; addStep(view, "error", "⚠ " + (ev.message || "error"), "bad"); }
   else if (ev.kind === "steer") { if (ev.status === "delivered") view.phase = "steered"; state.msgSig = ""; loadMessages().catch(() => {}); }
   else if (ev.kind === "done") view.done = (ev.attempt ?? view.attempt) >= view.attempt;
-  refreshView(view);
-  if (stick) box.scrollTop = box.scrollHeight;
+  queueRefresh(view, stick);
+}
+
+/* 0.12.1: a fast stream sends many small text events; redraw the live bubble at most once per frame
+   (with a timer fallback for a hidden tab, where animation frames are paused) instead of once per event */
+function queueRefresh(view, stick) {
+  view.stickPending = stick;  // the latest event's view of "was at the bottom" wins
+  if (view.redraw) return;
+  if (typeof requestAnimationFrame !== "function") {  // no browser (unit tests): draw at once
+    refreshView(view);
+    if (stick) { const box = $("messages"); box.scrollTop = box.scrollHeight; }
+    view.stickPending = false;
+    return;
+  }
+  const run = () => {
+    if (!view.redraw) return;
+    cancelAnimationFrame(view.redraw.raf); clearTimeout(view.redraw.timer); view.redraw = null;
+    if (view.stopped) return;  // the bubble was replaced (another bot opened, turn over): draw nothing, scroll nothing
+    refreshView(view);
+    if (view.stickPending) { const box = $("messages"); box.scrollTop = box.scrollHeight; }
+    view.stickPending = false;
+  };
+  view.redraw = { raf: requestAnimationFrame(run), timer: setTimeout(run, 250) };
 }
 
 function handleFrame(view, frame) {
@@ -2473,11 +2511,12 @@ async function loadMessages() {
   if (bot.activity && !hasPending) {
     const turn = el("div", "msg assistant live turn" + (bot.activity === "running" ? "" : " is-waiting"));
     const row = workingRow();
-    row.status.textContent = bot.activity === "running" ? "Working" : "Waiting to start";
+    row.status.textContent = bot.activity === "running" ? "Starting up" : "Waiting to start";
     turn.append(row.row);
     nodes.push(turn);
   }
   $("thread").replaceChildren(...nodes);
+  if (echoStillNeeded(state.echo, messages, id)) $("thread").append(...state.echo.nodes);  // sending, or stored but not listed yet
   if (atBottom || messages.length < 3) box.scrollTop = box.scrollHeight;
   markRead(id, false);
   autoRead(id, messages);
@@ -2565,6 +2604,44 @@ $("show-archived").onclick = () => {
   loadMessages().catch(handleError);
 };
 
+/* 0.12.1: your message is on screen the moment you press Send, before the server has answered.
+   loadMessages() draws it from the server once it is stored and replaces this local copy. */
+function showEcho(bot, text, attachmentCount) {
+  const wrap = el("div", "msg user sending");
+  const who = el("div", "who", "You · ");
+  who.append(el("span", "delivery pending", "Sending…"));
+  const shown = text || "";
+  wrap.append(who, el("div", "body", shown + (attachmentCount ? (shown ? "\n" : "") + "📎 " + attachmentCount + (attachmentCount === 1 ? " attachment" : " attachments") : "")));
+  const nodes = [wrap];
+  if (!bot.activity) {  // idle bot: show that a turn is about to start
+    const turn = el("div", "msg assistant live turn is-waiting");
+    const row = workingRow();
+    row.status.textContent = "Sending to " + bot.name + "…";
+    turn.append(row.row);
+    nodes.push(turn);
+  }
+  if (state.echo) for (const node of state.echo.nodes) node.remove();  // a second send before the first one is drawn
+  // need: how many owner messages newer than baseId the list must hold before the stored copies replace the echo
+  const previous = state.echo && state.echo.bot === bot.id ? state.echo : null;
+  const echo = { bot: bot.id, nodes, need: previous ? previous.need + 1 : 1,
+                 baseId: previous ? previous.baseId : (state.shown && state.shown.bot === bot.id ? state.shown.max : 0) };
+  state.echo = echo;
+  $("thread").querySelector(".empty")?.remove();
+  $("thread").append(...nodes);
+  const box = $("messages"); box.scrollTop = box.scrollHeight;
+  return echo;
+}
+/* only the send that made it may remove it (a newer send has its own) */
+function clearEcho(echo) {
+  if (!echo) return;
+  for (const node of echo.nodes) node.remove();
+  if (state.echo === echo) state.echo = null;
+}
+/* the local copy is still needed while the chat list does not yet hold the stored message */
+function echoStillNeeded(echo, messages, botId) {
+  return !!echo && echo.bot === botId && messages.filter((m) => m.id > echo.baseId && isOwnerMessage(m)).length < echo.need;
+}
+
 let submitting = false;
 $("composer").onsubmit = async (event) => {
   event.preventDefault();
@@ -2586,6 +2663,8 @@ $("composer").onsubmit = async (event) => {
   const body = { text: text || (sentImages.every((item) => item.file) ? "Please see the attached files." : sentImages.some((item) => item.file) ? "Please see the attachments." : "Please see attached images."), attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
   sendingImages = true; for (const item of sentImages) item.sending = true; updateImages();
+  const echo = showEcho(bot, text, sentImages.length);
+  if (!sentImages.length) { $("text").value = ""; autoGrow(); }  // a failed send puts the draft back (below)
   try {
     const posted = await api("/v1/bots/" + bot.id + "/messages", { method: "POST", body: JSON.stringify(body) });
     if (state.selected === bot.id && draftRevision === revision && $("text").value === draft) $("text").value = "";
@@ -2602,13 +2681,16 @@ $("composer").onsubmit = async (event) => {
     // the message is in: free the composer now, so a slow or stuck chat refresh cannot leave Send greyed out
     for (const item of sentImages) item.sending = false;
     sendingImages = false; updateImages();
-    loadMessages().then(() => { const box = $("messages"); box.scrollTop = box.scrollHeight; }).catch(handleError);
+    loadMessages().then(() => { const box = $("messages"); box.scrollTop = box.scrollHeight; clearEcho(echo); }).catch(handleError);  // a failed refresh keeps the echo until the next one
   } catch (err) {
+    clearEcho(echo);
+    if (state.selected === bot.id) state.msgSig = "";  // the chat is redrawn below (e.g. the empty-chat greeting is back)
+    if (!sentImages.length && !$("text").value && state.selected === bot.id) { $("text").value = draft; autoGrow(); }  // nothing is lost
     if (err && err.timeout) {
       // the server may have accepted it even though no answer came back: refresh the chat and warn before a retry duplicates it
       err.message = "No answer from the server. The message may have been sent: check the chat before sending it again.";
       loadMessages().catch(() => {});
-    }
+    } else if (state.selected === bot.id) loadMessages().catch(() => {});
     handleError(err);
   }
   finally { for (const item of sentImages) { item.sending = false; if (item.removed && !item.idSent) deleteUpload(item); } sendingImages = false; updateImages(); }

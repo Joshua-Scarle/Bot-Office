@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.12.0. What changed is recorded below: [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.12.1. What changed is recorded below: [0.12.1](#what-changed-in-0121), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,19 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.12.1
+
+Small chat-speed and clarity fixes from an audit of the chat UI, engines and performance. Nothing about the engines, the queue or the data changed.
+
+- **Your message appears at once.** Pressing Send draws your bubble immediately with a "Sending…" mark (and "Sending to <bot>…" when the bot is idle) instead of waiting for the server's answer and a chat refresh; the stored copy replaces it a moment later. The box clears at once. If the send fails, the bubble goes away and your draft is put back (unless you already typed something new). Measured in a real browser with a simulated 300 ms round trip (a scripted browser run against a throwaway local server): 376, 400 and 403 ms from Enter to the bubble before, 10, 7 and 7 ms after.
+- **Plain errors that say what to do.** A dropped connection now reads "Can't reach Bot-Office. Check that the SSH tunnel or your connection is up, then try again. Anything you typed is still in the box." instead of "Failed to fetch"; `stream HTTP 502` becomes a note that the live view reconnects by itself; 413, 429 and 5xx answers get a sentence of their own. Server messages that were already clear are shown as they were.
+- **Consistent status words.** The short placeholder shown before the turn's own bubble exists says "Starting up" (running) or "Waiting to start" (queued), the same words as the live bubble.
+- **Smoother live reply.** The live bubble redraws at most once per animation frame (with a 250 ms timer for a hidden tab) instead of once per streamed text event.
+- **Smaller downloads.** Responses over 1 kB are gzip-compressed (Starlette `GZipMiddleware`, level 5) for clients that ask: the page (217 kB) and long chats (a 511-message chat is 457 kB of JSON). The live event stream stays uncompressed, so streaming is unchanged.
+- **One more index.** `jobs(bot_id, status, created_at)` (`jobs_bot`, created if missing at start-up; additive, old versions ignore it) for the per-bot job lookups. At 473 jobs the old plan already took 0.02 ms per query, so this is for growth.
+
+Tests: `tests/test_chat_polish.py`. Still open from the audit, on purpose: history pagination and message search, phone access without an SSH tunnel, push notifications, proof of mid-turn steering on the real Codex/Cursor/Antigravity/OpenCode CLIs, `/v1/providers` taking about 2 s (Settings), and pruning old `thinking` events.
 
 ## What changed in 0.12.0
 

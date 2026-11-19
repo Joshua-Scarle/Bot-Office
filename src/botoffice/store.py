@@ -773,6 +773,8 @@ class JobStore:
                     elif job["status"] not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
                         db.execute("UPDATE assignments SET turns_used=turns_used+1 WHERE id=?", (job["assignment_id"],))
             db.execute("CREATE INDEX IF NOT EXISTS jobs_claim ON jobs(status, priority, created_at)")
+            # 0.12.1: most per-bot job lookups (running/queued turn, last failure, caps) filter on bot_id
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_bot ON jobs(bot_id, status, created_at)")
             db.execute("CREATE TABLE IF NOT EXISTS agent_tokens (token_hash TEXT PRIMARY KEY, job_id TEXT NOT NULL, bot_id TEXT NOT NULL)")
 
             # Unread state per bot. revision changes on every "mark as unread" so a stale

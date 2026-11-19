@@ -23,6 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, grok_bridge, isolation, needs_you, safefs, vnc
@@ -372,6 +373,19 @@ class BridgeInbox(BaseModel):
 CHAT_PAGE = Path(__file__).parent / "static" / "bot-office.html"
 MAX_ICON_BYTES = avatars.MAX_UPLOAD_BYTES
 TERMINAL = {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.NEEDS_LOGIN, JobStatus.INCOMPLETE}
+
+
+class TextGZipMiddleware(GZipMiddleware):
+    """GZip for the page and JSON; attachment bodies and icons are images or files, mostly already compressed."""
+
+    async def __call__(self, scope, receive, send) -> None:
+        path = scope.get("path", "")
+        if scope["type"] == "http" and ("/attachments/" in path or path.endswith("/icon")):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 EVENT_POLL_SECONDS = 0.2
 EVENT_KEEPALIVE_SECONDS = 15.0
 EVENT_GRACE_SECONDS = 3.0
@@ -485,6 +499,9 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
+    # 0.12.1: the page (217 kB) and long chats (hundreds of kB) shrink a lot over a tunnel;
+    # Starlette leaves text/event-stream (the live reply) uncompressed
+    app.add_middleware(TextGZipMiddleware, minimum_size=1024, compresslevel=5)
     app.state.settings = settings
     app.state.store = store
     app.state.providers = providers
