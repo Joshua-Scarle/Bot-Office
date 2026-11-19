@@ -989,7 +989,7 @@ def create_app(
             except (ValueError, OSError) as exc:
                 raise HTTPException(status_code=400, detail="invalid attachment directory") from exc
             return {"id": stored, "mime": mime or "application/octet-stream", "size": len(data), "kind": "image" if mime else "file",
-                    "name": None if mime else stored[len("0000-00-00-") + 33:],
+                    "name": None if mime else attachments.display_name(stored),
                     "url": f"/v1/bots/{bot_id}/attachments/{stored}"}
 
     @app.delete("/v1/bots/{bot_id}/attachments/{attachment_id}", status_code=204, dependencies=[Depends(auth)])
@@ -1014,7 +1014,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="attachment not found") from exc
         is_file = attachments.is_file_id(attachment_id)
         return {"id": attachment_id, "kind": "file" if is_file else "image", "size": size,
-                "name": attachment_id[len("0000-00-00-") + 33:] if is_file else attachment_id}
+                "name": attachments.display_name(attachment_id)}
 
     @app.get("/v1/bots/{bot_id}/attachments/{attachment_id}", dependencies=[Depends(auth)])
     async def get_attachment(bot_id: UUID, attachment_id: str) -> Response:
@@ -1029,7 +1029,7 @@ def create_app(
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=404, detail="attachment not found") from exc
         if mime is None:
-            label = attachment_id[len("0000-00-00-") + 33:]
+            label = attachments.display_name(attachment_id)
             return Response(data, media_type="application/octet-stream", headers={
                 "X-Content-Type-Options": "nosniff", "Content-Disposition": f'attachment; filename="{label}"',
                 "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})

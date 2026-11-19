@@ -175,3 +175,22 @@ def test_lowering_the_limit_does_not_hide_files_already_sent(client_bot, monkeyp
     monkeypatch.setenv("BOT_OFFICE_MAX_UPLOAD_MB", "1")
     assert client.get(info["url"], headers=H).status_code == 200
     assert client.get(info["url"] + "/info", headers=H).json()["size"] == 1024 * 1024 + 10
+
+
+def test_unsent_uploads_are_pruned_even_for_a_bot_with_no_images(client_bot):
+    client, bot, settings = client_bot
+    old = up(client, bot, "old.bin", b"1").json()["id"]
+    sent = up(client, bot, "sent.bin", b"2").json()["id"]
+    client.post(f"/v1/bots/{bot}/messages", headers=H, json={"text": "x", "attachments": [sent]})
+    folder = settings.data_dir / "bots" / bot / "uploads"
+    assert not (settings.data_dir / "bots" / bot / "attachments").exists()  # no image folder at all
+    for name in (old, sent):
+        os.utime(folder / name, (1, 1))
+    attachments.prune(settings.data_dir, client.app.state.store.attachment_references())
+    assert not (folder / old).exists() and (folder / sent).exists()
+
+
+def test_claude_is_granted_the_uploads_folder():
+    import inspect
+    from botoffice.providers import claude
+    assert '"uploads"' in inspect.getsource(claude) and '"--add-dir"' in inspect.getsource(claude)

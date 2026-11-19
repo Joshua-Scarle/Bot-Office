@@ -64,6 +64,11 @@ def safe_name(raw: str) -> str:
     return name
 
 
+def display_name(name: str) -> str:
+    """The file's own (sanitized) name inside a file id; an image id is returned as is."""
+    return name[len("0000-00-00-") + 33:] if is_file_id(name) else name
+
+
 def is_file_id(name: str) -> bool:
     return bool(FILE_ID_RE.fullmatch(name))
 
@@ -266,33 +271,29 @@ def directory(data_dir: Path, bot_id, create: bool = False) -> Path:
     return path
 
 
+def _prune_folder(folder: Path, pattern: re.Pattern, kept: set[str], cutoff: float) -> None:
+    if not folder.exists():
+        return
+    for entry in folder.iterdir():
+        if pattern.fullmatch(entry.name) and entry.name not in kept:
+            info = entry.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+
+
 def prune(data_dir: Path, referenced: dict[str, set[str]]) -> None:
+    """Remove unsent uploads (images and files) older than a day; anything a message references stays."""
     root = data_dir / "bots"
     if not root.exists():
         return
     cutoff = time.time() - UNREFERENCED_TTL
     for bot in root.iterdir():
-        try:
-            path = directory(data_dir, bot.name)
-            if not path.exists():
+        kept = referenced.get(bot.name, set())
+        for folder_of, pattern in ((directory, ID_RE), (uploads_directory, FILE_ID_RE)):
+            try:  # a bot may have only one of the two folders
+                _prune_folder(folder_of(data_dir, bot.name), pattern, kept, cutoff)
+            except (OSError, ValueError):
                 continue
-            for entry in path.iterdir():
-                if ID_RE.fullmatch(entry.name) and entry.name not in referenced.get(bot.name, set()):
-                    info = entry.lstat()
-                    if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
-                        entry.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            continue
-        try:
-            files = uploads_directory(data_dir, bot.name)
-            if files.exists():
-                for entry in files.iterdir():
-                    if FILE_ID_RE.fullmatch(entry.name) and entry.name not in referenced.get(bot.name, set()):
-                        info = entry.lstat()
-                        if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
-                            entry.unlink(missing_ok=True)
-        except (OSError, ValueError):
-            continue
 
 
 def delete(data_dir: Path, bot_id, attachment_id: str) -> None:
