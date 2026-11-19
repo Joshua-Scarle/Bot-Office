@@ -180,7 +180,7 @@ Settings (environment, read on every call; unknown values fall back to the defau
 
 `GET /v1/tasks/settings` returns the current values.
 
-Rollback: the database changes are additive (new columns, an index and a marker row), and 0.11.9 ignores them. Tasks created on 0.11.10 still run on 0.11.9, without priority or bot-edit marks.
+Rollback: the database changes are additive (new columns, a side table for bot-message links, an index and a marker row), and 0.11.9 ignores them. No table that 0.11.9 fills with a positional `INSERT` gains a column, so its `bot-msg` and `desk message` keep working. Tasks created on 0.11.10 still run on 0.11.9, without priority or bot-edit marks. See the continuation rollback steps below before rolling back.
 
 **One continuation system.** The chat auto-continue and the assignment run-until-done loop share one decision (`src/botoffice/continuation.py`; design in [docs/CONTINUATION.md](docs/CONTINUATION.md)). A bot is no longer continued automatically when any of these holds:
 
@@ -211,7 +211,15 @@ Settings (Settings → Bot behavior, or `PUT /v1/settings` with `{"auto_continue
 
 To raise a cap, edit it in Settings → Bot behavior, or for example `PUT /v1/settings {"auto_continue": {"per_bot_day": 40}}`.
 
-Rollback: the migration is additive (`jobs.auto_kind`, `jobs.auto_decision`, `bots.chat_only`, plus new keys in the existing `auto_continue` setting), and older code ignores it. Turns waiting on a cap run once their time passes. Not built, by design: quiet hours, a general done gate for physical or irreversible results, and a loop that starts open tasks by itself.
+Rollback: the migration is additive (`jobs.auto_kind`, `jobs.auto_decision`, `bots.chat_only`, plus new keys in the existing `auto_continue` setting), and older code ignores it. Before starting 0.11.9 on the migrated database, stop the service with no job running and run:
+
+```bash
+sqlite3 ~/printpilot-agentdesk/data/agentdesk.sqlite3 "UPDATE messages SET steer_status='delivered' WHERE source='inbox' AND steer_status='pending'; UPDATE jobs SET status='cancelled', error='rollback' WHERE status='queued' AND failure_kind='auto_cap';"
+```
+
+The first statement drains bot messages still waiting to steer a turn (0.11.9 would re-queue them as if you had typed them). The second cancels automatic turns held by a cap (0.11.9 would run them without the cap check). Hidden machinery rows and approval cards show as plain lines in 0.11.9.
+
+Not built, by design: quiet hours, a general done gate for physical or irreversible results, and a loop that starts open tasks by itself.
 
 **Live end-to-end test.** `scripts/e2e_gui.py` drives a real Chromium (or Chrome with `--channel chrome`) through the UI against a throwaway local Bot-Office with a scripted engine and two bots labelled "E2E test bot" (Enter to send, Settings and approvals, the Approve / Deny card, the bot-to-bot row and panel), or read-only against a running install with `--url`/`--token` (`--send-to` sends one real message with Enter, only to a bot whose name starts with "E2E test"). It ends with a plain PASS/FAIL list. Needs `pip install playwright` and `python -m playwright install chromium`.
 
