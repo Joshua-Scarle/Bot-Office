@@ -177,7 +177,7 @@ def test_template_without_placeholders_appends_what_was_typed():
     assert slash.render_template("$2 then $1 and $9", "a b") == "b then a and"
 
 
-@pytest.mark.parametrize("name", ["login", "logout", "auth", "oauth-refresh", "mcp:auth", "setup-token", "connect", "sign-in", "relogin", "reauthenticate", "authorize", "api-key", "credentials", "account"])
+@pytest.mark.parametrize("name", ["login", "logout", "auth", "oauth-refresh", "mcp:auth", "setup-token", "connect", "sign-in", "relogin", "reauthenticate", "authorize", "api-key", "credentials", "account", "log_in", "sign_out", "log.in"])
 def test_auth_names_are_recognised(name):
     assert slash.is_auth(name) and slash.is_auth("/" + name)
 
@@ -410,3 +410,18 @@ def test_a_failed_refresh_keeps_the_stale_list_and_other_versions_stay_cached(tm
     catalog._failed.clear()
     asyncio.run(catalog.commands("claude"))
     assert old_key in catalog._cache and len(catalog._cache) == 2
+
+
+def test_template_arguments_follow_shell_quoting():
+    assert slash.render_template("first $1 second $2", '"a b" c') == "first a b second c"
+
+
+def test_a_damaged_cache_entry_is_dropped_and_asked_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(slash, "VERSION_TTL", 0)
+    fake = CliFake("claude", "2.1.319", (FIX / "claude-init.jsonl").read_bytes())
+    catalog = _catalog(tmp_path, {"claude": fake})
+    asyncio.run(catalog.commands("claude"))
+    for key in catalog._cache:
+        catalog._cache[key] = {"probe": {"oops": 1}}
+    data = asyncio.run(catalog.commands("claude"))
+    assert data["commands"] and data["cached"] is False  # the damaged entry was dropped and asked again

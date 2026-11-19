@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import secrets
 import socket
 import time
@@ -56,7 +57,7 @@ DESC_MAX = 160
 
 # ---- never surfaced, mapped or run: anything that logs in or out, or handles credentials ----
 AUTH_RE = re.compile(
-    r"(?<![a-z])(?:re|de)?(?:auth(?:enticat\w*|oriz\w*)?|log-?(?:in|out)|sign-?(?:in|out)|oauth|credentials?|connect|"
+    r"(?<![a-z])(?:re|de)?(?:auth(?:enticat\w*|oriz\w*)?|log[-_.]?(?:in|out)|sign[-_.]?(?:in|out)|oauth|credentials?|connect|"
     r"api-?key|(?:setup|api|access|auth)-?tokens?|setup-(?:bedrock|vertex)|install-github-app|account)(?![a-z])", re.I)
 
 
@@ -351,7 +352,10 @@ def custom_entries(items: list[tuple[str, Path, str]], *, action: str, expand: b
 def render_template(body: str, args: str) -> str:
     """What the CLIs do with a command file: ``$ARGUMENTS`` is all the arguments, ``$1``..``$9`` the
     positional ones, ``$$`` a dollar sign; named ``$NAME`` placeholders are left as written."""
-    words = args.split()
+    try:
+        words = shlex.split(args)
+    except ValueError:
+        words = args.split()
     out = []
     i = 0
     while i < len(body):
@@ -535,12 +539,20 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
 def fetch_json(url: str, password: str | None, timeout: float = 3.0) -> Any:
     request = urllib.request.Request(url)
     import base64
     if password is not None:
         request.add_header("Authorization", "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode())
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - loopback only
+    with _LOOPBACK.open(request, timeout=timeout) as response:  # loopback only: no proxy, no redirects
         return json.loads(response.read(2_000_000))
 
 
@@ -611,6 +623,11 @@ async def cli_version(adapter) -> str:
 
 
 # ---- the catalog service ----
+def _probe_ok(engine: str, probe: Any) -> bool:
+    need = {"claude": "names", "opencode": "commands", "antigravity": "help"}.get(engine, "documented")
+    return isinstance(probe, dict) and need in probe
+
+
 class SlashCatalog:
     """Lists, caches and resolves slash commands. ``cache_file`` keeps the CLI probes between restarts."""
 
@@ -675,6 +692,9 @@ class SlashCatalog:
         lock = self._locks.setdefault(engine, asyncio.Lock())
         async with lock:
             hit = self._cache.get(key)
+            if hit is not None and not _probe_ok(engine, hit.get("probe") if isinstance(hit, dict) else None):
+                self._cache.pop(key, None)  # damaged or hand-edited cache entry
+                hit = None
             cached = hit is not None and not refresh
             if usable and (hit is None or refresh):
                 if time.monotonic() - self._failed.get(engine, -1e9) >= FALLBACK_TTL:
@@ -689,7 +709,12 @@ class SlashCatalog:
                         self._failed.pop(engine, None)
                     else:
                         self._failed[engine] = time.monotonic()  # a failed refresh keeps the stale hit, if any
-            entries, source_note = self._assemble(engine, hit["probe"] if hit else None, items)
+            try:
+                entries, source_note = self._assemble(engine, hit["probe"] if hit else None, items)
+            except (KeyError, TypeError, ValueError, AttributeError):  # a damaged cache entry: forget it, use the fallback
+                self._cache.pop(key, None)
+                hit = None
+                entries, source_note = self._assemble(engine, None, items)
         return {"engine": engine, "label": ENGINE_LABELS.get(engine, engine), "version": version,
                 "cached": cached, "source": "cli" if hit else "fallback", "note": source_note,
                 "commands": sort_entries(set_actions(engine, entries))}

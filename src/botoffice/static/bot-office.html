@@ -2234,7 +2234,7 @@ async function slashCommands(bot, refresh) {
   if (hit && !refresh && Date.now() - hit.at < 600000) return hit.data;
   if (!slashUi.loading || slashUi.loading.key !== key) {
     const promise = api("/v1/bots/" + bot.id + "/slash-commands" + (refresh ? "?refresh=1" : ""))
-      .then((data) => { slashUi.cache.set(key, { at: Date.now(), data }); return data; })
+      .then((data) => { slashUi.cache.set(key, { at: data.source === "fallback" ? Date.now() - 570000 : Date.now(), data }); return data; })
       .finally(() => { if (slashUi.loading && slashUi.loading.key === key) slashUi.loading = null; });
     slashUi.loading = { key, promise };
   }
@@ -2318,7 +2318,7 @@ $("text").addEventListener("keydown", (event) => {
     event.preventDefault(); event.stopImmediatePropagation();
     slashUi.active = slashMove(slashUi.active, event.key, rows.length);
     renderSlash(slashUi.cache.get(slashKey(currentBot()))?.data || null);
-  } else if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+  } else if (!event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && (event.key === "Enter" || event.key === "Tab")) {
     event.preventDefault(); event.stopImmediatePropagation();
     if (rows[slashUi.active]) pickSlash(rows[slashUi.active]);
   }
@@ -2340,7 +2340,7 @@ let slashBusy = false;
 async function trySlash(bot, text) {
   const parts = slashSplit(text);
   if (!parts) return false;
-  if (slashBusy) return true;  // one slash command at a time; the draft stays in the box
+  if (slashBusy) { setStatus("A slash command is still being sent."); return true; }  // one at a time; the draft stays in the box
   const revision = draftRevision;
   const clearDraft = () => {  // like a normal send: only when the same bot is open and the draft was not edited meanwhile
     if (state.selected === bot.id && draftRevision === revision && $("text").value.trim() === text.trim()) { $("text").value = ""; autoGrow(); draftRevision++; }
