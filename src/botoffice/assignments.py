@@ -13,6 +13,7 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from . import autocontinue
 from .catalog import default_effort
 from .cron import to_cron_time
 from .domain import CLOSED_STATUSES, Assignment, Wakeup
@@ -648,11 +649,33 @@ class Assignments:
                 return "budget"
             if self._has_open_job(db, row["id"]):
                 return "continue"  # a queued turn (e.g. the user's reply) carries on
+            if why := self._loop_guard(db, row):
+                self._event(db, row["id"], "guard", why, job_id)
+                self._set_status(db, row, "waiting_on_user", f"paused, not blocked: {why}. Reply to resume.", job_id=job_id)
+                return "waiting"
             self._enqueue_turn(db, row, f'Continue assignment {_quoted(row)} (next step).',
                                f'Continue "{row["title"]}"', sender="Bot-Office", priority=LOOP_PRIORITY)
             return "continue"
         self._set_status(db, row, state, reason, job_id=job_id)
         return state
+
+    @staticmethod
+    def _loop_guard(db: sqlite3.Connection, row: sqlite3.Row) -> str | None:
+        """Why a "continue" turn must not queue the next one (None = go on): an open question card, a reply
+        that says the bot is blocked or needs the user, or a run of continues with no progress."""
+        if db.execute("SELECT 1 FROM questions WHERE bot_id=? AND status='open' AND blocking=1 LIMIT 1", (row["bot_id"],)).fetchone():
+            return "a question to you is still open"
+        run: list[tuple[str, str]] = []  # the continues since the user last spoke, newest first
+        for job in db.execute("SELECT priority,outcome,reply_text FROM jobs WHERE assignment_id=? AND assignment_turn "
+                              "IS NOT NULL AND status NOT IN ('queued','running') ORDER BY assignment_turn DESC "
+                              "LIMIT ?", (row["id"], autocontinue.MAX_CONSECUTIVE_CONTINUES)):
+            state, _, reason = (job["outcome"] or "unverified").partition(": ")
+            if state not in ("continue", "not_done", "unverified"):
+                break  # a turn that stopped the loop: the run starts after it
+            run.append((job["reply_text"] or "", reason))
+            if job["priority"] <= USER_PRIORITY:
+                break  # the user's own turn starts the run
+        return autocontinue.stop_reason(run[::-1])
 
     @staticmethod
     def _turn_state(job: sqlite3.Row, reported: tuple[str, str] | None, ran: bool) -> tuple[str | None, str]:
