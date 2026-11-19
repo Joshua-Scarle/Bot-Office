@@ -8,15 +8,17 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 _VENV_PYTHON = _ROOT / ".venv" / "bin" / "python"
 if _VENV_PYTHON.exists() and Path(sys.prefix).resolve() == (_ROOT / ".venv").resolve():
-    # Already in the venv: drop the loop guard so a nested script a child starts under a non-venv
-    # python still re-execs (the guard is exported and inherited by children).
+    # In the venv: drop the loop marker so a nested script a child starts under a non-venv python
+    # still re-execs (the marker is exported and inherited by children).
     os.environ.pop("BOT_OFFICE_VENV_REEXEC", None)
-elif _VENV_PYTHON.exists() and not os.environ.get("BOT_OFFICE_VENV_REEXEC"):
-    os.environ["BOT_OFFICE_VENV_REEXEC"] = "1"  # loop guard
+elif _VENV_PYTHON.exists() and os.environ.get("BOT_OFFICE_VENV_REEXEC") != str(os.getpid()):
+    # The marker is this process's pid (exec keeps the pid), so one inherited from an ancestor
+    # never blocks the re-exec; it only stops a loop if the venv python is not the venv.
+    os.environ["BOT_OFFICE_VENV_REEXEC"] = str(os.getpid())
     try:
         os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
     except OSError:
-        pass  # fall through: try with the current interpreter
+        os.environ.pop("BOT_OFFICE_VENV_REEXEC", None)  # fall through with this interpreter
 
 sys.path.insert(0, str(_ROOT / "src"))
 
