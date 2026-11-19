@@ -65,7 +65,7 @@ def test_needs_you_count_badge_hides_at_zero():
 
 
 def test_bot_search_matches_name_description_and_model():
-    _run(STORE + _slice("function botMatches(", "function renderBots(") + r'''
+    _run(STORE + _slice("function botMatches(", "/* ---- sections and sidebar") + r'''
 const bots = [
   { name: "Printer Helper", description: "Slices STL files for the Prusa", model: "gpt-6.1-terra", engine: "codex" },
   { name: "Writer", description: "Drafts newsletters", model: "claude-opus-5-5", engine: "claude" },
