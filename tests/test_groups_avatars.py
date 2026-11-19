@@ -321,7 +321,7 @@ def test_jpeg_upload_uses_reduced_decode_and_still_yields_256(client):
 
 def test_phone_sized_jpeg_is_accepted_but_a_huge_png_is_not(client, monkeypatch):
     bot = mk(client, "Phone")
-    monkeypatch.setattr(avatars, "MAX_UPLOAD_PIXELS", 1_000_000)   # the full-size limit; JPEG has its own, larger one
+    monkeypatch.setattr(avatars, "MAX_UPLOAD_PIXELS", 2_000_000)   # the full-size limit; JPEG has its own, larger one
     assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=image_bytes("JPEG", (3000, 2000))).status_code == 200
     assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=image_bytes("PNG", (3000, 2000))).status_code == 413
 
