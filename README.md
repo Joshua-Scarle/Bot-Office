@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.10. What changed is recorded below: [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.12. What changed is recorded below: [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,16 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.11.12
+
+**Waiting for another bot is not a blocker.** A bot that messages another bot (`bot-msg`) and has nothing else to do now finishes its turn as `done` (on a task, `waiting_on_bot`) instead of `waiting_on_user`/incomplete, so it no longer counts as blocked or shows up in Needs you. The rules, the task brief and the `bot-msg` note say so, and Bot-Office also rewrites the turn when the bot still says `waiting_on_user — reply arrives asynchronously` (only when a message it sent is still unanswered, the status names the wait, and nothing asks the owner: a real question, a question card, an approval or a "please send ..." still waits on you). When the other bot's reply arrives, Bot-Office wakes the asking bot once with the reply (as untrusted data) through the same rule that decides every automatic turn (`continuation.decide`): auto-continue off, chat-only bots, a task paused by the guard, the consecutive limit, the wake-up limit and the per-bot and all-bots caps all still apply. Details: `docs/CONTINUATION.md`. The only data change is the table `agent_message_origin` (additive; 0.11.10 ignores it).
+
+**Loop-guard fixes** (from the review of the task-loop guard): the guard's text checks ignore fenced and inline code, quoted lines and quoted strings, and do not read "Fixed the failed test" as unresolved, so productive turns keep going; a `bot-task status continue` report's note ("need a photo") now reaches the guard and pauses the task; and a guard pause stays paused (status-change, scheduled and reply wake-ups and a bot's out-of-turn `continue` do not resume it; this already held on 0.11.10 and is now tested).
+
+**Launchers:** `desk`, `bot-office-ask`, `bot-office-attach` and `bot-office-say` re-exec the app's venv python when started by another interpreter (merged from `desk-venv-launcher`). The re-exec marker is the process's own pid, so an inherited `BOT_OFFICE_VENV_REEXEC` never blocks a re-exec, it is removed once inside the venv and when the exec fails. Tests run the four real launchers (inherited marker, nested and cross-launcher launches, failing exec).
+
+Rollback: code only plus one additive table. Check out the previous live tree (the tag `backup/pre-0.11.12-<stamp>` is created at deploy) and restart; 0.11.10 ignores `agent_message_origin`, so no database restore is needed. Optional cleanup: `DROP TABLE agent_message_origin;`. The DB copy taken at deploy is `~/backups/agentdesk.sqlite3.pre-0.11.12-<stamp>`.
 
 ## What changed in 0.11.10
 

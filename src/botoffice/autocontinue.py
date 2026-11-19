@@ -49,9 +49,41 @@ def _clean(text: str) -> str:
     return (text or "").replace("’", "'").replace("‘", "'")
 
 
+# Text that is not the bot's own words about its own state: fenced and inline code (test logs, source),
+# quoted lines, and short double-quoted strings. Blanked (same length, newlines kept) before the phrase
+# checks, so "FAILED tests/..." in a log or "please send a photo" in an error message it just wrote is ignored.
+_QUOTED = [re.compile(p, flags) for p, flags in (
+    (r"```.*?```", re.DOTALL), (r"~~~.*?~~~", re.DOTALL), (r"```.*\Z", re.DOTALL), (r"~~~.*\Z", re.DOTALL),
+    (r"`[^`\n]+`", 0), (r"^[ \t]*>.*$", re.MULTILINE), (r'"[^"\n]{1,300}"', 0), (r"“[^”\n]{1,300}”", 0))]
+
+
+def prose(text: str) -> str:
+    """*text* with code, quoted lines and quoted strings blanked out, so only the bot's own prose is left."""
+    text = text or ""
+    for pattern in _QUOTED:
+        text = pattern.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+    return text
+
+
+# A sentence that says the problem is fixed ("Fixed the failed test", "The earlier failure is resolved")
+# and does not hedge ("but", "still", "not yet") does not report anything unresolved.
+_FIXED = re.compile(r"\b(?:fix(?:ed|es)?|resolv(?:ed|es)|repair(?:ed|s)?|no longer|now (?:pass(?:es)?|work(?:s|ing)?)|"
+                    r"(?:all )?(?:tests? )?(?:pass(?:es|ed)?|green)|passing)\b", re.IGNORECASE)
+_HEDGED = re.compile(r"\b(?:but|however|yet|still|remain(?:s|ed|ing)?|unresolved|not|never)\b|n't", re.IGNORECASE)
+
+
+def _unresolved_in(text: str) -> bool:
+    """True when *text* (prose only) has a sentence that reports something unresolved."""
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", _clean(text)):
+        if _UNRESOLVED.search(sentence) and not (_FIXED.search(sentence) and not _HEDGED.search(sentence)):
+            return True
+    return False
+
+
 def needs_user_phrase(reply: str, reason: str = "") -> str | None:
-    """The phrase that says the bot is blocked or needs the user, else None (reply body and status reason)."""
-    text = _clean(f"{reply}\n{reason}")
+    """The phrase that says the bot is blocked or needs the user, else None (reply body and status reason).
+    Code, quotes and quoted strings in the reply do not count: they are not the bot asking."""
+    text = _clean(f"{prose(reply)}\n{reason}")
     for pattern in _NEEDS_INPUT_RE:
         if match := pattern.search(text):
             return match.group(0).strip()
@@ -75,7 +107,7 @@ def made_progress(reply: str, earlier: list[str]) -> bool:
     (same words after dropping case, punctuation and filler). Progress is a heuristic on the text: a
     turn that moved things forward says so without hedging, and a stuck one keeps saying "still ...".
     """
-    if _UNRESOLVED.search(_clean(reply)):
+    if _unresolved_in(prose(reply)):
         return False
     return not any(similarity(reply, old) >= REPEAT_SIMILARITY for old in earlier)
 

@@ -718,6 +718,12 @@ class JobStore:
                 sender_message_id INTEGER, target_message_id INTEGER
             )""")
             _unwiden_agent_messages(db)
+            # 0.11.12: the turn a bot-to-bot message was sent from (None-origin messages are not here) and
+            # whether its reply already woke that bot ("woke_at" is the claim: a reply wakes once)
+            db.execute("""CREATE TABLE IF NOT EXISTS agent_message_origin (
+                message_id TEXT PRIMARY KEY, origin_job TEXT NOT NULL, woke_at TEXT, wake_decision TEXT
+            )""")
+            db.execute("CREATE INDEX IF NOT EXISTS agent_message_origin_job ON agent_message_origin (origin_job)")
             db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_steered ON agent_message_links (steered_into)")
             db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_reply ON agent_message_links (reply_to)")
             db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_sent ON agent_message_links (sender_message_id)")
@@ -2092,6 +2098,9 @@ class JobStore:
                     db.execute("INSERT INTO agent_message_links (message_id,reply_to,sender_message_id,target_message_id) "
                                "VALUES (?,?,?,?)", (message_id, reply_to, sent, target_row))
                     delivery, job = ("queue" if busy else "start"), db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if origin_id:
+                    db.execute("INSERT INTO agent_message_origin (message_id, origin_job) VALUES (?,?)",
+                               (message_id, origin_id))
                 row = db.execute("SELECT * FROM messages WHERE id=?", (target_row,)).fetchone()
                 db.commit()
             except BaseException:
@@ -2110,6 +2119,51 @@ class JobStore:
                        (message_id, str(from_bot), str(to_bot), body, str(job_id),
                         thread_id, hop, now().isoformat()))
         return self.get_agent_message(message_id)
+
+    def outstanding_bot_replies(self, job_id: UUID | str) -> list[str]:
+        """Names of the bots whose reply to a message sent from turn *job_id* has not arrived or has not
+        woken that turn's bot yet (0.11.12). A message that became a turn of its own is outstanding until
+        its reply is copied back and has woken the bot; a steered one until the other bot answers with a
+        message of its own."""
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT m.job_id, m.id, o.woke_at, b.name FROM agent_message_origin o "
+                "JOIN agent_messages_x m ON m.id=o.message_id LEFT JOIN bots b ON b.id=m.to_bot "
+                "WHERE o.origin_job=? ORDER BY m.created_at", (str(job_id),)).fetchall()
+            names = []
+            for row in rows:
+                if row["job_id"].startswith("steer:"):
+                    answered = db.execute("SELECT 1 FROM agent_message_links WHERE reply_to=? LIMIT 1",
+                                          (row["id"],)).fetchone()
+                    if answered is None:
+                        names.append(row["name"] or "another bot")
+                elif row["woke_at"] is None:
+                    names.append(row["name"] or "another bot")
+        return names
+
+    def unwoken_replies(self, bot_id: UUID | str, since: str) -> list[dict]:
+        """Replies (turns of their own, finished) to messages *bot_id* sent from a turn after *since*
+        that have not woken it: one dict each (message id, origin job, the other bot's name, how the
+        reply ended, its text)."""
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT m.id, o.origin_job, b.name AS target, j.status, j.error, j.failure_kind, j.reply_text, j.id AS reply_job "
+                "FROM agent_message_origin o JOIN agent_messages m ON m.id=o.message_id "
+                "JOIN jobs j ON j.id=m.job_id LEFT JOIN bots b ON b.id=m.to_bot "
+                "WHERE m.from_bot=? AND o.woke_at IS NULL AND m.created_at>? "
+                "AND j.status NOT IN ('queued','running') ORDER BY m.created_at", (str(bot_id), since)).fetchall()
+        return [dict(row) for row in rows]
+
+    def claim_reply_wake(self, message_id: str, decision: str | None = None) -> bool:
+        """Mark a reply as having woken its asker; False if it already had (a reply wakes once)."""
+        with closing(self._connect()) as db:
+            return db.execute("UPDATE agent_message_origin SET woke_at=?, wake_decision=? "
+                              "WHERE message_id=? AND woke_at IS NULL",
+                              (now().isoformat(), decision, message_id)).rowcount > 0
+
+    def set_reply_wake_decision(self, message_id: str, decision: str) -> None:
+        with closing(self._connect()) as db:
+            db.execute("UPDATE agent_message_origin SET wake_decision=? WHERE message_id=?", (decision, message_id))
 
     # a message steered into a running turn has no job of its own: "sent" until that turn reads it,
     # then "delivered"; its reply is never the receiver's turn's reply (that turn is the receiver's task)
