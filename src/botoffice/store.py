@@ -151,6 +151,29 @@ def _init_assignment_tables(db: sqlite3.Connection) -> None:
         )"""
     )
     db.execute("CREATE INDEX IF NOT EXISTS assignment_events_a ON assignment_events(assignment_id, id)")
+    # 0.11.4 task lists: optimistic version, list order, where a task came from, who changed it last
+    # (user | bot:<id> | system), a reserved reviewer (peer review of done is not built); every
+    # event records its actor and the task's version. Additive: 0.11.3 ignores these columns.
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(assignments)")}
+    for column, ddl in (
+        ("version", "INTEGER NOT NULL DEFAULT 1"),
+        ("position", "REAL"),
+        ("origin", "TEXT NOT NULL DEFAULT 'form'"),
+        ("source_message_id", "INTEGER"),
+        ("source_job_id", "TEXT"),
+        ("updated_by", "TEXT NOT NULL DEFAULT 'user'"),
+        ("reviewer", "TEXT"),
+    ):
+        if column not in columns:
+            db.execute(f"ALTER TABLE assignments ADD COLUMN {column} {ddl}")
+    db.execute("CREATE INDEX IF NOT EXISTS assignments_pick ON assignments(bot_id, status, position, created_at)")
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(assignment_events)")}
+    for column, ddl in (("actor", "TEXT NOT NULL DEFAULT 'system'"), ("version", "INTEGER")):
+        if column not in columns:
+            db.execute(f"ALTER TABLE assignment_events ADD COLUMN {column} {ddl}")
+    if "actor" not in columns:
+        # first start on 0.11.4: older events are history, not "changes since your last turn"
+        db.execute("UPDATE bots SET tasks_seen_event=(SELECT COALESCE(MAX(id), 0) FROM assignment_events)")
     db.execute(
         """CREATE TABLE IF NOT EXISTS wakeups (
             id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, assignment_id TEXT, due_at TEXT, on_assignment TEXT,
@@ -277,6 +300,15 @@ def charge_assignment_minutes(db: sqlite3.Connection, job: Mapping[str, Any]) ->
         db.execute("UPDATE assignments SET minutes_used=minutes_used+? WHERE id=?", (delta, job["assignment_id"]))
         db.execute("UPDATE jobs SET assignment_minutes=? WHERE id=?", (total, job["id"]))
     return max(delta, 0.0), ran
+
+
+def assignment_event(db: sqlite3.Connection, assignment_id: str, kind: str, note: str = "",
+                     job_id: str | None = None, *, actor: str = "system") -> None:
+    """An assignment_events row with its actor (user | bot:<id> | system) and the task's
+    version at that moment (after the change, when the caller bumped it)."""
+    db.execute("INSERT INTO assignment_events (assignment_id,kind,note,job_id,created_at,actor,version) "
+               "VALUES (?,?,?,?,?,?,(SELECT version FROM assignments WHERE id=?))",
+               (assignment_id, kind, note[:2000], job_id, now().isoformat(), actor, assignment_id))
 
 
 def _assignment_gate(db: sqlite3.Connection, job_id: str) -> str | None:
@@ -503,6 +535,8 @@ class JobStore:
                 ("digest", "INTEGER NOT NULL DEFAULT 0"),
                 # 0.11.10: messages from other bots may steer this bot's running turn
                 ("bot_steer", "INTEGER NOT NULL DEFAULT 1"),
+                # 0.11.4: the last assignment_events id this bot's prompt showed ("changes by others")
+                ("tasks_seen_event", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if column not in bot_columns:
                     db.execute(f"ALTER TABLE bots ADD COLUMN {column} {ddl}")
@@ -1750,8 +1784,13 @@ class JobStore:
             for table in ("usage_notices", "action_rules", "approvals", "gate_log"):
                 db.execute(f"DELETE FROM {table} WHERE bot_id=?", (key,))
             # 0.10.0: its open assignments are dropped (kept as history) and its wake-ups cancelled
-            db.execute("UPDATE assignments SET status='dropped', status_note='bot deleted', closed_at=?, updated_at=? "
+            dropped = [row["id"] for row in db.execute(
+                "SELECT id FROM assignments WHERE bot_id=? AND status NOT IN ('done','dropped')", (key,))]
+            db.execute("UPDATE assignments SET status='dropped', status_note='bot deleted', closed_at=?, updated_at=?, "
+                       "version=version+1, updated_by='user' "
                        "WHERE bot_id=? AND status NOT IN ('done','dropped')", (now().isoformat(), now().isoformat(), key))
+            for assignment_id in dropped:
+                assignment_event(db, assignment_id, "status", "dropped: bot deleted", actor="user")
             db.execute("UPDATE wakeups SET status='cancelled' WHERE bot_id=? AND status='pending'", (key,))
             db.execute("DELETE FROM bots WHERE id=?", (key,))
             db.commit()
@@ -1764,6 +1803,10 @@ class JobStore:
             db.execute("BEGIN IMMEDIATE")
             db.execute("UPDATE jobs SET agent_token_hash=? WHERE id=? AND bot_id=?", (digest, str(job.id), str(job.bot_id)))
             db.execute("INSERT INTO agent_tokens VALUES (?,?,?)", (digest, str(job.id), str(job.bot_id)))
+            if job.tasks_seen_event is not None:
+                # 0.11.4: the prompt built for this run showed task changes up to this event
+                db.execute("UPDATE bots SET tasks_seen_event=MAX(tasks_seen_event, ?) WHERE id=?",
+                           (job.tasks_seen_event, str(job.bot_id)))
             db.commit()
         return token
 
@@ -2251,11 +2294,12 @@ class JobStore:
                 status, note = "active", "rewound: re-running the edited reply"
             else:
                 status, note = "open", "rewound by an edit; its checkpoint may describe removed turns"
+            # the owner's edit rewinds it: a versioned change by the user
             db.execute("UPDATE assignments SET status=?, status_note=?, updated_at=?, closed_at=NULL, stalled_at=NULL, "
                        "dismissed_at=NULL, missing_status=0, verifying=0, reported_status=NULL, reported_note=NULL, "
-                       "reported_job=NULL WHERE id=?", (status, note, stamp, assignment_id))
-            db.execute("INSERT INTO assignment_events (assignment_id,kind,note,job_id,created_at) VALUES (?,?,?,?,?)",
-                       (assignment_id, "rewound", note, None, stamp))
+                       "reported_job=NULL, version=version+1, updated_by='user' WHERE id=?",
+                       (status, note, stamp, assignment_id))
+            assignment_event(db, assignment_id, "rewound", note, actor="user")
 
     def pending_session_reset(self, bot_id: UUID | str) -> int | None:
         with closing(self._connect()) as db:

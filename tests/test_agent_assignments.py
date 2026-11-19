@@ -53,8 +53,9 @@ def test_bot_creates_its_own_and_child_assignments_within_limits(settings):
     _, token = running_token(store, ada)
     own = client.post("/v1/agent/assignments", headers=token, json={"title": "mine", "start": False}).json()
     assert own["bot_id"] == str(ada.id) and own["created_by"] == f"bot:{ada.id}"
-    # another bot only as a child of one of its own
-    assert client.post("/v1/agent/assignments", headers=token, json={"title": "x", "for_bot": "Bea"}).status_code == 403
+    # 0.11.4: any bot's list without a parent too, but it lands open (nothing starts it); a parent must be its own
+    other = client.post("/v1/agent/assignments", headers=token, json={"title": "x", "for_bot": "Bea"})
+    assert other.status_code == 201 and other.json()["status"] == "open" and other.json()["bot_id"] == str(bea.id)
     theirs = Assignments(store).create(bea.id, {"title": "Bea's"})
     response = client.post("/v1/agent/assignments", headers=token,
                            json={"title": "x", "for_bot": "Cy", "parent_id": str(theirs.id)})
@@ -90,10 +91,12 @@ def test_only_the_assignee_changes_status_or_checkpoint(settings):
                        json={"state": "done"}).status_code == 403
     assert client.post(f"/v1/agent/assignments/{child.id}/checkpoint", headers=ada_token,
                        json={"text": "x"}).status_code == 403
-    # an unrelated bot cannot even read it
+    # 0.11.4: an unrelated bot reads it and adds notes too, but cannot change it
     _, cy_token = running_token(store, cy)
-    assert client.get(f"/v1/agent/assignments/{child.id}", headers=cy_token).status_code == 403
-    assert client.post(f"/v1/agent/assignments/{child.id}/note", headers=cy_token, json={"text": "x"}).status_code == 403
+    assert client.get(f"/v1/agent/assignments/{child.id}", headers=cy_token).status_code == 200
+    assert client.post(f"/v1/agent/assignments/{child.id}/note", headers=cy_token, json={"text": "x"}).status_code == 204
+    assert client.post(f"/v1/agent/assignments/{child.id}/status", headers=cy_token,
+                       json={"state": "done"}).status_code == 403
     # the assignee may
     _, bea_token = running_token(store, bea)
     assert client.post(f"/v1/agent/assignments/{child.id}/status", headers=bea_token,

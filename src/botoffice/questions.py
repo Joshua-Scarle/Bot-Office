@@ -93,7 +93,7 @@ def unpack(row):
     return item
 
 
-def _restore(store, db, row):
+def _restore(store, db, row, actor="user"):
     if row["assignment_id"]:
         assignment = db.execute(
             "SELECT * FROM assignments WHERE id=? AND status='waiting_on_user' AND status_note=?",
@@ -102,7 +102,7 @@ def _restore(store, db, row):
         if assignment:
             from .assignments import Assignments
 
-            Assignments(store)._set_status(db, assignment, "active", "Question resolved",
+            Assignments(store)._set_status(db, assignment, "active", "Question resolved", actor=actor,
                                            job_id=row["job_id"], announce=False)
 
 
@@ -119,7 +119,7 @@ def create(store, bot_id, job_id, payload, blocking=False):
                 db.execute("UPDATE questions SET status='skipped', answer=?, answered_at=? "
                            "WHERE id=?",
                            (json.dumps({"skip": True, "steps": []}), stamp, old["id"]))
-                _restore(store, db, old)
+                _restore(store, db, old, actor=f"bot:{bot_id}")
             job = db.execute("SELECT assignment_id FROM jobs WHERE id=? AND bot_id=?",
                              (str(job_id), str(bot_id))).fetchone() if job_id else None
             assignment = job["assignment_id"] if job else None
@@ -137,7 +137,7 @@ def create(store, bot_id, job_id, payload, blocking=False):
                     from .assignments import Assignments
 
                     Assignments(store)._set_status(db, row, "waiting_on_user",
-                                                   f"Question {key} awaiting answer",
+                                                   f"Question {key} awaiting answer", actor=f"bot:{bot_id}",
                                                    job_id=str(job_id), announce=False)
             db.commit()
         except BaseException:
