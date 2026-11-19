@@ -1,5 +1,6 @@
 import io
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -593,3 +594,93 @@ def test_desk_grok_logs_a_send_that_could_not_reach_the_controller(tmp_path):
         desk_grok(["send", "--to", "CoS", "--kind", "fyi", "--text", "hi", "--from", "Sec"], data_dir=empty,
                   environ={**env, "BOT_OFFICE_TOKEN_FILE": str(empty / "token")})
     assert not (empty / "agentdesk.sqlite3").exists()
+
+
+# --- r2 review: every refused or dropped send is audited; uncertain controller outcomes are not "failed" ---
+
+
+def test_ack_and_malformed_config_are_audited_not_counted(tmp_path):
+    ok = lambda request, timeout=15: FakeResponse(200)  # noqa: E731
+    _config(tmp_path)
+    assert send_to_grok(to="CoS", kind="ack", text="ok", from_bot="A", data_dir=tmp_path, opener=ok).startswith("dropped")
+    from botoffice.grok_bridge import config_path
+    for raw in ('{"url": 5, "key": "k"}', '["x"]', '{"url": "https://[bad", "key": "k"}'):
+        config_path(tmp_path).write_text(raw)
+        with pytest.raises(DeskError):
+            send_to_grok(to="CoS", kind="fyi", text="x", from_bot="A", data_dir=tmp_path, opener=ok)
+    rows = _rows(tmp_path)
+    assert [(r[0], r[1]) for r in rows] == [("A", "dropped"), ("A", "failed"), ("A", "failed"), ("A", "failed")]
+    assert "malformed" in rows[1][3] and "malformed" in rows[2][3] and "malformed" in rows[3][3]
+
+
+def test_api_refusals_reach_the_audit(controller, monkeypatch):
+    # an actually empty --text, an oversized text and a bad --from: all logged, none counted
+    with pytest.raises(DeskError):
+        desk_grok(["send", "--to", "CoS", "--kind", "fyi", "--text", "", "--from", "Ops"])
+    with pytest.raises(DeskError):
+        desk_grok(["send", "--to", "CoS", "--kind", "fyi", "--text", "x" * 10001, "--from", "Ops"])
+    _agent_env(monkeypatch, controller.store, "Overflow")
+    with pytest.raises(DeskError):
+        desk_grok(["send", "--to", "CoS", "--kind", "fyi", "--text", "x", "--from", "Someone Else"])
+    rows = sqlite3.connect(controller.store.path).execute(
+        "SELECT bot, state, error FROM bridge_sends ORDER BY id").fetchall()
+    assert [(r[0], r[1]) for r in rows] == [("Ops", "failed")] * 2 + [("Overflow", "failed")]
+    assert "non-empty" in rows[0][2] and "too long" in rows[1][2] and "master token" in rows[2][2]
+    assert controller.sent == []
+
+
+def _cli_env(tmp_path):
+    JobStore(tmp_path / "agentdesk.sqlite3")
+    (tmp_path / "token").write_text("t")
+    return {"BOT_OFFICE_API_URL": "http://127.0.0.1:9", "BOT_OFFICE_TOKEN_FILE": str(tmp_path / "token"),
+            "BOT_OFFICE_BOT_ID": ""}
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("timed out"), ValueError("not json")])
+def test_uncertain_controller_outcome_is_unsure_not_failed(tmp_path, monkeypatch, failure):
+    from botoffice import grok_bridge
+    import urllib.error
+
+    def boom(request, timeout=30):
+        raise urllib.error.URLError(failure) if isinstance(failure, TimeoutError) else failure
+
+    monkeypatch.setattr(grok_bridge._NO_REDIRECTS, "open", boom)
+    with pytest.raises(DeskError, match="may have been sent"):
+        desk_grok(["send", "--to", "CoS", "--kind", "fyi", "--text", "hi", "--from", "Sec"],
+                  data_dir=tmp_path, environ=_cli_env(tmp_path))
+    rows = _rows(tmp_path)
+    assert [(r[0], r[1]) for r in rows] == [("Sec", "unsure")]  # never a definite failed send
+
+
+def test_connection_refused_stays_a_definite_failed_send(tmp_path):
+    with pytest.raises(DeskError, match="unreachable"):
+        desk_grok(["send", "--to", "CoS", "--kind", "fyi", "--text", "hi", "--from", "Sec"],
+                  data_dir=tmp_path, environ=_cli_env(tmp_path))
+    assert [(r[0], r[1]) for r in _rows(tmp_path)] == [("Sec", "failed")]
+
+
+def test_concurrent_initialisers_of_an_old_database_both_succeed(tmp_path):
+    import threading
+    path = tmp_path / "agentdesk.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE bridge_sends (id INTEGER PRIMARY KEY, bot TEXT NOT NULL, ts TEXT NOT NULL, "
+               "state TEXT NOT NULL DEFAULT 'reserved')")
+    db.commit()
+    db.close()
+    errors = []
+    barrier = threading.Barrier(4)
+
+    def init():
+        barrier.wait()
+        try:
+            JobStore(path)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=init) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(bridge_sends)")} >= {"target", "error"}

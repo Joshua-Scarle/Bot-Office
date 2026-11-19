@@ -27,7 +27,7 @@ ASSIGNMENT_ACTIONS = ["reply", "start", "done", "dismiss"]
 # #10: a job parked on a usage limit for longer than this gets one notice per attempt
 PARK_NOTICE_AFTER = timedelta(minutes=10)
 NOTICE_TZ = "America/New_York"
-# an assignment waiting on Joshua for something to hand over (photos, files) rather than a decision
+# an assignment waiting on the owner for something to hand over (photos, files) rather than a decision
 MATERIALS = re.compile(r"\b(photos?|pictures?|images?|screenshots?|scans?|files?|uploads?|attach\w*)\b", re.I)
 
 
@@ -213,8 +213,8 @@ def _annotate(items: list[dict]) -> list[dict]:
 
     group: one per assignment (its own item plus any question, failed turn or usage notice of the
     same assignment), else one per item, so a client counts an assignment once however many
-    things it is waiting on. category: ``materials`` for an assignment waiting on Joshua to hand
-    something over (photos, files: not a decision, and it stays until he does), else ``action``.
+    things it is waiting on. category: ``materials`` for an assignment waiting on the owner to hand
+    something over (photos, files: not a decision, and it stays until they do), else ``action``.
     Incomplete turns are not items at all: they are history with a Retry button in the chat."""
     for item in items:
         item["group"] = f"as:{item['assignment_id']}" if item.get("assignment_id") else item["id"]
@@ -307,6 +307,8 @@ def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None)
             "id": f"p:{row['id']}:{row['status']}", "kind": "approval", "state": row["status"],
             "bot_id": row["bot_id"], "bot_name": bot["name"], "notify": bool(bot["notify"]),
             "approval_id": row["id"], "job_id": row["job_id"], "title": f"Approval #{row['id']}",
+            # the task this approval's turn belongs to: it is grouped (and counted) with that task's other items
+            "assignment_id": row["assignment_id"],
             "class": (approval_card(store, dict(row))["label"] if store is not None else row["preset"]),
             "ask": (f"{bot['name']} asks to run ({row['source']}, {row['preset'] or 'rule'}): {_preview(row['summary'])} "
                     f"({len(row['summary'])} characters, fingerprint {row['input_hash'][:12]}; the whole command is below)"

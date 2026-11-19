@@ -315,11 +315,12 @@ class AgentRoutineUpdate(BaseModel):
 class BridgeSend(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    to: str = Field(min_length=1, max_length=200)
-    kind: str = Field(min_length=1, max_length=20)
-    text: str = Field(min_length=1, max_length=10000)
-    thread_id: str | None = Field(default=None, max_length=200)
-    from_bot: str | None = Field(default=None, alias="from", max_length=200)
+    # no length limits here: send_to_grok enforces them, so a refused send is logged in bridge_sends
+    to: str
+    kind: str
+    text: str
+    thread_id: str | None = None
+    from_bot: str | None = Field(default=None, alias="from")
 
 
 class BridgeInbox(BaseModel):
@@ -1545,8 +1546,12 @@ def create_app(
         if binding:
             bot = store.get_bot(binding.bot_id) if binding.bot_id else None
             if not bot:
+                store.bridge_record(str(binding.bot_id or "unbound"), datetime.now(UTC), "failed",
+                                    "token is not bound to a bot", body.to[:200])
                 raise HTTPException(status_code=403, detail="token is not bound to a bot")
             if body.from_bot and body.from_bot.strip() not in (bot.name, str(bot.id)):
+                store.bridge_record(bot.name, datetime.now(UTC), "failed",
+                                    "--from is only allowed with the master token", body.to[:200])
                 raise HTTPException(status_code=403, detail="--from is only allowed with the master token")
             sender = bot.name
         else:
@@ -1557,7 +1562,7 @@ def create_app(
                 from_bot=sender, data_dir=settings.control_dir, environ={},
             )
         except grok_bridge.DeskError as exc:
-            status = 400 if str(exc).startswith(("kind must", "to and text")) else 502
+            status = 400 if str(exc).startswith(("kind must", "to and text", "field too long")) else 502
             raise HTTPException(status_code=status, detail=str(exc)) from exc
         return {"result": result}
 

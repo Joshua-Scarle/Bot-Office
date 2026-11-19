@@ -6,9 +6,12 @@ the scheduler retries the same job row later (see ``retry_at``).
 
 from __future__ import annotations
 
+import logging
 import re
-from datetime import datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+log = logging.getLogger(__name__)
 
 USAGE_LIMIT = "usage_limit"
 AUTH = "auth"
@@ -140,19 +143,40 @@ RE_DATE_AT = re.compile(r"(?:resets?|try again|available)\s+(?:on\s+|at\s+)?" + 
 RE_AT = re.compile(r"(?:resets?|try again)\s+(?:at\s+)?" + _TIME + _ZONE, re.I)
 
 
+class _UnknownZone(Exception):
+    """The message names a zone this host does not know: its time cannot be read."""
+
+
 def _zone(name: str | None, default: tzinfo | None) -> tzinfo | None:
-    """The zone a message names; else *default*. None means the host's local zone (the CLI ran here)."""
+    """The zone a message names; else *default*. None means the host's local zone (the CLI ran here).
+    A named zone that does not exist is an error, never the host zone."""
     if name:
         try:
             return ZoneInfo(name)
-        except (ZoneInfoNotFoundError, ValueError):
-            pass
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            log.warning("usage reset names an unknown time zone %r; reset time not parsed", name)
+            raise _UnknownZone(name) from exc
     return default
 
 
-def _wall(naive: datetime, zone: tzinfo | None) -> datetime:
-    """*naive* wall-clock time read in *zone* (None: the host's local zone, DST-aware)."""
-    return naive.astimezone() if zone is None else naive.replace(tzinfo=zone)
+def _wall(naive: datetime, zone: tzinfo | None, now: datetime) -> datetime:
+    """*naive* wall-clock time read in *zone* (None: the host's local zone, DST-aware).
+
+    A wall time that happens twice (clocks going back) is the first occurrence still ahead of *now*,
+    else the first; one that never happens (clocks going forward) is moved on by the skipped hour."""
+    def read(fold: int) -> datetime:
+        wall = naive.replace(fold=fold)
+        return wall.astimezone() if zone is None else wall.replace(tzinfo=zone)
+
+    first, second = read(0), read(1)
+    back = (first if zone is None else first.astimezone(zone)).replace(tzinfo=None, fold=0)
+    if back != naive:
+        chosen = first  # in the gap: fold 0 carries the offset from before it, which lands after it
+    elif first.astimezone(UTC) == second.astimezone(UTC):
+        chosen = first
+    else:
+        chosen = first if first.astimezone(UTC) > now else second
+    return chosen.astimezone(UTC)  # an instant: aware datetimes of one repeated hour compare unequal across zones
 
 
 def _hour(hour: str, minute: str | None, meridiem: str | None) -> tuple[int, int] | None:
@@ -187,19 +211,22 @@ def parse_reset(text: str | None, now: datetime, default_zone: tzinfo | None = N
     if match := RE_DATE_AT.search(text):
         y, mo, d, month_name, day, year2, hour, minute, meridiem, zone_name = match.groups()
         clock = _hour(hour, minute, meridiem)
-        zone = _zone(zone_name, default_zone)
+        try:
+            zone = _zone(zone_name, default_zone)
+        except _UnknownZone:
+            return None
         local_now = now.astimezone(zone)
         if clock:
             try:
                 if y:
-                    date = _wall(datetime(int(y), int(mo), int(d), *clock), zone)
+                    date = _wall(datetime(int(y), int(mo), int(d), *clock), zone, now)
                 else:
                     month = _MONTHS.get(month_name[:3].lower())
                     if month is None:
                         raise ValueError
-                    date = _wall(datetime(int(year2 or local_now.year), month, int(day), *clock), zone)
+                    date = _wall(datetime(int(year2 or local_now.year), month, int(day), *clock), zone, now)
                     if not year2 and date < local_now - timedelta(days=1):
-                        date = _wall(datetime(date.year + 1, month, int(day), *clock), zone)
+                        date = _wall(datetime(date.year + 1, month, int(day), *clock), zone, now)
                 return date
             except ValueError:
                 pass
@@ -207,12 +234,15 @@ def parse_reset(text: str | None, now: datetime, default_zone: tzinfo | None = N
         hour, minute, meridiem, zone_name = match.groups()
         clock = _hour(hour, minute, meridiem)
         if clock:
-            zone = _zone(zone_name, default_zone)
-            local_now = now.astimezone(zone)
-            moment = _wall(local_now.replace(hour=clock[0], minute=clock[1], second=0, microsecond=0,
-                                             tzinfo=None), zone)
-            if moment <= local_now:
-                moment = _wall(moment.astimezone(zone).replace(tzinfo=None) + timedelta(days=1), zone)
+            try:
+                zone = _zone(zone_name, default_zone)
+            except _UnknownZone:
+                return None
+            today = now.astimezone(zone).replace(hour=clock[0], minute=clock[1], second=0, microsecond=0,
+                                                 tzinfo=None, fold=0)
+            moment = _wall(today, zone, now)
+            if moment <= now:
+                moment = _wall(today + timedelta(days=1), zone, now)
             return moment
     return None
 

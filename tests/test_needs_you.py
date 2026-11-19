@@ -184,7 +184,7 @@ def test_bot_notify_and_timeout_flow_into_needs_you():
 
 
 def test_incomplete_turns_never_count_and_an_assignment_counts_once(settings):
-    """Printer Writing Bot case: dozens of incomplete turns plus assignments waiting for photos."""
+    """A noisy bot: dozens of incomplete turns plus assignments waiting for photos."""
     with client_for(settings) as client:
         store = client.app.state.store
         book = Assignments(store)
@@ -209,3 +209,28 @@ def test_incomplete_turns_never_count_and_an_assignment_counts_once(settings):
         extra = {"id": "q:1:open", "kind": "question", "state": "open", "ask": "asks: ?", "assignment_id": photos.id}
         again = needs_you._annotate([*items, extra])
         assert needs_you.count_items(again) == {"total": 2, "materials": 0}  # the question is a real ask
+
+
+def test_assignment_approval_groups_with_its_task_and_the_page_renders_groups(settings):
+    with client_for(settings) as client:
+        store = client.app.state.store
+        book = Assignments(store)
+        ada = store.create_bot("Ada", "", "codex", None)
+        task = book.create(ada.id, {"title": "Ship it"})
+        with closing(book._tx()) as db:
+            book._set_status(db, book._row(db, task.id), "waiting_on_user", "which branch?")
+            db.commit()
+        job = store.create("x", "codex", bot_id=ada.id)
+        with closing(store._connect()) as db:
+            db.execute("INSERT INTO approvals (bot_id,job_id,assignment_id,tool,summary,input_hash,scope,source,preset,"
+                       "status,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)",
+                       (str(ada.id), str(job.id), str(task.id), "bash", "bash: git push", "h" * 64, "attended", "chat", "outbound",
+                        (now() + timedelta(hours=1)).isoformat(), now().isoformat()))
+        items = needs(client)
+        approval = next(i for i in items if i["kind"] == "approval")
+        assert approval["assignment_id"] == str(task.id) and approval["actions"] == ["approve", "deny"]
+        assert approval["id"].startswith("p:")  # ids and actions unchanged
+        assert {i["group"] for i in items} == {f"as:{task.id}"}
+        assert needs_you.count_items(items) == {"total": 1, "materials": 0}  # the task and its approval: one count
+    html = (Path(__file__).parents[1] / "src" / "botoffice" / "static" / "bot-office.html").read_text()
+    assert 'el("div", "needs-group")' in html and "frames.get(key).append(rows[i])" in html

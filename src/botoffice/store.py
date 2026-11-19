@@ -782,10 +782,7 @@ class JobStore:
             db.execute("CREATE INDEX IF NOT EXISTS bridge_sends_ts ON bridge_sends(ts)")
             # 0.11.10: failed and refused sends are recorded too (state failed/dropped, why in error);
             # only sent/reserved rows count against the bridge caps (BRIDGE_COUNTED)
-            bridge_cols = {row["name"] for row in db.execute("PRAGMA table_info(bridge_sends)")}
-            for column in ("target", "error"):
-                if column not in bridge_cols:
-                    db.execute(f"ALTER TABLE bridge_sends ADD COLUMN {column} TEXT")
+            add_columns(db, "bridge_sends", (("target", "TEXT"), ("error", "TEXT")))  # race-safe (see add_columns)
             db.execute(
                 "CREATE TABLE IF NOT EXISTS bridge_threads (thread_id TEXT PRIMARY KEY, hop INTEGER NOT NULL, "
                 "updated_at TEXT NOT NULL)"

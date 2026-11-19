@@ -65,6 +65,7 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .tools-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .tools-bar select { width: auto; max-width: 100%; }
 /* bounded: many items scroll inside the panel and never push the bot list or the footer off-screen */
+.needs-group { border-left: 3px solid var(--line); padding-left: 6px; margin-bottom: 6px; }
 .needs-you { margin: 0 8px 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; flex: none; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
 .needs-toggle { all: unset; font-weight: 700; }
 .needs-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
@@ -3135,7 +3136,7 @@ async function loadNeedsYou() {
   const labels = {reply: "Reply", start: "Continue", done: "Done", retry: "Retry", dismiss: "Dismiss",
     approve: "Approve once", deny: "Deny", rerun: "Re-run", resume: "Resume", allow: "Allow +10 today",
     answer: "Answer", skip: "Skip", keep: "Keep waiting", settings: "Open Settings"};
-  $("needs-list").replaceChildren(...items.map((item) => {
+  const rows = items.map((item) => {
     const row = el("div", "needs-item");
     const ask = el("button", "needs-ask", item.ask);
     ask.type = "button";
@@ -3154,7 +3155,16 @@ async function loadNeedsYou() {
     if (item.command) row.append(ask, el("pre", "needs-command", item.command), bar);  // the whole command (Sec 5)
     else row.append(ask, bar);
     return row;
-  }));
+  });
+  // items of one task (item.group) sit together under one frame; each keeps its own id and buttons
+  const frames = new Map();
+  const shown = [];
+  items.forEach((item, i) => {
+    const key = item.group || item.id;
+    if (!frames.has(key)) { frames.set(key, el("div", "needs-group")); shown.push(frames.get(key)); }
+    frames.get(key).append(rows[i]);
+  });
+  $("needs-list").replaceChildren(...shown.map((frame) => frame.children.length > 1 ? frame : frame.firstChild));
   $("needs-you").hidden = !items.length;
   // one count per assignment (item.group), and how many of those only wait on photos/files from you
   const groups = new Map();
