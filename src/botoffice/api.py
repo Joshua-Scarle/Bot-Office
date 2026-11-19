@@ -21,7 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import approval_classes, attachments, baseline, grok_bridge, isolation, needs_you, safefs, vnc
+from . import approval_classes, attachments, baseline, continuation, grok_bridge, isolation, needs_you, safefs, vnc
 from . import rules as action_rules
 from . import usage as budgets
 from .auth import auth_dependency, bearer
@@ -110,8 +110,15 @@ from .voice.wav import WavError, parse_pcm16_mono
 
 
 class AutoContinueBody(BaseModel):
+    """0.11.10: one section for chat auto-continue and the task loop (continuation.py)."""
     enabled: bool | None = None
     max: int | None = None
+    no_progress: int | None = None
+    consecutive: int | None = None
+    # a whole number, or null / "unlimited" for no cap
+    per_bot_day: int | Literal["unlimited"] | None = None
+    per_hour: int | Literal["unlimited"] | None = None
+    evidence: bool | None = None
 
 
 class ApprovalClassCreate(BaseModel):
@@ -190,6 +197,8 @@ class AgentTaskReorder(BaseModel):
 class AgentStatus(BaseModel):
     state: str = Field(min_length=1, max_length=32)
     note: str = Field(default="", max_length=1000)
+    # G4: how the work was verified (tests, a check, a command's result, a file)
+    evidence: str = Field(default="", max_length=1000)
 
 
 class AgentText(BaseModel):
@@ -776,6 +785,8 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if body.chat_only:
+            bot = store.update_bot(bot.id, chat_only=1)
         memory.write_bot(bot.id, "")
         return _with_steering([bot])[0]
 
@@ -851,7 +862,7 @@ def create_app(
         if "description" in fields:
             fields["description"] = (fields["description"] or "").strip()
         for key in ("name", "instructions", "default_provider", "model", "icon", "cli_access", "notify", "allow_sudo",
-                    "scheduled_runs", "daily_budget", "digest", "bot_steer"):
+                    "scheduled_runs", "daily_budget", "digest", "bot_steer", "chat_only"):
             if key in fields and fields[key] is None:
                 del fields[key]
         if "daily_budget" in fields:
@@ -863,6 +874,8 @@ def create_app(
             fields["digest"] = int(fields["digest"])
         if "bot_steer" in fields:
             fields["bot_steer"] = int(fields["bot_steer"])
+        if "chat_only" in fields:
+            fields["chat_only"] = int(fields["chat_only"])
         if fields.get("job_timeout") is not None and fields["job_timeout"] > settings.max_turn_timeout:
             raise HTTPException(status_code=422, detail=f"job_timeout must be at most {settings.max_turn_timeout} seconds")
         if "notify" in fields:
@@ -1090,14 +1103,18 @@ def create_app(
         gates = {name: action_rules.gate_state(settings.control_dir, name) for name in action_rules.WIRED}
         return {"auto_continue": baseline.auto_continue(store),
                 "auto_continue_max_limit": baseline.AUTO_CONTINUE_MAX,
+                "auto_continue_defaults": continuation.defaults(),
                 "approvals": {**approval_classes.settings(store), "gates": gates,
                               "unpausable_bots": approval_classes.unpausable_bots(store)}}
 
     @app.put("/v1/settings", dependencies=[Depends(auth)])
     async def put_settings(body: SettingsBody) -> dict[str, object]:
         if body.auto_continue is not None:
+            given = body.auto_continue.model_dump(exclude_unset=True)
+            # null means "not given", except for a cap, where it means unlimited
+            changes = {key: value for key, value in given.items() if value is not None or key in continuation.CAPS}
             try:
-                baseline.set_auto_continue(store, body.auto_continue.enabled, body.auto_continue.max)
+                baseline.set_auto_continue(store, maximum=changes.pop("max", None), **changes)
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
         if body.approvals is not None:
@@ -1316,7 +1333,7 @@ def create_app(
     @app.post("/v1/agent/assignments/{ref}/status", response_model=Assignment)
     async def agent_assignment_status(ref: str, body: AgentStatus, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
         return _assignment_call(assignments.report, _agent_assignment_id(job, ref), job.bot_id, job.id,
-                                body.state.strip().lower(), body.note.strip())
+                                body.state.strip().lower(), body.note.strip(), body.evidence.strip())
 
     @app.post("/v1/agent/assignments/{ref}/checkpoint", response_model=Assignment)
     async def agent_assignment_checkpoint(ref: str, body: AgentText, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
@@ -1397,7 +1414,7 @@ def create_app(
     @app.post("/v1/agent/tasks/{ref}/status", response_model=Task)
     async def agent_task_status(ref: str, body: AgentStatus, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
         item = assignments.report(_agent_task_id(job, ref), job.bot_id, job.id, body.state.strip().lower(),
-                                  body.note.strip())
+                                  body.note.strip(), body.evidence.strip())
         return assignments.task(item.id)
 
     @app.post("/v1/agent/tasks/{ref}/drop", response_model=Task)

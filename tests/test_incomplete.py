@@ -63,10 +63,14 @@ def test_not_done_and_waiting_on_user(settings):
 
 
 def test_not_done_is_shown_when_auto_continue_is_off(settings, monkeypatch):
-    from botoffice import baseline
-    monkeypatch.setattr(baseline, "auto_continue", lambda store: {"enabled": False, "max": 10})
+    from botoffice import continuation
+    monkeypatch.setattr(continuation, "get", lambda store: {**continuation.defaults(), "enabled": False})
     store, bot, job = run_turn(settings, "Started.\nBOT-OFFICE-STATUS: not_done - tests still failing")
-    assert job.status == JobStatus.INCOMPLETE and chat(store, bot)[-1] == ("system", "Not done: tests still failing")
+    # 0.11.10 one continuation system: every stop says why in the chat
+    assert job.status == JobStatus.INCOMPLETE and chat(store, bot)[-2:] == [
+        ("system", "Not done: tests still failing"),
+        ("system", "Stopped continuing automatically: auto-continue is off (Settings, Auto-continue). "
+                   "Reply to keep it going.")]
 
 
 def test_done_line_is_stripped_and_missing_line_is_unverified(settings):

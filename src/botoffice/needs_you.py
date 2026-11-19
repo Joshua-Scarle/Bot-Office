@@ -11,8 +11,10 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 
+from . import continuation
 from .assignments import utc_time
 from .catalog import ENGINE_LABELS
+from .cron import to_cron_time
 from .store import PARKED_SQL, JobStore, approval_card, now
 
 FAILED_WINDOW = timedelta(hours=72)
@@ -163,6 +165,23 @@ def needs_you(store: JobStore) -> list[dict]:
                 "ask": f"{bot['name']} used today's unattended budget; {row['held']} turn(s) wait until tomorrow "
                        f"({(row['why'] or '').removeprefix('held: ')})",
                 "at": row["at"], "actions": ["allow"],
+            })
+        # 0.11.10 (G3): automatic turns a cap holds until its window slides; gone once they run or are cancelled
+        for row in db.execute("SELECT bot_id, COUNT(*) AS held, MIN(error) AS why, MIN(not_before) AS until, "
+                              "MIN(created_at) AS at FROM jobs WHERE status='queued' AND failure_kind=? GROUP BY bot_id",
+                              (continuation.HELD,)):
+            bot = bots.get(row["bot_id"])
+            if bot is None:
+                continue
+            until = datetime.fromisoformat(row["until"]) if row["until"] else stamp
+            items.append({
+                "id": f"c:{row['bot_id']}:{row['at']}", "kind": "auto_cap", "state": "held",
+                "bot_id": row["bot_id"], "bot_name": bot["name"], "notify": bool(bot["notify"]),
+                "title": "Automatic-turn cap reached",
+                "ask": f"{bot['name']} stopped automatic work: {(row['why'] or '').removeprefix('held: ')}; "
+                       f"{row['held']} turn(s) wait until {to_cron_time(until).strftime('%-I:%M %p')} ET. "
+                       "You can raise the cap in Settings (Auto-continue), or reply to it.",
+                "at": row["at"], "actions": ["settings"],
             })
         for row in db.execute("SELECT * FROM watchers WHERE enabled=0 AND paused_reason IS NOT NULL"):
             bot = bots.get(row["bot_id"])

@@ -12,6 +12,19 @@ def _allow_fake_voice(monkeypatch):
     monkeypatch.setenv("BOT_OFFICE_VOICE_FAKE", "1")
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "continuation_defaults: run with the shipped G4 evidence default (on)")
+
+
+@pytest.fixture(autouse=True)
+def _done_without_evidence(request, monkeypatch):
+    """0.11.10 G4 makes a task's done need evidence by default. Tests written before it exercise the loop,
+    verify turns and status lines, not the evidence gate, so they run with it off; tests/test_continuation.py
+    (marked continuation_defaults) runs with the shipped default."""
+    if request.node.get_closest_marker("continuation_defaults") is None:
+        monkeypatch.setenv("BOT_OFFICE_DONE_NEEDS_EVIDENCE", "off")
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(data_dir=tmp_path / "data", token="test-token", job_timeout=2)

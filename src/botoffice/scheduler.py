@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from . import attachments, baseline, failures, isolation, needs_you, procs, safefs
+from . import attachments, baseline, continuation, failures, isolation, needs_you, procs, safefs
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
 from .catalog import ENGINE_LABELS
@@ -812,35 +812,42 @@ class Scheduler:
                 sink.emit("done", status=status.value, exit_code=exit_code, error=error)
 
     def _auto_continue(self, job: Job) -> str:
-        """0.11.10: a turn that ended ``not_done`` is continued in the same session, up to the owner's
-        limit. Not for assignment turns (their own loop), bot-to-bot or watcher turns, nor when the owner
-        has a turn waiting, a question or approval is open, or the turn's chat line was withdrawn by an
-        edit. A message the owner steered into the turn starts a new chain. Returns the decision."""
+        """0.11.10: a turn that ended ``not_done`` is continued in the same session when
+        ``continuation.decide`` says so (the same rules as the task loop). Not for assignment turns (the
+        loop decides those), bot-to-bot or watcher turns, nor a turn whose chat line an edit withdrew.
+        A message the owner steered into the turn starts a new chain. Decided once per job (a second
+        call returns "already decided"). Returns the decision code."""
         assert job.bot_id
         if job.assignment_id or job.source not in AUTO_CONTINUE_SOURCES or self.store.agent_message_for_job(job.id):
             return "not eligible"
-        settings = baseline.auto_continue(self.store)
-        if not settings["enabled"]:
-            return "off"
+        if not self.store.claim_auto_decision(job.id):
+            return "already decided"
         bot = self.store.get_bot(job.bot_id)
         line = self.store.job_message(job.bot_id, job.id)
         if bot is None or line is None or line.archived_at is not None:
+            self.store.set_auto_decision(job.id, "withdrawn")
             return "withdrawn"
-        if (self.store.user_turn_waiting(bot.id) or self.store.has_open_question(job.id)
-                or self.store.pending_approval(job.id)):
-            return "waiting"
+        settings = continuation.get(self.store)
         steered = self.store.delivered_steers(job.id) > 0
         number = 1 if steered else job.continue_count + 1
         root = job.id if steered or not job.continued_from else job.continued_from
+        finished = self.store.get(job.id) or job
+        # the turns in a row since the owner last spoke: the chain from its root (the owner's turn)
+        run = ([(finished.reply_text or "", (finished.outcome or "").partition(": ")[2])] if steered
+               else self.store.chain_turns(root, finished.created_at))
+        decision = continuation.decide(settings, continuation.Turn(
+            path="chat", state="not_done", run=run, automatic=number - 1, chat_only=bot.chat_only,
+            question_open=self.store.has_open_question(job.id), approval_pending=self.store.pending_approval(job.id),
+            owner_waiting=self.store.user_turn_waiting(bot.id)))
+        self.store.set_auto_decision(job.id, decision.code)
+        if not decision.go:
+            self.store.add_message(bot.id, "system", continuation.chat_stop_line(decision), source=job.source)
+            return decision.code
         limit = int(settings["max"])
-        if number > limit:
-            self.store.add_message(bot.id, "system", f"Stopped continuing automatically after {limit} "
-                                   "continuations. Send a message to keep it going.", source=job.source)
-            return "limit"
         text = AUTO_CONTINUE_LINE.format(n=number, max=limit)
 
         def mark(db, new_job: Job) -> None:
-            db.execute("UPDATE jobs SET continue_count=?, continued_from=? WHERE id=?",
+            db.execute("UPDATE jobs SET continue_count=?, continued_from=?, auto_kind='chat' WHERE id=?",
                        (number, str(root), str(new_job.id)))
             # the owner sees the working bubble carry on ("continuing, n of max"), not these lines
             db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='user' AND sender='Bot-Office'",
@@ -853,6 +860,7 @@ class Scheduler:
                                     prompt=AUTO_CONTINUE_PROMPT.format(n=number, max=limit), hook=mark)
         except TurnError as exc:
             self.store.add_message(bot.id, "system", f"Could not continue automatically: {exc}", source=job.source)
+            self.store.set_auto_decision(job.id, "error")
             return "error"
         return "continued"
 

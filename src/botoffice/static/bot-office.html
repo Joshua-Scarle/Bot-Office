@@ -401,9 +401,17 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </section>
     <section class="settings-section" id="set-behavior" aria-labelledby="set-behavior-title">
       <h3 id="set-behavior-title">Bot behavior</h3>
-      <label class="check"><input id="auto-continue" type="checkbox"> Keep going automatically when a bot stops before its task is done</label>
-      <label class="inline">At most <input id="auto-continue-max" type="number" min="1" max="50" aria-label="Most automatic continuations in a row"> continuations in a row, then the bot waits for you</label>
-      <p class="muted">A message from you or Stop ends the run. Continuations run quietly: the bot stays "Working" in the chat. Assignments use the same loop, within the turn budget set on each assignment (20 turns by default).</p>
+      <h4>Auto-continue</h4>
+      <label class="check"><input id="auto-continue" type="checkbox"> Keep going automatically when a bot stops before its work is done (chats and assignments)</label>
+      <label class="inline">At most <input id="auto-continue-max" type="number" min="1" max="50" aria-label="Most automatic continuations in a row"> continuations in a row in a chat, then the bot waits for you</label>
+      <label class="inline">Stop after <input id="auto-no-progress" type="number" min="1" max="100" aria-label="Turns in a row with no progress"> turns in a row with no progress</label>
+      <label class="inline">Stop after <input id="auto-consecutive" type="number" min="1" max="1000" aria-label="Automatic turns in a row without a reply from you"> automatic turns in a row without a reply from you</label>
+      <label class="inline">Each bot: at most <input id="auto-per-bot-day" type="number" min="1" max="100000" aria-label="Automatic turns per bot per day"> automatic turns a day</label>
+      <label class="check"><input id="auto-per-bot-day-unlimited" type="checkbox"> No cap per bot (unlimited)</label>
+      <label class="inline">All bots together: at most <input id="auto-per-hour" type="number" min="1" max="100000" aria-label="Automatic turns per hour, all bots"> automatic turns an hour</label>
+      <label class="check"><input id="auto-per-hour-unlimited" type="checkbox"> No cap for all bots (unlimited)</label>
+      <label class="check"><input id="auto-evidence" type="checkbox"> An assignment counts as done only with evidence of how it was checked (tests, a check, a command's result, a file)</label>
+      <p class="muted">A message from you or Stop ends the run, and a bot also stops when it says it is blocked or needs you. Continuations run quietly: the bot stays "Working" in the chat. Automatic turns are chat continuations, assignment steps and checks, and wake-ups; your own messages, Start and Reply, and routines are not counted. A bot over a cap waits instead of dropping work, and its chat and Needs you say which cap. Assignments also keep their own turn budget (20 turns by default). Chat-only bots (set in a bot's dialog) never continue.</p>
       <div class="tools-bar"><button id="behavior-save" type="button" class="primary">Save</button><span id="behavior-state" class="muted" role="status"></span></div>
     </section>
     <section class="settings-section" id="set-approvals" aria-labelledby="set-approvals-title">
@@ -463,6 +471,8 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <p class="hint">Starts a new provider session on the next turn (cheaper context; chat history, memory and WORKING.md are kept).</p></div>
     <label>Command-line access<select id="f-cli-access"><option value="full">Full (shell, files, network, no prompts)</option><option value="restricted">Restricted (edits only, sandboxed)</option></select></label>
     <p class="hint">Full lets the bot run any command as the server user. Applies from the next turn.</p>
+    <label class="check"><input id="f-chat-only" type="checkbox"> Chat only: never continue automatically</label>
+    <p class="hint">A chat-only bot answers your messages and does nothing by itself: no automatic continuation, no task steps, checks or wake-ups of its own. Your Start and Reply still give it one turn.</p>
     <div id="loop-zone" hidden>
       <label>Turn time limit in minutes<input id="f-timeout" type="number" min="1" max="60" placeholder="default"></label>
       <label class="check"><input id="f-notify" type="checkbox"> Notify me when this bot needs me</label>
@@ -2415,6 +2425,7 @@ async function openDialog(bot) {
   $("f-timeout").value = bot && bot.job_timeout ? Math.round(bot.job_timeout / 60) : "";
   $("f-notify").checked = !bot || bot.notify !== false;
   $("f-bot-steer").checked = !bot || bot.bot_steer !== false;
+  $("f-chat-only").checked = Boolean(bot && bot.chat_only);
   $("f-allow-sudo").checked = Boolean(bot && bot.allow_sudo);
   $("f-scheduled-runs").value = bot && bot.scheduled_runs === "gated" ? "gated" : "full";
   $("f-digest").checked = Boolean(bot && bot.digest);
@@ -2507,6 +2518,7 @@ $("bot-form").onsubmit = async (event) => {
   if (!bot || engine !== bot.engine || model !== bot.model) { body.engine = engine; body.model = model; }
   if (!$("f-effort-row").hidden && (!bot || $("f-effort").value !== (bot.effort || "") || engine !== bot.engine)) body.effort = $("f-effort").value || null;
   if (!bot || $("f-cli-access").value !== (bot.cli_access || "full")) body.cli_access = $("f-cli-access").value;
+  if ($("f-chat-only").checked !== Boolean(bot && bot.chat_only)) body.chat_only = $("f-chat-only").checked;
   if (bot) {
     const timeout = $("f-timeout").value ? Math.round(Number($("f-timeout").value) * 60) : null;
     if (timeout !== (bot.job_timeout || null)) body.job_timeout = timeout;
@@ -2674,9 +2686,25 @@ function showLayer(prefix, data) {
   $(prefix + "-reset").disabled = !data.customized;
 }
 function showBehavior(data) {
-  $("auto-continue").checked = !!data.auto_continue.enabled;
-  $("auto-continue-max").value = data.auto_continue.max;
+  const auto = data.auto_continue;
+  $("auto-continue").checked = !!auto.enabled;
+  $("auto-continue-max").value = auto.max;
   $("auto-continue-max").max = data.auto_continue_max_limit;
+  $("auto-no-progress").value = auto.no_progress;
+  $("auto-consecutive").value = auto.consecutive;
+  for (const key of ["per-bot-day", "per-hour"]) {
+    const value = auto[key.replaceAll("-", "_")];
+    $("auto-" + key + "-unlimited").checked = value === null;
+    $("auto-" + key).disabled = value === null;
+    $("auto-" + key).value = value === null ? "" : value;
+  }
+  $("auto-evidence").checked = !!auto.evidence;
+}
+for (const key of ["per-bot-day", "per-hour"]) {
+  $("auto-" + key + "-unlimited").onchange = () => {
+    $("auto-" + key).disabled = $("auto-" + key + "-unlimited").checked;
+    if (!$("auto-" + key + "-unlimited").checked && !$("auto-" + key).value) $("auto-" + key).value = 20;
+  };
 }
 const GATE_WORDS = { enforced: "can pause", advisory: "can pause (not yet proven on this computer)", none: "can't pause" };
 function showApprovals(data) {
@@ -2746,9 +2774,12 @@ function layerButtons(prefix, path, label) {
 layerButtons("rules", "/v1/rules-for-all-bots", "the rules for all bots");
 layerButtons("system", "/v1/system-prompt", "the system prompt");
 $("behavior-save").onclick = async () => {
-  const max = Number($("auto-continue-max").value);
+  const cap = (key) => $("auto-" + key + "-unlimited").checked ? "unlimited" : Number($("auto-" + key).value);
+  const auto_continue = {enabled: $("auto-continue").checked, max: Number($("auto-continue-max").value),
+    no_progress: Number($("auto-no-progress").value), consecutive: Number($("auto-consecutive").value),
+    per_bot_day: cap("per-bot-day"), per_hour: cap("per-hour"), evidence: $("auto-evidence").checked};
   try {
-    showBehavior(await api("/v1/settings", {method: "PUT", body: JSON.stringify({auto_continue: {enabled: $("auto-continue").checked, max}})}));
+    showBehavior(await api("/v1/settings", {method: "PUT", body: JSON.stringify({auto_continue})}));
     $("behavior-state").textContent = "Saved.";
   } catch (e) { $("behavior-state").textContent = e.message; }
 };
@@ -3006,6 +3037,9 @@ async function needsAction(item, action) {
       await api("/v1/approvals/" + item.approval_id + "/approve", {method: "POST"});
     } else if (action === "deny") {
       await api("/v1/approvals/" + item.approval_id + "/deny", {method: "POST"});
+    } else if (action === "settings") {
+      $("office-settings").click();
+      return;
     } else if (action === "allow") {
       await api("/v1/bots/" + item.bot_id + "/budget/allow", {method: "POST", body: JSON.stringify({turns: 10, minutes: 30})});
     } else if (item.kind === "usage_limit" && action.startsWith("switch:")) {
@@ -3028,7 +3062,7 @@ async function loadNeedsYou() {
   const [items] = await Promise.all([api("/v1/needs-you"), loadTaskCounts()]);
   const labels = {reply: "Reply", start: "Continue", done: "Done", retry: "Retry", dismiss: "Dismiss",
     approve: "Approve once", deny: "Deny", rerun: "Re-run", resume: "Resume", allow: "Allow +10 today",
-    answer: "Answer", skip: "Skip", keep: "Keep waiting"};
+    answer: "Answer", skip: "Skip", keep: "Keep waiting", settings: "Open Settings"};
   $("needs-list").replaceChildren(...items.map((item) => {
     const row = el("div", "needs-item");
     const ask = el("button", "needs-ask", item.ask);

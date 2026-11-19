@@ -101,7 +101,8 @@ def test_consecutive_continue_ceiling_even_when_every_reply_is_fresh(settings):
     fresh = [f"Completed unit {n}: wrote module{n} covering topic{n}{CONT}next" for n in range(30)]
     store, scheduler, _, _, item = setup(settings, *fresh, budget_turns=30)
     jobs = run_all(store, scheduler)
-    assert len(jobs) == ac.MAX_CONSECUTIVE_CONTINUES
+    # 0.11.10 one continuation system: the owner's Start plus 10 automatic turns (the limit counts automatic ones)
+    assert len(jobs) == ac.MAX_CONSECUTIVE_CONTINUES + 1
     after = scheduler.assignments.get(item.id)
     assert after.status == "waiting_on_user" and "in a row without a reply" in after.status_note
 

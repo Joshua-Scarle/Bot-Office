@@ -15,12 +15,11 @@ Also here: the owner's auto-continue setting (0.11.10), a JSON document in ``met
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
-from . import isolation, safefs
+from . import continuation, isolation, safefs
 from .store import JobStore
 
 PROMPTS = Path(__file__).with_name("prompts")
@@ -100,36 +99,25 @@ def effective_layers(store: JobStore) -> dict[str, str]:
     return {layer.key: layer.effective(store) for layer in LAYERS}
 
 
-# --- auto-continue (0.11.10) ---
+# --- auto-continue (0.11.10): the settings are continuation.py's (one system for chat and tasks) ---
 
-AUTO_CONTINUE_KEY = "auto_continue"
+AUTO_CONTINUE_KEY = continuation.KEY
 AUTO_CONTINUE_DEFAULT = {"enabled": True, "max": 10}
-AUTO_CONTINUE_MAX = 50
+AUTO_CONTINUE_MAX = continuation.CHAIN_MAX_LIMIT
 
 
 def auto_continue(store: JobStore) -> dict[str, object]:
-    settings = dict(AUTO_CONTINUE_DEFAULT)
-    raw = store.get_meta(AUTO_CONTINUE_KEY)
-    if raw:
-        try:
-            saved = json.loads(raw)
-        except ValueError:
-            saved = {}
-        if isinstance(saved, dict):
-            if isinstance(saved.get("enabled"), bool):
-                settings["enabled"] = saved["enabled"]
-            if isinstance(saved.get("max"), int) and not isinstance(saved.get("max"), bool):
-                settings["max"] = max(1, min(AUTO_CONTINUE_MAX, saved["max"]))
-    return settings
+    return continuation.get(store)
 
 
-def set_auto_continue(store: JobStore, enabled: bool | None = None, maximum: int | None = None) -> dict[str, object]:
-    settings = auto_continue(store)
+def set_auto_continue(store: JobStore, enabled: bool | None = None, maximum: int | None = None,
+                      **more: object) -> dict[str, object]:
+    """*more*: the other continuation settings by key (None for a cap means unlimited)."""
+    if maximum is not None and not 1 <= maximum <= AUTO_CONTINUE_MAX:
+        raise ValueError(f"the limit must be between 1 and {AUTO_CONTINUE_MAX}")
+    changes = dict(more)
     if enabled is not None:
-        settings["enabled"] = bool(enabled)
+        changes["enabled"] = bool(enabled)
     if maximum is not None:
-        if not 1 <= maximum <= AUTO_CONTINUE_MAX:
-            raise ValueError(f"the limit must be between 1 and {AUTO_CONTINUE_MAX}")
-        settings["max"] = maximum
-    store.set_meta(AUTO_CONTINUE_KEY, json.dumps(settings))
-    return settings
+        changes["max"] = maximum
+    return continuation.update(store, changes)
