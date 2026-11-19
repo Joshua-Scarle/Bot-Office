@@ -95,13 +95,15 @@ def test_only_not_done_continues(settings, ending):
 
 
 def test_chain_stops_at_the_owner_limit(settings):
-    store, scheduler, _, bot = _setup(settings, [NOT_DONE])
+    # each reply is fresh progress, so the chain limit (not the no-progress guard) is what stops it
+    steps = [f"Wrote module{n} with its parser{n}.\nBOT-OFFICE-STATUS: not_done — next: module{n + 1}" for n in range(9)]
+    store, scheduler, _, bot = _setup(settings, steps)
     baseline.set_auto_continue(store, maximum=3)
     runs = _run_all(store, scheduler)
     assert [job.continue_count for job in runs] == [0, 1, 2, 3]
     assert _queued(store, bot) == []
-    assert any("Stopped continuing automatically after 3" in m.text for m in store.list_messages(bot.id)
-               if m.role == "system")
+    assert any("Stopped continuing automatically: 3 continuations in a row" in m.text
+               for m in store.list_messages(bot.id) if m.role == "system")
 
 
 def test_switched_off_by_the_owner(settings):
@@ -137,7 +139,9 @@ def test_a_steered_message_starts_a_fresh_count(settings):
     store, scheduler, _, bot = _setup(settings, [NOT_DONE])
     first = _run_one(store, scheduler)
     with closing(store._connect()) as db:
-        db.execute("UPDATE jobs SET continue_count=7, continued_from=? WHERE id=?", (str(first.id), str(first.id)))
+        # as if not decided yet (the scheduler already decided it once; a second call would be refused)
+        db.execute("UPDATE jobs SET continue_count=7, continued_from=?, auto_decision=NULL WHERE id=?",
+                   (str(first.id), str(first.id)))
         db.execute("UPDATE jobs SET status='cancelled' WHERE bot_id=? AND status='queued'", (str(bot.id),))
         db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,attachments,steer_job_id,steer_status) "
                    "VALUES (?,'user','chat','also add docs','2026-11-17T00:00:00+00:00','[]',?,'delivered')",

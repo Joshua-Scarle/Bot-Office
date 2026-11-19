@@ -91,6 +91,8 @@ class Job(BaseModel):
     # 0.11.10: automatic continuation number (0 = not one) and the turn its chain started from
     continue_count: int = 0
     continued_from: UUID | None = None
+    # 0.11.10: the kind of automatic turn (continuation.AUTO_KINDS), None for owner/routine/bot-message turns
+    auto_kind: str | None = None
     bot_name: str | None = Field(default=None, exclude=True)
     api_url: str | None = Field(default=None, exclude=True)
     agent_token: str | None = Field(default=None, exclude=True)
@@ -181,6 +183,8 @@ class Bot(BaseModel):
     digest: bool = False
     # 0.11.10: other bots' messages may steer this bot's running turn (off: they wait for a turn of their own)
     bot_steer: bool = True
+    # 0.11.10 (G1): never continues by itself (no auto-continue, loop, verify or wake-up turns)
+    chat_only: bool = False
     # unread state for the owner (filled by GET /v1/bots and the read/unread endpoints)
     unread_count: int = 0
     unread_since: datetime | None = None
@@ -240,6 +244,7 @@ class BotCreate(_BotFields):
     name: str = Field(min_length=1, max_length=80)
     instructions: str = Field(default="", max_length=50_000)
     default_provider: BotProvider = "codex"
+    chat_only: bool = False
 
 
 class BotUpdate(_BotFields):
@@ -254,6 +259,7 @@ class BotUpdate(_BotFields):
     daily_budget: dict | None = None
     digest: bool | None = None
     bot_steer: bool | None = None
+    chat_only: bool | None = None
 
 
 class ModelOption(BaseModel):

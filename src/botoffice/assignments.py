@@ -13,7 +13,7 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from . import autocontinue
+from . import continuation
 from .catalog import default_effort
 from .cron import to_cron_time
 from .domain import CLOSED_STATUSES, Assignment, Task, Wakeup
@@ -50,6 +50,9 @@ MAX_WAKEUPS_PER_DAY = 24
 MAX_BOT_ROUTINES = 10
 BOT_ROUTINE_MIN_GAP = timedelta(minutes=15)
 # what a turn (BOT-OFFICE-STATUS line) or ``bot-task status`` may report
+# G4: what a done without evidence is told, and the note when it says done again without any
+EVIDENCE_ASK = 'say how you verified it (bot-task done --evidence "...")'
+NO_EVIDENCE_NOTE = "says it is done; no evidence of how it was verified. Check it and mark it done, or reply"
 REPORT_STATES = ("done", "continue", "not_done", "blocked", "waiting_on_user", "waiting_on_bot")
 EDITABLE = ("title", "goal", "done_when", "due_at", "budget_turns", "budget_minutes", "verify", "escalate")
 # 0.11.4 task lists (plan 4.4): what the owner may also set, and what a bot may edit (the assignee on
@@ -353,15 +356,16 @@ class Assignments:
     @staticmethod
     def _insert_turn(db: sqlite3.Connection, bot: sqlite3.Row, prompt: str, text: str, *, sender: str | None,
                      priority: int, source: str, message_source: str | None = None, title: str = "",
-                     assignment_id: str | None = None, turn: int | None = None, hidden: bool = False) -> str:
+                     assignment_id: str | None = None, turn: int | None = None, hidden: bool = False,
+                     auto_kind: str | None = None) -> str:
         job_id, stamp = str(uuid4()), now().isoformat()
         # the reason is optional; a loop turn names its assignment so the Claude-use log says why it ran
         reason = bot["reason"] or f"Bot-Office {source}: {(title or 'scheduled turn')[:200]}"
         db.execute(
             "INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority,"
-            "assignment_id,assignment_turn) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "assignment_id,assignment_turn,auto_kind) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (job_id, prompt, "queued", bot["default_provider"], stamp, bot["id"], reason, source, bot["model"],
-             bot["effort"] or default_effort(bot["default_provider"]), priority, assignment_id, turn))
+             bot["effort"] or default_effort(bot["default_provider"]), priority, assignment_id, turn, auto_kind))
         # hidden: Bot-Office's own step prompts (Continue, Check, wake-ups) stay out of the chat (0.11.10)
         db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments,hidden) "
                    "VALUES (?,?,?,?,?,?,?,'[]',?)",
@@ -370,7 +374,8 @@ class Assignments:
 
     def _enqueue_turn(self, db: sqlite3.Connection, row: sqlite3.Row, prompt: str, text: str, *,
                       sender: str | None, priority: int, source: str = "assignment",
-                      message_source: str | None = None, hidden: bool = False) -> str | None:
+                      message_source: str | None = None, hidden: bool = False,
+                      auto_kind: str | None = None) -> str | None:
         """Queue the assignment's next turn (job + chat line); None if its bot is gone."""
         bot = db.execute("SELECT * FROM bots WHERE id=?", (row["bot_id"],)).fetchone()
         if bot is None:
@@ -379,7 +384,7 @@ class Assignments:
         db.execute("UPDATE assignments SET next_turn=? WHERE id=?", (turn, row["id"]))
         job_id = self._insert_turn(db, bot, prompt, text, sender=sender, priority=priority, source=source,
                                    message_source=message_source, title=row["title"], assignment_id=row["id"],
-                                   turn=turn, hidden=hidden)
+                                   turn=turn, hidden=hidden, auto_kind=auto_kind)
         self._event(db, row["id"], "queued", f"turn {turn}", job_id)
         return job_id
 
@@ -568,7 +573,8 @@ class Assignments:
         if self._has_open_job(db, row["id"]):
             return None
         return self._enqueue_turn(db, self._row(db, row["id"]), f'Work on assignment {_quoted(row)}.',
-                                  text or f'Start assignment "{row["title"]}"', sender=sender, priority=priority)
+                                  text or f'Start assignment "{row["title"]}"', sender=sender, priority=priority,
+                                  auto_kind="loop" if priority >= LOOP_PRIORITY else None)
 
     def start(self, assignment_id: UUID | str, add_turns: int = 0, add_minutes: int = 0) -> Assignment:
         with closing(self._tx()) as db:
@@ -729,6 +735,9 @@ class Assignments:
         fields["budget_minutes"] = min(fields.get("budget_minutes", BOT_BUDGET_MINUTES), BOT_BUDGET_MINUTES)
         if target != str(bot_id) and not (parent_id and choice(CROSS_BOT_SUBTASK_START) == "allow"):
             fields["start"] = False
+        with closing(self.store._connect()) as db:
+            if self._chat_only(db, target):
+                fields["start"] = False  # G1: a chat-only bot gets no loop turns; the owner starts it
         # the parent and the open-children cap are checked inside the insert's transaction
         return self.create(target, fields, created_by=actor_of(bot_id), parent_id=parent_id,
                            max_children=MAX_CHILDREN if parent_id else None, origin="bot", source_job_id=job_id,
@@ -860,9 +869,11 @@ class Assignments:
         return [self.task(key) for key in ids]
 
     def report(self, assignment_id: UUID | str, bot_id: UUID | str, job_id: UUID | str, state: str,
-               note: str = "") -> Assignment:
-        """``bot-task status``. During a turn of this assignment the report is kept for the loop
-        (the turn's own status line, if any, comes later and wins); otherwise it applies now."""
+               note: str = "", evidence: str = "") -> Assignment:
+        """``bot-task status`` / ``bot-task done --evidence``. During a turn of this assignment the report
+        is kept for the loop (the turn's own status line, if any, comes later and wins); otherwise it
+        applies now. *evidence* (how the work was verified, G4) is kept as an ``evidence`` event. Out of
+        its turn, a done without evidence (setting on) and a chat-only bot's continue are refused (409)."""
         if state not in REPORT_STATES:
             raise AssignmentError(400, f"state must be one of {', '.join(REPORT_STATES)}")
         actor = actor_of(bot_id)
@@ -876,6 +887,14 @@ class Assignments:
                 # fix 7: the report goes through the versioned writer (no version precondition)
                 # (during a turn of this task the report is kept for the loop; otherwise it applies now)
                 own_turn = bool(job and job["assignment_id"] == row["id"])
+                if evidence:
+                    self._event(db, row["id"], "evidence", evidence[:1000], str(job_id), actor=actor)
+                if not own_turn and state == "done" and continuation.read(db)["evidence"] \
+                        and not self._has_evidence(db, row["id"]):
+                    raise AssignmentError(409, f"not marked done: {EVIDENCE_ASK}")
+                if not own_turn and state in ("continue", "not_done") and self._chat_only(db, row["bot_id"]):
+                    raise AssignmentError(409, "this bot is chat-only: it does not start or continue tasks by itself; "
+                                               "the owner starts them")
                 kept = {"last_progress_at": now().isoformat(), "stalled_at": None}
                 if own_turn:
                     kept.update(reported_status=state, reported_note=note[:1000], reported_job=str(job_id))
@@ -1139,56 +1158,125 @@ class Assignments:
             db.execute("UPDATE assignments SET missing_status=0 WHERE id=?", (row["id"],))
         row = self._row(db, row["id"])
         if state == "done":
-            if row["verify"] and not row["verifying"]:
-                db.execute("UPDATE assignments SET verifying=1 WHERE id=?", (row["id"],))
-                if not self._has_open_job(db, row["id"]):
-                    self._enqueue_turn(
-                        db, row, f'Check assignment {_quoted(row)} against its "done when" before it is closed: '
-                        f'{_quoted(row, "done_when" if row["done_when"] else "goal")}. Report done only if it holds; otherwise continue or blocked.',
-                        f'Check "{row["title"]}" against done-when', sender="Bot-Office", priority=LOOP_PRIORITY,
-                        hidden=True)
-                return "verify"
-            self._set_status(db, row, "done", reason, actor=actor, job_id=job_id)
-            return "done"
+            return self._settle_done(db, row, job, reason, actor)
         if state == "cancelled":
             self._set_status(db, row, "open", reason, actor="system", job_id=job_id)
             return "open"
         if state == "continue":
             row = self._row(db, row["id"])
             db.execute("UPDATE assignments SET verifying=0 WHERE id=?", (row["id"],))
-            if not self._budget_left(row):
-                self._set_status(db, row, "blocked", f"budget used ({row['turns_used']}/{row['budget_turns']} turns, "
-                                 f"{row['minutes_used']:.0f}/{row['budget_minutes']} min)", actor="system", job_id=job_id)
-                return "budget"
-            if self._has_open_job(db, row["id"]):
+            if self._budget_left(row) and self._has_open_job(db, row["id"]):
                 return "continue"  # a queued turn (e.g. the user's reply) carries on
-            if why := self._loop_guard(db, row):
-                self._event(db, row["id"], "guard", why, job_id)
-                self._set_status(db, row, "waiting_on_user", f"paused, not blocked: {why}. Reply to resume.", job_id=job_id)
-                return "waiting"
+            if not (decision := self._go(db, row, job, "continue")).go:
+                return "budget" if decision.code == "budget" else "waiting"
             self._enqueue_turn(db, row, f'Continue assignment {_quoted(row)} (next step).',
-                               f'Continue "{row["title"]}"', sender="Bot-Office", priority=LOOP_PRIORITY, hidden=True)
+                               f'Continue "{row["title"]}"', sender="Bot-Office", priority=LOOP_PRIORITY, hidden=True,
+                               auto_kind="loop")
             return "continue"
         self._set_status(db, row, state, reason, actor=actor, job_id=job_id)
         return state
 
+    def _settle_done(self, db: sqlite3.Connection, row: sqlite3.Row, job: sqlite3.Row, reason: str, actor: str) -> str:
+        """A turn said done. G4: without evidence of how it was verified it continues once to say so,
+        then waits for the owner; with ``verify`` set a check turn runs first; then the task is done."""
+        job_id = job["id"]
+        if continuation.read(db)["evidence"] and not self._has_evidence(db, row["id"]):
+            if db.execute("SELECT 1 FROM assignment_events WHERE assignment_id=? AND kind='evidence_asked' LIMIT 1",
+                          (row["id"],)).fetchone():
+                self._set_status(db, row, "waiting_on_user", NO_EVIDENCE_NOTE, job_id=job_id)
+                return "no_evidence"
+            if not self._go(db, row, job, "evidence").go:
+                return "waiting"
+            self._event(db, row["id"], "evidence_asked", EVIDENCE_ASK, job_id)
+            self._enqueue_turn(db, row, f'You said assignment {_quoted(row)} is done, but nothing shows how it was '
+                               f'verified. {EVIDENCE_ASK}: run the check that proves it, then report done again.',
+                               f'Evidence for "{row["title"]}"', sender="Bot-Office", priority=LOOP_PRIORITY,
+                               hidden=True, auto_kind="evidence")
+            return "evidence"
+        if row["verify"] and not row["verifying"]:
+            if not self._has_open_job(db, row["id"]):
+                if not self._go(db, row, job, "verify").go:
+                    return "waiting"
+                db.execute("UPDATE assignments SET verifying=1 WHERE id=?", (row["id"],))
+                self._enqueue_turn(
+                    db, row, f'Check assignment {_quoted(row)} against its "done when" before it is closed: '
+                    f'{_quoted(row, "done_when" if row["done_when"] else "goal")}. Report done only if it holds; otherwise continue or blocked.',
+                    f'Check "{row["title"]}" against done-when', sender="Bot-Office", priority=LOOP_PRIORITY,
+                    hidden=True, auto_kind="verify")
+            else:
+                db.execute("UPDATE assignments SET verifying=1 WHERE id=?", (row["id"],))
+            return "verify"
+        self._set_status(db, row, "done", reason, actor=actor, job_id=job_id)
+        return "done"
+
     @staticmethod
-    def _loop_guard(db: sqlite3.Connection, row: sqlite3.Row) -> str | None:
-        """Why a "continue" turn must not queue the next one (None = go on): an open question card, a reply
-        that says the bot is blocked or needs the user, or a run of continues with no progress."""
-        if db.execute("SELECT 1 FROM questions WHERE bot_id=? AND status='open' AND blocking=1 LIMIT 1", (row["bot_id"],)).fetchone():
-            return "a question to you is still open"
-        run: list[tuple[str, str]] = []  # the continues since the user last spoke, newest first
-        for job in db.execute("SELECT priority,outcome,reply_text FROM jobs WHERE assignment_id=? AND assignment_turn "
-                              "IS NOT NULL AND status NOT IN ('queued','running') ORDER BY assignment_turn DESC "
-                              "LIMIT ?", (row["id"], autocontinue.MAX_CONSECUTIVE_CONTINUES)):
-            state, _, reason = (job["outcome"] or "unverified").partition(": ")
+    def _chat_only(db: sqlite3.Connection, bot_id: str) -> bool:
+        bot = db.execute("SELECT chat_only FROM bots WHERE id=?", (str(bot_id),)).fetchone()
+        return bool(bot and bot["chat_only"])
+
+    @staticmethod
+    def _has_evidence(db: sqlite3.Connection, assignment_id: str) -> bool:
+        return bool(db.execute("SELECT 1 FROM assignment_events WHERE assignment_id=? AND kind='evidence' LIMIT 1",
+                               (assignment_id,)).fetchone())
+
+    def _go(self, db: sqlite3.Connection, row: sqlite3.Row, job: sqlite3.Row, kind: str) -> continuation.Decision:
+        """Ask ``continuation.decide`` whether the loop queues its next automatic turn (*kind*: continue,
+        verify, evidence). On a stop the task is blocked (its own budget is used) or paused as
+        waiting_on_user ("paused, not blocked: ... Reply to resume.", Needs-you) with a guard event."""
+        decision = continuation.decide(continuation.read(db), self._turn(db, row, job, kind))
+        db.execute("UPDATE jobs SET auto_decision=? WHERE id=?", (decision.code, job["id"]))
+        if decision.go:
+            return decision
+        self._event(db, row["id"], "guard", decision.why, job["id"])
+        if decision.code == "budget":
+            self._set_status(db, row, "blocked", decision.why, actor="system", job_id=job["id"])
+        else:
+            self._set_status(db, row, "waiting_on_user", continuation.task_pause_note(decision), job_id=job["id"])
+        return decision
+
+    def _turn(self, db: sqlite3.Connection, row: sqlite3.Row, job: sqlite3.Row, kind: str) -> continuation.Turn:
+        """The finished turn *job* of *row* for ``continuation.decide``. The run counts back from the newest
+        finished turn: it ends at a turn that stopped the loop (blocked, waiting, ...), at the owner's own
+        turn (Start, Reply, or a message steered into it; included) and at a turn that began before the
+        owner's latest chat message."""
+        settings = continuation.read(db)
+        bot = db.execute("SELECT chat_only FROM bots WHERE id=?", (row["bot_id"],)).fetchone()
+        spoke = db.execute("SELECT MAX(created_at) FROM messages WHERE bot_id=? AND role='user' AND sender IS NULL "
+                           "AND source IN ('chat','api')", (row["bot_id"],)).fetchone()[0]
+        run: list[tuple[str, str]] = []  # newest first while collecting
+        automatic, collecting = 0, True
+        limit = int(settings["consecutive"]) + int(settings["no_progress"]) + 2
+        for turn in db.execute("SELECT id,priority,outcome,reply_text,COALESCE(started_at,created_at) AS began "
+                               "FROM jobs WHERE assignment_id=? AND "
+                               "assignment_turn IS NOT NULL AND status NOT IN ('queued','running') "
+                               "ORDER BY assignment_turn DESC LIMIT ?", (row["id"], limit)):
+            steered = db.execute("SELECT 1 FROM messages WHERE steer_job_id=? AND steer_status='delivered' AND "
+                                 "source!='inbox' LIMIT 1", (turn["id"],)).fetchone()
+            if spoke and turn["began"] < spoke and not steered:
+                break  # the owner spoke after this turn began
+            state, _, reason = (turn["outcome"] or "unverified").partition(": ")
             if state not in ("continue", "not_done", "unverified"):
-                break  # a turn that stopped the loop: the run starts after it
-            run.append((job["reply_text"] or "", reason))
-            if job["priority"] <= USER_PRIORITY:
-                break  # the user's own turn starts the run
-        return autocontinue.stop_reason(run[::-1])
+                collecting = False
+                if state != "done":
+                    break  # a turn that stopped the loop: the run starts after it
+            if collecting:
+                run.append((turn["reply_text"] or "", reason))
+            owner = turn["priority"] <= USER_PRIORITY or steered
+            automatic += 0 if owner else 1
+            if owner:
+                break
+        return continuation.Turn(
+            path="task", kind=kind, state="continue" if kind == "continue" else "done",
+            run=run[::-1], automatic=automatic, chat_only=bool(bot and bot["chat_only"]),
+            question_open=bool(db.execute("SELECT 1 FROM questions WHERE bot_id=? AND status='open' AND blocking=1 "
+                                          "LIMIT 1", (row["bot_id"],)).fetchone()),
+            approval_pending=bool(db.execute("SELECT 1 FROM approvals WHERE job_id=? AND status='pending' LIMIT 1",
+                                             (job["id"],)).fetchone()),
+            owner_waiting=bool(db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='queued' AND source IN "
+                                          "('chat','api') AND auto_kind IS NULL LIMIT 1", (row["bot_id"],)).fetchone()),
+            budget_used=None if self._budget_left(row) else
+            f"budget used ({row['turns_used']}/{row['budget_turns']} turns, "
+            f"{row['minutes_used']:.0f}/{row['budget_minutes']} min)")
 
     @staticmethod
     def _turn_state(job: sqlite3.Row, reported: tuple[str, str] | None, ran: bool) -> tuple[str | None, str]:
@@ -1314,6 +1402,8 @@ class Assignments:
         if bot is None:
             db.execute("UPDATE wakeups SET status='cancelled' WHERE id=?", (wakeup["id"],))
             return 0
+        if bot["chat_only"]:
+            return cancel(f"{bot['name']} is chat-only, so it does not wake itself")
         if db.execute("SELECT COUNT(*) FROM wakeups WHERE bot_id=? AND status='fired' AND fired_at>=?",
                       (wakeup["bot_id"], (stamp - timedelta(days=1)).isoformat())).fetchone()[0] >= MAX_WAKEUPS_PER_DAY:
             return cancel(f"the limit of {MAX_WAKEUPS_PER_DAY} wake-ups per day was reached")
@@ -1336,10 +1426,10 @@ class Assignments:
             if row["status"] != "active":
                 self._set_status(db, row, "active", "wake-up", actor="system", announce=False)
             job_id = self._enqueue_turn(db, self._row(db, row["id"]), prompt, text, sender="Bot-Office",
-                                        priority=LOOP_PRIORITY, source="wakeup", hidden=True)
+                                        priority=LOOP_PRIORITY, source="wakeup", hidden=True, auto_kind="wakeup")
         else:
             job_id = self._insert_turn(db, bot, prompt, text, sender="Bot-Office", priority=LOOP_PRIORITY,
-                                       source="wakeup", title=wakeup["note"][:80], hidden=True)
+                                       source="wakeup", title=wakeup["note"][:80], hidden=True, auto_kind="wakeup")
         db.execute("UPDATE wakeups SET status='fired', fired_at=?, job_id=? WHERE id=?",
                    (stamp.isoformat(), job_id, wakeup["id"]))
         return 1
