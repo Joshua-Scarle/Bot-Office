@@ -44,6 +44,12 @@ def max_file_bytes() -> int:
     return int(max(mb, 0.001) * 1024 * 1024)
 
 
+def stored_limit(name: str) -> int:
+    """The largest stored file that is still read. The upload limit applies when a file arrives; lowering it
+    later must not make files already sent unreadable, so reads allow the larger of it and the default."""
+    return max(max_file_bytes(), DEFAULT_MAX_FILE_MB * 1024 * 1024) if is_file_id(name) else MAX_BYTES
+
+
 def safe_name(raw: str) -> str:
     """A file name that is safe on disk: no directory part, no path tricks, plain characters only."""
     name = re.split(r"[\\/]", raw.replace("\x00", ""))[-1]
@@ -304,7 +310,7 @@ def size(data_dir: Path, bot_id, attachment_id: str) -> int:
     if not is_valid_id(attachment_id):
         raise ValueError("invalid attachment id")
     info = (folder_for(data_dir, bot_id, attachment_id) / attachment_id).lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > (max_file_bytes() if is_file_id(attachment_id) else MAX_BYTES):
+    if not stat.S_ISREG(info.st_mode) or info.st_size > stored_limit(attachment_id):
         raise ValueError("invalid attachment file")
     return info.st_size
 
@@ -313,7 +319,7 @@ def read(data_dir: Path, bot_id, attachment_id: str) -> bytes:
     if not is_valid_id(attachment_id):
         raise ValueError("invalid attachment id")
     path = folder_for(data_dir, bot_id, attachment_id) / attachment_id
-    limit = max_file_bytes() if is_file_id(attachment_id) else MAX_BYTES
+    limit = stored_limit(attachment_id)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
@@ -370,7 +376,7 @@ def write_index(data_dir: Path, bot_id, rows: list[tuple]) -> Path:
     lines = [
         "# Images and files sent to and from this bot",
         "",
-        f"Every image is kept permanently in {path}/ . Open files from here, never from an old job directory.",
+        f"Every image is kept permanently in {path}/ and every other uploaded file in {path.parent / UPLOADS_DIR}/ . Open files from there, never from an old job directory.",
         "Newest last. Columns: date (UTC) | message id | direction | file | message text.",
         "",
     ]

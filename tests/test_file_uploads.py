@@ -140,3 +140,38 @@ def test_uploads_are_never_made_executable_or_extracted(client_bot):
     info = up(client, bot, "tool.sh", b"#!/bin/sh\n").json()
     path = settings.data_dir / "bots" / bot / "uploads" / info["id"]
     assert not os.access(path, os.X_OK)
+
+
+def test_steer_prompt_names_files_in_uploads_and_never_as_images(client_bot):
+    from types import SimpleNamespace
+    from botoffice.providers.cli import _steer_prompt
+    client, bot, settings = client_bot
+    img = client.post(f"/v1/bots/{bot}/attachments", headers=H, content=PNG).json()["id"]
+    doc = up(client, bot, "report.pdf", b"%PDF").json()["id"]
+    message = SimpleNamespace(text="look", bot_id=bot, attachments=[img, doc], sender=None, source="chat")
+    prompt = _steer_prompt(message, settings.data_dir / "bots" / bot / "workspace")
+    assert f"/bots/{bot}/attachments/{img}" in prompt
+    assert f"/bots/{bot}/uploads/{doc}" in prompt and f"/attachments/{doc}" not in prompt
+    assert "never to run" in prompt
+
+
+def test_files_do_not_count_against_the_seed_image_caps(client_bot):
+    """Many files (and big ones) never make rewind_seed refuse; only images count against its caps."""
+    from botoffice import store as store_mod
+    client, bot, settings = client_bot
+    ids = [up(client, bot, f"f{i}.bin", b"x" * 1024).json()["id"] for i in range(store_mod.SEED_MAX_IMAGES + 6)]
+    for start in range(0, len(ids), 6):
+        client.post(f"/v1/bots/{bot}/messages", headers=H, json={"text": "files", "attachments": ids[start:start + 6]})
+    store = client.app.state.store
+    last = store.list_messages(bot)[-1].id
+    seed = store.rewind_seed(bot, last + 1)
+    assert len(seed.images) == len(ids)  # named in the seed, none refused
+
+
+def test_lowering_the_limit_does_not_hide_files_already_sent(client_bot, monkeypatch):
+    client, bot, settings = client_bot
+    monkeypatch.setenv("BOT_OFFICE_MAX_UPLOAD_MB", "2")
+    info = up(client, bot, "keep.bin", b"x" * (1024 * 1024 + 10)).json()
+    monkeypatch.setenv("BOT_OFFICE_MAX_UPLOAD_MB", "1")
+    assert client.get(info["url"], headers=H).status_code == 200
+    assert client.get(info["url"] + "/info", headers=H).json()["size"] == 1024 * 1024 + 10

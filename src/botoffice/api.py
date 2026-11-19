@@ -981,9 +981,9 @@ def create_app(
                     _bot(bot_id)
                     refs = await asyncio.to_thread(store.attachment_references)
                     if mime:
-                        stored = await attachment_io(attachments.save, settings.data_dir, bot_id, bytes(data), mime, refs)
+                        stored = await attachment_io(attachments.save, settings.data_dir, bot_id, data, mime, refs)
                     else:
-                        stored = await attachment_io(attachments.save_file, settings.data_dir, bot_id, bytes(data), name or "file", refs)
+                        stored = await attachment_io(attachments.save_file, settings.data_dir, bot_id, data, name or "file", refs)
             except OverflowError as exc:
                 raise HTTPException(status_code=507, detail=str(exc)) from exc
             except (ValueError, OSError) as exc:
@@ -1643,8 +1643,10 @@ def create_app(
     async def _check_attachments(bot_id: UUID, ids: list[str]) -> None:
         for attachment_id in ids:
             try:
-                data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
-                if not attachments.is_file_id(attachment_id):
+                if attachments.is_file_id(attachment_id):
+                    await asyncio.to_thread(attachments.size, settings.data_dir, bot_id, attachment_id)  # lstat only
+                else:
+                    data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
                     mime = _sniff_image(data)
                     if not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
                         raise ValueError("invalid image")
