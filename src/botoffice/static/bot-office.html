@@ -41,28 +41,71 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 
 /* App layout */
 .app { display: grid; grid-template-columns: var(--sidebar-w, 272px) minmax(0, 1fr); height: 100vh; }
-.sidebar { position: relative; background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.sidebar { position: relative; background: var(--side-bg, #121419); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
 /* drag handle on the sidebar's right edge: pointer drag, arrow keys, double-click resets */
 .sidebar-resize { position: absolute; top: 0; right: -3px; bottom: 0; width: 7px; cursor: col-resize; z-index: 20; touch-action: none; }
 .sidebar-resize:hover, .sidebar-resize.dragging, .sidebar-resize:focus-visible { background: var(--accent, #6385ad); opacity: .55; outline: none; }
 body.resizing-sidebar { cursor: col-resize; user-select: none; }
-.bot-search { margin: 0 8px 8px; width: calc(100% - 16px); }
-.brand { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 8px; font-weight: 700; font-size: 17px; letter-spacing: .2px; }
+.bot-search { margin: 0 8px 6px; width: calc(100% - 16px); padding: 7px 10px; font-size: 13px; }
+.brand { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 6px; font-weight: 600; font-size: 16px; }
 .new-bot { margin: 4px 12px 10px; text-align: left; }
-.bot-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 2px; }
-.bot-item { display: grid; grid-template-columns: 36px 1fr auto auto; gap: 10px; align-items: center; width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 8px; }
-.bot-item:hover { background: var(--panel); border-color: transparent; }
-.bot-item.active { background: var(--raised); border-color: var(--line); }
-.bot-item .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bot-item .sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-list { flex: 1; overflow-y: auto; padding: 0 6px 8px; display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+/* 0.12.0: dense rows (avatar 36px, name + one muted line), the status dot sits on the avatar */
+.bot-row { position: relative; border-radius: 12px; }
+.bot-item { display: grid; grid-template-columns: 36px 1fr auto; gap: 12px; align-items: center; width: 100%; text-align: left; background: transparent; border: 0; border-radius: 12px; padding: 7px 10px; min-height: 52px; position: relative; }
+.bot-item:hover { background: rgba(255,255,255,.045); border-color: transparent; }
+.bot-item.active { background: var(--raised); }
+.bot-item.active::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent); }
+.bot-item .name { font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-item .sub { font-size: 12px; line-height: 16px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-item .meta { min-width: 0; }
-.dot { background: #718096; width: 8px; height: 8px; border-radius: 50%; background: #718096; }
+.bot-item:not(.active) .sub.counts { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }   /* hidden visually, still read by screen readers */
+.av-wrap { position: relative; width: 36px; height: 36px; }
+.av-wrap .dot { position: absolute; right: -2px; bottom: -2px; width: 11px; height: 11px; border: 2px solid var(--side-bg, #121419); box-sizing: border-box; }
+.bot-item.active .av-wrap .dot { border-color: var(--raised); }
+.dot { background: #718096; width: 8px; height: 8px; border-radius: 50%; }
 .dot.queued { background: var(--warn); }
-.dot.running { background: var(--ok); }
+.dot.running { background: var(--ok); animation: dotpulse 1.6s ease-in-out infinite; }
 .dot.error { background: var(--danger); }
 .dot.offline { background: #56606e; }
+@keyframes dotpulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .dot.running { animation: none; } }
 .unread { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); white-space: nowrap; }
 .bot-item.has-unread .name { font-weight: 800; }
+.row-menu, .sec-menu { all: unset; box-sizing: border-box; cursor: pointer; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 8px; color: var(--muted); font-size: 16px; line-height: 1; opacity: 0; }
+.row-menu { position: absolute; right: 6px; top: 13px; background: var(--raised); }
+.bot-row:hover .row-menu, .bot-row:focus-within .row-menu, .sec-head:hover .sec-menu, .sec-head:focus-within .sec-menu { opacity: 1; }
+.bot-row:hover .unread, .bot-row:focus-within .unread { visibility: hidden; }
+@media (hover: none) { .row-menu, .sec-menu { opacity: 1; } .bot-item { padding-right: 38px; } .bot-row:hover .unread, .bot-row:focus-within .unread { visibility: visible; } }
+.row-menu:hover, .sec-menu:hover { color: var(--text); background: rgba(255,255,255,.08); }
+.row-menu:focus-visible, .sec-menu:focus-visible, .sec-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; opacity: 1; }
+/* section headers: small uppercase label, chevron left, count right, sticky while the list scrolls */
+.sec-head { display: flex; align-items: center; gap: 2px; position: sticky; top: 0; z-index: 2; background: var(--side-bg, #121419); margin-top: 8px; padding: 2px 0 2px 2px; border-radius: 8px; }
+.sec-toggle { all: unset; box-sizing: border-box; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 8px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.sec-toggle:hover { color: var(--text); background: rgba(255,255,255,.04); }
+.sec-chev { width: 10px; font-size: 10px; transition: transform .12s; }
+.sec-toggle[aria-expanded="true"] .sec-chev { transform: rotate(90deg); }
+.sec-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sec-count { margin-left: auto; font-weight: 600; letter-spacing: 0; opacity: .8; }
+.sec-rename { flex: 1; min-width: 0; margin: 2px 4px; padding: 3px 8px; font-size: 13px; }
+.sec-body[hidden] { display: none; }
+.sec-empty { margin: 2px 10px 6px; font-size: 12px; color: var(--muted); }
+/* drag and drop: lifted origin, accent insertion line, ring on a section that takes the bot */
+.dragging { opacity: .4; }
+.drop-before::after, .drop-after::after { content: ""; position: absolute; left: 8px; right: 8px; height: 2px; border-radius: 2px; background: var(--accent); pointer-events: none; z-index: 3; }
+.drop-before::after { top: -2px; }
+.drop-after::after { bottom: -2px; }
+.sec-head.drop-before, .sec-head.drop-after { position: sticky; }
+.drop-into { outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: 8px; }
+.sidebar-menu { position: fixed; z-index: 60; min-width: 190px; max-width: 280px; max-height: 70vh; overflow-y: auto; background: var(--raised); border: 1px solid var(--line); border-radius: 12px; padding: 6px; box-shadow: 0 12px 32px rgba(0,0,0,.45); }
+.sidebar-menu button { all: unset; box-sizing: border-box; display: block; width: 100%; padding: 7px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-menu button:hover, .sidebar-menu button:focus-visible { background: rgba(255,255,255,.08); outline: none; }
+.sidebar-menu button[disabled] { opacity: .4; cursor: default; }
+.sidebar-menu button.danger { color: var(--danger); }
+.sidebar-menu .menu-label { padding: 6px 10px 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.new-section { margin: 0 8px 6px; text-align: left; font-size: 12px; padding: 2px 6px; }
+#section-dialog { max-width: 400px; border-radius: 14px; }
 .msg.inbox .body { border: 1px solid #6385ad; }
 #desktop-screen { height: min(65vh, 650px); min-height: 260px; background: #080a0e; }
 #tools-dialog { width: min(900px, calc(100vw - 24px)); }
@@ -87,9 +130,9 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .needs-command { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18em; overflow: auto; margin: 4px 0;
   padding: 6px; font: 12px/1.4 ui-monospace, monospace; background: rgba(127, 127, 127, 0.12); border-radius: 4px; }
 .sidebar-foot { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
-.avatar { width: 36px; height: 36px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); display: grid; place-items: center; font-size: 20px; overflow: hidden; flex: none; }
+.avatar { width: 36px; height: 36px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); display: grid; place-items: center; font-size: 20px; overflow: hidden; flex: none; }
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
-.avatar.lg { width: 40px; height: 40px; font-size: 22px; }
+.avatar.lg { width: 44px; height: 44px; font-size: 24px; border-radius: 13px; }
 
 .chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 /* the header controls wrap onto further rows rather than pushing any off-screen */
@@ -221,7 +264,11 @@ dialog label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
 dialog label > input, dialog label > select, dialog label > textarea { color: var(--text); font-size: 15px; }
 dialog textarea { min-height: 90px; resize: vertical; }
 .icon-row { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: end; }
-.icon-row .avatar { width: 56px; height: 56px; font-size: 30px; border-radius: 14px; }
+.icon-row .avatar { width: 64px; height: 64px; font-size: 34px; border-radius: 14px; }
+.preset-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin: 2px 0 6px; }
+.preset-grid button { padding: 0; border-radius: 12px; aspect-ratio: 1; overflow: hidden; border: 2px solid transparent; background: var(--panel); }
+.preset-grid button[aria-pressed="true"] { border-color: var(--accent); }
+.preset-grid img { width: 100%; height: 100%; display: block; }
 .icon-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
 .icon-tools label { flex: 0 0 110px; }
 .file-btn { position: relative; overflow: hidden; display: inline-block; }
@@ -247,9 +294,11 @@ dialog textarea { min-height: 90px; resize: vertical; }
 @media (max-width: 720px) {
   .app { grid-template-columns: 76px minmax(0, 1fr); }
   .sidebar-resize, .bot-search { display: none; }
-  .brand span, .bot-item .meta, .bot-item .dot, .sidebar-foot .muted { display: none; }
+  .brand span, .bot-item .meta, .sidebar-foot .muted, .sec-name, .sec-count, .sec-menu, .row-menu, .new-section { display: none; }
   .bot-item .unread { grid-row: 1; grid-column: 1; justify-self: end; align-self: start; font-size: 10px; padding: 0 5px; }
   .bot-item { grid-template-columns: 36px; justify-content: center; }
+  .sec-head { justify-content: center; margin-top: 4px; }
+  .sec-toggle { flex: none; }
   .new-bot { text-align: center; padding: 6px; }
   .new-bot span { display: none; }
   .msg { max-width: 100%; }
@@ -343,7 +392,9 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <div class="needs-head"><button id="needs-toggle" class="needs-toggle" type="button" aria-expanded="false" aria-controls="needs-list"><span>Needs you</span><span id="needs-count" class="needs-count" hidden>0</span></button><button id="notify-enable" class="ghost" type="button" hidden>Turn on notifications</button></div>
       <div id="needs-list"></div>
     </section>
+    <button id="new-section" class="ghost new-section" type="button" title="Create a section to group bots">+ New section</button>
     <nav id="bot-list" class="bot-list"></nav>
+    <div id="sidebar-live" class="sr-only" role="status" aria-live="polite"></div>
     <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="office-settings" class="ghost" type="button" title="Settings for all bots">⚙ Settings</button><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
     <div id="sidebar-resize" class="sidebar-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar" aria-valuemin="200" aria-valuemax="520" aria-valuenow="272" tabindex="0" title="Drag to resize; double-click to reset"></div>
   </aside>
@@ -498,6 +549,13 @@ dialog textarea { min-height: 90px; resize: vertical; }
   </div>
 </dialog>
 
+<dialog id="section-dialog" aria-labelledby="section-dialog-title">
+  <form method="dialog" id="section-delete-form">
+    <h2 id="section-dialog-title">Delete section?</h2>
+    <p id="section-dialog-text"></p>
+    <div class="tools-bar"><button type="submit" value="cancel" id="section-delete-cancel" autofocus>Cancel</button><button type="submit" value="delete" id="section-delete-go" class="danger solid">Delete section</button></div>
+  </form>
+</dialog>
 <dialog id="bot-dialog" aria-labelledby="dialog-title">
   <form id="bot-form" autocomplete="off">
     <h2 id="dialog-title">Bot settings</h2>
@@ -506,10 +564,13 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <span id="f-icon-preview" class="avatar"></span>
       <div class="icon-tools">
         <label>Emoji<input id="f-icon" maxlength="16" placeholder="🤖"></label>
-        <span class="file-btn"><button type="button" tabindex="-1">Upload image…</button><input id="f-image" type="file" accept="image/png,image/jpeg,image/gif,image/webp" aria-label="Upload icon image"></span>
-        <button type="button" id="f-image-remove" class="ghost">Remove image</button>
+        <span class="file-btn"><button type="button" tabindex="-1">Upload image…</button><input id="f-image" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Upload icon image"></span>
+        <button type="button" id="f-avatar-shuffle">Generate new</button>
+        <button type="button" id="f-image-remove" class="ghost">Use emoji only</button>
       </div>
     </div>
+    <div id="f-presets" class="preset-grid" role="group" aria-label="Default avatars"></div>
+    <p class="hint">Upload a PNG, JPEG or WebP (up to 2 MB; it is cropped square and resized to 256 px), pick a default avatar, or generate one. The emoji shows if no image can load.</p>
     <label>Description<input id="f-desc" maxlength="500" placeholder="What this bot is for"></label>
     <div class="picker"><label for="f-model">Model</label>
       <input id="f-model" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="f-model-list" autocomplete="off" spellcheck="false" maxlength="100" placeholder="Type to search models">
@@ -581,11 +642,11 @@ const LEGACY_TOKEN_KEYS = ["crewdeck-token", "agentdesk-token"];
 const BOT_KEY = "bot-office-bot";
 const LEGACY_BOT_KEYS = ["crewdeck-bot"];
 const ENGINE_LABELS = { codex: "Codex", claude: "Claude", cursor: "Cursor", antigravity: "Antigravity" };
-const MAX_ICON_BYTES = 256 * 1024;
+const MAX_ICON_BYTES = 2 * 1024 * 1024;
 
 const state = {
   bots: [], choices: null, selected: sessionStorage.getItem(BOT_KEY) || sessionStorage.getItem("crewdeck-bot"),
-  msgSig: "", iconUrls: new Map(), editing: null, pendingImage: null, removeImage: false,
+  msgSig: "", iconUrls: new Map(), editing: null, pendingImage: null, pendingSeed: null, removeImage: false,
   timer: null, tick: 0, live: new Map(),
   // newest message ids rendered for the selected bot (all / counted as unread)
   shown: { bot: null, max: 0, counted: 0 }, readSent: new Map(),
@@ -705,8 +766,10 @@ async function fetchChoices() {
 }
 
 /* ---- icons ---- */
+// 0.12.0: an uploaded image or a generated avatar (avatar_seed) is served by /icon; otherwise the emoji shows
+function hasImage(bot) { return Boolean(bot.icon_image || bot.avatar_seed); }
 async function iconUrl(bot) {
-  if (!bot.icon_image) return null;
+  if (!hasImage(bot)) return null;
   const key = bot.id + "|" + bot.updated_at;
   const cached = state.iconUrls.get(bot.id);
   if (cached && cached.key === key) return cached.url;
@@ -727,7 +790,7 @@ function fillAvatar(node, bot, override) {
   const fallback = (override && override.icon) || bot.icon || (bot.name || "?").slice(0, 1).toUpperCase();
   const src = override ? override.url : null;
   if (src) { const img = el("img"); img.alt = ""; img.src = src; node.append(img); return; }
-  if (!override && bot.icon_image) {
+  if (!override && hasImage(bot)) {
     const cached = state.iconUrls.get(bot.id);
     if (cached && cached.url && cached.key === bot.id + "|" + bot.updated_at) {
       const img = el("img"); img.alt = ""; img.src = cached.url; node.append(img); return;
@@ -751,41 +814,410 @@ function botMatches(bot, query, label) {
   const hay = [bot.name, bot.description, bot.model, label, bot.engine].filter(Boolean).join(" ").toLowerCase();
   return words.every((word) => hay.includes(word));
 }
+/* ---- sections and sidebar (0.12.0) ---- */
+state.sections = null; state.drag = null; state.renaming = null; state.draftSection = false; state.sidebarDirty = false; state.moving = 0;
+function announce(text) { const live = $("sidebar-live"); if (live) live.textContent = text; }
+function sidebarFail(err, what) {
+  if (err instanceof AuthError) { handleError(err); return; }
+  const text = what + ": " + (err && err.message ? err.message : "failed");
+  announce(text); setStatus(text);
+  loadSections().then(renderBots).catch(() => {});
+}
+async function loadSections() {
+  try { state.sections = await api("/v1/sections"); }
+  catch (err) { if (err instanceof AuthError) throw err; /* keep the last layout; bots still show */ }
+}
+// Bots in section order. Without a layout (or sections) every bot is one flat, headerless list as before.
+function sidebarLayout() {
+  const byId = new Map(state.bots.map((b) => [b.id, b]));
+  const lay = state.sections || { sections: [], ungrouped: { collapsed: false, bot_ids: state.bots.map((b) => b.id) } };
+  const seen = new Set();
+  const take = (ids) => ids.map((id) => { seen.add(id); return byId.get(id); }).filter(Boolean);
+  const sections = lay.sections.map((s) => ({ ...s, bots: take(s.bot_ids) }));
+  const ungrouped = { id: "ungrouped", name: "Ungrouped", collapsed: lay.ungrouped.collapsed, bots: take(lay.ungrouped.bot_ids) };
+  for (const bot of state.bots) if (!seen.has(bot.id)) ungrouped.bots.push(bot);
+  return { sections, ungrouped };
+}
+function sectionOfBot(lay, botId) {
+  return [...lay.sections, lay.ungrouped].find((s) => s.bots.some((b) => b.id === botId));
+}
+
 function renderBots() {
+  if (state.drag || state.renaming || state.moving) { state.sidebarDirty = true; return; }   // never replace a row mid-drag or mid-rename
+  renderSidebar();
+}
+function renderSidebar() {
+  state.sidebarDirty = false;
   const list = $("bot-list");
-  if (!state.bots.length) {
+  const hasSections = Boolean(state.sections && state.sections.sections.length) || state.draftSection;
+  if (!state.bots.length && !hasSections) {
+    state.renaming = null; state.draftSection = false;
     list.replaceChildren(el("p", "muted pad", "No bots yet. Create one to start."));
     return;
   }
   const query = $("bot-search") ? $("bot-search").value.trim() : "";
-  const shown = state.bots.filter((bot) => botMatches(bot, query, modelLabel(bot.engine, bot.model)));
-  if (!shown.length) {
+  const filtering = Boolean(query);
+  const lay = sidebarLayout();
+  const grouped = lay.sections.length > 0 || state.draftSection;
+  const match = (bot) => botMatches(bot, query, modelLabel(bot.engine, bot.model));
+  const nodes = [];
+  let shown = 0;
+  for (const sec of lay.sections) {
+    const visible = sec.bots.filter(match);
+    if (filtering && !visible.length) continue;
+    shown += visible.length;
+    nodes.push(sectionNode(lay, sec, visible, filtering, false));
+  }
+  if (state.draftSection) nodes.push(draftSectionNode());
+  const ungShown = lay.ungrouped.bots.filter(match);
+  shown += ungShown.length;
+  if (!filtering || ungShown.length) nodes.push(sectionNode(lay, lay.ungrouped, ungShown, filtering, !grouped));
+  if (!shown && filtering) {
+    state.renaming = null; state.draftSection = false;
     const empty = el("p", "muted pad", `No bots match "${query}".`);
     empty.id = "bot-empty"; empty.setAttribute("role", "status");
     list.replaceChildren(empty);
     return;
   }
-  list.replaceChildren(...shown.map((bot) => {
-    const item = el("button", "bot-item" + (bot.id === state.selected ? " active" : ""));
-    item.type = "button";
-    item.title = bot.name;
-    if (bot.id === state.selected) item.setAttribute("aria-current", "true");
-    const avatar = el("span", "avatar");
-    fillAvatar(avatar, bot);
-    const meta = el("span", "meta");
-    meta.append(el("div", "name", bot.name), el("div", "sub", modelLabel(bot.engine, bot.model) + " · " + (bot.capability_tier || "")));
-    const counts = taskCounts[bot.id] || {in_progress: 0, waiting: 0, blocked: 0, completed_today: 0};
-    meta.append(el("div", "sub", `▶ ${counts.in_progress} · ⏸ ${counts.waiting} waiting · ${counts.blocked} blocked · ✓ ${counts.completed_today} today`));
-    const dot = el("span", "dot " + (bot.status === "working" ? "running" : bot.status));
-    dot.title = bot.status || "idle";
-    dot.setAttribute("aria-label", dot.title);
-    const badge = unreadBadge(bot);
-    if (badge) item.classList.add("has-unread");
-    item.append(avatar, meta, badge || el("span"), dot);
-    item.onclick = () => selectBot(bot.id);
-    item.oncontextmenu = (event) => { event.preventDefault(); markUnread(bot.id); };
-    return item;
-  }));
+  list.replaceChildren(...nodes);
+  const editing = list.querySelector(".sec-rename");
+  if (editing) { editing.focus(); editing.select(); }
+  else if (state.renaming) { state.renaming = null; state.draftSection = false; }   // never leave the sidebar waiting on an input that is not there
+}
+
+function sectionNode(lay, sec, visible, filtering, headless) {
+  const wrap = el("div", "sec");
+  wrap.dataset.section = sec.id;
+  const open = headless || filtering || !sec.collapsed;
+  const body = el("div", "sec-body");
+  body.setAttribute("role", "group");
+  body.setAttribute("aria-label", sec.name);
+  body.hidden = !open;
+  if (!headless) wrap.append(sectionHead(lay, sec, open, filtering));
+  if (open) {
+    visible.forEach((bot, index) => body.append(botRow(lay, sec, bot, filtering)));
+    if (!visible.length && !filtering) {
+      body.append(el("p", "sec-empty", sec.id === "ungrouped" ? "Drop bots here to ungroup them." : "Empty. Drag bots here, or use ⋯ then Move to."));
+    }
+  }
+  wrap.append(body);
+  wrap.addEventListener("dragover", (event) => {
+    if (!state.drag || state.drag.type !== "bot" || event.target.closest(".bot-row, .sec-head")) return;
+    event.preventDefault(); clearDropMarks(); wrap.classList.add("drop-into");
+  });
+  wrap.addEventListener("drop", (event) => {
+    if (!state.drag || state.drag.type !== "bot" || event.target.closest(".bot-row, .sec-head")) return;
+    event.preventDefault();
+    const dragId = state.drag.id;
+    finishDrop(() => moveBot(dragId, sec.id, 1e6));
+  });
+  return wrap;
+}
+
+function sectionHead(lay, sec, open, filtering) {
+  const isUng = sec.id === "ungrouped";
+  const head = el("div", "sec-head");
+  head.dataset.section = sec.id;
+  if (state.renaming && state.renaming.id === sec.id) { head.append(renameInput(sec.name, sec.id)); return head; }
+  const toggle = el("button", "sec-toggle");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", String(open));
+  const chev = el("span", "sec-chev", "▸"); chev.setAttribute("aria-hidden", "true");
+  toggle.append(chev, el("span", "sec-name", sec.name), el("span", "sec-count", String(sec.bots.length)));
+  toggle.title = sec.name + " (" + sec.bots.length + ")";
+  const unread = sec.bots.reduce((n, b) => n + (b.unread_count || (b.marked_unread ? 1 : 0)), 0);
+  if (!open && unread) { const badge = el("span", "unread", String(unread)); badge.setAttribute("aria-label", unread + " unread in " + sec.name); toggle.append(badge); }
+  toggle.onclick = () => toggleSection(sec);
+  toggle.addEventListener("keydown", (event) => {
+    if (isUng || !event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+    event.preventDefault(); moveSectionStep(lay, sec, event.key === "ArrowUp" ? -1 : 1);
+  });
+  head.append(toggle);
+  if (!isUng) {
+    const menu = el("button", "sec-menu", "⋯");
+    menu.type = "button"; menu.setAttribute("aria-haspopup", "menu"); menu.setAttribute("aria-label", "Options for section " + sec.name);
+    menu.onclick = () => openMenu(menu, sectionMenuItems(sec.id));
+    head.append(menu);
+    head.draggable = !filtering;
+    head.addEventListener("dragstart", (event) => startDrag(event, { type: "section", id: sec.id }, head));
+    head.addEventListener("dragend", endDrag);
+  }
+  head.addEventListener("dragover", (event) => {
+    if (!state.drag) return;
+    if (state.drag.type === "bot") { event.preventDefault(); clearDropMarks(); head.parentElement.classList.add("drop-into"); }
+    else if (state.drag.type === "section" && state.drag.id !== sec.id) { event.preventDefault(); clearDropMarks(); head.classList.add(isUng || dropPosition(event, head) === "after" ? "drop-after" : "drop-before"); }
+  });
+  head.addEventListener("drop", (event) => {
+    if (!state.drag) return;
+    event.preventDefault(); event.stopPropagation();
+    const drag = state.drag, after = isUng || dropPosition(event, head) === "after";
+    if (drag.type === "bot") finishDrop(() => moveBot(drag.id, sec.id, 1e6));
+    else if (drag.id !== sec.id) finishDrop(() => placeSection(lay, drag.id, sec.id, after));
+  });
+  return head;
+}
+
+function renameInput(value, id) {
+  const input = el("input", "sec-rename");
+  input.value = value; input.maxLength = 60; input.setAttribute("aria-label", id ? "Section name" : "New section name");
+  input.placeholder = "Section name";
+  let done = false;
+  const finish = (save) => {
+    if (done) return; done = true;
+    const name = input.value.trim();
+    state.renaming = null;
+    const wasDraft = id === null; state.draftSection = false;
+    if (!save || !name || (!wasDraft && name === value)) { renderSidebar(); return; }
+    saveSectionName(id, name, value);
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); finish(true); }
+    else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));   // clicking away keeps what was typed
+  return input;
+}
+function draftSectionNode() {
+  const wrap = el("div", "sec");
+  const head = el("div", "sec-head");
+  head.append(renameInput("", null));
+  wrap.append(head);
+  return wrap;
+}
+async function saveSectionName(id, name, previous) {
+  try {
+    if (id === null) { await api("/v1/sections", { method: "POST", body: JSON.stringify({ name }) }); announce("Section " + name + " created"); }
+    else { await api("/v1/sections/" + id, { method: "PATCH", body: JSON.stringify({ name }) }); announce("Section renamed to " + name); }
+    await loadSections();
+  } catch (err) { sidebarFail(err, id === null ? "Could not create the section" : "Could not rename the section"); }
+  renderSidebar();
+}
+function clearSearchForEdit() { const box = $("bot-search"); if (box && box.value) box.value = ""; }
+function startCreateSection() {
+  clearSearchForEdit();
+  state.draftSection = true; state.renaming = { id: null };
+  renderSidebar();
+  const input = $("bot-list").querySelector(".sec-rename");
+  if (input) input.scrollIntoView({ block: "nearest" });
+}
+function startRename(sec) { clearSearchForEdit(); state.renaming = { id: sec.id }; renderSidebar(); }
+$("new-section").onclick = startCreateSection;
+
+async function toggleSection(sec) {
+  if (!state.sections) return;
+  if ($("bot-search").value.trim()) { setStatus("Clear the search to collapse or expand sections."); announce(""); requestAnimationFrame(() => announce("Clear the search to collapse or expand sections")); return; }   // a search shows every match
+  const next = !sec.collapsed;
+  const target = sec.id === "ungrouped" ? state.sections.ungrouped : state.sections.sections.find((s) => s.id === sec.id);
+  if (target) target.collapsed = next;
+  renderBots();
+  focusSidebar('.sec-head[data-section="' + sec.id + '"] .sec-toggle');
+  try { await api("/v1/sections/" + sec.id, { method: "PATCH", body: JSON.stringify({ collapsed: next }) }); }
+  catch (err) { sidebarFail(err, "Could not save the section state"); }
+}
+function focusSidebar(selector) {
+  const node = $("bot-list").querySelector(selector);
+  if (node) node.focus();
+}
+
+$("section-dialog").onclose = async () => {
+  const dialog = $("section-dialog");
+  const id = dialog.dataset.section;
+  if (dialog.returnValue !== "delete" || !id) return;
+  try {
+    const result = await api("/v1/sections/" + id, { method: "DELETE" });
+    announce("Section deleted; " + result.moved_bot_ids.length + " bots moved to Ungrouped");
+    await loadSections();
+  } catch (err) { sidebarFail(err, "Could not delete the section"); }
+  renderBots();
+};
+function confirmDeleteSection(sec) {
+  const dialog = $("section-dialog");
+  dialog.dataset.section = sec.id;
+  dialog.returnValue = "";
+  const n = sec.bots.length;
+  $("section-dialog-text").textContent = `Delete the section "${sec.name}"? ` + (n ? `Its ${n} ${n === 1 ? "bot moves" : "bots move"} to Ungrouped. ` : "") + "No bot is deleted.";
+  dialog.showModal();
+}
+
+async function moveBot(botId, sectionId, index) {
+  state.moving++;
+  try {
+    state.sections = await api("/v1/bots/" + botId + "/section", { method: "PUT", body: JSON.stringify({ section_id: sectionId === "ungrouped" ? null : sectionId, index: Math.min(Math.max(0, Math.floor(index)), 100000) }) });
+    const bot = state.bots.find((b) => b.id === botId);
+    const sec = sectionOfBot(sidebarLayout(), botId);
+    announce((bot ? bot.name : "Bot") + " moved to " + (sec ? sec.name : "Ungrouped") + ", position " + (sec ? sec.bots.findIndex((b) => b.id === botId) + 1 : 1));
+  } catch (err) { sidebarFail(err, "Could not move the bot"); }
+  state.moving--;
+  renderBots();
+  focusSidebar('.bot-row[data-bot="' + botId + '"] .bot-item');
+}
+function moveBotStep(lay, bot, delta) {
+  const sec = sectionOfBot(lay, bot.id);
+  if (!sec) return;
+  if ($("bot-search").value.trim()) { announce("Clear the search to reorder bots"); return; }
+  const at = sec.bots.findIndex((b) => b.id === bot.id), to = at + delta;
+  if (to < 0 || to >= sec.bots.length) { announce(bot.name + " is already " + (delta < 0 ? "first" : "last") + " in " + sec.name); return; }
+  moveBot(bot.id, sec.id, to);
+}
+async function placeSection(lay, id, targetId, after) {
+  const ids = lay.sections.map((s) => s.id).filter((s) => s !== id);
+  const at = targetId === "ungrouped" ? ids.length : ids.indexOf(targetId) + (after ? 1 : 0);
+  ids.splice(Math.max(0, at), 0, id);
+  state.moving++;
+  try {
+    state.sections = await api("/v1/sections/order", { method: "PUT", body: JSON.stringify({ ids }) });
+    const sec = state.sections.sections.find((s) => s.id === id);
+    announce("Section " + (sec ? sec.name : "") + " moved to position " + (ids.indexOf(id) + 1));
+  } catch (err) { sidebarFail(err, "Could not reorder the sections"); }
+  state.moving--;
+  renderBots();
+  focusSidebar('.sec-head[data-section="' + id + '"] .sec-toggle');
+}
+function moveSectionStep(lay, sec, delta) {
+  const at = lay.sections.findIndex((s) => s.id === sec.id), to = at + delta;
+  if (to < 0 || to >= lay.sections.length) { announce(sec.name + " is already " + (delta < 0 ? "first" : "last")); return; }
+  placeSection(lay, sec.id, lay.sections[to].id, delta > 0);
+}
+
+/* drag and drop (pointer; touch and keyboard use the ⋯ menus) */
+function dropPosition(event, node) { const r = node.getBoundingClientRect(); return event.clientY < r.top + r.height / 2 ? "before" : "after"; }
+function clearDropMarks() { document.querySelectorAll(".drop-before, .drop-after, .drop-into").forEach((n) => n.classList.remove("drop-before", "drop-after", "drop-into")); }
+function startDrag(event, drag, node) {
+  if (event.target.closest("input")) { event.preventDefault(); return; }
+  state.drag = drag;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", drag.type + ":" + drag.id);
+  node.classList.add("dragging");
+  event.stopPropagation();
+}
+function endDrag() {
+  state.drag = null; clearDropMarks();
+  document.querySelectorAll(".dragging").forEach((n) => n.classList.remove("dragging"));
+  if (state.sidebarDirty) renderSidebar();
+}
+function finishDrop(run) { clearDropMarks(); state.drag = null; run(); }
+document.addEventListener("dragend", endDrag);
+
+function botRow(lay, sec, bot, filtering) {
+  const row = el("div", "bot-row");
+  row.dataset.bot = bot.id;
+  const item = el("button", "bot-item" + (bot.id === state.selected ? " active" : ""));
+  item.type = "button";
+  const counts = taskCounts[bot.id] || {in_progress: 0, waiting: 0, blocked: 0, completed_today: 0};
+  const countsText = `▶ ${counts.in_progress} · ⏸ ${counts.waiting} waiting · ${counts.blocked} blocked · ✓ ${counts.completed_today} today`;
+  item.title = bot.name + "\n" + countsText;
+  if (bot.id === state.selected) item.setAttribute("aria-current", "true");
+  const wrap = el("span", "av-wrap");
+  const avatar = el("span", "avatar");
+  fillAvatar(avatar, bot);
+  const dot = el("span", "dot " + (bot.status === "working" ? "running" : bot.status));
+  dot.title = bot.status || "idle";
+  dot.setAttribute("aria-label", dot.title);
+  wrap.append(avatar, dot);
+  const meta = el("span", "meta");
+  meta.append(el("div", "name", bot.name), el("div", "sub", modelLabel(bot.engine, bot.model) + " · " + (bot.capability_tier || "")), el("div", "sub counts", countsText));
+  const badge = unreadBadge(bot);
+  if (badge) item.classList.add("has-unread");
+  item.append(wrap, meta, badge || el("span"));
+  item.onclick = () => selectBot(bot.id);
+  item.oncontextmenu = (event) => { event.preventDefault(); markUnread(bot.id); };
+  const menu = el("button", "row-menu", "⋯");
+  menu.type = "button"; menu.setAttribute("aria-haspopup", "menu"); menu.setAttribute("aria-label", "Options for " + bot.name);
+  menu.onclick = () => openMenu(menu, botMenuItems(bot.id));
+  item.addEventListener("keydown", (event) => {
+    if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) { event.preventDefault(); moveBotStep(lay, bot, event.key === "ArrowUp" ? -1 : 1); }
+    else if ((event.key === "m" || event.key === "M") && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); openMenu(menu, botMenuItems(bot.id)); }
+  });
+  row.append(item, menu);
+  row.draggable = !filtering;
+  row.addEventListener("dragstart", (event) => startDrag(event, { type: "bot", id: bot.id }, row));
+  row.addEventListener("dragend", endDrag);
+  row.addEventListener("dragover", (event) => {
+    if (!state.drag || state.drag.type !== "bot" || state.drag.id === bot.id) return;
+    event.preventDefault(); clearDropMarks(); row.classList.add(dropPosition(event, row) === "after" ? "drop-after" : "drop-before");
+  });
+  row.addEventListener("drop", (event) => {
+    if (!state.drag || state.drag.type !== "bot") return;
+    event.preventDefault(); event.stopPropagation();
+    const dragId = state.drag.id;
+    if (dragId === bot.id) { finishDrop(() => {}); return; }
+    const after = dropPosition(event, row) === "after";
+    const ids = sec.bots.map((b) => b.id).filter((id) => id !== dragId);
+    finishDrop(() => moveBot(dragId, sec.id, ids.indexOf(bot.id) + (after ? 1 : 0)));
+  });
+  return row;
+}
+
+/* the ⋯ menus: the keyboard and touch way to do everything a drag does */
+let sidebarMenu = null, sidebarMenuReturn = null;
+function closeMenu(refocus) {
+  if (!sidebarMenu) return;
+  sidebarMenu.remove(); sidebarMenu = null;
+  document.removeEventListener("keydown", menuKeydown, true);
+  document.removeEventListener("pointerdown", menuOutside, true);
+  if (refocus && sidebarMenuReturn && sidebarMenuReturn.isConnected) sidebarMenuReturn.focus();
+}
+function menuOutside(event) { if (sidebarMenu && !sidebarMenu.contains(event.target)) closeMenu(false); }
+function menuKeydown(event) {
+  if (!sidebarMenu) return;
+  const items = [...sidebarMenu.querySelectorAll('button[role="menuitem"]:not([disabled])')];
+  const at = items.indexOf(document.activeElement);
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeMenu(true); }
+  else if (event.key === "ArrowDown") { event.preventDefault(); (items[at + 1] || items[0]).focus(); }
+  else if (event.key === "ArrowUp") { event.preventDefault(); (items[at - 1] || items[items.length - 1]).focus(); }
+  else if (event.key === "Home") { event.preventDefault(); items[0].focus(); }
+  else if (event.key === "End") { event.preventDefault(); items[items.length - 1].focus(); }
+  else if (event.key === "Tab") closeMenu(true);
+}
+function openMenu(anchor, items) {
+  closeMenu(false);
+  sidebarMenuReturn = anchor;
+  const menu = el("div", "sidebar-menu");
+  menu.setAttribute("role", "menu");
+  for (const item of items) {
+    if (item.label && !item.run) { menu.append(el("div", "menu-label", item.label)); continue; }
+    const button = el("button", item.danger ? "danger" : "", item.text);
+    button.type = "button"; button.setAttribute("role", "menuitem"); button.disabled = Boolean(item.disabled);
+    button.onclick = () => { closeMenu(false); item.run(); };
+    menu.append(button);
+  }
+  document.body.append(menu);
+  const rect = anchor.getBoundingClientRect(), box = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - box.width - 8)) + "px";
+  menu.style.top = (rect.bottom + box.height + 8 > window.innerHeight ? Math.max(8, rect.top - box.height - 4) : rect.bottom + 4) + "px";
+  sidebarMenu = menu;
+  document.addEventListener("keydown", menuKeydown, true);
+  document.addEventListener("pointerdown", menuOutside, true);
+  const first = menu.querySelector('button[role="menuitem"]:not([disabled])');
+  if (first) first.focus();
+}
+// The menu items look the layout up when they run, so a poll that re-rendered the list meanwhile cannot make them stale
+function botMenuItems(botId) {
+  const lay = sidebarLayout(), sec = sectionOfBot(lay, botId), bot = state.bots.find((b) => b.id === botId);
+  if (!sec || !bot) return [];
+  const at = sec.bots.findIndex((b) => b.id === botId), filtering = Boolean($("bot-search").value.trim());
+  const items = [{ label: "Move to" }];
+  for (const target of [...lay.sections, lay.ungrouped]) {
+    if (target.id === sec.id) continue;
+    items.push({ text: target.name, run: () => moveBot(botId, target.id, 1e6) });
+  }
+  if (items.length === 1) items.push({ text: "Create a section first (+ New section)", run: () => {}, disabled: true });
+  items.push({ label: "Order" },
+    { text: "Move up", disabled: filtering || at <= 0, run: () => moveBotStep(sidebarLayout(), bot, -1) },
+    { text: "Move down", disabled: filtering || at < 0 || at >= sec.bots.length - 1, run: () => moveBotStep(sidebarLayout(), bot, 1) });
+  return items;
+}
+function sectionMenuItems(sectionId) {
+  const lay = sidebarLayout(), sec = lay.sections.find((s) => s.id === sectionId);
+  if (!sec) return [];
+  const at = lay.sections.findIndex((s) => s.id === sectionId), filtering = Boolean($("bot-search").value.trim());
+  const fresh = () => sidebarLayout().sections.find((s) => s.id === sectionId);
+  return [
+    { text: "Rename", run: () => { const now = fresh(); if (now) startRename(now); } },
+    { text: "Move up", disabled: filtering || at <= 0, run: () => { const now = fresh(); if (now) moveSectionStep(sidebarLayout(), now, -1); } },
+    { text: "Move down", disabled: filtering || at < 0 || at >= lay.sections.length - 1, run: () => { const now = fresh(); if (now) moveSectionStep(sidebarLayout(), now, 1); } },
+    { text: "Delete…", danger: true, run: () => { const now = fresh(); if (now) confirmDeleteSection(now); } },
+  ];
 }
 
 const searchBox = $("bot-search");
@@ -867,7 +1299,8 @@ try {
 }
 
 async function loadBots() {
-  state.bots = await api("/v1/bots");
+  const [bots] = await Promise.all([api("/v1/bots"), loadSections()]);
+  state.bots = bots;
   if (!currentBot()) state.selected = state.bots.length ? state.bots[0].id : null;
   renderBots();
   renderHeader();
@@ -2974,25 +3407,64 @@ function updateTier() {
   $("f-tier").textContent = tier ? "Capability tier: " + tier + " (derived from the model; it changes when the model does)" : "";
 }
 
+// 0.12.0: a default or generated avatar is chosen by seed; the server renders it, so a preview is a fetch
+const seedUrls = new Map();
+function seedUrl(seed) {
+  if (!seedUrls.has(seed)) {
+    seedUrls.set(seed, api("/v1/avatar-preview?seed=" + encodeURIComponent(seed)).then((blob) => URL.createObjectURL(blob)).catch(() => { seedUrls.delete(seed); return null; }));
+  }
+  return seedUrls.get(seed);
+}
 function updateIconPreview() {
-  const bot = state.editing || { id: "", name: $("f-name").value, icon: "", icon_image: null, updated_at: "" };
+  const bot = state.editing || { id: "", name: $("f-name").value, icon: "", icon_image: null, avatar_seed: null, avatar: "emoji", updated_at: "" };
   const preview = $("f-icon-preview");
   const icon = $("f-icon").value.trim() || bot.icon || "🤖";
+  preview.dataset.want = "";
   if (state.pendingImage) { fillAvatar(preview, bot, { url: state.pendingImage.url, icon }); }
-  else if (state.removeImage || !bot.icon_image) { fillAvatar(preview, { ...bot, icon_image: null }, { url: null, icon }); }
+  else if (state.pendingSeed) {
+    const seed = state.pendingSeed;
+    preview.dataset.want = seed;
+    fillAvatar(preview, bot, { url: null, icon });
+    seedUrl(seed).then((url) => { if (url && preview.dataset.want === seed) fillAvatar(preview, bot, { url, icon }); });
+  }
+  else if (state.removeImage || bot.avatar === "emoji" || !hasImage(bot)) { fillAvatar(preview, { ...bot, icon_image: null, avatar_seed: null }, { url: null, icon }); }
   else fillAvatar(preview, bot);
-  $("f-image-remove").hidden = !(state.pendingImage || (bot.icon_image && !state.removeImage));
+  const current = state.pendingSeed || (!state.pendingImage && !state.removeImage && state.editing && !state.editing.icon_image ? state.editing.avatar_seed : null);
+  document.querySelectorAll("#f-presets button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.seed === current)));
+  $("f-image-remove").hidden = !(state.pendingImage || state.pendingSeed || (hasImage(bot) && !state.removeImage));
 }
 
 function clearPendingImage() {
   if (state.pendingImage) URL.revokeObjectURL(state.pendingImage.url);
   state.pendingImage = null;
 }
+function pickSeed(seed) {
+  clearPendingImage(); $("f-image").value = "";
+  state.pendingSeed = seed; state.removeImage = false;
+  updateIconPreview();
+}
+async function buildPresets() {
+  const grid = $("f-presets");
+  if (grid.childElementCount) return;
+  let presets = [];
+  try { presets = (await api("/v1/avatar-presets")).presets; } catch (err) { return; }
+  grid.replaceChildren(...presets.map((preset, i) => {
+    const button = el("button"); button.type = "button"; button.dataset.seed = preset.seed;
+    button.title = "Default avatar " + (i + 1); button.setAttribute("aria-label", "Default avatar " + (i + 1)); button.setAttribute("aria-pressed", "false");
+    seedUrl(preset.seed).then((url) => { if (url) { const img = el("img"); img.alt = ""; img.src = url; button.append(img); } });
+    button.onclick = () => pickSeed(preset.seed);
+    return button;
+  }));
+  updateIconPreview();
+}
+$("f-avatar-shuffle").onclick = () => pickSeed(Array.from(crypto.getRandomValues(new Uint8Array(6)), (v) => v.toString(16).padStart(2, "0")).join(""));
 
 async function openDialog(bot) {
   state.editing = bot;
   clearPendingImage();
   state.removeImage = false;
+  state.pendingSeed = bot ? null : "preset-" + Math.floor(Math.random() * 12);   // a new bot starts with a default avatar
+  buildPresets();
   $("dialog-title").textContent = bot ? "Bot settings" : "New bot";
   $("dialog-save").textContent = bot ? "Save" : "Create bot";
   $("f-name").value = bot ? bot.name : "";
@@ -3081,19 +3553,34 @@ const modelPicker = createModelPicker($("f-model"), $("f-model-list"), { customE
 $("f-icon").oninput = updateIconPreview;
 $("f-name").oninput = () => { if (!state.editing) updateIconPreview(); };
 
-$("f-image").onchange = () => {
+async function shrinkImage(file) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 512 / Math.min(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale)); canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  } catch (err) { return null; }
+}
+$("f-image").onchange = async () => {
   const file = $("f-image").files[0];
   $("dialog-error").textContent = "";
   if (!file) return;
-  if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) { $("dialog-error").textContent = "Use a PNG, JPEG, GIF or WebP image."; $("f-image").value = ""; return; }
-  if (file.size > MAX_ICON_BYTES) { $("dialog-error").textContent = "Image is larger than 256 KB."; $("f-image").value = ""; return; }
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { $("dialog-error").textContent = "Use a PNG, JPEG or WebP image."; $("f-image").value = ""; return; }
   if (!file.size) { $("dialog-error").textContent = "Image is empty."; $("f-image").value = ""; return; }
+  let upload = file;
+  if (file.size > MAX_ICON_BYTES) {   // a phone photo: shrink it here (the server crops and resizes to 256 px anyway)
+    upload = await shrinkImage(file);
+    if (!upload || upload.size > MAX_ICON_BYTES) { $("dialog-error").textContent = "Image is larger than 2 MB and could not be shrunk."; $("f-image").value = ""; return; }
+  }
   clearPendingImage();
-  state.pendingImage = { file, url: URL.createObjectURL(file) };
+  state.pendingImage = { file: upload, url: URL.createObjectURL(upload) };
+  state.pendingSeed = null;
   state.removeImage = false;
   updateIconPreview();
 };
-$("f-image-remove").onclick = () => { clearPendingImage(); $("f-image").value = ""; state.removeImage = true; updateIconPreview(); };
+$("f-image-remove").onclick = () => { clearPendingImage(); state.pendingSeed = null; $("f-image").value = ""; state.removeImage = true; updateIconPreview(); };
 
 $("bot-form").onsubmit = async (event) => {
   event.preventDefault();
@@ -3141,7 +3628,9 @@ $("bot-form").onsubmit = async (event) => {
       : await api("/v1/bots", { method: "POST", body: JSON.stringify(body) });
     if (state.pendingImage) {
       saved = await api("/v1/bots/" + saved.id + "/icon", { method: "PUT", body: state.pendingImage.file });
-    } else if (state.removeImage && bot && bot.icon_image) {
+    } else if (state.pendingSeed && !(saved.avatar === "generated" && saved.avatar_seed === state.pendingSeed)) {
+      saved = await api("/v1/bots/" + saved.id + "/icon/generate", { method: "POST", body: JSON.stringify({ seed: state.pendingSeed }) });
+    } else if (state.removeImage && saved.avatar !== "emoji") {
       saved = await api("/v1/bots/" + saved.id + "/icon", { method: "DELETE" });
     }
     $("bot-dialog").close();

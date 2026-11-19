@@ -16,7 +16,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from . import attachments as attachment_files
-from . import continuation, failures
+from . import avatars, continuation, failures, sections
 from . import usage as budgets
 from .catalog import DEFAULT_ICON, DEFAULT_ICONS, default_effort, default_model
 from .domain import Bot, Job, JobStatus, Message, Routine
@@ -36,6 +36,7 @@ BOT_FIELDS = {
     "model",
     "icon",
     "icon_image",
+    "avatar_seed",
     "description",
     "effort",
     "cli_access",
@@ -51,6 +52,7 @@ BOT_FIELDS = {
 IDENTITY_MIGRATION = "crewdeck-identity-v1"
 EFFORT_MIGRATION = "crewdeck-effort-v1"
 READS_MIGRATION = "reads-seeded-v1"
+AVATARS_MIGRATION = "avatars.default_assigned"
 # 0.9.0: Grok bridge rate/hop state moved from JSON files into SQLite (imported once)
 BRIDGE_IMPORT = "bridge_json_import"
 TASKS_SEEN_INIT = "tasks_seen_init"  # meta key: the "changes by others" watermark was set (task lists)
@@ -510,6 +512,7 @@ class JobStore:
     def __init__(self, path: Path, initialize: bool = True):
         self.path = Path(path)
         self._initialized = False
+        self.sections = sections.Sections(self._connect)
         # The one lock for chat mutations that must not interleave with an edit: the edit
         # commit and outcome publication (chat message + memory write). Every other
         # enqueue/claim path is a single BEGIN IMMEDIATE transaction, i.e. serialized by
@@ -610,6 +613,8 @@ class JobStore:
                 ("model", "TEXT"),
                 ("icon", "TEXT NOT NULL DEFAULT ''"),
                 ("icon_image", "TEXT"),
+                # 0.12.0: seed of the generated avatar (NULL: none, the emoji shows); an uploaded image wins
+                ("avatar_seed", "TEXT"),
                 ("description", "TEXT NOT NULL DEFAULT ''"),
                 ("effort", "TEXT"),
                 ("cli_access", "TEXT NOT NULL DEFAULT 'full'"),
@@ -782,6 +787,8 @@ class JobStore:
             self._migrate_identity(db)
             self._migrate_effort(db)
             self._migrate_reads(db)
+            sections.ensure_schema(db)
+            self._migrate_avatars(db)
 
             # Grok bridge state: one row per send (reserved before the webhook call, then sent
             # or failed) and the last hop per bridge thread.
@@ -934,6 +941,26 @@ class JobStore:
                 (stamp,),
             )
             db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (READS_MIGRATION, stamp))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_avatars(db: sqlite3.Connection) -> None:
+        """One-time (0.12.0): a bot with no uploaded image and no seed gets its default generated avatar.
+        Its emoji is kept and stays the fallback. Nothing else about the bot changes."""
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM meta WHERE key=?", (AVATARS_MIGRATION,)).fetchone():
+                db.rollback()
+                return
+            used = [r[0] for r in db.execute("SELECT avatar_seed FROM bots WHERE avatar_seed IS NOT NULL")]
+            for row in db.execute("SELECT id FROM bots WHERE icon_image IS NULL AND avatar_seed IS NULL ORDER BY created_at, id").fetchall():
+                seed = avatars.default_seed(row["id"], used)
+                used.append(seed)
+                db.execute("UPDATE bots SET avatar_seed=? WHERE id=?", (seed, row["id"]))
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (AVATARS_MIGRATION, now().isoformat()))
             db.commit()
         except BaseException:
             db.rollback()
@@ -1727,8 +1754,11 @@ class JobStore:
         cli_access: str | None = None,
     ) -> Bot:
         stamp = now()
+        bot_id = uuid4()
+        with closing(self._connect()) as db:
+            used = [r[0] for r in db.execute("SELECT avatar_seed FROM bots WHERE avatar_seed IS NOT NULL")]
         bot = Bot(
-            id=uuid4(),
+            id=bot_id,
             name=name,
             instructions=instructions,
             default_provider=default_provider,
@@ -1737,6 +1767,7 @@ class JobStore:
             cli_access=cli_access or "full",
             icon=icon or DEFAULT_ICON,
             description=description,
+            avatar_seed=avatars.default_seed(bot_id, used),
             reason=reason,
             created_at=stamp,
             updated_at=stamp,
@@ -1745,7 +1776,7 @@ class JobStore:
             with closing(self._connect()) as db:
                 db.execute(
                     "INSERT INTO bots (id,name,instructions,default_provider,reason,created_at,"
-                    "updated_at,model,icon,description,effort,cli_access) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "updated_at,model,icon,description,effort,cli_access,avatar_seed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         str(bot.id),
                         name,
@@ -1759,6 +1790,7 @@ class JobStore:
                         description,
                         bot.effort,
                         bot.cli_access,
+                        bot.avatar_seed,
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -1959,6 +1991,7 @@ class JobStore:
             db.execute("DELETE FROM watchers WHERE bot_id=?", (key,))
             db.execute("DELETE FROM bot_aliases WHERE bot_id=?", (key,))
             db.execute("DELETE FROM bot_reads WHERE bot_id=?", (key,))
+            self.sections.forget_bot(db, key)
             db.execute("DELETE FROM working_snapshots WHERE bot_id=?", (key,))
             # 0.11.0: its usage notices, own action rules (global rules have bot_id NULL), approvals and gate log
             for table in ("usage_notices", "action_rules", "approvals", "gate_log"):

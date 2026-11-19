@@ -162,6 +162,8 @@ class Bot(BaseModel):
     description: str = ""
     icon: str = ""
     icon_image: str | None = None
+    # 0.12.0: seed of the generated avatar; an uploaded image wins, the emoji is the fallback
+    avatar_seed: str | None = None
     instructions: str = ""
     default_provider: BotProvider = "codex"
     model: str | None = None
@@ -199,6 +201,11 @@ class Bot(BaseModel):
     # access modes that cannot resume), "queue" (an engine that cannot take input mid-run: it becomes the
     # next turn). Filled by the bot endpoints.
     steering: Literal["live", "interrupt", "restart", "queue"] | None = None
+
+    @computed_field
+    @property
+    def avatar(self) -> Literal["upload", "generated", "emoji"]:
+        return "upload" if self.icon_image else "generated" if self.avatar_seed else "emoji"
 
     @computed_field
     @property

@@ -55,7 +55,7 @@ def messages(client, bot_id):
 
 
 def test_version_is_0_7_0():
-    assert botoffice.__version__ == "0.11.15"
+    assert botoffice.__version__ == "0.12.0"
 
 
 def test_model_choices_lists_only_signed_in_engines(settings):
@@ -211,7 +211,7 @@ def test_icon_upload_validation_and_auth(settings):
     with TestClient(create_app(settings, {"codex": FakeAdapter()})) as client:
         bot = client.post("/v1/bots", json={"name": "Pic"}, headers=H).json()
         url = f"/v1/bots/{bot['id']}/icon"
-        assert client.get(url, headers=H).status_code == 404
+        assert client.get(url, headers=H).headers["content-type"] == "image/png"      # 0.12.0: a generated default avatar
         assert client.put(url, content=PNG, headers={"Content-Type": "image/png"}).status_code == 401
         assert client.put(url, content=b"", headers=H | {"Content-Type": "image/png"}).status_code == 400
         huge = PNG + b"\x00" * MAX_ICON_BYTES
@@ -220,14 +220,20 @@ def test_icon_upload_validation_and_auth(settings):
         assert client.put(url, content=svg, headers=H | {"Content-Type": "image/svg+xml"}).status_code == 415
         assert client.put(url, content=b"hello", headers=H | {"Content-Type": "image/png"}).status_code == 415
 
-        ok = client.put(url, content=PNG, headers=H | {"Content-Type": "image/png"})
+        import io
+
+        from PIL import Image
+        real = io.BytesIO()
+        Image.new("RGB", (40, 30), (9, 9, 9)).save(real, format="PNG")
+        assert client.put(url, content=PNG, headers=H | {"Content-Type": "image/png"}).status_code == 415   # 0.12.0: fully decoded
+        ok = client.put(url, content=real.getvalue(), headers=H | {"Content-Type": "image/png"})
         assert ok.status_code == 200 and ok.json()["icon_image"] == "image/png"
         path = settings.data_dir / "bots" / bot["id"] / "icon"
         assert path.stat().st_mode & 0o777 == 0o600
         assert path.parent.stat().st_mode & 0o777 == 0o700
         assert client.get(url).status_code == 401
         served = client.get(url, headers=H)
-        assert served.content == PNG and served.headers["content-type"] == "image/png"
+        assert served.content[:8] == b"\x89PNG\r\n\x1a\n" and served.headers["content-type"] == "image/png"   # re-encoded, 256 px
         assert served.headers["x-content-type-options"] == "nosniff"
 
         removed = client.delete(url, headers=H)
