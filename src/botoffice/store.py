@@ -331,6 +331,26 @@ def assignment_event(db: sqlite3.Connection, assignment_id: str, kind: str, note
                (assignment_id, kind, note[:2000], job_id, now().isoformat(), actor, assignment_id))
 
 
+def _drop_stale_hold(db: sqlite3.Connection, job_id: str, why: str) -> None:
+    """A held automatic turn that should no longer run (continuation.stale_hold) is cancelled with a
+    chat line; an active task it belonged to waits for the owner, so it does not stall silently."""
+    stamp = now().isoformat()
+    row = db.execute("SELECT bot_id, source, assignment_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+    db.execute("UPDATE jobs SET status=?, finished_at=?, error=? WHERE id=?",
+               (JobStatus.CANCELLED.value, stamp, f"not run: {why}", job_id))
+    if row["bot_id"] and db.execute("SELECT 1 FROM bots WHERE id=?", (row["bot_id"],)).fetchone():
+        db.execute("INSERT INTO messages (bot_id,role,source,text,job_id,created_at,attachments) VALUES (?,?,?,?,?,?,'[]')",
+                   (row["bot_id"], "system", row["source"],
+                    f"A held automatic turn was not run: {why}. Reply to keep it going.", job_id, stamp))
+    if row["assignment_id"] and not db.execute("SELECT 1 FROM jobs WHERE assignment_id=? AND status IN "
+                                               "('queued','running') LIMIT 1", (row["assignment_id"],)).fetchone():
+        note = f"paused, not blocked: {why}. Reply to resume."
+        if db.execute("UPDATE assignments SET status='waiting_on_user', status_note=?, updated_at=?, dismissed_at=NULL, "
+                      "version=version+1, updated_by='system' WHERE id=? AND status='active'",
+                      (note, stamp, row["assignment_id"])).rowcount:
+            assignment_event(db, row["assignment_id"], "status", f"waiting_on_user: {note}", job_id)
+
+
 def _assignment_gate(db: sqlite3.Connection, job_id: str) -> str | None:
     """Claim-time check of an assignment turn (every run: continuation, verify, retry, reply,
     wake-up, restart replay): its assignment must be active with budget left. Reserves one turn
@@ -542,6 +562,8 @@ class JobStore:
                 # continuation.decide said after it finished (set once)
                 ("auto_kind", "TEXT"),
                 ("auto_decision", "TEXT"),
+                # when a cap first held this automatic turn (continuation.stale_hold)
+                ("held_at", "TEXT"),
             ):
                 if column not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
@@ -1333,6 +1355,10 @@ class JobStore:
                 capped = continuation.cap_gate(db, job_id, now())
                 if capped is not None:
                     continuation.hold(db, job_id, *capped, now())
+                    continue
+                stale = continuation.stale_hold(db, job_id, now())
+                if stale is not None:
+                    _drop_stale_hold(db, job_id, stale)
                     continue
                 refused = _assignment_gate(db, job_id)
                 if refused is None:
