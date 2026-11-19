@@ -285,7 +285,8 @@ def test_icon_routes_reject_a_bots_own_agent_token(client):
 
 def test_upload_without_pillow_is_a_clear_503_and_generation_still_works(client, monkeypatch):
     import sys
+    payload = image_bytes()
     monkeypatch.setitem(sys.modules, "PIL", None)
     bot = mk(client, "NoPil")
-    assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=image_bytes()).status_code == 503
+    assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=payload).status_code == 503
     assert client.get(f"/v1/bots/{bot['id']}/icon", headers=H).status_code == 200
