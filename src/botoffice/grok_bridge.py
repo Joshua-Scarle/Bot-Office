@@ -74,6 +74,9 @@ def load_config(data_dir: Path | None = None) -> dict[str, str]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise DeskError("webhook config is unreadable") from exc
+    if not isinstance(data, dict) or not all(
+            isinstance(data.get(name) or "", str) for name in ("url", "key", "header")):
+        raise DeskError("webhook config is malformed (url, key and header must be strings)")
     url, key = (data.get("url") or "").strip(), (data.get("key") or "").strip()
     if not url or not key:
         raise DeskError("webhook config must include url and key")
@@ -140,13 +143,16 @@ def per_bot_daily() -> int:
 def check_url(url: str) -> None:
     """Webhook URLs must be https; plain http only to this machine. With an allowlist set the
     host must be on it."""
-    parsed = urlparse(url)
-    if not parsed.netloc or not (
-        parsed.scheme == "https" or parsed.scheme == "http" and (parsed.hostname or "") in LOCAL_HOSTS
-    ):
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
+        parsed.port  # noqa: B018  (a malformed port raises ValueError)
+    except ValueError as exc:
+        raise WebhookNotSent("webhook url is malformed") from exc
+    if not parsed.netloc or not (parsed.scheme == "https" or parsed.scheme == "http" and hostname in LOCAL_HOSTS):
         raise WebhookNotSent("url must be https (http only for 127.0.0.1 or localhost)")
     allowed = allowed_hosts()
-    if allowed and (parsed.hostname or "").lower() not in allowed:
+    if allowed and hostname.lower() not in allowed:
         raise WebhookNotSent("webhook host is not in BOT_OFFICE_GROK_HOSTS")
 
 
@@ -300,15 +306,20 @@ def send_to_grok(
     now: datetime | None = None,
 ) -> str:
     kind = kind.strip().lower()
-    if kind in DROPPED_KINDS:
-        return "dropped: kind=ack is not sent"
     to = to.strip()
     directory = data_dir or _data_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     sender = resolve_from_bot(from_bot, directory, environ)
     store = JobStore(directory / "agentdesk.sqlite3")
     stamp = now or datetime.now(UTC)
+    if kind in DROPPED_KINDS:
+        store.bridge_record(sender, stamp, "dropped", "dropped: kind=ack is not sent", to)
+        return "dropped: kind=ack is not sent"
     try:
+        for name, value, limit in (("to", to, 200), ("kind", kind, 20), ("text", text, 10000),
+                                   ("thread_id", thread_id or "", 200), ("from", sender, 200)):
+            if len(value) > limit:
+                raise DeskError(f"field too long: {name} is at most {limit} characters")
         if kind not in KINDS:
             raise DeskError(f"kind must be one of {', '.join(KINDS)}")
         text = text.strip()
@@ -448,8 +459,16 @@ def _transport(url: str, body: dict[str, Any], token: str) -> tuple[int, dict[st
             data = {}
         return exc.code, data if isinstance(data, dict) else {}
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        error = DeskError(f"Bot-Office API unreachable at {url.split('/v1/')[0]}")
-        error.unreachable = True  # type: ignore[attr-defined]
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        where = url.split("/v1/")[0]
+        if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
+            # the connection was never made: the controller certainly did not see the request
+            error = DeskError(f"Bot-Office API unreachable at {where}")
+            error.unreachable = True  # type: ignore[attr-defined]
+        else:
+            # a timeout, a reset or an unreadable answer may come after the controller handled it
+            error = DeskError(f"Bot-Office API gave no usable answer at {where}; the message may have been sent")
+            error.unsure = True  # type: ignore[attr-defined]
         raise error from exc
 
 
@@ -469,17 +488,17 @@ def _flag_parser(prog: str, usage: str) -> argparse.ArgumentParser:
 
 
 def _record_unreachable(args: argparse.Namespace, environ: dict[str, str] | None, data_dir: Path | None,
-                        exc: Exception) -> None:
+                        exc: Exception, state: str = "failed") -> None:
     """Best effort: a send that could not reach the controller is logged in bridge_sends (state
-    failed, not counted) when this process can open the existing database. Never raises, never
-    creates a database."""
+    failed, not counted; 'unsure' when the controller may have handled it) when this process can
+    open the existing database. Never raises, never creates a database."""
     with contextlib.suppress(Exception):
         directory = data_dir or _data_dir()
         if not (directory / "agentdesk.sqlite3").is_file():
             return
         env = dict(os.environ) if environ is None else environ
         sender = args.from_bot or resolve_from_bot(None, directory, env)
-        JobStore(directory / "agentdesk.sqlite3").bridge_record(sender, datetime.now(UTC), "failed", str(exc), args.to)
+        JobStore(directory / "agentdesk.sqlite3").bridge_record(sender, datetime.now(UTC), state, str(exc), args.to)
 
 
 def desk_grok(argv: list[str], *, stdin=None, data_dir: Path | None = None,
@@ -514,6 +533,8 @@ def desk_grok(argv: list[str], *, stdin=None, data_dir: Path | None = None,
     except DeskError as exc:
         if getattr(exc, "unreachable", False):
             _record_unreachable(args, environ, data_dir, exc)  # the controller never saw it: log it here
+        elif getattr(exc, "unsure", False):
+            _record_unreachable(args, environ, data_dir, exc, "unsure")  # it may have: not a definite failure
         raise
     print(result)
     return 0 if result == "sent" else 2

@@ -119,7 +119,7 @@ Other routes include `POST/GET /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/{i
 `systemctl --user status bot-office` over a non-login `ssh host 'cmd'` can say `Failed to connect to bus: No medium found` (no `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` in that shell), and `systemctl status bot-office` without `--user` says `Unit bot-office.service could not be found` because it asks the system manager; the service is a *user* unit (`~/.config/systemd/user/bot-office.service`, lingering enabled so it outlives logins). Use the wrapper, which sets `XDG_RUNTIME_DIR=/run/user/$(id -u)` itself and checks that the process listening on the API port is the unit's MainPID (or inside its cgroup), so a process started by hand outside systemd shows up as `MISMATCH`:
 
 ```sh
-ssh host 'cd ~/printpilot-agentdesk && scripts/svc.sh status'   # exit 0 OK, 2 mismatch / nothing listening, 3 unit or user manager missing
+ssh host 'cd <repo> && scripts/svc.sh status'   # exit 0 OK, 2 mismatch / nothing listening, 3 unit or user manager missing
 scripts/svc.sh logs 100
 scripts/svc.sh restart            # refuses (exit 4) while a job is running; --force overrides
 ```

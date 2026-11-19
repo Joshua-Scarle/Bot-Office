@@ -246,3 +246,35 @@ def test_kill_process_group_only_signals_an_unreaped_leader(monkeypatch):
     sent.clear()
     asyncio.run(CliAdapter._kill_process_group(leader))
     assert sent == []
+
+
+def test_reset_in_the_repeated_dst_hour_uses_the_upcoming_occurrence():
+    # Europe/Berlin falls back on 2026-10-25: 02:00-02:59 happens twice (CEST = 00:xx UTC, then CET = 01:xx UTC)
+    zone = "(Europe/Berlin)"
+    msg = f"try again at 2:30 AM {zone}"
+    # 02:15 CET (the second pass): the upcoming 02:30 is 15 minutes away, not tomorrow
+    assert failures.parse_reset(msg, datetime(2026, 10, 25, 1, 15, tzinfo=UTC)) == datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+    # 02:15 CEST (the first pass): the first 02:30 is next
+    assert failures.parse_reset(msg, datetime(2026, 10, 25, 0, 15, tzinfo=UTC)) == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+    # past both passes: tomorrow, no longer ambiguous
+    assert failures.parse_reset(msg, datetime(2026, 10, 25, 1, 45, tzinfo=UTC)) == datetime(2026, 10, 26, 1, 30, tzinfo=UTC)
+    # the explicit date form picks the same way
+    dated = f"try again at Oct 25th, 2026 2:30 AM {zone}"
+    assert failures.parse_reset(dated, datetime(2026, 10, 25, 1, 15, tzinfo=UTC)) == datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
+
+
+def test_reset_in_the_skipped_dst_hour_lands_after_the_gap():
+    # Europe/Berlin springs forward on 2026-03-29: 02:00-02:59 never happens; 02:30 means 03:30 CEST = 01:30 UTC
+    now = datetime(2026, 3, 29, 0, 10, tzinfo=UTC)
+    assert failures.parse_reset("try again at 2:30 AM (Europe/Berlin)", now) == datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
+    # after 03:30 CEST the next 02:30 is the following (nonexistent-free) day: 02:30 CEST on the 30th
+    after = datetime(2026, 3, 29, 2, 0, tzinfo=UTC)
+    assert failures.parse_reset("try again at 2:30 AM (Europe/Berlin)", after) == datetime(2026, 3, 30, 0, 30, tzinfo=UTC)
+
+
+def test_unknown_zone_name_is_unparsed_not_the_host_zone(caplog):
+    now = datetime(2026, 11, 16, 21, 23, tzinfo=UTC)
+    with caplog.at_level("WARNING", logger="botoffice.failures"):
+        assert failures.parse_reset("try again at 1:15 AM (Mars/Olympus)", now) is None
+        assert failures.parse_reset("try again at Nov 21st, 2026 1:15 AM (Mars/Olympus)", now) is None
+    assert "Mars/Olympus" in caplog.text

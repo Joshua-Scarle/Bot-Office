@@ -12,7 +12,8 @@
 #   scripts/svc.sh stop | start        same environment, same unit
 #
 # Env: BOT_OFFICE_UNIT (default bot-office.service), BOT_OFFICE_PORT / AGENTDESK_PORT (default
-# 8787), BOT_OFFICE_DATA_DIR (default <repo>/data, only read to count running jobs).
+# 8787). The job count reads the database named by the RUNNING service's own environment
+# (BOT_OFFICE_PRIVATE_DIR, else BOT_OFFICE_DATA_DIR); if that cannot be identified, restart refuses.
 set -u
 
 UNIT="${BOT_OFFICE_UNIT:-bot-office.service}"
@@ -23,7 +24,6 @@ if [ -n "$SELF" ] && [ -e "$SELF" ]; then
 else
   REPO="$PWD"  # piped into bash: run it from the repo
 fi
-DATA="${BOT_OFFICE_DATA_DIR:-${AGENTDESK_DATA_DIR:-$REPO/data}}"
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
@@ -42,12 +42,51 @@ listener_pid() {  # pid listening on the API port (ss shows our own processes wi
 
 main_pid() { ctl show "$UNIT" -p MainPID --value 2>/dev/null; }
 
-running_jobs() {  # read-only; prints a number, or "?" when it cannot be read
+service_db() {  # the database the RUNNING service uses, from its own environment; empty when unknown
+  local env_text pid
+  pid="$(main_pid)"
+  if [ -n "$pid" ] && [ "$pid" != "0" ] && [ -r "/proc/$pid/environ" ]; then
+    env_text="$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null)"
+  else
+    env_text="$(ctl show "$UNIT" -p Environment --value 2>/dev/null | tr ' ' '\n')"
+  fi
+  python3 -c '
+import sys
+env = dict(line.split("=", 1) for line in sys.stdin.read().splitlines() if "=" in line)
+env = {k.strip("\""): v.strip("\"") for k, v in env.items()}
+# same rule as Settings.control_dir: the private dir wins, else the data dir
+base = env.get("BOT_OFFICE_PRIVATE_DIR") or env.get("BOT_OFFICE_DATA_DIR") or env.get("AGENTDESK_DATA_DIR")
+print(base + "/agentdesk.sqlite3" if base else "")
+' <<<"$env_text"
+}
+
+running_jobs() {  # read-only count in the service's own database; "?" when it cannot be identified or read
+  local db
+  db="$(service_db)"
+  [ -n "$db" ] && [ -f "$db" ] || { echo "?"; return; }
   python3 -c '
 import sqlite3, sys
 db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=5)
 print(db.execute("SELECT count(*) FROM jobs WHERE status=\"running\"").fetchone()[0])
-' "$DATA/agentdesk.sqlite3" 2>/dev/null || echo "?"
+' "$db" 2>/dev/null || echo "?"
+}
+
+guarded_restart() {  # count running jobs and ask for the restart while holding the database write lock:
+  # Store.claim starts a job inside BEGIN IMMEDIATE, so nothing can be claimed between the check and
+  # the restart request (--no-block: the stopping service must be able to write once we release)
+  local db
+  db="$(service_db)"
+  [ -n "$db" ] && [ -f "$db" ] || { echo "svc: cannot identify the service's database (BOT_OFFICE_PRIVATE_DIR / BOT_OFFICE_DATA_DIR not in its environment); refusing (use --force to restart anyway)" >&2; return 5; }
+  python3 -c '
+import sqlite3, subprocess, sys
+db = sqlite3.connect(sys.argv[1], timeout=10, isolation_level=None)
+db.execute("BEGIN IMMEDIATE")
+n = db.execute("SELECT count(*) FROM jobs WHERE status=\"running\"").fetchone()[0]
+if n:
+    print(f"svc: running jobs: {n}; a restart would interrupt them (use --force to restart anyway)", file=sys.stderr)
+    sys.exit(4)
+sys.exit(subprocess.run(["systemctl", "--user", "restart", "--no-block", sys.argv[2]]).returncode)
+' "$db" "$UNIT"
 }
 
 status() {
@@ -79,13 +118,14 @@ status() {
 }
 
 restart() {
-  local jobs i
-  jobs="$(running_jobs)"
-  if [ "$jobs" != "0" ] && [ "${1:-}" != "--force" ]; then
-    echo "svc: running jobs: $jobs; a restart would interrupt them (use --force to restart anyway)" >&2
-    return 4
+  local i rc
+  if [ "${1:-}" = "--force" ]; then
+    ctl restart "$UNIT" || return $?
+  else
+    guarded_restart; rc=$?
+    [ "$rc" -eq 0 ] || return "$rc"
+    sleep 1
   fi
-  ctl restart "$UNIT" || return $?
   for i in $(seq 1 30); do
     [ -n "$(listener_pid)" ] && break
     sleep 1
