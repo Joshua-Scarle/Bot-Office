@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from . import attachments, baseline, continuation, failures, isolation, needs_you, procs, safefs
+from . import attachments, autocontinue, baseline, continuation, failures, isolation, needs_you, procs, safefs
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
 from .catalog import ENGINE_LABELS
@@ -725,6 +725,7 @@ class Scheduler:
         if status == JobStatus.SUCCEEDED:
             # a finished run is not a finished task: the bot says so on its last line
             audit, state, reason = failures.split_status(audit)
+            state, reason = self._waiting_for_bot(job, audit, state, reason)
             if state != "unverified":
                 stated = (state, reason)
             outcome = f"{state}: {reason}" if reason and state != "done" else state
@@ -798,6 +799,8 @@ class Scheduler:
                                                   attachments=ids) is not None and ids:
                         with contextlib.suppress(Exception):
                             _image_index(self.store, sender)
+                # the reply wakes the bot that asked (once; not while it is running: its turn end asks again)
+                self._wake_for_replies(sender.id)
         if job.bot_id:
             with contextlib.suppress(Exception):
                 self._record_outcome(job, workspace, status, log_path, error, audit, kind=kind, reset=reset,
@@ -811,10 +814,44 @@ class Scheduler:
                         self.store.set_auto_decision(job.id, "error")
                         self.store.add_message(job.bot_id, "system", AUTO_CONTINUE_FAILED, source=job.source)
         self._settle(job)
+        if job.bot_id:
+            self._wake_for_replies(job.bot_id)
         if sink is not None:
             with contextlib.suppress(Exception):
                 sink.emit("final", text=audit)
                 sink.emit("done", status=status.value, exit_code=exit_code, error=error)
+
+    # a reason that names the wait for another bot's reply (the bot's own words for it)
+    _BOT_WAIT = re.compile(r"\b(?:repl(?:y|ies|ied)|answer\w*|respon(?:d|ds|se|ses)|asynchronous\w*|asynchronously|bot-msg|"
+                           r"inbox|messag(?:e|ed|es)|another bot|other bot|hear(?:ing)? back|comes? back|arrives?)\b",
+                           re.IGNORECASE)
+
+    def _waiting_for_bot(self, job: Job, reply: str, state: str, reason: str) -> tuple[str, str]:
+        """0.11.12: a turn whose only outstanding item is another bot's reply is not blocked and does not
+        need the owner. When the bot ends not_done / waiting_on_user / waiting_on_bot with a message to
+        another bot still unanswered, a status that names that wait (or waiting_on_bot) and nothing for the
+        owner (no phrase asking them, no question card, no approval), it is a normal finish: ``done`` for a
+        chat turn, ``waiting_on_bot`` for a task turn. The reply then wakes the bot (``wake_for_replies``).
+        Anything that asks the owner, and ``blocked``, are left as the bot said."""
+        if state not in ("not_done", "waiting_on_user", "waiting_on_bot") or not job.bot_id:
+            return state, reason
+        names = self.store.outstanding_bot_replies(job.id)
+        if not names or self.store.pending_approval(job.id) or "```ask" in reply:
+            return state, reason
+        if autocontinue.needs_user_phrase(reply, reason):
+            return state, reason
+        named = any(name.lower() in reason.lower() for name in names)
+        if state != "waiting_on_bot" and not (named or self._BOT_WAIT.search(reason)):
+            return state, reason
+        if job.assignment_id:
+            return "waiting_on_bot", reason
+        return "done", reason
+
+    def _wake_for_replies(self, bot_id: UUID | str) -> None:
+        try:
+            self.assignments.wake_for_replies(bot_id)
+        except Exception:
+            log.exception("could not wake bot %s for a bot reply", bot_id)
 
     def _auto_continue(self, job: Job) -> str:
         """0.11.10: a turn that ended ``not_done`` is continued in the same session when
