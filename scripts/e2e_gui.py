@@ -506,6 +506,8 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     page.wait_for_timeout(500)
     check(layout()["sections"][0]["bot_ids"] == [ids[names[1]], ids[names[0]]], "dragging onto the top half of a row reorders within the section")
     # hold a drag to show the insertion line
+    row(names[0]).wait_for(state="visible")
+    row(names[2]).wait_for(state="visible")
     box = row(names[0]).bounding_box()
     page.mouse.move(*(box["x"] + 60, box["y"] + 20))
     page.mouse.down()
