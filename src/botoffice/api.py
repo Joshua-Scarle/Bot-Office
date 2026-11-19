@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -24,7 +25,8 @@ from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import approval_classes, attachments, baseline, continuation, grok_bridge, isolation, needs_you, safefs, vnc
+from . import approval_classes, attachments, avatars, baseline, continuation, grok_bridge, isolation, needs_you, safefs, vnc
+from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
 from . import usage as budgets
@@ -113,6 +115,33 @@ from .voice import SpeakableRequest, SpeakRequest, VoiceError, VoicePrefs, Voice
 from .voice import VoicePrefsUpdate as VoicePrefsBody
 from .voice.text import chunks as speech_chunks
 from .voice.wav import WavError, parse_pcm16_mono
+
+
+class AvatarGenerate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    seed: str | None = Field(default=None, max_length=64)
+
+
+class SectionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(max_length=200)
+
+
+class SectionPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, max_length=200)
+    collapsed: bool | None = None
+
+
+class SectionOrder(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ids: list[str] = Field(max_length=200)
+
+
+class BotSectionMove(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    section_id: str | None = None
+    index: int = Field(default=0, ge=0, le=100000)
 
 
 class AutoContinueBody(BaseModel):
@@ -341,7 +370,7 @@ class BridgeInbox(BaseModel):
 
 
 CHAT_PAGE = Path(__file__).parent / "static" / "bot-office.html"
-MAX_ICON_BYTES = 256 * 1024
+MAX_ICON_BYTES = avatars.MAX_UPLOAD_BYTES
 TERMINAL = {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.NEEDS_LOGIN, JobStatus.INCOMPLETE}
 EVENT_POLL_SECONDS = 0.2
 EVENT_KEEPALIVE_SECONDS = 15.0
@@ -1104,58 +1133,125 @@ def create_app(
                 "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})
         return Response(data, media_type=mime, headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": "inline", "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})
 
+    def _png_response(request: Request, data: bytes, mime: str, versioned: bool) -> Response:
+        tag = avatars.etag(data)
+        headers = {
+            "ETag": tag,
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=31536000, immutable" if versioned else "private, no-cache",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        }
+        if request.headers.get("if-none-match") == tag:
+            return Response(status_code=304, headers=headers)
+        return Response(data, media_type=mime, headers=headers)
+
     @app.get("/v1/bots/{bot_id}/icon", dependencies=[Depends(auth)])
-    async def get_bot_icon(bot_id: UUID) -> Response:
+    async def get_bot_icon(bot_id: UUID, request: Request, v: str | None = None) -> Response:
+        """The uploaded image, else the generated avatar of the bot's seed, else 404 (the emoji shows).
+        Cached by ETag; a request carrying ``v`` (the client passes the bot's updated_at) may be cached for good."""
         bot = _bot(bot_id)
-        try:
-            data = safefs.read_bytes(_icon_path(bot_id), MAX_ICON_BYTES) if bot.icon_image else None
-        except OSError:
-            data = None
-        if data is None:
-            raise HTTPException(status_code=404, detail="no icon image")
-        return Response(
-            data,
-            media_type=bot.icon_image,
-            headers={
-                "X-Content-Type-Options": "nosniff",
-                "Cache-Control": "no-store",
-                "Content-Security-Policy": "default-src 'none'; sandbox",
-            },
-        )
+        if bot.icon_image:
+            try:
+                data = await attachment_io(safefs.read_bytes, _icon_path(bot_id), MAX_ICON_BYTES)
+            except OSError:
+                data = None
+            if data is not None:
+                return _png_response(request, data, bot.icon_image, v is not None)
+        if bot.avatar_seed and avatars.valid_seed(bot.avatar_seed):
+            data = await asyncio.to_thread(avatars.render_png, bot.avatar_seed)
+            return _png_response(request, data, "image/png", v is not None)
+        raise HTTPException(status_code=404, detail="no icon image")
 
     @app.put("/v1/bots/{bot_id}/icon", response_model=Bot, dependencies=[Depends(auth)])
     async def put_bot_icon(bot_id: UUID, request: Request) -> Bot:
-        """Upload a PNG, JPEG, GIF or WebP icon as the raw request body (max 256 KiB)."""
+        """Upload a PNG, JPEG or WebP (GIF first frame) as the raw request body (max 2 MB). It is checked, cropped
+        to a square, resized to 256 px and stored as PNG; SVG and anything else is refused."""
         _bot(bot_id)
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > MAX_ICON_BYTES:
-            raise HTTPException(status_code=413, detail="icon image is too large")
+            raise HTTPException(status_code=413, detail="icon image is too large (limit 2 MB)")
         data = bytearray()
         async for chunk in request.stream():
             data += chunk
             if len(data) > MAX_ICON_BYTES:
-                raise HTTPException(status_code=413, detail="icon image is too large")
-        if not data:
-            raise HTTPException(status_code=400, detail="icon image is empty")
-        mime = _sniff_image(bytes(data))
-        if mime is None:
-            raise HTTPException(
-                status_code=415, detail="icon must be a PNG, JPEG, GIF or WebP image"
-            )
+                raise HTTPException(status_code=413, detail="icon image is too large (limit 2 MB)")
+        try:
+            png = await asyncio.to_thread(avatars.normalise_upload, bytes(data))
+        except avatars.AvatarError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
         # bots/<id> is bot-writable when isolated: create, write and replace without following links
         safefs.mkdir(memory.bot_dir(bot_id), isolation.shared_dir_mode())
-        safefs.write_bytes(_icon_path(bot_id), bytes(data), 0o600)
-        updated = store.update_bot(bot_id, icon_image=mime)
-        assert updated is not None
+        safefs.write_bytes(_icon_path(bot_id), png, 0o600)
+        updated = store.update_bot(bot_id, icon_image="image/png")
+        if updated is None:
+            raise HTTPException(status_code=404, detail="bot not found")
         return updated
 
     @app.delete("/v1/bots/{bot_id}/icon", response_model=Bot, dependencies=[Depends(auth)])
     async def delete_bot_icon(bot_id: UUID) -> Bot:
+        """Remove the uploaded image and the generated avatar: the bot shows its emoji."""
         _bot(bot_id)
         safefs.unlink(_icon_path(bot_id))
-        updated = store.update_bot(bot_id, icon_image=None)
+        updated = store.update_bot(bot_id, icon_image=None, avatar_seed=None)
         assert updated is not None
         return updated
+
+    @app.post("/v1/bots/{bot_id}/icon/generate", response_model=Bot, dependencies=[Depends(auth)])
+    async def generate_bot_icon(bot_id: UUID, body: AvatarGenerate | None = None) -> Bot:
+        """Give the bot a generated avatar (a given seed, e.g. a preset, or a fresh random one). Replaces an upload."""
+        _bot(bot_id)
+        seed = (body.seed if body else None) or secrets.token_hex(6)
+        if not avatars.valid_seed(seed):
+            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : -")
+        await asyncio.to_thread(avatars.render_png, seed)
+        safefs.unlink(_icon_path(bot_id))
+        updated = store.update_bot(bot_id, icon_image=None, avatar_seed=seed)
+        assert updated is not None
+        return updated
+
+    @app.get("/v1/avatar-presets", dependencies=[Depends(auth)])
+    async def avatar_presets() -> dict:
+        return {"presets": [{"seed": seed} for seed in avatars.PRESET_SEEDS]}
+
+    @app.get("/v1/avatar-preview", dependencies=[Depends(auth)])
+    async def avatar_preview(request: Request, seed: str) -> Response:
+        if not avatars.valid_seed(seed):
+            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : -")
+        data = await asyncio.to_thread(avatars.render_png, seed)
+        return _png_response(request, data, "image/png", True)
+
+    # ---- sidebar sections (0.12.0) ----
+    def _sections(call, *args):
+        try:
+            return call(*args)
+        except sections_mod.SectionError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+
+    @app.get("/v1/sections", dependencies=[Depends(auth)])
+    async def get_sections() -> dict:
+        return store.sections.layout()
+
+    @app.post("/v1/sections", status_code=201, dependencies=[Depends(auth)])
+    async def create_section(body: SectionCreate) -> dict:
+        return _sections(store.sections.create, body.name)
+
+    @app.put("/v1/sections/order", dependencies=[Depends(auth)])
+    async def order_sections(body: SectionOrder) -> dict:
+        return _sections(store.sections.reorder, body.ids)
+
+    @app.patch("/v1/sections/{section_id}", dependencies=[Depends(auth)])
+    async def patch_section(section_id: str, body: SectionPatch) -> dict:
+        return _sections(store.sections.update, section_id, body.name, body.collapsed)
+
+    @app.delete("/v1/sections/{section_id}", dependencies=[Depends(auth)])
+    async def delete_section(section_id: str) -> dict:
+        """Its bots move to the top of Ungrouped; no bot is deleted."""
+        moved = _sections(store.sections.delete, section_id)
+        return {"deleted": section_id, "moved_bot_ids": moved}
+
+    @app.put("/v1/bots/{bot_id}/section", dependencies=[Depends(auth)])
+    async def move_bot_section(bot_id: UUID, body: BotSectionMove) -> dict:
+        return _sections(store.sections.move_bot, str(bot_id), body.section_id, body.index)
 
     @app.get("/v1/bots/{bot_id}/memory", dependencies=[Depends(auth)])
     async def get_bot_memory(bot_id: UUID) -> dict[str, str]:
