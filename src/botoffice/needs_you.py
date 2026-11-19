@@ -75,12 +75,18 @@ def needs_you(store: JobStore) -> list[dict]:
             state = _assignment_state(row, stamp)
             if bot is None or state is None:
                 continue
+            # G4: the newest evidence the bot gave (stale or too short ones too), so the owner can judge it
+            given = db.execute("SELECT note FROM assignment_events WHERE assignment_id=? AND kind='evidence' "
+                               "ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+            ask = _assignment_ask(row, state, bot["name"])
+            if given and state == "waiting_on_user":
+                ask += f' (last evidence given: "{given["note"][:200]}")'
             items.append({
                 "id": f"a:{row['id']}:{state}:{row['stalled_at'] or row['updated_at']}",
                 "kind": "assignment", "state": state, "bot_id": row["bot_id"], "bot_name": bot["name"],
                 "notify": bool(bot["notify"]), "assignment_id": row["id"], "title": row["title"],
-                "ask": _assignment_ask(row, state, bot["name"]), "at": row["stalled_at"] or row["updated_at"],
-                "actions": ASSIGNMENT_ACTIONS,
+                "ask": ask, "at": row["stalled_at"] or row["updated_at"],
+                "evidence": given["note"] if given else None, "actions": ASSIGNMENT_ACTIONS,
             })
         # 0.11.4 (G5 with_note): a task Joshua created that its bot dropped, until he dismisses it
         for row in db.execute("SELECT * FROM assignments WHERE status='dropped' AND created_by='user' "

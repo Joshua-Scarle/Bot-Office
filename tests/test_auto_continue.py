@@ -1,6 +1,7 @@
 """0.11.10: a turn that ends not_done is continued automatically, within the owner's limit."""
 import asyncio
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 
@@ -183,3 +184,58 @@ def test_rule_seven_asks_to_keep_working():
     from botoffice.workspace import RULES
     seven = next(line for line in RULES.splitlines() if line.startswith("7."))
     assert "Keep working until the task is done" in seven and "not_done means you will carry on" in seven
+
+
+def test_a_crash_while_deciding_leaves_a_line_not_silence(settings, monkeypatch):
+    """decide raising (or the process dying) after the job was claimed for a decision: the caller's
+    except posts the line at once; a row left 'deciding' gets it at the next start."""
+    from botoffice import continuation
+    store, scheduler, _, bot = _setup(settings, [NOT_DONE])
+
+    def boom(*_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(continuation, "decide", boom)
+    job = _run_one(store, scheduler)
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT auto_decision FROM jobs WHERE id=?", (str(job.id),)).fetchone()[0] == "error"
+    assert [m.text for m in store.list_messages(bot.id) if m.role == "system"][-1].startswith(
+        "Could not continue automatically")
+    # a crash between the claim and the decision: the row stays 'deciding' until the next start
+    other = store.create("p", "codex", bot_id=bot.id, source="chat")
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET auto_decision='deciding', status='incomplete' WHERE id=?", (str(other.id),))
+    before = len([m for m in store.list_messages(bot.id) if m.role == "system"])
+
+    async def start_and_stop():
+        await scheduler.start()
+        await scheduler.stop()
+
+    asyncio.run(start_and_stop())
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT auto_decision FROM jobs WHERE id=?", (str(other.id),)).fetchone()[0] == "error"
+    lines = [m.text for m in store.list_messages(bot.id) if m.role == "system"]
+    assert len(lines) == before + 1 and lines[-1] == "Could not continue automatically. Reply to keep it going."
+
+
+def test_max_above_consecutive_is_refused_and_the_effective_limit_shown(settings, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from botoffice import continuation
+    from botoffice.api import create_app
+    client = TestClient(create_app(settings, {"codex": FakeAdapter()}))
+    owner = {"Authorization": "Bearer test-token"}
+    refused = client.put("/v1/settings", headers=owner, json={"auto_continue": {"max": 50}})
+    assert refused.status_code == 422 and "consecutive" in refused.json()["detail"]
+    both = client.put("/v1/settings", headers=owner, json={"auto_continue": {"max": 50, "consecutive": 50}}).json()
+    assert both["auto_continue"]["max"] == 50 and both["auto_continue_chat_limit"] == 50
+    # an env default lowering consecutive later: the effective limit is shown, and the chat says "n of 5"
+    client.put("/v1/settings", headers=owner, json={"auto_continue": {"max": 8, "consecutive": 8}})
+    store = client.app.state.store
+    raw = store.get_meta(continuation.KEY)
+    store.set_meta(continuation.KEY, raw.replace('"consecutive": 8', '"consecutive": 5'))
+    shown = client.get("/v1/settings", headers=owner).json()
+    assert shown["auto_continue"]["max"] == 8 and shown["auto_continue_chat_limit"] == 5
+    assert continuation.chat_limit(shown["auto_continue"]) == 5
+    html = (Path(__file__).parents[1] / "src" / "botoffice" / "static" / "bot-office.html").read_text()
+    assert "auto_continue_chat_limit" in html and "auto-continue-effective" in html

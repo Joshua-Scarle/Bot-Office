@@ -36,12 +36,13 @@ DEFAULTS: dict[str, object] = {
     "per_bot_day": 20,  # G3 probation; to be raised to 40. None = unlimited
     "per_hour": 20,  # all bots together. None = unlimited
     "evidence": True,  # G4: a task counts as done only with evidence of how it was verified
+    "evidence_min": 12,  # the shortest evidence text (characters) that counts
 }
 ENV = {"no_progress": "BOT_OFFICE_AUTO_NO_PROGRESS", "consecutive": "BOT_OFFICE_AUTO_CONSECUTIVE",
        "per_bot_day": "BOT_OFFICE_AUTO_TURNS_PER_BOT_DAY", "per_hour": "BOT_OFFICE_AUTO_TURNS_PER_HOUR",
-       "evidence": "BOT_OFFICE_DONE_NEEDS_EVIDENCE"}
+       "evidence": "BOT_OFFICE_DONE_NEEDS_EVIDENCE", "evidence_min": "BOT_OFFICE_DONE_EVIDENCE_MIN_CHARS"}
 BOUNDS = {"max": (1, CHAIN_MAX_LIMIT), "no_progress": (1, 100), "consecutive": (1, 1000),
-          "per_bot_day": (1, 100_000), "per_hour": (1, 100_000)}
+          "per_bot_day": (1, 100_000), "per_hour": (1, 100_000), "evidence_min": (1, 1000)}
 CAPS = ("per_bot_day", "per_hour")
 WINDOWS = {"per_bot_day": timedelta(hours=24), "per_hour": timedelta(hours=1)}
 UNLIMITED = "unlimited"
@@ -110,6 +111,12 @@ def get(store) -> dict[str, object]:
     return load(store.get_meta(KEY))
 
 
+def chat_limit(settings: dict[str, object]) -> int:
+    """The continuations in a row a chat really gets: ``max``, or ``consecutive`` if that is lower
+    (an env default can make it so after ``max`` was saved)."""
+    return min(int(settings["max"]), int(settings["consecutive"]))
+
+
 def update(store, changes: dict[str, object]) -> dict[str, object]:
     """Save the given keys (others keep their saved value or default); ValueError names a bad one.
     Held turns are released for a re-check, so a raised cap applies at once."""
@@ -120,6 +127,11 @@ def update(store, changes: dict[str, object]) -> dict[str, object]:
         saved = {}
     saved = {key: value for key, value in (saved if isinstance(saved, dict) else {}).items() if key in DEFAULTS}
     saved.update(checked)
+    after = load(json.dumps(saved))
+    if int(after["max"]) > int(after["consecutive"]):
+        # the chat chain also stops at "consecutive": a larger max would never be reached
+        raise ValueError(f"max ({after['max']}) cannot be more than consecutive ({after['consecutive']}): "
+                         "the chat stops at whichever comes first; raise consecutive too")
     store.set_meta(KEY, json.dumps(saved))
     if any(key in CAPS for key in checked):
         release_held(store)

@@ -5,7 +5,7 @@ Bot-Office continues a bot without the owner in two places:
 - **chat**: a chat (or API, routine, wake-up) turn ends `BOT-OFFICE-STATUS: not_done`. A hidden "continue" turn is posted in the same session. The working bubble shows "continuing, n of max".
 - **task loop**: an assignment turn ends `continue` (or `not_done`). The next turn is queued at loop priority. A `done` on a task with `verify` set queues a check turn.
 
-Both paths ask one function, `continuation.decide(settings, turn)`. `scheduler._auto_continue` and `assignments._settle` build a `Turn` (path, kind, the run of turns since the owner last spoke, open question/approval, owner message waiting, task budget, chat-only) and act on the returned `Decision`. Neither path keeps its own stop rules or counters. The text heuristics (needs-you phrases, no-progress) are Engineer 3's `autocontinue.py`. `continuation.py` uses them.
+Both paths ask one function, `continuation.decide(settings, turn)`. `scheduler._auto_continue` and `assignments._settle` build a `Turn` (path, kind, the run of turns since the owner last spoke, open question/approval, owner message waiting, task budget, chat-only) and act on the returned `Decision`. Neither path keeps its own stop rules or counters. A bot's own `bot-task start` or `bot-task status ID continue` sent from outside the task's own turn (a chat, routine or wake-up turn) queues a loop turn too, so it asks `decide` as well; a stop refuses it with 409 and leaves the task as it is. The text heuristics (needs-you phrases, no-progress) are Engineer 3's `autocontinue.py`. `continuation.py` uses them.
 
 ## Stop rules (in order, both paths)
 
@@ -44,6 +44,8 @@ A bot's `done` (status line or call) on a task with no evidence event:
 - The first time, the loop continues once with "say how you verified it (bot-task done --evidence ...)".
 - The next time, the task goes `waiting_on_user` with "says it is done; no evidence".
 
+Only evidence given since the task last became active counts (a start, a reply that resumes it, a reopen or a rewind starts over), and only text at least `evidence_min` characters long (shorter evidence is refused with 400). The accepted evidence is added to the done note (`...; evidence: <text>`), and a task waiting on the owner shows the last evidence given in Needs-you (`evidence`).
+
 Owner completion needs no evidence. Setting `evidence` (default on) turns the gate off. Peer review stays opt-in per task (`verify`, `reviewer`). Plain chat turns are untouched.
 
 ## Chat-only bots (G1)
@@ -68,6 +70,9 @@ All of these are in `GET/PUT /v1/settings` under `auto_continue`. A value saved 
 | per_bot_day | 20 (or null = unlimited) | BOT_OFFICE_AUTO_TURNS_PER_BOT_DAY |
 | per_hour | 20 (or null = unlimited) | BOT_OFFICE_AUTO_TURNS_PER_HOUR |
 | evidence | true | BOT_OFFICE_DONE_NEEDS_EVIDENCE (on/off) |
+| evidence_min | 12 (1..1000 characters) | BOT_OFFICE_DONE_EVIDENCE_MIN_CHARS |
+
+`max` cannot be saved above `consecutive` (422): the chat chain stops at whichever comes first. If an env default later makes `consecutive` lower, `GET /v1/settings` returns the limit that applies as `auto_continue_chat_limit`, Settings shows it, and the chat bubble counts against it.
 
 Not built (owner answers G6, G9 and plan 6.2): quiet hours, a physical/irreversible done gate, and a pick-up loop that starts open tasks by itself.
 
