@@ -165,7 +165,7 @@ Both are inlined in every fresh prompt (system prompt first) and written as `SYS
 - A task one bot adds to another bot's list lands open and waits for that bot. It gets at most normal priority and no position of the sender's choosing, so one bot cannot reorder another's queue.
 - On its own list, a bot may edit the title and goal of a task you created, never its done-when. Such edits are marked "Edited by a bot", and prompts show them as untrusted text until you rewrite them.
 - Dropping a task (by you or a bot) cancels its queued and running turns, and they do not come back.
-- A bot's task writes are capped per hour.
+- A bot's task writes are capped per hour. A reorder counts as one write, however many tasks it moves.
 
 Settings (environment, read on every call; unknown values fall back to the default):
 
