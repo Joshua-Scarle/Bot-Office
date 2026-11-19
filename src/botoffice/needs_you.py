@@ -7,6 +7,7 @@ state, so a resolved item disappears and a new state (or a new failure) comes ba
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
@@ -26,6 +27,8 @@ ASSIGNMENT_ACTIONS = ["reply", "start", "done", "dismiss"]
 # #10: a job parked on a usage limit for longer than this gets one notice per attempt
 PARK_NOTICE_AFTER = timedelta(minutes=10)
 NOTICE_TZ = "America/New_York"
+# an assignment waiting on Joshua for something to hand over (photos, files) rather than a decision
+MATERIALS = re.compile(r"\b(photos?|pictures?|images?|screenshots?|scans?|files?|uploads?|attach\w*)\b", re.I)
 
 
 def _assignment_state(row: sqlite3.Row, stamp: datetime) -> str | None:
@@ -67,6 +70,7 @@ def needs_you(store: JobStore) -> list[dict]:
                 items.append({"id": f"q:{row['id']}:open", "kind": "question", "state": "open",
                               "bot_id": row["bot_id"], "bot_name": bot["name"],
                               "notify": bool(bot["notify"]), "question_id": row["id"],
+                              "assignment_id": row["assignment_id"],
                               "title": "Question", "ask": f"{bot['name']} asks: {prompt[:120]}",
                               "at": row["created_at"], "actions": ["answer", "skip"]})
         for row in db.execute("SELECT * FROM assignments WHERE status NOT IN ('done','dropped') "
@@ -123,7 +127,7 @@ def needs_you(store: JobStore) -> list[dict]:
             items.append({
                 "id": f"j:{job['id']}:{job['attempts']}", "kind": "job", "state": "failed", "bot_id": job["bot_id"],
                 "bot_name": bot["name"], "notify": bool(bot["notify"]), "job_id": job["id"],
-                "title": f"{job['source'] or 'turn'} failed",
+                "assignment_id": job["assignment_id"], "title": f"{job['source'] or 'turn'} failed",
                 "ask": f"{bot['name']}'s {job['source'] or ''} turn failed: {reason}", "at": job["finished_at"],
                 "actions": ["retry", "dismiss"],
             })
@@ -145,7 +149,7 @@ def needs_you(store: JobStore) -> list[dict]:
                 })
         _approvals(db, bots, items, store)
         for row in db.execute(
-                f"SELECT n.*, j.not_before FROM usage_notices n JOIN jobs j ON j.id=n.job_id "
+                f"SELECT n.*, j.not_before, j.assignment_id FROM usage_notices n JOIN jobs j ON j.id=n.job_id "
                 f"WHERE {PARKED_SQL} AND n.attempt=j.attempts AND n.dismissed_at IS NULL ORDER BY n.created_at DESC"):
             bot = bots.get(row["bot_id"])
             if bot is None:
@@ -153,7 +157,8 @@ def needs_you(store: JobStore) -> list[dict]:
             items.append({
                 "id": f"u:{row['job_id']}:{row['attempt']}", "kind": "usage_limit", "state": "parked",
                 "bot_id": row["bot_id"], "bot_name": bot["name"], "notify": bool(bot["notify"]),
-                "job_id": row["job_id"], "provider": row["provider"], "title": "Waiting on a usage limit",
+                "job_id": row["job_id"], "assignment_id": row["assignment_id"], "provider": row["provider"],
+                "title": "Waiting on a usage limit",
                 "ask": _usage_text(bot["name"], row["provider"], row["not_before"], stamp),
                 # "switch" becomes one "Retry on <provider>" button per provider in "options" (the API
                 # fills it with the enabled, signed-in, different providers)
@@ -200,7 +205,32 @@ def needs_you(store: JobStore) -> list[dict]:
                 "ask": f"{bot['name']}'s watcher \"{row['name']}\" was paused: {row['paused_reason']}",
                 "at": row["last_fired_at"], "actions": ["resume"],
             })
+    return _annotate(items)
+
+
+def _annotate(items: list[dict]) -> list[dict]:
+    """Give every item a *category* and a *group* (additive keys; ids and actions are unchanged).
+
+    group: one per assignment (its own item plus any question, failed turn or usage notice of the
+    same assignment), else one per item, so a client counts an assignment once however many
+    things it is waiting on. category: ``materials`` for an assignment waiting on Joshua to hand
+    something over (photos, files: not a decision, and it stays until he does), else ``action``.
+    Incomplete turns are not items at all: they are history with a Retry button in the chat."""
+    for item in items:
+        item["group"] = f"as:{item['assignment_id']}" if item.get("assignment_id") else item["id"]
+        waits = item["kind"] == "assignment" and item["state"] == "waiting_on_user"
+        item["category"] = "materials" if waits and MATERIALS.search(item["ask"]) else "action"
     return items
+
+
+def count_items(items: list[dict]) -> dict[str, int]:
+    """What the Needs-you badge shows: distinct groups, and how many of them are only waiting on materials."""
+    groups: dict[str, str] = {}
+    for item in items:
+        group = item.get("group") or item["id"]
+        if groups.get(group) != "action":
+            groups[group] = item.get("category", "action")
+    return {"total": len(groups), "materials": sum(1 for c in groups.values() if c == "materials")}
 
 
 def _usage_text(bot: str, provider: str, not_before: str, stamp: datetime) -> str:
@@ -208,7 +238,10 @@ def _usage_text(bot: str, provider: str, not_before: str, stamp: datetime) -> st
 
     back = utc_time(not_before)
     minutes = max(0, round((back - stamp).total_seconds() / 60))
-    clock = back.astimezone(ZoneInfo(NOTICE_TZ)).strftime("%H:%M")
+    local = back.astimezone(ZoneInfo(NOTICE_TZ))
+    clock = local.strftime("%H:%M %Z")  # always with the zone (ET): a bare clock time was ambiguous
+    if local.date() != stamp.astimezone(ZoneInfo(NOTICE_TZ)).date():
+        clock = f"{local:%a %b} {local.day}, {clock}"
     return (f"{bot} is waiting for {ENGINE_LABELS.get(provider, provider)}'s usage limit to reset "
             f"(back about {clock}, {minutes} min).")
 

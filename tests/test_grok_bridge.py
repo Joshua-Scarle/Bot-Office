@@ -513,3 +513,83 @@ def test_inbound_hop_is_stored_only_with_the_turn(tmp_path, monkeypatch):
     # a hop that another message stored meanwhile conflicts instead of being reused
     with pytest.raises(BridgeHopConflict):
         store.enqueue_message(bot, "late", "late", None, "inbox", "CoS", None, None, bridge_hop=("t", 1))
+
+
+def _rows(tmp_path):
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "agentdesk.sqlite3")
+    return db.execute("SELECT bot, state, target, error FROM bridge_sends ORDER BY id").fetchall()
+
+
+def test_failed_and_refused_sends_are_recorded_but_not_counted(tmp_path, monkeypatch):
+    from botoffice import grok_bridge
+
+    monkeypatch.setenv("BOT_OFFICE_GROK_PER_BOT_DAILY", "30")
+    now = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
+    ok = lambda request, timeout=15: FakeResponse(200)  # noqa: E731
+    # no config yet: refused before any quota is used
+    with pytest.raises(DeskError):
+        send_to_grok(to="CoS", kind="fyi", text="x", from_bot="A", data_dir=tmp_path, opener=ok, now=now)
+    with pytest.raises(DeskError, match="kind must be"):
+        send_to_grok(to="CoS", kind="bogus", text="x", from_bot="A", data_dir=tmp_path, opener=ok, now=now)
+    _config(tmp_path)
+
+    def refused(request, timeout=15):
+        raise ConnectionRefusedError()
+
+    with pytest.raises(grok_bridge.WebhookNotSent):
+        send_to_grok(to="CoS", kind="fyi", text="x", from_bot="A", data_dir=tmp_path, opener=refused, now=now)
+    with pytest.raises(grok_bridge.WebhookUnsure):
+        send_to_grok(to="CoS", kind="fyi", text="x", from_bot="B", data_dir=tmp_path,
+                     opener=lambda request, timeout=15: (_ for _ in ()).throw(TimeoutError("t")), now=now)
+    assert send_to_grok(to="CoS", kind="fyi", text="x", from_bot="A", data_dir=tmp_path, opener=ok, now=now) == "sent"
+    assert send_to_grok(to="CoS", kind="fyi", text="y", from_bot="A", data_dir=tmp_path, opener=ok,
+                        now=now + timedelta(seconds=5)).startswith("dropped: rate limit")
+    rows = _rows(tmp_path)
+    assert [(r[0], r[1]) for r in rows] == [("A", "failed")] * 3 + [("B", "sent"), ("A", "sent"), ("A", "failed")]
+    assert all(r[2] == "CoS" for r in rows)
+    assert rows[0][3]
+    assert rows[1][3].startswith("kind must be")
+    assert rows[3][3].startswith("unsure:")  # delivery unknown: counted, with the note
+    assert rows[5][3].startswith("dropped: rate limit")
+    # the caps count only sent/reserved rows: three failed rows left bot A's quota untouched
+    store = JobStore(tmp_path / "agentdesk.sqlite3")
+    res, _hop, why = store.bridge_reserve("A", None, now + timedelta(seconds=90), per_bot_seconds=60,
+                                          daily_limit=3, max_hops=6)
+    assert res is not None and why is None  # 2 counted rows (B unsure-sent, A sent), not 6
+    assert store.bridge_reserve("Z", None, now + timedelta(seconds=95), per_bot_seconds=60, daily_limit=3,
+                                max_hops=6)[2] == "daily limit of 3 sends reached"
+
+
+def test_old_bridge_sends_table_gains_columns(tmp_path):
+    import sqlite3
+    path = tmp_path / "agentdesk.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE bridge_sends (id INTEGER PRIMARY KEY, bot TEXT NOT NULL, ts TEXT NOT NULL, "
+               "state TEXT NOT NULL DEFAULT 'reserved')")
+    db.execute("INSERT INTO bridge_sends (bot, ts, state) VALUES ('A', '2026-11-13T12:00:00+00:00', 'sent')")
+    db.commit()
+    db.close()
+    JobStore(path)
+    cols = {r[1] for r in sqlite3.connect(path).execute("PRAGMA table_info(bridge_sends)")}
+    assert {"target", "error"} <= cols
+    assert sqlite3.connect(path).execute("SELECT state, error FROM bridge_sends").fetchall() == [("sent", None)]
+
+
+def test_desk_grok_logs_a_send_that_could_not_reach_the_controller(tmp_path):
+    JobStore(tmp_path / "agentdesk.sqlite3")  # an existing database (a missing one is never created)
+    env = {"BOT_OFFICE_API_URL": "http://127.0.0.1:9", "BOT_OFFICE_TOKEN_FILE": str(tmp_path / "token"),
+           "BOT_OFFICE_BOT_ID": ""}
+    (tmp_path / "token").write_text("t")
+    with pytest.raises(DeskError, match="unreachable"):
+        desk_grok(["send", "--to", "CoS", "--kind", "fyi", "--text", "hi", "--from", "Sec"],
+                  data_dir=tmp_path, environ=env)
+    rows = _rows(tmp_path)
+    assert len(rows) == 1 and rows[0][:3] == ("Sec", "failed", "CoS") and "unreachable" in rows[0][3]
+    empty = tmp_path / "other"
+    empty.mkdir()
+    (empty / "token").write_text("t")
+    with pytest.raises(DeskError):
+        desk_grok(["send", "--to", "CoS", "--kind", "fyi", "--text", "hi", "--from", "Sec"], data_dir=empty,
+                  environ={**env, "BOT_OFFICE_TOKEN_FILE": str(empty / "token")})
+    assert not (empty / "agentdesk.sqlite3").exists()

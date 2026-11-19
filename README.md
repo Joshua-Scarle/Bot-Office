@@ -114,6 +114,25 @@ curl -X POST http://127.0.0.1:8787/v1/jobs \
 
 Other routes include `POST/GET /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/{id}/cancel`, `GET /v1/slots`, `GET /v1/providers`, and `POST /v1/slots/{slot}/exec`.
 
+## Service status and restart over SSH
+
+`systemctl --user status bot-office` over a non-login `ssh host 'cmd'` can say `Failed to connect to bus: No medium found` (no `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` in that shell), and `systemctl status bot-office` without `--user` says `Unit bot-office.service could not be found` because it asks the system manager; the service is a *user* unit (`~/.config/systemd/user/bot-office.service`, lingering enabled so it outlives logins). Use the wrapper, which sets `XDG_RUNTIME_DIR=/run/user/$(id -u)` itself and checks that the process listening on the API port is the unit's MainPID (or inside its cgroup), so a process started by hand outside systemd shows up as `MISMATCH`:
+
+```sh
+ssh host 'cd ~/printpilot-agentdesk && scripts/svc.sh status'   # exit 0 OK, 2 mismatch / nothing listening, 3 unit or user manager missing
+scripts/svc.sh logs 100
+scripts/svc.sh restart            # refuses (exit 4) while a job is running; --force overrides
+```
+
+Do not restart while a job is `running` unless you accept that it is interrupted and re-queued once. The legacy `agentdesk.service` unit is disabled; ignore it.
+
+## What changed after 0.11.9 (branch fix/desk-catchup, not yet deployed)
+
+- *Usage-limit reset times are read in the host's zone.* A provider message with a clock time and no zone (Codex: `try again at Nov 21st, 2026 1:15 AM`) is now parsed in the zone of the machine the CLI runs on, not America/New_York. On the VPS (Europe/Berlin) that message means 7:15 PM ET, six hours earlier than the old reading; the Codex `resets_at` epochs in its session logs confirm it. A zone the message names still wins. Retry times in the Needs-you text now carry the zone (`back about 19:17 EST`, with the date when it is not today) and the page shows the retry time with its zone abbreviation.
+- *Failed `desk grok send` calls are recorded.* `bridge_sends` gains `target` and `error` columns (added in place on start-up; old rows and an older controller keep working). Refused sends (no webhook config, bad kind or URL, limit or hop drops) and sends that certainly did not leave (state `failed`) are rows with the reason; a send whose delivery is unsure (timeout after sending) stays `sent` with an `unsure:` note; a send that could not reach the controller at all is logged by `desk` itself when it can open the existing database. The bridge limits count only `sent` and still-`reserved` rows, never failed ones. A process that dies before any Python runs (the pre-launcher `ModuleNotFoundError`) cannot be recorded by anything.
+- *Needs-you counts an assignment once.* Items gain `group` (one per assignment, else per item) and `category` (`materials` for an assignment waiting on photos or files from you, else `action`). The badge counts groups and shows `· N waiting on photos/files`. Incomplete turns were never Needs-you items and still are not.
+- `scripts/svc.sh` (above).
+
 ## Providers
 
 OpenCode uses the official `opencode` executable on the service PATH. On the server, run `opencode auth login` or configure a provider API key in the service environment. Choose a `provider/model` ID; effort is passed as an OpenCode variant and availability depends on the model. OpenCode 1.19.5 `run -s` resume hangs (and a session stays bound to its first directory), so Bot-Office starts every OpenCode turn fresh with the compact handoff context (WORKING.md and the last 12 messages); a message sent while an OpenCode turn runs steers that turn by a restart (0.11.7, see [Real-time steering](#real-time-steering-091)): the run is interrupted and started again as the same job with the same prompt, a note of the steps it had taken and your message. A run that prints nothing at all (stdout or stderr) in its first 60 s is killed and fails as a provider error (retried by the normal rules); after its first output the guard is off and only the turn timeout applies, so a long silent tool call is never killed; a job with an open `desk ask` question is not killed either. Provider credentials remain under the CLI’s control.
