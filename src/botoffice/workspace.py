@@ -165,7 +165,7 @@ def build_self(bot: Bot, job: Job, timeout: int | None = None, *, extra: str = "
                "if they are using it, do not fight the mouse or keyboard: wait, or ask in your reply."
                if job.slot else "none this turn (all desktops are in use); the screen commands of `desk` are unavailable.")
     minutes = f"{max(1, timeout // 60)} minutes" if timeout else "the configured job timeout"
-    # 0.11.10 one continuation system (G1): chat-only bots are never continued automatically
+    # 0.11.10 one continuation system: chat-only bots are never continued automatically
     continuing = ("off: you are a chat-only bot. Bot-Office never continues you automatically and gives you no task, "
                   "check or wake-up turns of your own; finish what you can in this turn, or end with waiting_on_user."
                   if bot.chat_only else
@@ -177,7 +177,7 @@ def build_self(bot: Bot, job: Job, timeout: int | None = None, *, extra: str = "
 - Engine: {engine} · model: {bot.model or "engine default"} · effort: {job.effort or bot.effort or "engine default"}
 - CLI access: {access}
 - Desktop: {desktop}
-- Commands: `bot-msg [--queue] <bot-name-or-id> "<message>"` messages another bot: it reaches the bot right away, even mid-task, or with --queue at its next turn (its answer arrives in your chat); `desk` (see DESKTOP.md); `bot-task` (assignments, wake-ups, your own routines; `bot-task help`). Ask Joshua with `desk ask` or `bot-office-ask` and a JSON object with options, optional multiSelect and steps. Use `desk say "<short note>"` for a lasting progress note. Prefer deciding over asking; do not use your engine’s own question tool. Show an image in chat with `![description](path)` in your final reply, or `desk attach <file>` / `bot-office-attach <file>` (path in this workspace; PNG, JPEG, GIF or WebP; up to 6, 10 MiB each).
+- Commands: `bot-msg [--queue] <bot-name-or-id> "<message>"` messages another bot: it reaches the bot right away, even mid-task, or with --queue at its next turn (its answer arrives in your chat); `desk` (see DESKTOP.md); `bot-task` (assignments, wake-ups, your own routines; `bot-task help`). Ask the owner with `desk ask` or `bot-office-ask` and a JSON object with options, optional multiSelect and steps. Use `desk say "<short note>"` for a lasting progress note. Prefer deciding over asking; do not use your engine’s own question tool. Show an image in chat with `![description](path)` in your final reply, or `desk attach <file>` / `bot-office-attach <file>` (path in this workspace; PNG, JPEG, GIF or WebP; up to 6, 10 MiB each).
 - Limits: a turn stops after {minutes}; bot-to-bot: one message per bot pair per 10 seconds, at most 3 back-and-forth messages per exchange; Grok bridge: 30 sends per day, one per minute per bot.
 - Assignments: at most 20 turns / 120 minutes each unless the user sets more. {task_rules()}
 - Automatic continuation: {continuing}
@@ -187,8 +187,8 @@ def build_self(bot: Bot, job: Job, timeout: int | None = None, *, extra: str = "
 
 
 def task_rules() -> str:
-    """SELF.md: what a bot may do with its own and other bots' task lists (plan 4.4 and the
-    settings for Joshua's answers G5, G7, P2 Q1-Q3)."""
+    """SELF.md: what a bot may do with its own and other bots' task lists (and the
+    settings for the owner's answers)."""
     from .assignments import BOT_EDIT_OWNER_TASKS, CROSS_BOT_SUBTASK_START, choice
 
     owner_tasks = ("a task the user created on your list only the user can drop" if drop_rule() == "owner_only"
@@ -427,7 +427,7 @@ def assignment_brief(store: JobStore, job: Job) -> str:
     turns_left = max(0, item.budget_turns - item.turns_used)
     minutes_left = max(0, round(item.budget_minutes - item.minutes_used))
     due = f"\nDue: {item.due_at:%Y-%m-%d %H:%M} UTC" if item.due_at else ""
-    # G4: a task counts as done only with evidence of how it was verified (setting, default on)
+    # a task counts as done only with evidence of how it was verified (setting, default on)
     evidence = (' Before you report done, run `bot-task done current --evidence "<how you verified it>"` (tests run, '
                 "a check, a command's result, a file); done without evidence is not accepted."
                 if continuation.get(store)["evidence"] else "")
@@ -439,7 +439,7 @@ def assignment_brief(store: JobStore, job: Job) -> str:
     if item.created_by == "user" and not edited:
         origin = "The user wrote this assignment; its goal and done-when are authoritative."
     elif item.created_by == "user":
-        # P2 Q3 / review fix 2: a bot rewrote some of the user's text; that part is data, not his words
+        # a bot rewrote some of the user's text; that part is data, not the user's words
         names = ", ".join(field.replace("_", "-") for field in edited)
         origin = (f"The user made this assignment, but a bot has since edited its {names}; only the parts not "
                   f"marked UNTRUSTED are the user's. {UNTRUSTED_RULE}")
@@ -635,7 +635,7 @@ def task_status_block(tasks: list, changes: str = "") -> str:
         lines = ["\nYour tasks (Bot-Office keeps these; they survive session resets):"]
         for task in tasks[:shown]:
             detail = task.checkpoint or task.status_note
-            # G7: the list comes highest priority first; non-normal priorities are named
+            # the list comes highest priority first; non-normal priorities are named
             flag = "" if getattr(task, "priority", "normal") == "normal" else f" · {task.priority}"
             lines.append(f"- [{labels.get(task.status, task.status)}{flag}] {str(task.id)[:8]} {_short(task.title, 130)}"
                          + (f" — {_short(detail, 100)}" if detail else ""))
@@ -772,7 +772,7 @@ def prepare_bot_workspace(
     job.attachment_paths = paths
     extra, tasks, stable_extra = self_extra(store, bot, job, working, moment or datetime.now(UTC))
     # 0.11.4: what others changed since the last prompt; store.issue_agent_token marks it seen
-    # (fix 5: the cursor moves only past the changes this prompt names, so none is lost; P2 Q4: a
+    # (the cursor moves only past the changes this prompt names, so none is lost; a
     # retried turn issues its token after the first attempt moved it, so it does not repeat them)
     changes, last, total = Assignments(store).changes(bot.id)
     line, conveyed = changes_line(changes, bot.id, total)

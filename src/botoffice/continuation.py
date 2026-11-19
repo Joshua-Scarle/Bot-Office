@@ -33,9 +33,9 @@ DEFAULTS: dict[str, object] = {
     "max": 10,  # chat: continuations in a row (the 0.11.10 setting)
     "no_progress": autocontinue.NO_PROGRESS_LIMIT,
     "consecutive": autocontinue.MAX_CONSECUTIVE_CONTINUES,
-    "per_bot_day": 20,  # G3 probation; to be raised to 40. None = unlimited
+    "per_bot_day": 20,  # probation; to be raised to 40. None = unlimited
     "per_hour": 20,  # all bots together. None = unlimited
-    "evidence": True,  # G4: a task counts as done only with evidence of how it was verified
+    "evidence": True,  # a task counts as done only with evidence of how it was verified
     "evidence_min": 12,  # the shortest evidence text (characters) that counts
     "hold_hours": 12,  # an automatic turn a cap held longer than this is dropped with a line, not run late
 }
@@ -185,7 +185,7 @@ def decide(settings: dict[str, object], turn: Turn) -> Decision:
         return stop("question", "a question to you is still open")
     if turn.approval_pending:
         return stop("approval", "an approval is waiting for you")
-    # the task loop yields instead: its next turn queues behind the owner's (claim order, G2)
+    # the task loop yields instead: its next turn queues behind the owner's (claim order)
     if turn.owner_waiting and turn.path == "chat":
         return stop("owner", "your new message comes first")
     if turn.kind == "continue" and turn.run:
@@ -213,7 +213,7 @@ def task_pause_note(decision: Decision) -> str:
     return f"paused, not blocked: {decision.why}. Reply to resume."
 
 
-# --- caps on automatic turns (G3), checked at claim ---
+# --- caps on automatic turns, checked at claim ---
 
 def cap_gate(db: sqlite3.Connection, job_id: str, stamp: datetime) -> tuple[str, datetime] | None:
     """(why, until) when the automatic job *job_id* is over a cap, else None. Counts the automatic

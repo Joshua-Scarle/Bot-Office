@@ -75,7 +75,7 @@ def needs_you(store: JobStore) -> list[dict]:
             state = _assignment_state(row, stamp)
             if bot is None or state is None:
                 continue
-            # G4: the newest evidence the bot gave (stale or too short ones too), so the owner can judge it
+            # the newest evidence the bot gave (stale or too short ones too), so the owner can judge it
             given = db.execute("SELECT note FROM assignment_events WHERE assignment_id=? AND kind='evidence' "
                                "ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
             ask = _assignment_ask(row, state, bot["name"])
@@ -88,7 +88,7 @@ def needs_you(store: JobStore) -> list[dict]:
                 "ask": ask, "at": row["stalled_at"] or row["updated_at"],
                 "evidence": given["note"] if given else None, "actions": ASSIGNMENT_ACTIONS,
             })
-        # 0.11.4 (G5 with_note): a task Joshua created that its bot dropped, until he dismisses it
+        # 0.11.4: a task the owner created that its bot dropped, until the owner dismisses it
         for row in db.execute("SELECT * FROM assignments WHERE status='dropped' AND created_by='user' "
                               "AND updated_by LIKE 'bot:%' AND dismissed_at IS NULL AND closed_at>=? "
                               "ORDER BY closed_at DESC LIMIT 50", ((stamp - FAILED_WINDOW).isoformat(),)):
@@ -172,7 +172,7 @@ def needs_you(store: JobStore) -> list[dict]:
                        f"({(row['why'] or '').removeprefix('held: ')})",
                 "at": row["at"], "actions": ["allow"],
             })
-        # 0.11.10 (G3): automatic turns a cap holds until its window slides; gone once they run or are cancelled
+        # 0.11.10: automatic turns a cap holds until its window slides; gone once they run or are cancelled
         for row in db.execute("SELECT bot_id, COUNT(*) AS held, MIN(error) AS why, MIN(not_before) AS until, "
                               "MIN(created_at) AS at FROM jobs WHERE status='queued' AND failure_kind=? GROUP BY bot_id",
                               (continuation.HELD,)):

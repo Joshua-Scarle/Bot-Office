@@ -50,12 +50,12 @@ MAX_WAKEUPS_PER_DAY = 24
 MAX_BOT_ROUTINES = 10
 BOT_ROUTINE_MIN_GAP = timedelta(minutes=15)
 # what a turn (BOT-OFFICE-STATUS line) or ``bot-task status`` may report
-# G4: what a done without evidence is told, and the note when it says done again without any
+# what a done without evidence is told, and the note when it says done again without any
 EVIDENCE_ASK = 'say how you verified it (bot-task done --evidence "...")'
 NO_EVIDENCE_NOTE = "says it is done; no evidence of how it was verified. Check it and mark it done, or reply"
 REPORT_STATES = ("done", "continue", "not_done", "blocked", "waiting_on_user", "waiting_on_bot")
 EDITABLE = ("title", "goal", "done_when", "due_at", "budget_turns", "budget_minutes", "verify", "escalate")
-# 0.11.4 task lists (plan 4.4): what the owner may also set, and what a bot may edit (the assignee on
+# 0.11.4 task lists: what the owner may also set, and what a bot may edit (the assignee on
 # its own list, another bot only on tasks it created; never budgets, so a bot cannot widen its gate)
 OWNER_TASK_FIELDS = (*EDITABLE, "position", "reviewer", "priority")
 BOT_TASK_FIELDS = ("title", "goal", "done_when", "due_at", "priority")
@@ -65,30 +65,30 @@ KNOWN_TASK_FIELDS = (*OWNER_TASK_FIELDS, "priority", "status", "note")
 # text a bot may write: once a bot edits one of these on a task the user created, prompts show it
 # delimited as untrusted (assignments.bot_edited)
 TEXT_FIELDS = ("title", "goal", "done_when")
-# G7: task priority, higher first wherever tasks are listed or picked
+# task priority, higher first wherever tasks are listed or picked
 PRIORITIES = ("urgent", "high", "normal", "low")
-# Joshua's answers (Nov 15 2026) as settings, read on every call; an unknown value means the default.
-# G5: may the assignee drop a task the owner created? with_note (default: yes, with a note; shown in
+# The owner's answers as settings, read on every call; an unknown value means the default.
+# may the assignee drop a task the owner created? with_note (default: yes, with a note; shown in
 # Needs-you as "dropped by bot") | owner_only (only the owner, as before 0.11.4)
 BOT_DROP_OWNER_TASKS = ("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "with_note", ("with_note", "owner_only"))
-# G7 / P2 Q2: a subtask one bot adds to another bot's list waits for that bot (wait, default) or may
+# a subtask one bot adds to another bot's list waits for that bot (wait, default) or may
 # start right away as in 0.10.0-0.11.9 (allow). Tasks without a parent always wait.
 CROSS_BOT_SUBTASK_START = ("BOT_OFFICE_CROSS_BOT_SUBTASK_START", "wait", ("wait", "allow"))
-# P2 Q1: dropping a task (by anyone) cancels the turns queued or running on it (on) | queued only (off)
+# dropping a task (by anyone) cancels the turns queued or running on it (on) | queued only (off)
 DROP_CANCELS_TURNS = ("BOT_OFFICE_DROP_CANCELS_TURNS", "on", ("on", "off"))
-# P2 Q3: on its own list a bot may edit title and goal of a task the user created (title_goal) | not (off)
+# on its own list a bot may edit title and goal of a task the user created (title_goal) | not (off)
 BOT_EDIT_OWNER_TASKS = ("BOT_OFFICE_BOT_EDIT_OWNER_TASKS", "title_goal", ("title_goal", "off"))
-# G10: a task the owner adds with the form starts on its own (auto) | waits for Start (manual)
+# a task the owner adds with the form starts on its own (auto) | waits for Start (manual)
 FORM_TASKS_START = ("BOT_OFFICE_FORM_TASKS_START", "auto", ("auto", "manual"))
-# G7: the priority of a new task that names none
+# the priority of a new task that names none
 TASK_DEFAULT_PRIORITY = ("BOT_OFFICE_TASK_DEFAULT_PRIORITY", "normal", PRIORITIES)
 # a bot's task on another bot's list gets at most this priority (and no list position): the list's
 # own bot and the owner order that list
 CROSS_BOT_MAX_PRIORITY = ("BOT_OFFICE_CROSS_BOT_MAX_PRIORITY", "normal", PRIORITIES)
-# review fix 6 (plan 4.7): task writes (adds, edits, notes, drops, moves, reports, checkpoints) one
+# task writes (adds, edits, notes, drops, moves, reports, checkpoints) one
 # bot may make per rolling hour; the owner is exempt
 TASK_WRITES_PER_HOUR = ("BOT_OFFICE_TASK_WRITES_PER_HOUR", 200)
-# G8: what the GUI calls the task lists (no rename by default)
+# what the GUI calls the task lists (no rename by default)
 TASKS_LABEL = ("BOT_OFFICE_TASKS_LABEL", "Assignments")
 CHANGES_LIMIT = 50
 
@@ -147,17 +147,17 @@ def choice(setting: tuple[str, str, tuple[str, ...]]) -> str:
 
 
 def drop_rule() -> str:
-    """The G5 setting: with_note (default) or owner_only."""
+    """Whether the assignee may drop a task the owner created: with_note (default) or owner_only."""
     return choice(BOT_DROP_OWNER_TASKS)
 
 
 def tasks_label() -> str:
-    """The G8 setting: the name the GUI shows for task lists."""
+    """The name the GUI shows for task lists."""
     return " ".join(os.environ.get(TASKS_LABEL[0], "").split())[:40] or TASKS_LABEL[1]
 
 
 def stage(status: str, stalled_at: str | datetime | None = None) -> dict:
-    """The three-state view (plan 4.2) of an assignment status, with its flags. Computed, never stored."""
+    """The three-state view of an assignment status, with its flags. Computed, never stored."""
     if status == "open":
         shown = "not_started"
     elif status == "done":
@@ -253,7 +253,7 @@ def actor_of(bot_id: UUID | str | None) -> str:
 class Assignments:
     def __init__(self, store: JobStore):
         self.store = store
-        # P2 Q1: cancels running jobs by id once a drop is committed (the scheduler sets it)
+        # cancels running jobs by id once a drop is committed (the scheduler sets it)
         self.cancel_running: Callable[[list[str]], None] | None = None
 
     # --- reading ---
@@ -345,7 +345,7 @@ class Assignments:
             "changes": [dict(event) for event in reversed(changes)]})
 
     def review_hook(self, db: sqlite3.Connection, row: sqlite3.Row, actor: str) -> None:
-        """Reserved for peer review of "done" (plan G4, not decided): called in the transaction in
+        """Reserved for peer review of "done" (not decided): called in the transaction in
         which a task becomes done, with the task and who closed it. Does nothing and returns None;
         ``assignments.reviewer`` stays unused until review is built."""
 
@@ -501,7 +501,7 @@ class Assignments:
     @staticmethod
     def _check_parent(db: sqlite3.Connection, parent_id: UUID | str, owner: UUID | str) -> None:
         """A bot's subtask: its parent exists, is one of the bot's own open tasks, and the child
-        stays within MAX_DEPTH levels below the root. Runs in the insert's transaction (fix 8)."""
+        stays within MAX_DEPTH levels below the root. Runs in the insert's transaction."""
         parent = db.execute("SELECT * FROM assignments WHERE id=?", (str(parent_id),)).fetchone()
         if parent is None:
             raise AssignmentError(404, "parent assignment not found")
@@ -547,7 +547,7 @@ class Assignments:
                 running: list[str] = []
                 if values:
                     edited = ", ".join(sorted(values))
-                    # a field the owner rewrites is his text again; one he sends back unchanged keeps
+                    # a field the owner rewrites is the owner's text again; one sent back unchanged keeps
                     # its bot-edited mark (a form that resends every field clears nothing)
                     marks = bot_edited(row)
                     rewritten = {key for key in marks if key in values and values[key] != row[key]}
@@ -572,7 +572,7 @@ class Assignments:
 
     @staticmethod
     def _running_turns(db: sqlite3.Connection, row: sqlite3.Row, keep: UUID | str | None = None) -> list[str]:
-        """P2 Q1: the running turns of a task being dropped (its queued ones are cancelled with the
+        """The running turns of a task being dropped (its queued ones are cancelled with the
         status change), except *keep* (the turn that drops it); none under DROP_CANCELS_TURNS=off."""
         if choice(DROP_CANCELS_TURNS) != "on":
             return []
@@ -725,7 +725,7 @@ class Assignments:
     # --- a bot's own actions (job-scoped agent token; see api agent_scope) ---
 
     def readable_by(self, assignment_id: UUID | str, bot_id: UUID | str) -> Assignment:
-        """0.11.4: every bot may read every bot's assignments (plan 4.4). Text a bot wrote stays
+        """0.11.4: every bot may read every bot's assignments. Text a bot wrote stays
         delimited (``untrusted``) wherever it reaches another bot's prompt."""
         item = self.get(assignment_id)
         if item is None:
@@ -734,7 +734,7 @@ class Assignments:
 
     def _related(self, assignment_id: UUID | str, bot_id: UUID | str) -> Assignment:
         """The assignee, the bot that owns its parent, or the bot of one of its children: the bots
-        that may wait on it with an on-change wake-up (waking on any bot's task is plan P6)."""
+        that may wait on it with an on-change wake-up (waking on any bot's task is not built yet)."""
         item = self.readable_by(assignment_id, bot_id)
         if str(item.bot_id) == str(bot_id):
             return item
@@ -773,7 +773,7 @@ class Assignments:
             fields["start"] = False
         with closing(self.store._connect()) as db:
             if self._chat_only(db, target):
-                fields["start"] = False  # G1: a chat-only bot gets no loop turns; the owner starts it
+                fields["start"] = False  # a chat-only bot gets no loop turns; the owner starts it
         # the parent and the open-children cap are checked inside the insert's transaction
         return self.create(target, fields, created_by=actor_of(bot_id), parent_id=parent_id,
                            max_children=MAX_CHILDREN if parent_id else None, origin="bot", source_job_id=job_id,
@@ -788,11 +788,11 @@ class Assignments:
 
     def agent_edit(self, assignment_id: UUID | str, bot_id: UUID | str, fields: dict,
                    expected_version: int) -> Task:
-        """A bot edits a task (plan 4.4): on its own list title, goal, done-when (not of a task the
+        """A bot edits a task: on its own list title, goal, done-when (not of a task the
         user created), due time, priority and position; on another bot's list only the tasks it
         created (not their position). Never budgets, never a closed task. A stale version is a 409.
         An unknown field is a 400 and a field the matrix refuses a 403, before anything changes.
-        P2 Q3: title and goal of a task the user created are editable on its own list (setting
+        title and goal of a task the user created are editable on its own list (setting
         BOT_OFFICE_BOT_EDIT_OWNER_TASKS); each edited text field is marked bot-edited."""
         actor = actor_of(bot_id)
         unknown = sorted(set(fields) - set(KNOWN_TASK_FIELDS))
@@ -837,9 +837,9 @@ class Assignments:
 
     def agent_drop(self, assignment_id: UUID | str, bot_id: UUID | str, job_id: UUID | str, note: str = "") -> Task:
         """A bot drops a task it created (on any list), or a bot-made task on its own list. A task
-        the user created on its list under the G5 setting ``with_note`` (default), with a note (shown
+        the user created on its list under the drop setting ``with_note`` (default), with a note (shown
         in Needs-you as dropped by the bot); under ``owner_only`` only the user drops those. The
-        task's running turns are cancelled (P2 Q1), except the turn that drops it."""
+        task's running turns are cancelled, except the turn that drops it."""
         actor, note = actor_of(bot_id), note.strip()
         with closing(self._tx()) as db:
             try:
@@ -915,7 +915,7 @@ class Assignments:
                note: str = "", evidence: str = "") -> Assignment:
         """``bot-task status`` / ``bot-task done --evidence``. During a turn of this assignment the report
         is kept for the loop (the turn's own status line, if any, comes later and wins); otherwise it
-        applies now. *evidence* (how the work was verified, G4) is kept as an ``evidence`` event. Out of
+        applies now. *evidence* (how the work was verified) is kept as an ``evidence`` event. Out of
         its turn, a done without evidence (setting on) is refused (409), and a continue goes through
         ``continuation.decide`` like the loop's own next step (refused with 409 on a stop)."""
         if state not in REPORT_STATES:
@@ -928,7 +928,7 @@ class Assignments:
                     raise AssignmentError(409, f"assignment is {row['status']}")
                 self._check_writes(db, actor)
                 job = db.execute("SELECT assignment_id FROM jobs WHERE id=?", (str(job_id),)).fetchone()
-                # fix 7: the report goes through the versioned writer (no version precondition)
+                # the report goes through the versioned writer (no version precondition)
                 # (during a turn of this task the report is kept for the loop; otherwise it applies now)
                 own_turn = bool(job and job["assignment_id"] == row["id"])
                 settings = continuation.read(db)
@@ -992,7 +992,7 @@ class Assignments:
                  text: str) -> None:
         """A note on the assignment's trail (shown, delimited, in its next turns): since 0.11.4 any
         bot may add one to any assignment, and the user (*bot_id* None). A note never conflicts
-        (no version precondition) but bumps the version (fix 7), so a 409 lists it among the changes."""
+        (no version precondition) but bumps the version, so a 409 lists it among the changes."""
         with closing(self._tx()) as db:
             try:
                 row = self._row(db, assignment_id)
@@ -1031,7 +1031,7 @@ class Assignments:
 
     def tasks(self, bot_id: UUID | str | None = None, *, stages: list[str] | None = None,
               include_closed: bool = True, include_dropped: bool = True, limit: int = 200) -> list[Task]:
-        """One bot's list (or every bot's: the board) in list order: by priority (G7), then the
+        """One bot's list (or every bot's: the board) in list order: by priority, then the
         tasks without a position (made before 0.11.4) by age, then by position."""
         query, params = "SELECT * FROM assignments WHERE 1=1", []
         if bot_id is not None:
@@ -1093,7 +1093,7 @@ class Assignments:
         return rows[0]["id"]
 
     def events_since(self, event_id: int = 0, limit: int = 200) -> list[dict]:
-        """Read helper (Stage C seam, plan 9): every task event after *event_id*, oldest first."""
+        """Read helper : every task event after *event_id*, oldest first."""
         with closing(self.store._connect()) as db:
             rows = db.execute("SELECT * FROM assignment_events WHERE id>? ORDER BY id LIMIT ?",
                               (event_id, max(1, min(limit, 1000)))).fetchall()
@@ -1105,7 +1105,7 @@ class Assignments:
         tasks and on the tasks it created on other lists, after event *since* (default: the last one
         its prompt showed). Returns the oldest *limit* events (with ``title``, ``task_bot`` and
         ``actor_name``), the last event id looked at (the cursor once all of them are conveyed) and
-        how many relevant events there are in all (fix 5: the caller advances the cursor only
+        how many relevant events there are in all (the caller advances the cursor only
         through what it conveyed)."""
         key, actor = str(bot_id), actor_of(bot_id)
         where = ("FROM assignment_events e JOIN assignments a ON a.id=e.assignment_id "
@@ -1243,7 +1243,7 @@ class Assignments:
         return state
 
     def _settle_done(self, db: sqlite3.Connection, row: sqlite3.Row, job: sqlite3.Row, reason: str, actor: str) -> str:
-        """A turn said done. G4: without evidence of how it was verified it continues once to say so,
+        """A turn said done. Without evidence of how it was verified it continues once to say so,
         then waits for the owner; with ``verify`` set a check turn runs first; then the task is done."""
         job_id = job["id"]
         evidence = self._evidence(db, row["id"])
@@ -1482,7 +1482,7 @@ class Assignments:
         prompt = f"You scheduled this wake-up at {made}: {wakeup['note'] or '(no note)'}"
         if change:
             watched = db.execute("SELECT * FROM assignments WHERE id=?", (wakeup["on_assignment"],)).fetchone()
-            # the user's title is quoted; a bot's (or one a bot edited, fix 2) is delimited
+            # the user's title is quoted; a bot's (or one a bot edited) is delimited
             title = _quoted(watched) if watched else untrusted(change[2], change[0])
             prompt += f'\nAssignment {title} is now {change[1].replace("_", " ")}.'
         text = "Wake-up" + (f": {wakeup['note']}" if wakeup["note"] else "")

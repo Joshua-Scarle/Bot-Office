@@ -13,8 +13,12 @@ Two modes:
   load). With --send-to it also sends one short message with the Enter key to that bot and waits for
   its reply. That is a real turn on its engine, so the bot's name must start with "E2E test":
 
-    .venv/bin/python scripts/e2e_gui.py --url http://127.0.0.1:8787 --token "$(cat ~/.config/bot-office/token)" \
+    .venv/bin/python scripts/e2e_gui.py --url http://127.0.0.1:8787 --token-file ~/.config/bot-office/token \
         [--send-to "E2E test bot"]
+
+  The token comes from --token-file, else BOT_OFFICE_TOKEN_FILE, else BOT_OFFICE_TOKEN (never the
+  command line, where other users can read it in the process list). --token still works but is
+  deprecated.
 
 Checked (local mode): Enter sends (bubble shows, box clears, Send comes back; Shift+Enter adds a
 line), the bot's reply arrives, continuation prompts never look like the owner's messages,
@@ -30,6 +34,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -283,10 +288,27 @@ def bot_to_bot(page, out: Path, base: str, token: str) -> None:
     shot(page, out, "08-received-row")
 
 
+def resolve_token(args, environ=None) -> str | None:
+    """The live-mode API token: --token-file, BOT_OFFICE_TOKEN_FILE, BOT_OFFICE_TOKEN, then the
+    deprecated --token (a warning on stderr; it shows in the process list)."""
+    environ = os.environ if environ is None else environ
+    path = args.token_file or environ.get("BOT_OFFICE_TOKEN_FILE")
+    if path:
+        return Path(path).expanduser().read_text(encoding="utf-8").strip() or None
+    if environ.get("BOT_OFFICE_TOKEN"):
+        return environ["BOT_OFFICE_TOKEN"].strip()
+    if args.token:
+        print("warning: --token is deprecated (it shows in the process list); use --token-file or "
+              "BOT_OFFICE_TOKEN_FILE / BOT_OFFICE_TOKEN", file=sys.stderr)
+        return args.token
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", help="a running Bot-Office (live mode, read-only unless --send-to)")
-    parser.add_argument("--token", help="its API token (live mode)")
+    parser.add_argument("--token-file", help="live mode: a file holding its API token (or set BOT_OFFICE_TOKEN_FILE)")
+    parser.add_argument("--token", help="deprecated: its API token on the command line (use --token-file or BOT_OFFICE_TOKEN)")
     parser.add_argument("--send-to", help="live mode: send one short message to this bot with Enter")
     parser.add_argument("--headed", action="store_true", help="show the browser window")
     parser.add_argument("--channel", choices=("chrome", "chromium", "msedge"),
@@ -302,12 +324,13 @@ def main() -> int:
         errors: list[str] = []
         page.on("pageerror", lambda exc: errors.append(str(exc)))
         if args.url:
-            if not args.token:
-                raise SystemExit("--token is required with --url")
+            token = resolve_token(args)
+            if not token:
+                raise SystemExit("live mode needs a token: --token-file, BOT_OFFICE_TOKEN_FILE or BOT_OFFICE_TOKEN")
             base = args.url.rstrip("/")
-            unlock(page, base, args.token)
+            unlock(page, base, token)
             check(True, "unlocked " + base)
-            settings_page(page, out, base, args.token, write=False)
+            settings_page(page, out, base, token, write=False)
             if args.send_to:
                 if not args.send_to.startswith(TEST_PREFIX):
                     raise SystemExit(f'--send-to only messages test bots: the name must start with "{TEST_PREFIX}"')
