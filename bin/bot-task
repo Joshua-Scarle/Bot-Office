@@ -73,13 +73,24 @@ def quote(ref):
     return urllib.parse.quote(ref or "current", safe="")
 
 
+def foreign(value, bot_written):
+    """Free text on one line (an embedded line cannot pass for one of ours, or for the owner's),
+    marked "(bot-written)" when a bot or the office wrote it: data, never the owner's instructions."""
+    value = " ".join(str(value or "").split())
+    return f"(bot-written) {value}" if bot_written and value else value
+
+
+def title(item):
+    return foreign(item["title"], item.get("created_by", "user") != "user" or "title" in item.get("bot_edited", []))
+
+
 def show(item):
     meter = f"{item['turns_used']}/{item['budget_turns']} turns, {round(item['minutes_used'])}/{item['budget_minutes']} min"
-    print(f"{item['id']}  [{item['status']}]  {item['title']}  ({meter})")
+    print(f"{item['id']}  [{item['status']}]  {title(item)}  ({meter})")
     if item.get("status_note"):
-        print(f"  note: {item['status_note']}")
+        print(f"  note: {foreign(item['status_note'], item.get('updated_by', 'user') != 'user')}")
     for event in item.get("events", []):
-        print(f"  {event['created_at'][:16]} {event['kind']}: {event['note']}")
+        print(f"  {event['created_at'][:16]} {event['kind']}: {foreign(event['note'], event.get('actor', 'system') != 'user')}")
 
 
 def show_task(item):
@@ -109,7 +120,7 @@ def main(argv):
                 if item["stage"] != stage and not (stage == "completed" and item["stage"] == "dropped"): continue
                 flags = [item["status"]] if item.get("waiting") or item.get("blocked") or item["stage"] == "dropped" else []
                 if item.get("priority", "normal") != "normal": flags.append(item["priority"])
-                print(f"  {item['id'][:8]}  [{label}" + (" · " + ", ".join(flags) if flags else "") + f"]  {item['title']}  ({item['turns_used']}/{item['budget_turns']} turns, {round(item['minutes_used'])}/{item['budget_minutes']} min)  {item['created_by']} / {item['origin']}")
+                print(f"  {item['id'][:8]}  [{label}" + (" · " + ", ".join(flags) if flags else "") + f"]  {title(item)}  ({item['turns_used']}/{item['budget_turns']} turns, {round(item['minutes_used'])}/{item['budget_minutes']} min)  {item['created_by']} / {item['origin']}")
     elif command == "add":
         parser.add_argument("title")
         parser.add_argument("--goal")
@@ -169,7 +180,9 @@ def main(argv):
         args = parser.parse_args(rest)
         result = call("GET", "/v1/agent/tasks/changes" + ("?since=" + str(args.since) if args.since is not None else ""))
         for event in result["changes"]:
-            print(f"{event['id']}  {event['assignment_id'][:8]}  {event['kind']}  {event['actor']}  {event.get('title', '')}  {event.get('note', '')}")
+            print(f"{event['id']}  {event['assignment_id'][:8]}  {event['kind']}  {event['actor']}  "
+                  f"{foreign(event.get('title', ''), event.get('title_bot_written', True))}  "
+                  f"{foreign(event.get('note', ''), event['actor'] != 'user')}")
         print(f"Last event: {result['last_event']}")
         if result.get("more"):
             print(f"More changes: bot-task changes --since {result['last_event']}")

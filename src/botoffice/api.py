@@ -1299,6 +1299,10 @@ def create_app(
                     store.enqueue_message(bot, text, text, bot.reason, "chat", None, None, None)
         return item
 
+    def _marked(events: list[dict]) -> list[dict]:
+        # whose text an event note is: anything not the owner's is data, never the owner's instructions
+        return [{**event, "bot_written": event.get("actor") != "user"} for event in events]
+
     def _agent_assignment_id(job: Job, ref: str) -> str:
         if ref in ("current", "-"):
             if not job.assignment_id:
@@ -1328,7 +1332,7 @@ def create_app(
     @app.get("/v1/agent/assignments/{ref}")
     async def agent_get_assignment(ref: str, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
         item = _assignment_call(assignments.readable_by, _agent_assignment_id(job, ref), job.bot_id)
-        return {**item.model_dump(mode="json"), "events": assignments.events(item.id, 10)}
+        return {**item.model_dump(mode="json"), "events": _marked(assignments.events(item.id, 10))}
 
     @app.post("/v1/agent/assignments/{ref}/status", response_model=Assignment)
     async def agent_assignment_status(ref: str, body: AgentStatus, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
@@ -1382,7 +1386,7 @@ def create_app(
     @app.get("/v1/agent/tasks/{ref}")
     async def agent_get_task(ref: str, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
         item = assignments.task(_agent_task_id(job, ref))
-        return {**item.model_dump(mode="json"), "events": assignments.events(item.id, 20),
+        return {**item.model_dump(mode="json"), "events": _marked(assignments.events(item.id, 20)),
                 "children": [child.model_dump(mode="json") for child in assignments.children(item.id)]}
 
     @app.post("/v1/agent/tasks", response_model=Task, status_code=201)
