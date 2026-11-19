@@ -873,7 +873,8 @@ class Assignments:
         """``bot-task status`` / ``bot-task done --evidence``. During a turn of this assignment the report
         is kept for the loop (the turn's own status line, if any, comes later and wins); otherwise it
         applies now. *evidence* (how the work was verified, G4) is kept as an ``evidence`` event. Out of
-        its turn, a done without evidence (setting on) and a chat-only bot's continue are refused (409)."""
+        its turn, a done without evidence (setting on) is refused (409), and a continue goes through
+        ``continuation.decide`` like the loop's own next step (refused with 409 on a stop)."""
         if state not in REPORT_STATES:
             raise AssignmentError(400, f"state must be one of {', '.join(REPORT_STATES)}")
         actor = actor_of(bot_id)
@@ -895,6 +896,14 @@ class Assignments:
                 if not own_turn and state in ("continue", "not_done") and self._chat_only(db, row["bot_id"]):
                     raise AssignmentError(409, "this bot is chat-only: it does not start or continue tasks by itself; "
                                                "the owner starts them")
+                if not own_turn and state in ("continue", "not_done"):
+                    # a start or continue from outside the task's own turn queues an automatic loop
+                    # turn: it asks the one decision like the loop does (not stamped on the asking job,
+                    # which may be a chat turn with a decision of its own)
+                    asking = db.execute("SELECT * FROM jobs WHERE id=?", (str(job_id),)).fetchone() or {"id": str(job_id)}
+                    decision = continuation.decide(continuation.read(db), self._turn(db, row, asking, "continue"))
+                    if not decision.go:
+                        raise AssignmentError(409, f"not started: {decision.why}. The owner can start it.")
                 kept = {"last_progress_at": now().isoformat(), "stalled_at": None}
                 if own_turn:
                     kept.update(reported_status=state, reported_note=note[:1000], reported_job=str(job_id))
@@ -1059,10 +1068,18 @@ class Assignments:
                 since = seen[0] if seen else 0
             last = db.execute("SELECT COALESCE(MAX(id), 0) FROM assignment_events").fetchone()[0]
             params = (since, last, actor, key, actor)
-            rows = db.execute("SELECT e.*, a.title, a.bot_id AS task_bot, COALESCE(b.name, '') AS actor_name "
+            rows = db.execute("SELECT e.*, a.title, a.bot_id AS task_bot, COALESCE(b.name, '') AS actor_name, "
+                              "a.created_by AS task_created_by, a.bot_edited AS task_bot_edited "
                               + where + " ORDER BY e.id LIMIT ?", (*params, max(1, limit))).fetchall()
             total = db.execute("SELECT COUNT(*) " + where, params).fetchone()[0]
-        return [dict(row) for row in rows], max(last, since), total
+        items = []
+        for row in rows:
+            item = dict(row)
+            # whether a bot wrote the title (bot-task prints such text marked, never as the owner's)
+            item["title_bot_written"] = not user_wrote({"created_by": item.pop("task_created_by"),
+                                                        "bot_edited": item.pop("task_bot_edited")})
+            items.append(item)
+        return items, max(last, since), total
 
     def delete(self, assignment_id: UUID | str) -> None:
         """The owner's hard delete of a closed task with no subtasks. Its events are kept (with a

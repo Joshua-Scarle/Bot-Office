@@ -277,6 +277,36 @@ def test_chat_only_on_the_bot_api(settings):
 
 # --- evidence before done (G4) ---
 
+def test_out_of_turn_start_asks_the_one_decide_function(settings, monkeypatch):
+    """bot-task start / status continue from another turn (chat, routine, wake-up) is a continuation
+    too: it goes through continuation.decide and a stop refuses it (409), the task as it was."""
+    store, scheduler, _, bot, item = task_setup(settings, *fresh(20))
+    save(store, consecutive=2)
+    run_all(store, scheduler)
+    paused = scheduler.assignments.get(item.id)
+    assert paused.status == "waiting_on_user" and "paused" in paused.status_note
+    chat = store.create("routine: check in", "codex", bot_id=bot.id, source="routine")  # not the owner speaking
+    seen = []
+    real = continuation.decide
+    monkeypatch.setattr(continuation, "decide", lambda s, turn: seen.append(turn) or real(s, turn))
+    with pytest.raises(AssignmentError) as refused:
+        scheduler.assignments.report(item.id, bot.id, chat.id, "continue")
+    assert refused.value.status == 409 and "automatic turns in a row" in refused.value.detail
+    assert seen and seen[-1].path == "task" and seen[-1].kind == "continue"
+    assert scheduler.assignments.get(item.id).status == "waiting_on_user" and not task_queued(store, item)
+    # the decision is not stamped on the asking job (a chat turn's own continuation is decided separately)
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT auto_decision FROM jobs WHERE id=?", (str(chat.id),)).fetchone()[0] is None
+    # auto-continue off: an open task is not started by the bot out of its turn either
+    other = scheduler.assignments.create(bot.id, {"title": "later", "start": False})
+    save(store, enabled=False)
+    with pytest.raises(AssignmentError):
+        scheduler.assignments.report(other.id, bot.id, chat.id, "continue")
+    save(store, enabled=True)
+    started = scheduler.assignments.report(other.id, bot.id, chat.id, "continue")
+    assert started.status == "active" and task_queued(store, other)
+
+
 def test_done_without_evidence_continues_once_then_waits(settings):
     store, scheduler, adapter, _bot, item = task_setup(settings, "Finished.\nBOT-OFFICE-STATUS: done")
     jobs = run_all(store, scheduler)
