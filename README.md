@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.14. What changed is recorded below: [0.11.14](#what-changed-in-01114), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.14. What changed is recorded below: [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -139,7 +139,7 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
-## What changed in 0.11.14
+## What changed in 0.11.14 (deployed 2026-11-19)
 
 **Slash commands for every bot CLI.** Type `/` at the start of the chat box and the list of that bot's CLI commands opens with a short description each. It filters as you type; Up/Down move, Enter or Tab pick, Esc closes. Picking fills the box (add arguments if you like); the next Enter sends it. A line that starts with `/` but is not one of the bot's commands (for example a path) is sent as an ordinary message.
 
@@ -159,7 +159,7 @@ Each entry carries its `source` (`cli`, `custom`, `skill`, `plugin`, `documented
 
 A slash command is its own turn: it is queued behind a running turn and never steered into one, and a message sent while one runs waits behind it. Command files are read without following symlinks. Server: `POST /v1/bots/{id}/slash` with `{name, args, confirm}`.
 
-Rollback: one additive column, `jobs.slash` (TEXT); an older version ignores it. Code-only rollback to the backup tag taken at deploy.
+Deployed 2026-11-19 12:13 PM ET (first deploy 11:57 AM ET; the later ones fixed small things found in the live tests). Live-tested on all five engines with throwaway bots. Rollback: one additive column, `jobs.slash` (TEXT); an older version ignores it, so the rollback is code only. Check out tag `backup/pre-0.11.14-20261119-165741` and restart. The DB copy taken at deploy is `~/backups/agentdesk.sqlite3.pre-0.11.14-20261119-165741`.
 
 ## What changed in 0.11.13 (deployed 2026-11-19)
 
