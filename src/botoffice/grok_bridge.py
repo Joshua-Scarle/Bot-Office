@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import http.client
 import ipaddress
 import json
@@ -301,40 +302,47 @@ def send_to_grok(
     kind = kind.strip().lower()
     if kind in DROPPED_KINDS:
         return "dropped: kind=ack is not sent"
-    if kind not in KINDS:
-        raise DeskError(f"kind must be one of {', '.join(KINDS)}")
     to = to.strip()
-    text = text.strip()
-    if not to or not text:
-        raise DeskError("to and text must be non-empty")
     directory = data_dir or _data_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     sender = resolve_from_bot(from_bot, directory, environ)
-    config = load_config(directory)
-    check_url(config["url"])
     store = JobStore(directory / "agentdesk.sqlite3")
+    stamp = now or datetime.now(UTC)
+    try:
+        if kind not in KINDS:
+            raise DeskError(f"kind must be one of {', '.join(KINDS)}")
+        text = text.strip()
+        if not to or not text:
+            raise DeskError("to and text must be non-empty")
+        config = load_config(directory)
+        check_url(config["url"])
+    except DeskError as exc:
+        store.bridge_record(sender, stamp, "failed", str(exc), to)  # refused before any quota use
+        raise
     try:
         reservation, hop, dropped = store.bridge_reserve(
-            sender, thread_id, now or datetime.now(UTC),
+            sender, thread_id, stamp,
             per_bot_seconds=PER_BOT_SECONDS, daily_limit=DAILY_LIMIT, max_hops=MAX_HOPS,
-            per_bot_daily=per_bot_daily(),
+            per_bot_daily=per_bot_daily(), target=to,
         )
     except sqlite3.OperationalError:
+        store.bridge_record(sender, stamp, "failed", "dropped: bridge state is busy", to)
         return "dropped: bridge state is busy; not sent"
     if dropped or reservation is None:
+        store.bridge_record(sender, stamp, "failed", f"dropped: {dropped}", to)
         return f"dropped: {dropped}"
     payload = build_payload(
         from_bot=sender, to=to, kind=kind, text=text, thread_id=thread_id, hop=hop, ts=now
     )
     try:
         post_webhook(config, payload, opener=opener)
-    except WebhookNotSent:
-        # certainly not delivered: release the quota and undo the hop step
-        store.bridge_settle(reservation, False, thread_id, hop)
+    except WebhookNotSent as exc:
+        # certainly not delivered: release the quota (row kept as failed) and undo the hop step
+        store.bridge_settle(reservation, False, thread_id, hop, error=str(exc))
         raise
-    except BaseException:
+    except BaseException as exc:
         # a timeout or anything else may have come after delivery: keep it counted
-        store.bridge_settle(reservation, True)
+        store.bridge_settle(reservation, True, error=f"unsure: {exc}")
         raise
     store.bridge_settle(reservation, True)
     return "sent"
@@ -440,7 +448,9 @@ def _transport(url: str, body: dict[str, Any], token: str) -> tuple[int, dict[st
             data = {}
         return exc.code, data if isinstance(data, dict) else {}
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise DeskError(f"Bot-Office API unreachable at {url.split('/v1/')[0]}") from exc
+        error = DeskError(f"Bot-Office API unreachable at {url.split('/v1/')[0]}")
+        error.unreachable = True  # type: ignore[attr-defined]
+        raise error from exc
 
 
 def call_api(path: str, body: dict[str, Any], *, environ: dict[str, str] | None = None,
@@ -456,6 +466,20 @@ def call_api(path: str, body: dict[str, Any], *, environ: dict[str, str] | None 
 def _flag_parser(prog: str, usage: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=prog, usage=usage, add_help=True)
     return parser
+
+
+def _record_unreachable(args: argparse.Namespace, environ: dict[str, str] | None, data_dir: Path | None,
+                        exc: Exception) -> None:
+    """Best effort: a send that could not reach the controller is logged in bridge_sends (state
+    failed, not counted) when this process can open the existing database. Never raises, never
+    creates a database."""
+    with contextlib.suppress(Exception):
+        directory = data_dir or _data_dir()
+        if not (directory / "agentdesk.sqlite3").is_file():
+            return
+        env = dict(os.environ) if environ is None else environ
+        sender = args.from_bot or resolve_from_bot(None, directory, env)
+        JobStore(directory / "agentdesk.sqlite3").bridge_record(sender, datetime.now(UTC), "failed", str(exc), args.to)
 
 
 def desk_grok(argv: list[str], *, stdin=None, data_dir: Path | None = None,
@@ -485,7 +509,12 @@ def desk_grok(argv: list[str], *, stdin=None, data_dir: Path | None = None,
     body = {"to": args.to, "kind": args.kind, "text": args.text, "thread_id": args.thread}
     if args.from_bot:
         body["from"] = args.from_bot
-    result = str(call_api("/v1/bridge/grok/send", body, environ=environ, data_dir=data_dir).get("result"))
+    try:
+        result = str(call_api("/v1/bridge/grok/send", body, environ=environ, data_dir=data_dir).get("result"))
+    except DeskError as exc:
+        if getattr(exc, "unreachable", False):
+            _record_unreachable(args, environ, data_dir, exc)  # the controller never saw it: log it here
+        raise
     print(result)
     return 0 if result == "sent" else 2
 

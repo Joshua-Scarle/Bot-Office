@@ -18,6 +18,7 @@ from fakes import StreamProc, jsonl
 CLAUDE_429 = "You've hit your 5-hour limit · resets 6:10pm (Europe/Berlin)"
 # 16:00 in Berlin, 10:00 in New York
 NOW = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)
+ET = ZoneInfo("America/New_York")
 
 
 def test_claude_limit_text_is_a_usage_limit_with_berlin_reset_shown_in_et():
@@ -32,9 +33,9 @@ def test_claude_limit_text_is_a_usage_limit_with_berlin_reset_shown_in_et():
 def test_reset_time_forms():
     assert failures.parse_reset("try again in 3 hours", NOW) == NOW + timedelta(hours=3)
     assert failures.parse_reset("Retry-After: 90", NOW) == NOW + timedelta(seconds=90)
-    # a time of day already past rolls to the next day (default zone America/New_York)
-    assert failures.parse_reset("limit reached, try again at 9:00 AM", NOW) == datetime(2026, 11, 15, 14, 0, tzinfo=UTC)
-    assert failures.parse_reset("usage limit; resets Nov 20 at 3pm", NOW) == datetime(2026, 11, 20, 20, 0, tzinfo=UTC)
+    # a time of day already past rolls to the next day (default zone passed in)
+    assert failures.parse_reset("limit reached, try again at 9:00 AM", NOW, ET) == datetime(2026, 11, 15, 14, 0, tzinfo=UTC)
+    assert failures.parse_reset("usage limit; resets Nov 20 at 3pm", NOW, ET) == datetime(2026, 11, 20, 20, 0, tzinfo=UTC)
     assert failures.parse_reset("rate limited", NOW) is None
     assert failures.parse_reset("error 500 at 12", NOW) is None
 
@@ -43,13 +44,33 @@ def test_codex_date_with_at_before_it_and_ordinal_day():
     now = datetime(2026, 11, 14, 22, 40, tzinfo=UTC)
     msg = "You've hit your usage limit. Please try again at Nov 15th, 2026 2:23 AM."
     want = datetime(2026, 11, 15, 2, 23, tzinfo=ZoneInfo("America/New_York"))
-    assert failures.parse_reset(msg, now) == want
+    assert failures.parse_reset(msg, now, ET) == want
     for text in ("try again at Nov 15, 2026 2:23 AM", "try again at November 15th 2026 at 2:23 AM",
                  "try again on Nov 15th, 2026 2:23 AM", "try again at Nov 1st, 2026 2:23 AM"):
-        assert failures.parse_reset(text, now) is not None
-    assert failures.parse_reset("try again at Nov 1st, 2026 2:23 AM", now).day == 1
+        assert failures.parse_reset(text, now, ET) is not None
+    assert failures.parse_reset("try again at Nov 1st, 2026 2:23 AM", now, ET).day == 1
     # a time only is still a time of day (next 2:23 AM ET)
-    assert failures.parse_reset("try again at 2:23 AM", now) == datetime(2026, 11, 15, 7, 23, tzinfo=UTC)
+    assert failures.parse_reset("try again at 2:23 AM", now, ET) == datetime(2026, 11, 15, 7, 23, tzinfo=UTC)
+
+
+def test_zoneless_reset_is_read_in_the_host_zone_not_et(monkeypatch):
+    """VPS evidence: Codex's "try again at Nov 21st, 2026 1:15 AM" matched its raw resets_at epoch
+    1795220139 = 00:15 UTC = 01:15 Europe/Berlin (the VPS zone) = 7:15 PM ET, not 1:15 AM ET."""
+    import time
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    time.tzset()
+    try:
+        now = datetime(2026, 11, 16, 21, 23, tzinfo=UTC)
+        msg = "You've hit your usage limit. Upgrade to Pro, or try again at Nov 21st, 2026 1:15 AM."
+        reset = failures.parse_reset(msg, now)
+        assert reset == datetime(2026, 11, 21, 0, 15, tzinfo=UTC)
+        assert failures.show_time(reset, now) == "Fri Nov 20, 7:15 PM ET"
+        # a time of day alone rolls to the next local day; a named zone still wins over the host zone
+        assert failures.parse_reset("try again at 1:15 AM", now) == datetime(2026, 11, 17, 0, 15, tzinfo=UTC)
+        assert failures.parse_reset("resets 6:10pm (Europe/London)", now) == datetime(2026, 11, 17, 18, 10, tzinfo=UTC)
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 
 def test_classification():

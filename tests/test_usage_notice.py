@@ -70,7 +70,7 @@ def test_parked_over_ten_minutes_gets_exactly_one_notice(settings):
     [notice] = notices(store, bot)
     assert notice.role == "system" and notice.notice == {"kind": "usage_limit", "job_id": str(job.id),
                                                          "provider": "codex", "open": True}
-    assert re.fullmatch(r"Ada is waiting for Codex's usage limit to reset \(back about \d\d:\d\d, 1[01] min\)\.",
+    assert re.fullmatch(r"Ada is waiting for Codex's usage limit to reset \(back about \d\d:\d\d E[SD]T, 1[01] min\)\.",
                         notice.text)
     [item] = items(store)
     assert item["id"] == f"u:{job.id}:{job.attempts}" and item["actions"] == ["switch", "keep"]
