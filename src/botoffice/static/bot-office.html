@@ -76,7 +76,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .row-menu { position: absolute; right: 6px; top: 13px; background: var(--raised); }
 .bot-row:hover .row-menu, .bot-row:focus-within .row-menu, .sec-head:hover .sec-menu, .sec-head:focus-within .sec-menu { opacity: 1; }
 .bot-row:hover .unread, .bot-row:focus-within .unread { visibility: hidden; }
-@media (hover: none) { .row-menu, .sec-menu { opacity: 1; } .bot-row:hover .unread { visibility: visible; } }
+@media (hover: none) { .row-menu, .sec-menu { opacity: 1; } .bot-item { padding-right: 38px; } .bot-row:hover .unread, .bot-row:focus-within .unread { visibility: visible; } }
 .row-menu:hover, .sec-menu:hover { color: var(--text); background: rgba(255,255,255,.08); }
 .row-menu:focus-visible, .sec-menu:focus-visible, .sec-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; opacity: 1; }
 /* section headers: small uppercase label, chevron left, count right, sticky while the list scrolls */
@@ -815,7 +815,7 @@ function botMatches(bot, query, label) {
   return words.every((word) => hay.includes(word));
 }
 /* ---- sections and sidebar (0.12.0) ---- */
-state.sections = null; state.drag = null; state.renaming = null; state.draftSection = false; state.sidebarDirty = false;
+state.sections = null; state.drag = null; state.renaming = null; state.draftSection = false; state.sidebarDirty = false; state.moving = 0;
 function announce(text) { const live = $("sidebar-live"); if (live) live.textContent = text; }
 function sidebarFail(err, what) {
   if (err instanceof AuthError) { handleError(err); return; }
@@ -851,6 +851,7 @@ function renderSidebar() {
   const list = $("bot-list");
   const hasSections = Boolean(state.sections && state.sections.sections.length) || state.draftSection;
   if (!state.bots.length && !hasSections) {
+    state.renaming = null; state.draftSection = false;
     list.replaceChildren(el("p", "muted pad", "No bots yet. Create one to start."));
     return;
   }
@@ -871,7 +872,8 @@ function renderSidebar() {
   const ungShown = lay.ungrouped.bots.filter(match);
   shown += ungShown.length;
   if (!filtering || ungShown.length) nodes.push(sectionNode(lay, lay.ungrouped, ungShown, filtering, !grouped));
-  if (!shown && !hasSections) {
+  if (!shown && filtering) {
+    state.renaming = null; state.draftSection = false;
     const empty = el("p", "muted pad", `No bots match "${query}".`);
     empty.id = "bot-empty"; empty.setAttribute("role", "status");
     list.replaceChildren(empty);
@@ -1002,7 +1004,8 @@ function startRename(sec) { clearSearchForEdit(); state.renaming = { id: sec.id 
 $("new-section").onclick = startCreateSection;
 
 async function toggleSection(sec) {
-  if (!state.sections || $("bot-search").value.trim()) return;   // a search shows every match, whatever the state
+  if (!state.sections) return;
+  if ($("bot-search").value.trim()) { announce("Clear the search to collapse or expand sections"); return; }   // a search shows every match
   const next = !sec.collapsed;
   const target = sec.id === "ungrouped" ? state.sections.ungrouped : state.sections.sections.find((s) => s.id === sec.id);
   if (target) target.collapsed = next;
@@ -1037,14 +1040,14 @@ function confirmDeleteSection(sec) {
 }
 
 async function moveBot(botId, sectionId, index) {
-  state.moving = true;
+  state.moving++;
   try {
     state.sections = await api("/v1/bots/" + botId + "/section", { method: "PUT", body: JSON.stringify({ section_id: sectionId === "ungrouped" ? null : sectionId, index: Math.min(Math.max(0, Math.floor(index)), 100000) }) });
     const bot = state.bots.find((b) => b.id === botId);
     const sec = sectionOfBot(sidebarLayout(), botId);
     announce((bot ? bot.name : "Bot") + " moved to " + (sec ? sec.name : "Ungrouped") + ", position " + (sec ? sec.bots.findIndex((b) => b.id === botId) + 1 : 1));
   } catch (err) { sidebarFail(err, "Could not move the bot"); }
-  state.moving = false;
+  state.moving--;
   renderBots();
   focusSidebar('.bot-row[data-bot="' + botId + '"] .bot-item');
 }
@@ -1060,13 +1063,13 @@ async function placeSection(lay, id, targetId, after) {
   const ids = lay.sections.map((s) => s.id).filter((s) => s !== id);
   const at = targetId === "ungrouped" ? ids.length : ids.indexOf(targetId) + (after ? 1 : 0);
   ids.splice(Math.max(0, at), 0, id);
-  state.moving = true;
+  state.moving++;
   try {
     state.sections = await api("/v1/sections/order", { method: "PUT", body: JSON.stringify({ ids }) });
     const sec = state.sections.sections.find((s) => s.id === id);
     announce("Section " + (sec ? sec.name : "") + " moved to position " + (ids.indexOf(id) + 1));
   } catch (err) { sidebarFail(err, "Could not reorder the sections"); }
-  state.moving = false;
+  state.moving--;
   renderBots();
   focusSidebar('.sec-head[data-section="' + id + '"] .sec-toggle');
 }

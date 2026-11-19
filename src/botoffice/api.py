@@ -1158,7 +1158,7 @@ def create_app(
             if data is not None:
                 return _png_response(request, data, bot.icon_image, v is not None)
         if bot.avatar_seed and avatars.valid_seed(bot.avatar_seed):
-            data = await asyncio.to_thread(avatars.render_png, bot.avatar_seed)
+            data = await avatars.run(avatars.render_png, bot.avatar_seed)
             return _png_response(request, data, "image/png", v is not None)
         raise HTTPException(status_code=404, detail="no icon image")
 
@@ -1176,7 +1176,7 @@ def create_app(
             if len(data) > MAX_ICON_BYTES:
                 raise HTTPException(status_code=413, detail="icon image is too large (limit 2 MB)")
         try:
-            png = await asyncio.to_thread(avatars.normalise_upload, bytes(data))
+            png = await avatars.run(avatars.normalise_upload, bytes(data))
         except avatars.AvatarError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.message) from exc
         # bots/<id> is bot-writable when isolated: create, write and replace without following links
@@ -1205,7 +1205,7 @@ def create_app(
         seed = (body.seed if body else None) or secrets.token_hex(6)
         if not avatars.valid_seed(seed):
             raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : -")
-        await asyncio.to_thread(avatars.render_png, seed)
+        await avatars.run(avatars.render_png, seed)
         safefs.unlink(_icon_path(bot_id))
         updated = store.update_bot(bot_id, icon_image=None, avatar_seed=seed)
         if updated is None:
@@ -1220,7 +1220,7 @@ def create_app(
     async def avatar_preview(request: Request, seed: str) -> Response:
         if not avatars.valid_seed(seed):
             raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : -")
-        data = await asyncio.to_thread(avatars.render_png, seed)
+        data = await avatars.run(avatars.render_png, seed)
         return _png_response(request, data, "image/png", True)
 
     # ---- sidebar sections (0.12.0) ----

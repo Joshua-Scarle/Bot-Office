@@ -317,3 +317,10 @@ def test_jpeg_upload_uses_reduced_decode_and_still_yields_256(client):
     r = client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=image_bytes("JPEG", (3000, 2000)))
     assert r.status_code == 200
     assert Image.open(io.BytesIO(client.get(f"/v1/bots/{bot['id']}/icon", headers=H).content)).size == (256, 256)
+
+
+def test_phone_sized_jpeg_is_accepted_but_a_huge_png_is_not(client, monkeypatch):
+    bot = mk(client, "Phone")
+    monkeypatch.setattr(avatars, "MAX_UPLOAD_PIXELS", 1000)       # PNG/WebP/GIF limit tiny, JPEG limit untouched
+    assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=image_bytes("JPEG", (400, 300))).status_code == 200
+    assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=image_bytes("PNG", (400, 300))).status_code == 413

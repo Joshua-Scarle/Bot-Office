@@ -7,18 +7,20 @@ seed always gives the same bytes. Uploads are validated, centre-cropped to a squ
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import math
 import re
 import struct
-import threading
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
 SIZE = 256
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
-MAX_UPLOAD_PIXELS = 12_000_000
+MAX_UPLOAD_PIXELS = 12_000_000          # PNG, WebP, GIF: decoded at full size
+MAX_JPEG_PIXELS = 40_000_000            # a JPEG is decoded at reduced size (draft), so phone photos fit
 PRESET_COUNT = 12
 SEED_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
@@ -126,7 +128,14 @@ def _png(rows: list[bytes], size: int) -> bytes:
             + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
-_RENDER_SLOTS = threading.BoundedSemaphore(2)   # at most two renders or upload decodes at once
+# avatar work (CPU-bound) runs on its own two threads, so a burst of previews or uploads never starves the shared pool
+EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="avatar")
+
+
+async def run(fn, *args):
+    return await asyncio.get_running_loop().run_in_executor(EXECUTOR, fn, *args)
+
+
 GENERATOR_VERSION = 1                           # part of every ETag: bump it if the drawing changes
 _PRESET_PNGS: dict[str, bytes] = {}             # the 12 defaults are kept for good, whatever other seeds do
 
@@ -144,27 +153,26 @@ def render_png(seed: str) -> bytes:
 
 @lru_cache(maxsize=64)
 def _render(seed: str) -> bytes:
-    with _RENDER_SLOTS:
-        p = _params(seed)
-        (c1, c2, tint, strength) = p["palette"]
-        if p["dark"]:
-            tint, strength = (0, 0, 0), strength * 0.7
-        ga = math.cos(p["angle"] * 0.5 + 0.6)
-        gb = math.sin(p["angle"] * 0.5 + 0.6)
-        px = 1.0 / SIZE
-        rows: list[bytes] = []
-        for y in range(SIZE):
-            v = (y + 0.5) / SIZE
-            row = bytearray()
-            for x in range(SIZE):
-                u = (x + 0.5) / SIZE
-                t = min(1.0, max(0.0, 0.5 + ((u - 0.5) * ga + (v - 0.5) * gb)))
-                cov = _coverage(p["motif"], u, v, p, px) * strength
-                for ch in range(3):
-                    base = c1[ch] + (c2[ch] - c1[ch]) * t
-                    row.append(int(base + (tint[ch] - base) * cov + 0.5))
-            rows.append(bytes(row))
-        return _png(rows, SIZE)
+    p = _params(seed)
+    (c1, c2, tint, strength) = p["palette"]
+    if p["dark"]:
+        tint, strength = (0, 0, 0), strength * 0.7
+    ga = math.cos(p["angle"] * 0.5 + 0.6)
+    gb = math.sin(p["angle"] * 0.5 + 0.6)
+    px = 1.0 / SIZE
+    rows: list[bytes] = []
+    for y in range(SIZE):
+        v = (y + 0.5) / SIZE
+        row = bytearray()
+        for x in range(SIZE):
+            u = (x + 0.5) / SIZE
+            t = min(1.0, max(0.0, 0.5 + ((u - 0.5) * ga + (v - 0.5) * gb)))
+            cov = _coverage(p["motif"], u, v, p, px) * strength
+            for ch in range(3):
+                base = c1[ch] + (c2[ch] - c1[ch]) * t
+                row.append(int(base + (tint[ch] - base) * cov + 0.5))
+        rows.append(bytes(row))
+    return _png(rows, SIZE)
 
 
 def etag(data: bytes) -> str:
@@ -193,8 +201,7 @@ def normalise_upload(data: bytes) -> bytes:
     except ImportError as exc:  # pragma: no cover - depends on the install
         raise AvatarError(503, "image uploads need the Pillow package on the server") from exc
     try:
-        with _RENDER_SLOTS:
-            return _square_png(data, Image, ImageOps)
+        return _square_png(data, Image, ImageOps)
     except AvatarError:
         raise
     except Exception as exc:  # corrupt, truncated, bomb, unsupported: all the same to the caller
@@ -204,7 +211,7 @@ def normalise_upload(data: bytes) -> bytes:
 def _square_png(data: bytes, Image, ImageOps) -> bytes:
     img = Image.open(io.BytesIO(data), formats=["PNG", "JPEG", "WEBP", "GIF"])
     width, height = img.size
-    if width < 1 or height < 1 or width * height > MAX_UPLOAD_PIXELS:
+    if width < 1 or height < 1 or width * height > (MAX_JPEG_PIXELS if img.format == "JPEG" else MAX_UPLOAD_PIXELS):
         raise AvatarError(413, "icon image has too many pixels")
     img.seek(0)
     if img.format == "JPEG":

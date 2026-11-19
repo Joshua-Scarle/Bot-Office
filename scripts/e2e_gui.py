@@ -564,6 +564,9 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     lay = layout()
     check(len(lay["sections"]) == 1 and ids[names[0]] in lay["ungrouped"]["bot_ids"], "confirming deletes the section and its bots go to Ungrouped")
     check({b["id"] for b in call(base, token, "GET", "/v1/bots")} >= set(ids.values()), "no bot was deleted")
+    page.fill("#bot-search", "no-such-bot-zzz")
+    check(page.locator("#bot-empty").is_visible(), "a search with no match says so even when sections exist")
+    page.fill("#bot-search", "")
     # naming a section while a search shows nothing still works (the search is cleared), and a bot can be
     # dropped into an empty section's body, not only onto its header
     page.fill("#bot-search", "no-such-bot-zzz")
