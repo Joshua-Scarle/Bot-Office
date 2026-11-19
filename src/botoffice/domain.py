@@ -50,6 +50,8 @@ class Job(BaseModel):
     # 0.11.10: the owner-side layers this turn's prompt carried, by layer key (snapshots are saved once
     # the turn succeeds)
     layer_texts: dict[str, str] | None = Field(default=None, exclude=True)
+    # 0.11.4: the last task event the prompt's "changes by others" line covered (store.issue_agent_token)
+    tasks_seen_event: int | None = Field(default=None, exclude=True)
     id: UUID
     prompt: str
     status: JobStatus
@@ -433,6 +435,30 @@ class Assignment(BaseModel):
     closed_at: datetime | None = None
 
 
+# 0.11.4 task lists: the shown stage of an assignment (computed, never stored; plan 4.2)
+TaskStage = Literal["not_started", "in_progress", "completed", "dropped"]
+TaskOrigin = Literal["form", "chat", "auto", "bot", "routine"]
+
+
+class Task(Assignment):
+    """An assignment as the task-list API shows it: its version (send it back to edit), list
+    position, origin, last actor and the computed stage with its flags."""
+    version: int = 1
+    position: float | None = None
+    origin: str = "form"
+    source_message_id: int | None = None
+    source_job_id: str | None = None
+    updated_by: str = "user"
+    reviewer: str | None = None
+    stage: TaskStage = "not_started"
+    waiting: bool = False  # waiting on the user or on a bot
+    blocked: bool = False  # blocked, or flagged stalled by the watchdog
+    stalled: bool = False
+    # working (turn running) | next_up (turn queued) | parked (queued, held until parked_until) | None
+    activity: str | None = None
+    parked_until: datetime | None = None
+
+
 class AssignmentCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     goal: str = Field(default="", max_length=20_000)
@@ -458,6 +484,27 @@ class AssignmentUpdate(BaseModel):
     # the user may close (done / dropped) or reopen an assignment; "active" goes through /start
     status: Literal["open", "done", "dropped"] | None = None
     note: str | None = Field(default=None, max_length=1000)
+
+
+class TaskCreate(AssignmentCreate):
+    # list order (lower first); default: after the bot's last task
+    position: float | None = None
+
+
+class TaskUpdate(AssignmentUpdate):
+    # the version the client last saw (required): a stale one is answered 409 with the current task
+    version: int = Field(ge=1)
+    position: float | None = None
+    reviewer: str | None = Field(default=None, max_length=200)
+
+
+class TaskReorder(BaseModel):
+    bot_id: str = Field(min_length=1, max_length=200)
+    order: list[UUID] = Field(min_length=1, max_length=500)
+
+
+class TaskNote(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
 
 
 class AssignmentStart(BaseModel):

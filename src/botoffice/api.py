@@ -41,7 +41,7 @@ from .catalog import (
 from .config import Settings
 from .cron import min_gap
 from .desktop import run_desktop_command
-from .assignments import BOT_ROUTINE_MIN_GAP, MAX_BOT_ROUTINES, AssignmentError
+from .assignments import BOT_ROUTINE_MIN_GAP, MAX_BOT_ROUTINES, AssignmentError, drop_rule, tasks_label
 from .domain import (
     _check_cron,
     Assignment,
@@ -68,6 +68,11 @@ from .domain import (
     Routine,
     RoutineCreate,
     RoutineUpdate,
+    Task,
+    TaskCreate,
+    TaskNote,
+    TaskReorder,
+    TaskUpdate,
     TextBody,
     Wakeup,
 )
@@ -133,6 +138,32 @@ class AgentAssignmentCreate(BaseModel):
     budget_turns: int = Field(default=20, ge=1, le=200)
     budget_minutes: int = Field(default=120, ge=1, le=24 * 60)
     start: bool = True
+
+
+TASK_STAGES = {"not_started", "in_progress", "completed", "dropped"}
+
+
+class AgentTaskCreate(AgentAssignmentCreate):
+    # 0.11.4: lands open unless the bot asks to start one on its own list (or a child it delegates)
+    start: bool = False
+    position: float | None = None
+
+
+class AgentTaskEdit(BaseModel):
+    version: int = Field(ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    goal: str | None = Field(default=None, max_length=20_000)
+    done_when: str | None = Field(default=None, max_length=4000)
+    due_at: datetime | None = None
+    position: float | None = None
+
+
+class AgentTaskDrop(BaseModel):
+    note: str = Field(default="", max_length=1000)
+
+
+class AgentTaskReorder(BaseModel):
+    order: list[str] = Field(min_length=1, max_length=500)
 
 
 class AgentStatus(BaseModel):
@@ -1276,6 +1307,90 @@ def create_app(
             raise HTTPException(status_code=400, detail="note is empty")
         _assignment_call(assignments.add_note, _agent_assignment_id(job, ref), job.bot_id, job.id, body.text.strip()[:2000])
 
+    # --- 0.11.4 task lists (job token only): every list readable, cross-bot add/edit per plan 4.4 ---
+    # AssignmentError raised here is answered by the handler below (409 conflicts carry the
+    # current task and the changes since the caller's version)
+
+    def _agent_task_id(job: Job, ref: str) -> str:
+        if ref in ("current", "-"):
+            return _agent_assignment_id(job, ref)
+        return assignments.find(ref)
+
+    @app.get("/v1/agent/tasks", response_model=list[Task])
+    async def agent_list_tasks(bot: str | None = None, closed: bool = False,
+                               job: Job = Depends(agent_scope)) -> list[Task]:  # noqa: B008
+        """Your list, another bot's (``bot=<name or id>``) or every bot's (``bot=all``)."""
+        target = job.bot_id
+        if bot == "all":
+            target = None
+        elif bot:
+            found = store.find_bot(bot)
+            if not found:
+                raise HTTPException(status_code=404, detail="bot not found")
+            target = found.id
+        return assignments.tasks(target, include_closed=closed)
+
+    @app.get("/v1/agent/tasks/changes")
+    async def agent_task_changes(since: int | None = Query(default=None, ge=0),
+                                 job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        """What others changed on your tasks (and on tasks you created) since your last prompt
+        (or since event *since*). Reading does not mark them seen."""
+        changes, last = assignments.changes(job.bot_id, since)
+        return {"changes": changes, "last_event": last}
+
+    @app.get("/v1/agent/tasks/{ref}")
+    async def agent_get_task(ref: str, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        item = assignments.task(_agent_task_id(job, ref))
+        return {**item.model_dump(mode="json"), "events": assignments.events(item.id, 20),
+                "children": [child.model_dump(mode="json") for child in assignments.children(item.id)]}
+
+    @app.post("/v1/agent/tasks", response_model=Task, status_code=201)
+    async def agent_create_task(body: AgentTaskCreate, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
+        target = None
+        if body.for_bot:
+            found = store.find_bot(body.for_bot)
+            if not found:
+                raise HTTPException(status_code=404, detail="bot not found")
+            target = found.id
+        parent = _agent_task_id(job, body.parent_id) if body.parent_id else None
+        fields = body.model_dump(exclude={"for_bot", "parent_id"})
+        item = assignments.agent_create(job.bot_id, fields, for_bot=target, parent_id=parent, job_id=job.id)
+        return assignments.task(item.id)
+
+    @app.patch("/v1/agent/tasks/{ref}", response_model=Task)
+    async def agent_edit_task(ref: str, body: AgentTaskEdit, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
+        fields = body.model_dump(exclude_unset=True, exclude={"version"})
+        for key in ("title", "goal", "done_when"):
+            if key in fields and fields[key] is None:
+                del fields[key]
+        return assignments.agent_edit(_agent_task_id(job, ref), job.bot_id, fields, body.version)
+
+    @app.post("/v1/agent/tasks/reorder", response_model=list[Task])
+    async def agent_reorder_tasks(body: AgentTaskReorder, job: Job = Depends(agent_scope)) -> list[Task]:  # noqa: B008
+        ids = [_agent_task_id(job, ref) for ref in body.order]
+        return assignments.reorder(job.bot_id, ids, actor=f"bot:{job.bot_id}")
+
+    @app.post("/v1/agent/tasks/{ref}/status", response_model=Task)
+    async def agent_task_status(ref: str, body: AgentStatus, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
+        item = assignments.report(_agent_task_id(job, ref), job.bot_id, job.id, body.state.strip().lower(),
+                                  body.note.strip())
+        return assignments.task(item.id)
+
+    @app.post("/v1/agent/tasks/{ref}/drop", response_model=Task)
+    async def agent_drop_task(ref: str, body: AgentTaskDrop, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
+        return assignments.agent_drop(_agent_task_id(job, ref), job.bot_id, job.id, body.note)
+
+    @app.post("/v1/agent/tasks/{ref}/note", status_code=204)
+    async def agent_task_note(ref: str, body: AgentText, job: Job = Depends(agent_scope)) -> None:  # noqa: B008
+        if not body.text.strip():
+            raise HTTPException(status_code=400, detail="note is empty")
+        assignments.add_note(_agent_task_id(job, ref), job.bot_id, job.id, body.text.strip()[:2000])
+
+    @app.post("/v1/agent/tasks/{ref}/checkpoint", response_model=Task)
+    async def agent_task_checkpoint(ref: str, body: AgentText, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
+        item = assignments.save_checkpoint(_agent_task_id(job, ref), job.bot_id, job.id, body.text)
+        return assignments.task(item.id)
+
     @app.get("/v1/agent/wakeups")
     async def agent_list_wakeups(job: Job = Depends(agent_scope)) -> list[Wakeup]:  # noqa: B008
         return assignments.wakeups(job.bot_id)
@@ -1742,6 +1857,111 @@ def create_app(
     async def start_assignment(assignment_id: UUID, body: AssignmentStart | None = None) -> Assignment:
         body = body or AssignmentStart()
         return _assignment_call(assignments.start, assignment_id, body.add_turns, body.add_minutes)
+
+    # --- 0.11.4 task lists (master token): assignments with version, stage and actor (plan 4.7) ---
+
+    @app.exception_handler(AssignmentError)
+    async def assignment_error(request: Request, exc: AssignmentError) -> JSONResponse:
+        return JSONResponse({"detail": exc.detail, **exc.extra}, status_code=exc.status)
+
+    def _stages(value: str | None) -> list[str] | None:
+        if not value:
+            return None
+        stages = [part.strip() for part in value.split(",") if part.strip()]
+        unknown = set(stages) - TASK_STAGES
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"unknown stage: {', '.join(sorted(unknown))}")
+        return stages
+
+    @app.get("/v1/tasks/settings", dependencies=[Depends(auth)])
+    async def task_settings() -> dict:
+        """Read-only task-list settings for the GUI: its label (G8) and the drop rule (G5)."""
+        return {"label": tasks_label(), "bot_drop_owner_tasks": drop_rule(),
+                "stages": ["not_started", "in_progress", "completed", "dropped"]}
+
+    @app.get("/v1/tasks", dependencies=[Depends(auth)])
+    async def list_tasks(bot: str | None = None, stage: str | None = None, include_dropped: bool = False,
+                         limit: int = Query(default=200, ge=1, le=1000), counts: bool = False) -> Any:
+        """The board (every bot's tasks) or one bot's (``bot``), filtered by stage; ``counts=1``
+        returns only the counts per bot (the sidebar chip, one request for all bots)."""
+        if counts:
+            return {"bots": assignments.counts()}
+        target = None
+        if bot:
+            found = store.find_bot(bot)
+            if not found:
+                raise HTTPException(status_code=404, detail="bot not found")
+            target = found.id
+        stages = _stages(stage)
+        return assignments.tasks(target, stages=stages, include_dropped=include_dropped or bool(
+            stages and "dropped" in stages), limit=limit)
+
+    @app.post("/v1/tasks/reorder", response_model=list[Task], dependencies=[Depends(auth)])
+    async def reorder_tasks(body: TaskReorder) -> list[Task]:
+        bot = store.find_bot(body.bot_id)
+        if not bot:
+            raise HTTPException(status_code=404, detail="bot not found")
+        return assignments.reorder(bot.id, body.order, actor="user")
+
+    @app.get("/v1/bots/{bot_ref}/tasks", response_model=list[Task], dependencies=[Depends(auth)])
+    async def list_bot_tasks(bot_ref: str, include_closed: bool = True) -> list[Task]:
+        bot = store.find_bot(bot_ref)
+        if not bot:
+            raise HTTPException(status_code=404, detail="bot not found")
+        return assignments.tasks(bot.id, include_closed=include_closed)
+
+    @app.post("/v1/bots/{bot_ref}/tasks", response_model=Task, status_code=201, dependencies=[Depends(auth)])
+    async def create_task(bot_ref: str, body: TaskCreate) -> Task:
+        bot = store.find_bot(bot_ref)
+        if not bot:
+            raise HTTPException(status_code=404, detail="bot not found")
+        return assignments.task(assignments.create(bot.id, body.model_dump(), origin="form").id)
+
+    @app.get("/v1/tasks/{task_id}", dependencies=[Depends(auth)])
+    async def get_task(task_id: UUID) -> dict:
+        item = assignments.task(task_id)
+        return {**item.model_dump(mode="json"), "events": assignments.events(task_id),
+                "children": [child.model_dump(mode="json") for child in assignments.children(task_id)]}
+
+    @app.get("/v1/tasks/{task_id}/events", dependencies=[Depends(auth)])
+    async def task_events(task_id: UUID, limit: int = Query(default=50, ge=1, le=500)) -> list[dict]:
+        assignments.task(task_id)
+        return assignments.events(task_id, limit)
+
+    @app.patch("/v1/tasks/{task_id}", response_model=Task, dependencies=[Depends(auth)])
+    async def update_task(task_id: UUID, body: TaskUpdate) -> Task:
+        fields = body.model_dump(exclude_unset=True, exclude={"version"})
+        for key in ("title", "goal", "done_when", "budget_turns", "budget_minutes", "verify", "escalate"):
+            if key in fields and fields[key] is None:
+                del fields[key]
+        assignments.update(task_id, fields, expected_version=body.version)
+        return assignments.task(task_id)
+
+    @app.delete("/v1/tasks/{task_id}", status_code=204, dependencies=[Depends(auth)])
+    async def delete_task(task_id: UUID) -> None:
+        assignments.delete(task_id)
+
+    @app.post("/v1/tasks/{task_id}/start", response_model=Task, dependencies=[Depends(auth)])
+    async def start_task(task_id: UUID, body: AssignmentStart | None = None) -> Task:
+        body = body or AssignmentStart()
+        assignments.start(task_id, body.add_turns, body.add_minutes)
+        return assignments.task(task_id)
+
+    @app.post("/v1/tasks/{task_id}/stop", response_model=Task, dependencies=[Depends(auth)])
+    async def stop_task(task_id: UUID) -> Task:
+        _cancel_jobs(assignments.stop(task_id))
+        return assignments.task(task_id)
+
+    @app.post("/v1/tasks/{task_id}/reply", dependencies=[Depends(auth)])
+    async def reply_task(task_id: UUID, body: AssignmentReply) -> dict:
+        job_id = assignments.reply(task_id, body.text)
+        return {"job_id": job_id, "task": assignments.task(task_id).model_dump(mode="json")}
+
+    @app.post("/v1/tasks/{task_id}/note", status_code=204, dependencies=[Depends(auth)])
+    async def note_task(task_id: UUID, body: TaskNote) -> None:
+        if not body.text.strip():
+            raise HTTPException(status_code=400, detail="note is empty")
+        assignments.add_note(task_id, None, None, body.text.strip())
 
     # --- 0.10.0 Needs-you (computed, model-free) ---
 
