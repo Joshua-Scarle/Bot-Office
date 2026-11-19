@@ -384,6 +384,32 @@ def _minute(moment: datetime) -> datetime:
     return moment.astimezone(UTC).replace(second=0, microsecond=0)
 
 
+LINK_COLUMNS = ("steered_into", "reply_to", "sender_message_id", "target_message_id")
+
+
+def _unwiden_agent_messages(db: sqlite3.Connection) -> None:
+    """A database first opened by a 0.11.10 pre-release has the link columns on agent_messages
+    itself: move them to agent_message_links and drop them, so 0.11.9's positional INSERT works."""
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(agent_messages)")}
+    present = [column for column in LINK_COLUMNS if column in columns]
+    if not present:
+        return
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        picks = ", ".join(column if column in present else "NULL" for column in LINK_COLUMNS)
+        db.execute(f"INSERT OR IGNORE INTO agent_message_links (message_id, {', '.join(LINK_COLUMNS)}) "
+                   f"SELECT id, {picks} FROM agent_messages")
+        for index in ("agent_messages_steered", "agent_messages_sent", "agent_messages_received"):
+            db.execute(f"DROP INDEX IF EXISTS {index}")
+        db.execute("DROP VIEW IF EXISTS agent_messages_x")
+        for column in present:
+            db.execute(f"ALTER TABLE agent_messages DROP COLUMN {column}")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
 def message_author(values: dict) -> tuple[str, str | None]:
     """(author, peer) of a messages row; see Message.author. ``agent_from`` is the sending bot of the
     row's job when that job is a bot-to-bot message (agent_messages.from_bot), else None."""
@@ -646,18 +672,24 @@ class JobStore:
                 hop INTEGER NOT NULL, created_at TEXT NOT NULL
             )""")
             db.execute("CREATE INDEX IF NOT EXISTS agent_messages_pair ON agent_messages (from_bot, to_bot, created_at)")
-            agent_columns = {row["name"] for row in db.execute("PRAGMA table_info(agent_messages)")}
-            for column, kind in (
-                # 0.11.10: a message steered into the receiver's running job (job_id is then "steer:<id>"
-                # until it becomes a turn of its own), the steer it answers, and its two chat rows
-                ("steered_into", "TEXT"), ("reply_to", "TEXT"),
-                ("sender_message_id", "INTEGER"), ("target_message_id", "INTEGER"),
-            ):
-                if column not in agent_columns:
-                    db.execute(f"ALTER TABLE agent_messages ADD COLUMN {column} {kind}")
-            db.execute("CREATE INDEX IF NOT EXISTS agent_messages_steered ON agent_messages (steered_into)")
-            db.execute("CREATE INDEX IF NOT EXISTS agent_messages_sent ON agent_messages (sender_message_id)")
-            db.execute("CREATE INDEX IF NOT EXISTS agent_messages_received ON agent_messages (target_message_id)")
+            # 0.11.10: a message steered into the receiver's running job (job_id is then "steer:<id>"
+            # until it becomes a turn of its own), the steer it answers, and its two chat rows. A side
+            # table, not new columns: 0.11.9 inserts into agent_messages positionally (8 values), so the
+            # rollback build must still find exactly 8 columns there.
+            db.execute("""CREATE TABLE IF NOT EXISTS agent_message_links (
+                message_id TEXT PRIMARY KEY, steered_into TEXT, reply_to TEXT,
+                sender_message_id INTEGER, target_message_id INTEGER
+            )""")
+            _unwiden_agent_messages(db)
+            db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_steered ON agent_message_links (steered_into)")
+            db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_reply ON agent_message_links (reply_to)")
+            db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_sent ON agent_message_links (sender_message_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_received ON agent_message_links (target_message_id)")
+            # what the code reads: an agent message with its links (seq orders equal timestamps)
+            db.execute("DROP VIEW IF EXISTS agent_messages_x")
+            db.execute("CREATE VIEW agent_messages_x AS SELECT m.*, m.rowid AS seq, l.steered_into, l.reply_to, "
+                       "l.sender_message_id, l.target_message_id FROM agent_messages m "
+                       "LEFT JOIN agent_message_links l ON l.message_id=m.id")
 
             # one row per finished attempt that was re-queued (automatic or manual retry)
             db.execute(
@@ -1121,9 +1153,10 @@ class JobStore:
                 # 0.11.10: another bot's steer becomes an inbox turn of its own: its reply goes back to
                 # that bot, and its text stays marked as a bot's (never an owner's chat turn)
                 source, prompt = 'inbox', f"(from {row['sender']}) {row['text']}"
-                db.execute("UPDATE agent_messages SET job_id=?, steered_into=NULL WHERE target_message_id=?",
-                           (key, row['id']))
-                db.execute("UPDATE messages SET job_id=? WHERE id=(SELECT sender_message_id FROM agent_messages "
+                db.execute("UPDATE agent_messages SET job_id=? WHERE id=(SELECT message_id FROM agent_message_links "
+                           "WHERE target_message_id=?)", (key, row['id']))
+                db.execute("UPDATE agent_message_links SET steered_into=NULL WHERE target_message_id=?", (row['id'],))
+                db.execute("UPDATE messages SET job_id=? WHERE id=(SELECT sender_message_id FROM agent_message_links "
                            "WHERE target_message_id=?)", (key, row['id']))
             db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority) "
                        "VALUES (?,?,'queued',?,?,?,?,?,?,?,?)",
@@ -1691,7 +1724,7 @@ class JobStore:
     # whose job is no longer parked is hidden from the chat (list_messages), so it never counts
     _UNREAD_WHERE = (
         "m.bot_id = bots.id AND (m.role IN ('assistant','system') OR (m.role='user' AND m.source='inbox'"
-        " AND EXISTS (SELECT 1 FROM agent_messages a WHERE (a.job_id=m.job_id OR a.sender_message_id=m.id)"
+        " AND EXISTS (SELECT 1 FROM agent_messages_x a WHERE (a.job_id=m.job_id OR a.sender_message_id=m.id)"
         " AND a.from_bot=m.bot_id))"
         " OR (m.role='user' AND m.source='assignment' AND m.sender LIKE 'to %'))"
         " AND m.archived_at IS NULL AND m.hidden=0"
@@ -1922,11 +1955,11 @@ class JobStore:
                     origin = db.execute("SELECT bot_id FROM jobs WHERE id=?", (origin_id,)).fetchone()
                     if not origin or origin["bot_id"] != str(sender.id):
                         raise ValueError("invalid originating job")
-                    rows = db.execute("SELECT * FROM agent_messages WHERE job_id=? OR steered_into=? "
-                                      "ORDER BY created_at DESC, rowid DESC", (origin_id, origin_id)).fetchall()
+                    rows = db.execute("SELECT * FROM agent_messages_x WHERE job_id=? OR steered_into=? "
+                                      "ORDER BY created_at DESC, seq DESC", (origin_id, origin_id)).fetchall()
                 answered = next((r for r in rows if r["steered_into"] == origin_id and r["from_bot"] == str(target.id)
                                  and r["reply_to"] is None and not db.execute(
-                                     "SELECT 1 FROM agent_messages WHERE reply_to=? LIMIT 1", (r["id"],)).fetchone()),
+                                     "SELECT 1 FROM agent_message_links WHERE reply_to=? LIMIT 1", (r["id"],)).fetchone()),
                                 None)
                 if answered is not None:
                     hop, thread, reply_to = answered["hop"], answered["thread_id"], answered["id"]
@@ -1961,10 +1994,11 @@ class JobStore:
                     sent = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,created_at) "
                                       "VALUES (?,'user',?,'inbox',?,?)",
                                       (str(sender.id), f'to {target.name}', text, stamp)).lastrowid
-                    db.execute("INSERT INTO agent_messages (id,from_bot,to_bot,body,job_id,thread_id,hop,created_at,"
-                               "steered_into,reply_to,sender_message_id,target_message_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                               (message_id, str(sender.id), str(target.id), text, f"steer:{message_id}",
-                                thread or message_id, hop, stamp, running["id"], reply_to, sent, target_row))
+                    db.execute("INSERT INTO agent_messages (id,from_bot,to_bot,body,job_id,thread_id,hop,created_at) "
+                               "VALUES (?,?,?,?,?,?,?,?)", (message_id, str(sender.id), str(target.id), text,
+                                                            f"steer:{message_id}", thread or message_id, hop, stamp))
+                    db.execute("INSERT INTO agent_message_links (message_id,steered_into,reply_to,sender_message_id,"
+                               "target_message_id) VALUES (?,?,?,?,?)", (message_id, running["id"], reply_to, sent, target_row))
                     delivery, job = "steer", running
                 else:
                     busy = db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status IN ('queued','running') LIMIT 1",
@@ -1973,10 +2007,11 @@ class JobStore:
                     db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,bot_id,reason,source,model,effort,priority) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (job_id, prompt, 'queued', target.default_provider, stamp, str(target.id), target.reason, 'inbox', target.model, target.effort or default_effort(target.default_provider), _priority('inbox')))
                     target_row = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at) VALUES (?,?,?,?,?,?,?)", (str(target.id), 'user', f'bot {sender.name}', 'inbox', text, job_id, stamp)).lastrowid
                     sent = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at) VALUES (?,?,?,?,?,?,?)", (str(sender.id), 'user', f'to {target.name}', 'inbox', text, job_id, stamp)).lastrowid
-                    db.execute("INSERT INTO agent_messages (id,from_bot,to_bot,body,job_id,thread_id,hop,created_at,"
-                               "reply_to,sender_message_id,target_message_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                               (message_id, str(sender.id), str(target.id), text, job_id, thread or job_id, hop, stamp,
-                                reply_to, sent, target_row))
+                    db.execute("INSERT INTO agent_messages (id,from_bot,to_bot,body,job_id,thread_id,hop,created_at) "
+                               "VALUES (?,?,?,?,?,?,?,?)", (message_id, str(sender.id), str(target.id), text, job_id,
+                                                            thread or job_id, hop, stamp))
+                    db.execute("INSERT INTO agent_message_links (message_id,reply_to,sender_message_id,target_message_id) "
+                               "VALUES (?,?,?,?)", (message_id, reply_to, sent, target_row))
                     delivery, job = ("queue" if busy else "start"), db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
                 row = db.execute("SELECT * FROM messages WHERE id=?", (target_row,)).fetchone()
                 db.commit()
@@ -2001,12 +2036,13 @@ class JobStore:
     # then "delivered"; its reply is never the receiver's turn's reply (that turn is the receiver's task)
     _AGENT_SELECT = ("SELECT m.*, j.status AS job_status, CASE WHEN j.id IS NULL THEN NULL ELSE j.reply_text END AS reply, "
                      "j.finished_at, (SELECT t.steer_status FROM messages t WHERE t.id=m.target_message_id) AS steer_status "
-                     "FROM agent_messages m LEFT JOIN jobs j ON j.id=m.job_id")
+                     "FROM agent_messages_x m LEFT JOIN jobs j ON j.id=m.job_id")
 
     @staticmethod
     def _agent_item(row: sqlite3.Row) -> dict:
         item = dict(row)
         status, steer = item.pop("job_status"), item.pop("steer_status")
+        item.pop("seq", None)
         if status is None and item["job_id"].startswith("steer:"):
             item["status"] = "delivered" if steer == "delivered" else "sent"
         else:
@@ -2032,7 +2068,7 @@ class JobStore:
 
     def agent_message_for_job(self, job_id: UUID | str) -> dict | None:
         with closing(self._connect()) as db:
-            row = db.execute("SELECT * FROM agent_messages WHERE job_id=?", (str(job_id),)).fetchone()
+            row = db.execute("SELECT * FROM agent_messages_x WHERE job_id=?", (str(job_id),)).fetchone()
         return dict(row) if row else None
 
     def recent_pair_message(self, from_bot: UUID, to_bot: UUID, since: str) -> bool:
@@ -2145,7 +2181,7 @@ class JobStore:
             rows = db.execute(
                 f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified,"
                 " COALESCE((SELECT a.from_bot FROM agent_messages a WHERE a.job_id=m.job_id LIMIT 1),"
-                " (SELECT a.from_bot FROM agent_messages a WHERE a.sender_message_id=m.id OR a.target_message_id=m.id"
+                " (SELECT a.from_bot FROM agent_messages_x a WHERE a.sender_message_id=m.id OR a.target_message_id=m.id"
                 " LIMIT 1)) AS agent_from"
                 f" FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) AS m"
                 " LEFT JOIN jobs AS j ON j.id=m.job_id ORDER BY m.id",

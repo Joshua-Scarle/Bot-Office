@@ -78,4 +78,9 @@ The migration is additive:
 - `bots.chat_only` INTEGER DEFAULT 0.
 - New keys in the existing `auto_continue` meta JSON.
 
-Older code ignores all of these. To roll back, check out the previous build and restart. Held jobs (`failure_kind='auto_cap'`) then run when their `not_before` passes.
+Older code ignores all of these. To roll back, stop the service with no job running, then before starting the previous build:
+
+- drain pending bot steers: `UPDATE messages SET steer_status='delivered' WHERE source='inbox' AND steer_status='pending'` (0.11.9 would re-queue them as owner chat turns);
+- cancel held jobs: `UPDATE jobs SET status='cancelled', error='rollback' WHERE status='queued' AND failure_kind='auto_cap'` (0.11.9 would run them without the cap check).
+
+Bot-message links (steered into, reply to, chat rows) live in the side table `agent_message_links`, not in `agent_messages`, because 0.11.9 inserts into `agent_messages` positionally.

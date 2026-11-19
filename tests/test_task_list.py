@@ -3,6 +3,7 @@ plan 4.4 (with both G5 drop settings), the /v1/tasks and /v1/agent/tasks routes,
 others" prompt line, the label setting and the reserved review hook."""
 import asyncio
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -134,6 +135,17 @@ tasks = {a.title: a for a in book.list(bot.id)}
 assert "new on 0.11.10" in tasks and "edited by 0.11.3" in tasks, tasks
 assert book.events(tasks["new on 0.11.10"].id)
 needs_you.needs_you(store)
+if __version__ == "0.11.9":
+    # its positional INSERT INTO agent_messages (bot-msg, desk message) and the other writers of
+    # the tables 0.11.10 widened (bots, jobs, messages)
+    from botoffice.store import now
+    bea = store.find_bot("Bea")
+    store.create_bot("Cy", "", "codex", None)
+    _msg, chat_job = store.enqueue_message(bot, "p", "t", None, "chat", None, None, None)
+    store.add_message(bot.id, "assistant", "x")
+    _msg, inbox_job, sent = store.enqueue_agent_message(bea, bot, "hi from 0.11.9", None, now().isoformat())
+    store.create_agent_message(bot.id, bea.id, "reply", chat_job.id, sent["thread_id"], 2)
+    assert {m["body"] for m in store.list_agent_messages()} >= {"hi from 0.11.9", "reply"}
 store.delete_bot(store.find_bot("Bea").id)
 print("ok")
 '''
@@ -158,6 +170,7 @@ def test_rollback_code_works_on_the_migrated_database(tmp_path, release, version
     book.agent_create(bea.id, {"title": "cross-bot"}, for_bot=ada.id)
     book.update(item.id, {"goal": "x"}, expected_version=1)
     book.agent_edit(item.id, ada.id, {"title": "new on 0.11.10"}, 2)  # marks bot_edited
+    store.enqueue_agent_message(bea, ada, "steer or queue on 0.11.10", None, "9999")  # writes the link side table
     script = tmp_path / "rollback.py"
     script.write_text(ROLLBACK_SCRIPT)
     env = {**os.environ, "PYTHONPATH": str(old / "src")}
@@ -170,6 +183,55 @@ def test_rollback_code_works_on_the_migrated_database(tmp_path, release, version
     assert titles["edited by 0.11.3"].priority == "normal" and titles["edited by 0.11.3"].bot_edited == []
     # the old code leaves the new columns alone
     assert titles["new on 0.11.10"].priority == "urgent" and titles["new on 0.11.10"].bot_edited == ["title"]
+
+
+def _positional_inserts(release: str) -> list[tuple[str, str, int]]:
+    """(file, table, value count) of every ``INSERT INTO t VALUES (...)`` (no column list) in *release*."""
+    files = subprocess.run(["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", release, "src"],
+                           capture_output=True, text=True, check=True).stdout.split()
+    found = []
+    for name in files:
+        if not name.endswith(".py"):
+            continue
+        text = subprocess.run(["git", "-C", str(ROOT), "show", f"{release}:{name}"], capture_output=True, text=True,
+                              check=True).stdout
+        for table, values in re.findall(r"INSERT(?: OR \w+)? INTO (\w+) VALUES \(([^)]*)\)", text):
+            found.append((name, table, len(values.split(","))))
+    return found
+
+
+def test_rollback_positional_inserts_fit_the_migrated_tables(tmp_path):
+    """Every positional INSERT of 0.11.9 (the rollback target) supplies as many values as the
+    migrated table has columns (0.11.10 adds no column to such a table: agent_messages' links
+    live in agent_message_links)."""
+    if not shutil.which("git") or subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", RELEASE_0_11_9],
+                                                 capture_output=True, check=False).returncode:
+        pytest.skip("the 0.11.9 release commit is not available")
+    inserts = _positional_inserts(RELEASE_0_11_9)
+    assert {table for _name, table, _count in inserts} >= {"agent_messages", "questions", "agent_tokens"}
+    store = JobStore(tmp_path / "agentdesk.sqlite3")
+    with closing(store._connect()) as db:
+        for name, table, count in inserts:
+            columns = len(db.execute(f"PRAGMA table_info({table})").fetchall())
+            assert columns == count, f"{name}: INSERT INTO {table} gives {count} values, the table has {columns}"
+
+
+def test_prerelease_agent_message_columns_move_to_the_side_table(tmp_path):
+    """A database opened by a 0.11.10 pre-release (link columns on agent_messages) is un-widened."""
+    path = tmp_path / "agentdesk.sqlite3"
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("CREATE TABLE agent_messages (id TEXT PRIMARY KEY, from_bot TEXT NOT NULL, to_bot TEXT NOT NULL, "
+                   "body TEXT NOT NULL, job_id TEXT NOT NULL UNIQUE, thread_id TEXT NOT NULL, hop INTEGER NOT NULL, "
+                   "created_at TEXT NOT NULL, steered_into TEXT, reply_to TEXT, sender_message_id INTEGER, "
+                   "target_message_id INTEGER)")
+        db.execute("CREATE INDEX agent_messages_steered ON agent_messages (steered_into)")
+        db.execute("INSERT INTO agent_messages VALUES ('m1','a','b','hi','steer:m1','m1',1,'2026-11-18','j9',NULL,4,5)")
+        db.commit()
+    store = JobStore(path)
+    with closing(store._connect()) as db:
+        assert len(db.execute("PRAGMA table_info(agent_messages)").fetchall()) == 8
+        row = db.execute("SELECT * FROM agent_messages_x WHERE id='m1'").fetchone()
+    assert (row["steered_into"], row["sender_message_id"], row["target_message_id"]) == ("j9", 4, 5)
 
 
 # --- stage view ---
