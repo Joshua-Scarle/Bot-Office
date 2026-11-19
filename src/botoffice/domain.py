@@ -94,6 +94,8 @@ class Job(BaseModel):
     continued_from: UUID | None = None
     # 0.11.10: the kind of automatic turn (continuation.AUTO_KINDS), None for owner/routine/bot-message turns
     auto_kind: str | None = None
+    # 0.11.14: a slash command turn, JSON {"name","args","mode"} (slash.encode_slash); None for every other turn
+    slash: str | None = None
     bot_name: str | None = Field(default=None, exclude=True)
     api_url: str | None = Field(default=None, exclude=True)
     agent_token: str | None = Field(default=None, exclude=True)

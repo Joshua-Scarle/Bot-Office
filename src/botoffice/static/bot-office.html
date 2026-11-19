@@ -173,6 +173,21 @@ button.file-chip:hover { border-color: var(--accent, #6385ad); }
 #image-view img { max-width: 85vw; max-height: 80vh; }
 .composer-inner { max-width: 820px; margin: 0 auto; display: grid; gap: 8px; }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.slash-list { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 6; margin: 0; padding: 4px; list-style: none; max-height: 300px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 -6px 20px rgba(0, 0, 0, .4); }
+.slash-list li { display: grid; grid-template-columns: minmax(110px, auto) 1fr auto; gap: 10px; align-items: baseline; padding: 6px 8px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.slash-list li.active { background: var(--line); }
+.slash-list li .slash-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); }
+.slash-list li .slash-desc { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-list li .slash-tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; white-space: nowrap; }
+.slash-list li.grey { cursor: default; }
+.slash-list li.grey .slash-name { color: var(--muted); text-decoration: line-through; text-decoration-color: transparent; font-weight: 500; }
+.slash-list li.grey .slash-desc::before { content: "Unavailable: "; color: var(--warn); }
+.slash-list li.note { display: block; color: var(--muted); cursor: default; font-size: 12px; }
+.composer-inner { position: relative; }
+#slash-confirm { width: min(440px, calc(100vw - 24px)); }
+#slash-confirm form { padding: 18px; display: grid; gap: 12px; }
+#slash-confirm p { margin: 0; }
+#slash-confirm menu { display: flex; justify-content: flex-end; gap: 8px; margin: 0; padding: 0; }
 .composer textarea { resize: none; min-height: 46px; max-height: 220px; border-radius: 12px; }
 .status { font-size: 12px; color: var(--muted); min-height: 1.2em; }
 .status.bad { color: var(--danger); }
@@ -364,9 +379,10 @@ dialog textarea { min-height: 90px; resize: vertical; }
         <div id="attachment-list" class="attachment-list"></div>
         <label id="queue-option" hidden><input id="queue-next" type="checkbox"> Send after this turn instead of steering</label>
         <input id="image-file" type="file" multiple hidden>
+        <ul id="slash-list" class="slash-list" role="listbox" aria-label="Slash commands" hidden></ul>
         <div class="composer-row">
           <button id="attach" type="button" title="Attach files or images" aria-label="Attach files or images">📎</button>
-          <textarea id="text" rows="1" placeholder="Message (Ctrl+V or drop files to attach)" aria-label="Message"></textarea>
+          <textarea id="text" rows="1" placeholder="Message (Ctrl+V or drop files to attach)" aria-label="Message" title="Type / for this bot's CLI commands" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-controls="slash-list"></textarea>
           <button id="mic" type="button" title="Dictate (Ctrl+Shift+M)" aria-label="Dictate" aria-pressed="false" hidden>🎤</button>
           <button id="stop" type="button" class="danger" title="Stop the turn that is running" hidden>Stop</button>
           <button id="send" class="primary">Send</button>
@@ -548,6 +564,13 @@ dialog textarea { min-height: 90px; resize: vertical; }
   <div id="agent-chat-title"></div>
   <div id="agent-chat-list" role="log"></div>
   <div class="agent-chat-foot"><button type="button" id="agent-chat-close">Close Chat</button></div>
+</dialog>
+<dialog id="slash-confirm" aria-labelledby="slash-confirm-title">
+  <form method="dialog">
+    <h2 id="slash-confirm-title">Confirm command</h2>
+    <p id="slash-confirm-text"></p>
+    <menu><button value="cancel" id="slash-confirm-cancel">Cancel</button><button value="ok" id="slash-confirm-ok" class="primary">Confirm</button></menu>
+  </form>
 </dialog>
 <dialog id="image-view"><button type="button" id="image-close">Close</button><div><img id="image-full" alt="Attached image"></div></dialog>
 <script>
@@ -976,7 +999,7 @@ async function selectBot(id) {
   const clicked = state.bots.find((b) => b.id === id);
   const click = { revision: clicked ? clicked.read_revision || 0 : 0,
                   synced: api("/v1/bots/" + id).catch(() => null) };
-  if (state.selected !== id) { draftRevision++; clearImages(); clearImageCache(); state.editingMsg = null; $("queue-next").checked = false; stopDictation(); stopPlayback(); }
+  if (state.selected !== id) { closeSlash(); draftRevision++; clearImages(); clearImageCache(); state.editingMsg = null; $("queue-next").checked = false; stopDictation(); stopPlayback(); }
   state.selected = id;
   rememberBot(id);
   state.msgSig = "";
@@ -2089,13 +2112,22 @@ $("show-archived").onclick = () => {
   loadMessages().catch(handleError);
 };
 
+let submitting = false;
 $("composer").onsubmit = async (event) => {
   event.preventDefault();
   const bot = currentBot();
   const revision = draftRevision;
   const draft = $("text").value;
   const text = draft.trim();
-  if (!bot || (!text && !pendingImages.length) || pendingImages.some((item) => !item.id || item.bot !== bot.id) || sendingImages) return;
+  if (!bot || (!text && !pendingImages.length)) return;
+  if (text.startsWith("/") && !pendingImages.length) {
+    if (submitting) return;  // the list may still be loading: a second Enter must not send the text twice
+    submitting = true;
+    let handled;
+    try { handled = await trySlash(bot, text); } finally { submitting = false; }
+    if (handled) return;
+  }
+  if (pendingImages.some((item) => !item.id || item.bot !== bot.id) || sendingImages) return;
   const sentImages = [...pendingImages];
   const body = { text: text || (sentImages.every((item) => item.file) ? "Please see the attached files." : sentImages.some((item) => item.file) ? "Please see the attachments." : "Please see attached images."), attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
@@ -2128,6 +2160,222 @@ $("text").addEventListener("keydown", (event) => {
     $("composer").requestSubmit();
   }
 });
+
+
+/* ---- slash commands: logic (run by tests/test_slash_ui.py with node) ---- */
+// What is typed before the caret is a command query only while it is one token that starts the message.
+function slashQuery(text, caret) {
+  const m = /^\/([^\s]*)$/.exec(String(text).slice(0, caret));
+  return m ? m[1] : null;
+}
+// Name matches first (prefix before substring), then description matches; case-insensitive; the order of the list is kept inside a group.
+function slashFilter(commands, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return commands.slice();
+  const starts = [], inName = [], inDesc = [];
+  for (const c of commands) {
+    const n = c.name.toLowerCase();
+    if (n.startsWith(q)) starts.push(c);
+    else if (n.includes(q)) inName.push(c);
+    else if ((c.description || "").toLowerCase().includes(q)) inDesc.push(c);
+  }
+  return [...starts, ...inName, ...inDesc];
+}
+// Up/Down wrap around; Home/End jump. Returns the new active index (-1 when the list is empty).
+function slashMove(index, key, count) {
+  if (!count) return -1;
+  if (key === "ArrowDown") return index < 0 || index >= count - 1 ? 0 : index + 1;
+  if (key === "ArrowUp") return index <= 0 ? count - 1 : index - 1;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  return index;
+}
+// "/name args" to { name, args }; null when the text is not a slash line.
+function slashSplit(text) {
+  const m = /^\/([A-Za-z0-9][A-Za-z0-9_.:\/-]{0,79})(?:[ \t]+([\s\S]*))?$/.exec(String(text).trim());
+  return m ? { name: m[1], args: (m[2] || "").trim() } : null;
+}
+function slashFind(commands, name) { return (commands || []).find((c) => c.name === name) || null; }
+function slashTag(c) {
+  if (c.action === "map") return "Bot Office";
+  if (c.source === "custom") return "custom";
+  return ["skill", "plugin", "mcp"].includes(c.kind) ? c.kind : "";
+}
+function slashDescription(c) {
+  return c.action === "grey" ? (c.reason || "cannot run headless") : (c.description || "");
+}
+
+/* ---- slash commands: the popup in the chat box ---- */
+const slashUi = { open: false, active: -1, shown: [], query: "", dismissed: null, loading: null };
+slashUi.cache = new Map();
+function slashKey(bot) { return bot.id + "|" + bot.default_provider; }
+async function slashCommands(bot, refresh, bypass) {
+  const key = slashKey(bot);
+  const hit = slashUi.cache.get(key);
+  if (hit && !refresh && !bypass && Date.now() - hit.at < 600000) return hit.data;
+  if (!slashUi.loading || slashUi.loading.key !== key) {
+    const promise = api("/v1/bots/" + bot.id + "/slash-commands" + (refresh ? "?refresh=1" : ""))
+      .then((data) => { slashUi.cache.set(key, { at: data.source === "fallback" ? Date.now() - 570000 : Date.now(), data }); return data; })
+      .finally(() => { if (slashUi.loading && slashUi.loading.key === key) slashUi.loading = null; });
+    slashUi.loading = { key, promise };
+  }
+  return slashUi.loading.promise;
+}
+function closeSlash() {
+  slashUi.open = false; slashUi.active = -1; slashUi.shown = [];
+  $("slash-list").hidden = true;
+  $("text").setAttribute("aria-expanded", "false");
+  $("text").removeAttribute("aria-activedescendant");
+}
+function renderSlash(data) {
+  const list = $("slash-list");
+  const rows = slashUi.shown;
+  if (slashUi.active >= rows.length) slashUi.active = rows.length - 1;
+  const items = rows.map((c, i) => {
+    const li = el("li", (i === slashUi.active ? "active " : "") + (c.action === "grey" ? "grey" : ""));
+    li.id = "slash-opt-" + i;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", i === slashUi.active ? "true" : "false");
+    if (c.action === "grey") li.setAttribute("aria-disabled", "true");
+    li.append(el("span", "slash-name", "/" + c.name), el("span", "slash-desc", slashDescription(c)), el("span", "slash-tag", slashTag(c)));
+    li.title = c.action === "grey" ? "Unavailable: " + slashDescription(c) : c.description || "";
+    li.onmousedown = (event) => { event.preventDefault(); pickSlash(c); };
+    return li;
+  });
+  if (!rows.length) {
+    const none = el("li", "note", data ? "No matching command" : "Loading commands…");
+    none.setAttribute("role", "option"); none.setAttribute("aria-disabled", "true"); none.id = "slash-opt-none";
+    items.push(none);
+  } else if (data && data.note) {
+    const note = el("li", "note", data.engine ? data.label + " " + (data.version || "") + ": " + data.note : data.note);
+    note.setAttribute("role", "presentation");
+    items.push(note);
+  }
+  list.replaceChildren(...items);
+  list.hidden = false;
+  $("text").setAttribute("aria-expanded", "true");
+  if (slashUi.active >= 0) { $("text").setAttribute("aria-activedescendant", "slash-opt-" + slashUi.active); items[slashUi.active]?.scrollIntoView({ block: "nearest" }); }
+  else $("text").removeAttribute("aria-activedescendant");
+}
+async function updateSlash() {
+  const box = $("text"), bot = currentBot();
+  const query = bot ? slashQuery(box.value, box.selectionStart ?? box.value.length) : null;
+  if (query === null || slashUi.dismissed === box.value) { closeSlash(); return; }
+  slashUi.open = true; slashUi.query = query;
+  const hit = slashUi.cache.get(slashKey(bot));
+  if (!hit) { slashUi.shown = []; slashUi.active = -1; renderSlash(null); }
+  let data;
+  try { data = await slashCommands(bot); }
+  catch (err) { closeSlash(); if (!(err instanceof AuthError)) setStatus("Could not load this bot's slash commands: " + (err && err.message || err)); return; }
+  // the box may have changed while the list loaded
+  const now = slashQuery(box.value, box.selectionStart ?? box.value.length);
+  if (now === null || currentBot() !== bot || slashUi.dismissed === box.value) { closeSlash(); return; }
+  slashUi.shown = slashFilter(data.commands, now);
+  const before = slashUi.shown[slashUi.active];
+  if (slashUi.active < 0 || !before || slashUi.query !== now) slashUi.active = slashUi.shown.length ? 0 : -1;
+  slashUi.query = now;
+  renderSlash(data);
+}
+function pickSlash(c) {
+  const box = $("text");
+  closeSlash();
+  box.value = "/" + c.name + " ";
+  box.setSelectionRange(box.value.length, box.value.length);
+  box.focus();
+  draftRevision++; autoGrow();
+  if (c.action === "grey") setStatus("/" + c.name + " is unavailable: " + slashDescription(c));
+  else setStatus("");
+}
+$("text").addEventListener("input", () => { slashUi.dismissed = null; updateSlash(); });
+$("text").addEventListener("click", () => updateSlash());
+$("text").addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== $("text")) closeSlash(); }, 120));  // a stale timer must not close a list opened since
+// registered in the capture phase so that Enter picks a command instead of sending the message
+$("text").addEventListener("keydown", (event) => {
+  if (!slashUi.open || event.isComposing) return;
+  const rows = slashUi.shown;
+  if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); slashUi.dismissed = $("text").value; closeSlash(); return; }
+  if (!rows.length) return;  // "No matching command": Enter sends the text as a normal message
+  if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    slashUi.active = slashMove(slashUi.active, event.key, rows.length);
+    renderSlash(slashUi.cache.get(slashKey(currentBot()))?.data || null);
+  } else if (!event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && (event.key === "Enter" || event.key === "Tab")) {
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (rows[slashUi.active]) pickSlash(rows[slashUi.active]);
+  }
+}, true);
+function askConfirm(title, text, okLabel) {
+  return new Promise((resolve) => {
+    const dialog = $("slash-confirm");
+    $("slash-confirm-title").textContent = title;
+    $("slash-confirm-text").textContent = text;
+    $("slash-confirm-ok").textContent = okLabel || "Confirm";
+    dialog.onclose = () => resolve(dialog.returnValue === "ok");
+    dialog.returnValue = "cancel";
+    dialog.showModal();
+    $("slash-confirm-cancel").focus();  // the safe choice is the default
+  });
+}
+// Returns true when the text was a slash command that was handled (run, mapped, or refused with a reason).
+let slashBusy = false;
+async function trySlash(bot, text) {
+  const parts = slashSplit(text);
+  if (!parts) return false;
+  if (slashBusy) { setStatus("A slash command is still being sent."); return true; }  // one at a time; the draft stays in the box
+  const revision = draftRevision;
+  const clearDraft = () => {  // like a normal send: only when the same bot is open and the draft was not edited meanwhile
+    if (state.selected === bot.id && draftRevision === revision && $("text").value.trim() === text.trim()) { $("text").value = ""; autoGrow(); draftRevision++; }
+  };
+  let data;
+  try { data = await slashCommands(bot); } catch (err) { if (err instanceof AuthError) throw err; return false; }
+  let c = slashFind(data.commands, parts.name);
+  if (!c) {  // maybe a command file made in the last minutes: ask once more, bypassing the browser's copy
+    try { data = await slashCommands(bot, false, true); } catch (err) { if (err instanceof AuthError) throw err; return false; }
+    c = slashFind(data.commands, parts.name);
+  }
+  if (!c) return false;  // not one of this bot's commands: an ordinary message, as before
+  closeSlash();
+  if (c.action === "grey") { setStatus("/" + c.name + " is unavailable: " + slashDescription(c)); $("status").classList.add("bad"); return true; }
+  const patch = async (field, value) => {
+    await api("/v1/bots/" + bot.id, { method: "PATCH", body: JSON.stringify({ [field]: value }) });
+    await loadBots();
+    setStatus(field === "model" ? "Model set to " + value + " (used from the next turn)." : "Effort set to " + value + " (used from the next turn).");
+  };
+  slashBusy = true;
+  try {
+    if (c.action === "map") {
+      if (c.target === "new") {
+        if (bot.activity === "running" || bot.activity === "queued") { setStatus("Cannot start a fresh session while " + bot.name + " is working; try again when it is idle."); $("status").classList.add("bad"); return true; }
+        if (!(await askConfirm("Start a fresh session?", "Start a fresh " + bot.default_provider + " session for " + bot.name + " on its next turn? Its chat history, memory and WORKING.md are kept; the CLI forgets the conversation it was in.", "Start fresh session"))) { setStatus("Cancelled."); return true; }
+        const out = await api("/v1/bots/" + bot.id + "/slash", { method: "POST", body: JSON.stringify({ name: c.name, args: parts.args, confirm: true }) });
+        clearDraft();
+        setStatus(out.reset && out.reset.length ? "Fresh session: " + bot.name + " starts a new " + out.reset.join(", ") + " session on its next turn." : "No saved session to reset.");
+      } else if (parts.args) {
+        await patch(c.target === "model" ? "model" : "effort", parts.args);
+        clearDraft();
+      } else {
+        clearDraft();
+        await openDialog(bot);
+        const focus = $(c.target === "model" ? "f-model" : "f-effort");
+        if (focus) focus.focus();
+        setStatus(c.target === "model" ? "Pick the model in Settings." : "Pick the effort level in Settings.");
+      }
+      return true;
+    }
+    const posted = await api("/v1/bots/" + bot.id + "/slash", { method: "POST", body: JSON.stringify({ name: c.name, args: parts.args }) });
+    clearDraft();
+    if (!posted?.message?.steer_job_id) bot.activity = bot.activity === "running" ? "running" : "queued";
+    renderHeader(); renderBots();
+    setStatus(posted.delivery === "queue" && posted.delivery_note ? posted.delivery_note : "");
+    state.msgSig = "";
+    loadMessages().then(() => { const box = $("messages"); box.scrollTop = box.scrollHeight; }).catch(handleError);
+  } catch (err) {
+    handleError(err);
+  } finally {
+    slashBusy = false;
+  }
+  return true;
+}
 
 /* ---- dictation: record, decode in the browser, send 16 kHz mono WAV; never sends the message ---- */
 const MIC_MAX_MS = 120000;

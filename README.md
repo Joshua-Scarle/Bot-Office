@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.13. What changed is recorded below: [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112-deployed-2026-11-19), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.14. What changed is recorded below: [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112-deployed-2026-11-19), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,28 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.11.14 (deployed 2026-11-19)
+
+**Slash commands for every bot CLI.** Type `/` at the start of the chat box and the list of that bot's CLI commands opens with a short description each. It filters as you type; Up/Down move, Enter or Tab pick, Esc closes. Picking fills the box (add arguments if you like); the next Enter sends it. A line that starts with `/` but is not one of the bot's commands (for example a path) is sent as an ordinary message.
+
+| Engine | Where the list comes from | What a pick does |
+|---|---|---|
+| Claude Code | the CLI's own list: the `init` event of a local `claude -p /context` run (builtins, skills, plugin and your custom commands) | `run`: the line `/name args` is the whole turn, so Claude Code expands it itself |
+| Codex | **documented built-ins** (marked `documented`; Codex has no machine-readable list) plus `~/.codex/prompts/*.md` | custom prompts are expanded by Bot Office (`$ARGUMENTS`, `$1`..`$9`) and sent as the message; TUI-only built-ins are greyed |
+| OpenCode | the CLI's own list: a short-lived `opencode serve` on loopback with a random password, `GET /command` | `command`: `opencode run --command name -- args` |
+| Cursor Agent | **documented built-ins** (marked `documented`) plus `.cursor/commands` and `~/.cursor/commands` | like Codex: expanded by Bot Office |
+| Antigravity | the CLI's own list: `agy -p /help` | `run`: `agy -p "/name args"` |
+
+Each entry carries its `source` (`cli`, `custom`, `skill`, `plugin`, `documented`, `fallback`) in `GET /v1/bots/{id}/slash-commands`; `fallback` means the CLI could not be asked and a small built-in list is shown (retried after 60 s). The list is cached per engine, CLI version and custom-file set in memory and in `data/slash-cache.json` (mode 0600, at most 8 sets per engine); `?refresh=1` asks again.
+
+**Controls of Bot Office.** `/model` and `/effort` open the Settings field (with an argument they set it, used from the next turn); `/new` and `/clear` start a fresh CLI session on the next turn after a confirm dialog (chat history, memory and WORKING.md are kept; the server also requires `confirm=true`, and refuses while the bot has a job). Bot Office has no manual compaction control, so `/compact` runs only where the CLI does it headless (Claude Code) and is greyed elsewhere. Commands that need a terminal (pickers, `/status`, `/exit`...) are shown greyed with the reason and are not run.
+
+**Never surfaced or run:** anything that logs in or out or handles credentials (login, logout, auth, connect, setup-token, api-key...). They are hidden from the list and refused by the server (403). Official CLIs are used unmodified and no token is read or stored.
+
+A slash command is its own turn: it is queued behind a running turn and never steered into one, and a message sent while one runs waits behind it. Command files are read without following symlinks. Server: `POST /v1/bots/{id}/slash` with `{name, args, confirm}`.
+
+Live-tested on all five engines with throwaway bots. Rollback: one additive column, `jobs.slash` (TEXT); an older version ignores it, so the rollback is code only (check out the previous tree and restart).
 
 ## What changed in 0.11.13 (deployed 2026-11-19)
 

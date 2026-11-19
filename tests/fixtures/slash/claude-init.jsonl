@@ -1,0 +1,3 @@
+{"type":"noise"}
+{"type": "system", "subtype": "init", "cwd": "/tmp/x", "session_id": "s", "slash_commands": ["deep-research", "code-review:code-review", "railway:use-railway", "my-team-cmd", "project-cmd", "design", "dataviz", "simplify", "doctor", "color", "focus", "reload-plugins", "compact", "clear", "context", "usage", "model", "effort", "config", "fast", "agents", "login", "logout", "__remote-workflow", "mcp", "init", "insights"], "terminal_slash_commands": ["doctor", "color", "focus", "reload-plugins"], "claude_code_version": "2.1.319"}
+{"type":"result"}

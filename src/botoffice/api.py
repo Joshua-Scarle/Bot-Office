@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import approval_classes, attachments, baseline, continuation, grok_bridge, isolation, needs_you, safefs, vnc
+from . import slash as slash_mod
 from . import rules as action_rules
 from . import usage as budgets
 from .auth import auth_dependency, bearer
@@ -312,6 +313,13 @@ class AgentRoutineUpdate(BaseModel):
         return None if value is None else _check_cron(value)
 
 
+class SlashRun(BaseModel):
+    """A picked slash command (0.11.14). *confirm* is required for the destructive ones (new session)."""
+    name: str = Field(min_length=1, max_length=80)
+    args: str = Field(default="", max_length=slash_mod.MAX_ARGS)
+    confirm: bool = False
+
+
 class BridgeSend(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -419,6 +427,7 @@ def create_app(
     store = store or JobStore(settings.db_path, initialize=False)
     providers = providers or _default_providers(settings)
     scheduler = Scheduler(store, settings, providers)
+    slash_catalog = slash_mod.SlashCatalog(providers, settings.data_dir)
     voice = voice or VoiceService(settings)
 
     async def reap_voice() -> None:
@@ -490,6 +499,8 @@ def create_app(
     def _steer_blocked(bot: Bot):
         """For store.post_steer_explained: why this engine cannot take a message while *job* runs."""
         def note(job: Job) -> str | None:
+            if job.slash:
+                return "A slash command turn cannot take a message while it runs, so yours runs as the next turn."
             adapter = providers.get(job.provider)
             check = getattr(adapter, "steer_unavailable_note", None)
             return check(job.model_copy(update={"cli_access": bot.cli_access})) if check else None
@@ -911,6 +922,14 @@ def create_app(
         assert updated is not None
         return _with_status([store.bot_unread(bot_id) or updated])[0]
 
+    def _reset_session(bot: Bot) -> dict[str, list[str]]:
+        if any(j.bot_id == bot.id and j.status in {JobStatus.QUEUED, JobStatus.RUNNING} for j in store.list()):
+            raise HTTPException(status_code=409, detail="bot is busy; reset after its current job")
+        bot_dir = memory.bot_dir(bot.id)
+        reset = [name for name, adapter in providers.items()
+                 if hasattr(adapter, "reset_session") and adapter.reset_session(bot_dir)]
+        return {"reset": reset}
+
     @app.post("/v1/bots/{bot_id}/session/reset", dependencies=[Depends(auth)])
     async def reset_bot_session(bot_id: UUID) -> dict[str, list[str]]:
         """Forget the bot's saved provider sessions; its next turn starts one fresh session.
@@ -918,13 +937,63 @@ def create_app(
         Chat history, memory.md and WORKING.md are kept (the fresh session is seeded with
         WORKING.md and the last few messages). Refused while the bot has a queued or running job.
         """
+        return _reset_session(_bot(bot_id))
+
+    @app.get("/v1/bots/{bot_id}/slash-commands", dependencies=[Depends(auth)])
+    async def list_slash_commands(bot_id: UUID, refresh: bool = False) -> dict[str, Any]:
+        """The slash commands of this bot's engine (0.11.14), with what each does here (see slash.py)."""
         bot = _bot(bot_id)
-        if any(j.bot_id == bot.id and j.status in {JobStatus.QUEUED, JobStatus.RUNNING} for j in store.list()):
-            raise HTTPException(status_code=409, detail="bot is busy; reset after its current job")
-        bot_dir = memory.bot_dir(bot.id)
-        reset = [name for name, adapter in providers.items()
-                 if hasattr(adapter, "reset_session") and adapter.reset_session(bot_dir)]
-        return {"reset": reset}
+        data = await slash_catalog.commands(bot.default_provider, memory.bot_dir(bot.id), refresh=refresh)
+        data["commands"] = [{k: v for k, v in item.items() if k != "file"} for item in data["commands"]]
+        return data
+
+    @app.post("/v1/bots/{bot_id}/slash", dependencies=[Depends(auth)])
+    async def run_slash_command(bot_id: UUID, body: SlashRun) -> dict[str, Any]:
+        """Run a picked slash command: through the CLI (a queued turn), as a Bot Office control, or refuse it."""
+        bot = _bot(bot_id)
+        name = body.name.strip().lstrip("/")
+        if slash_mod.is_auth(name):
+            raise HTTPException(status_code=403, detail="login and authentication commands are never run by Bot Office")
+        if not slash_mod.NAME_RE.match(name):
+            raise HTTPException(status_code=422, detail="invalid command name")
+        item = await slash_catalog.resolve(bot.default_provider, name, memory.bot_dir(bot.id))
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"/{name} is not a command of {bot.default_provider}")
+        args = body.args.strip()
+        action = item["action"]
+        if action == "grey":
+            raise HTTPException(status_code=422, detail=item.get("reason") or "cannot run headless")
+        if action == "map":
+            target = item["target"]
+            if target == slash_mod.NEW:
+                if not body.confirm:
+                    raise HTTPException(status_code=409, detail={
+                        "confirm_required": True,
+                        "message": f"Start a fresh {bot.default_provider} session for {bot.name}? "
+                                   "Chat history, memory and WORKING.md are kept."})
+                return {"action": "map", "target": target, **_reset_session(bot)}
+            return {"action": "map", "target": target, "args": args}
+        mode = {"run": "raw", "command": "command", "expand": "expand"}[action]
+        text = slash_mod.slash_job_text(name, args)
+        prompt = text
+        if mode == "expand":
+            prompt = await asyncio.to_thread(slash_mod.expand_file, item["file"], args)
+            if not prompt.strip():
+                raise HTTPException(status_code=422, detail=f"/{name} is empty")
+        encoded = slash_mod.encode_slash(name, args, mode)
+
+        def mark(db, job: Job) -> None:
+            db.execute("UPDATE jobs SET slash=? WHERE id=?", (encoded, str(job.id)))
+            job.slash = encoded
+
+        try:
+            message, job = scheduler.turns.post_message(bot, text, prompt=prompt, hook=mark)
+        except TurnError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        queued = any(str(j.id) != str(job.id) for j in store.pending_jobs(bot.id))
+        return {"action": action, "message": jsonable_encoder(message), "job": jsonable_encoder(job),
+                "delivery": "queue" if queued else "start",
+                "delivery_note": "Queued as its own turn behind the bot's other work." if queued else None}
 
     @app.delete("/v1/bots/{bot_id}", status_code=204, dependencies=[Depends(auth)])
     async def delete_bot(bot_id: UUID) -> None:
