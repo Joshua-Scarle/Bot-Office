@@ -1,5 +1,5 @@
-"""0.11.4 task lists (plan P2): migration, the single versioned writer, the permission matrix of
-plan 4.4 (with both G5 drop settings), the /v1/tasks and /v1/agent/tasks routes, the "changes by
+"""0.11.4 task lists: migration, the single versioned writer, the permission matrix (with both
+drop settings), the /v1/tasks and /v1/agent/tasks routes, the "changes by
 others" prompt line, the label setting and the reserved review hook."""
 import asyncio
 import os
@@ -216,6 +216,26 @@ def test_rollback_positional_inserts_fit_the_migrated_tables(tmp_path):
             assert columns == count, f"{name}: INSERT INTO {table} gives {count} values, the table has {columns}"
 
 
+def test_stores_opened_at_once_do_not_race_on_the_links_view(tmp_path):
+    path = tmp_path / "db.sqlite3"
+    JobStore(path)
+    errors, start = [], threading.Barrier(8)
+
+    def open_store():
+        start.wait()
+        try:
+            JobStore(path)
+        except Exception as exc:  # noqa: BLE001 - any failure is the bug
+            errors.append(repr(exc))
+
+    threads = [threading.Thread(target=open_store) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+
+
 def test_prerelease_agent_message_columns_move_to_the_side_table(tmp_path):
     """A database opened by a 0.11.10 pre-release (link columns on agent_messages) is un-widened."""
     path = tmp_path / "agentdesk.sqlite3"
@@ -331,7 +351,7 @@ def test_agent_edit_conflict_over_http_and_id_prefix(rig):
     assert stale.json()["changes"][-1]["actor"] == f"bot:{ada.id}"
 
 
-# --- permission matrix (plan 4.4), one test per cell ---
+# --- permission matrix, one test per cell ---
 
 def test_read_any_list_owner_assignee_and_other_bot(rig):
     client, store, (ada, _bea, _cy), tokens = rig
@@ -348,7 +368,7 @@ def test_read_any_list_owner_assignee_and_other_bot(rig):
 def test_owner_adds_a_task_to_any_list(rig):
     client, _, (ada, *_), _ = rig
     item = client.post(f"/v1/bots/{ada.name}/tasks", headers=H, json={"title": "t", "budget_turns": 150}).json()
-    # G10: a task from the form starts on its own
+    # a task from the form starts on its own
     assert item["status"] == "active" and item["budget_turns"] == 150 and item["position"] == 1
 
 
@@ -401,7 +421,7 @@ def test_assignee_edits_done_when_of_bot_made_task_but_never_budgets(rig):
     item = Assignments(store).agent_create(bea.id, {"title": "from Bea"}, for_bot=ada.id)
     url = f"/v1/agent/tasks/{item.id}"
     assert client.patch(url, headers=tokens["Ada"], json={"version": 1, "done_when": "x"}).json()["done_when"] == "x"
-    # budget fields are refused by the matrix (fix 11: 403, nothing changes)
+    # budget fields are refused by the matrix (403, nothing changes)
     assert client.patch(url, headers=tokens["Ada"], json={"version": 2, "budget_turns": 200}).status_code == 403
 
 
@@ -478,7 +498,7 @@ def test_assignee_cannot_drop_owner_task_under_owner_only(rig, monkeypatch):
 
 
 def test_drop_owner_task_default_is_with_note(rig, monkeypatch):
-    """G5: by default (and for unknown values) the assignee may drop an owner task with a note."""
+    """By default (and for unknown values) the assignee may drop an owner task with a note."""
     client, store, (ada, *_), tokens = rig
     for value in (None, "nonsense"):
         if value is None:
@@ -505,7 +525,7 @@ def test_assignee_drops_owner_task_with_note_when_allowed_and_needs_you_shows_it
     assert "already done by Bea" in needs[0]["ask"] and needs[0]["actions"] == ["dismiss"]
     client.post("/v1/needs-you/dismiss", headers=H, json={"assignment_id": str(item.id)})
     assert not [e for e in client.get("/v1/needs-you", headers=H).json() if e.get("assignment_id") == str(item.id)]
-    # the owner dropping his own task is no Needs-you item
+    # the owner dropping the owner's own task is no Needs-you item
     other = Assignments(store).create(ada.id, {"title": "mine"})
     Assignments(store).update(other.id, {"status": "dropped"})
     assert not [e for e in client.get("/v1/needs-you", headers=H).json() if e.get("assignment_id") == str(other.id)]
@@ -513,7 +533,7 @@ def test_assignee_drops_owner_task_with_note_when_allowed_and_needs_you_shows_it
 
 def test_other_bot_drops_only_tasks_it_created(rig, monkeypatch):
     client, store, (ada, bea, cy), tokens = rig
-    monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "with_note")  # G5 is about the assignee only
+    monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "with_note")  # the drop setting is about the assignee only
     book = Assignments(store)
     mine = book.agent_create(bea.id, {"title": "Bea made"}, for_bot=ada.id)
     owners = book.create(ada.id, {"title": "owner made"})
@@ -549,7 +569,7 @@ def test_notes_by_owner_assignee_and_any_other_bot(rig):
                            json={"text": f"from {name}"}).status_code == 204
     notes = [(e["actor"], e["note"]) for e in events(store, item.id) if e["kind"] == "note"]
     assert [note for _, note in notes] == ["the user: from the owner", "Ada: from Ada", "Cy: from Cy"]
-    # fix 7: a note needs no version (never conflicts) but bumps it, so a 409 lists it
+    # a note needs no version (never conflicts) but bumps it, so a 409 lists it
     assert version(store, item.id) == 4
     stale = client.patch(f"/v1/tasks/{item.id}", headers=H, json={"version": 1, "goal": "g"}).json()
     assert [c["kind"] for c in stale["changes"]] == ["note", "note", "note"]
@@ -709,7 +729,7 @@ def test_label_setting_exposed(rig, monkeypatch):
     monkeypatch.delenv("BOT_OFFICE_TASKS_LABEL", raising=False)
     monkeypatch.delenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", raising=False)
     body = client.get("/v1/tasks/settings", headers=H).json()
-    assert body["label"] == "Assignments" and body["bot_drop_owner_tasks"] == "with_note"  # G8, G5 defaults
+    assert body["label"] == "Assignments" and body["bot_drop_owner_tasks"] == "with_note"  # defaults
     monkeypatch.setenv("BOT_OFFICE_TASKS_LABEL", "  Tasks ")
     monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "owner_only")
     body = client.get("/v1/tasks/settings", headers=H).json()
@@ -827,7 +847,7 @@ def test_self_md_describes_cross_bot_rules_and_drop_setting(settings, monkeypatc
     assert "Every bot's list is readable (`bot-task list`; `bot-task help`" in text
     assert "edit only the tasks you created there, and add notes to any task" in text
     assert "a task the user created on your list only the user can drop" in text
-    monkeypatch.delenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS")  # G5 default: with_note
+    monkeypatch.delenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS")  # default: with_note
     text = build_self(bot, job)
     assert "you may drop only with a note saying why" in text
     assert "waits for that bot to pick it up; children too wait for that bot" in text

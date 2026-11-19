@@ -226,7 +226,7 @@ The first statement drains bot messages still waiting to steer a turn (0.11.9 wo
 
 Not built, by design: quiet hours, a general done gate for physical or irreversible results, and a loop that starts open tasks by itself.
 
-**Live end-to-end test.** `scripts/e2e_gui.py` drives a real Chromium (or Chrome with `--channel chrome`) through the UI against a throwaway local Bot-Office with a scripted engine and two bots labelled "E2E test bot" (Enter to send, Settings and approvals, the Approve / Deny card, the bot-to-bot row and panel), or read-only against a running install with `--url`/`--token` (`--send-to` sends one real message with Enter, only to a bot whose name starts with "E2E test"). It ends with a plain PASS/FAIL list. Needs `pip install playwright` and `python -m playwright install chromium`.
+**Live end-to-end test.** `scripts/e2e_gui.py` drives a real Chromium (or Chrome with `--channel chrome`) through the UI against a throwaway local Bot-Office with a scripted engine and two bots labelled "E2E test bot" (Enter to send, Settings and approvals, the Approve / Deny card, the bot-to-bot row and panel), or read-only against a running install with `--url` and the token from `--token-file`, `BOT_OFFICE_TOKEN_FILE` or `BOT_OFFICE_TOKEN` (`--token` still works but is deprecated: it shows in the process list; `--send-to` sends one real message with Enter, only to a bot whose name starts with "E2E test"). It ends with a plain PASS/FAIL list. Needs `pip install playwright` and `python -m playwright install chromium`.
 
 ## What changed in 0.11.9
 
@@ -288,7 +288,7 @@ Roll back by deploying 0.11.3 (tag `backup/pre-cursor-text-0.11.4-20261115`, DB 
 
 ## What changed in 0.11.3 (deployed)
 
-Bots see their peers, schedule, open assignments and recent workspace context in SELF.md, and their open tasks in fresh and resumed prompts. The worklog keeps the last reply paragraph. Progress notes remain separate from replies. Run `python scripts/autonomy_metrics.py --db data/agentdesk.sqlite3 --days 7` for read-only baseline metrics; use `--since YYYY-MM-DD` or `--json` as needed. Roll back by deploying 0.11.2 (tag `backup/pre-autonomy-p0p1-0.11.3-20261115`, DB copy `~/backups/agentdesk.sqlite3.pre-autonomy-p0p1-0.11.3-20261115`); this release makes no data changes. This is phases P0 and P1 of the [bot autonomy plan](docs/plans/bot-autonomy-plan.md); the plan's open questions G1–G10 are still undecided and nothing here depends on them.
+Bots see their peers, schedule, open assignments and recent workspace context in SELF.md, and their open tasks in fresh and resumed prompts. The worklog keeps the last reply paragraph. Progress notes remain separate from replies. Run `python scripts/autonomy_metrics.py --db data/agentdesk.sqlite3 --days 7` for read-only baseline metrics; use `--since YYYY-MM-DD` or `--json` as needed. Roll back by deploying 0.11.2 (tag `backup/pre-autonomy-p0p1-0.11.3-20261115`, DB copy `~/backups/agentdesk.sqlite3.pre-autonomy-p0p1-0.11.3-20261115`); this release makes no data changes. This is phases P0 and P1 of the [bot autonomy plan](docs/plans/bot-autonomy-plan.md); the plan's open questions were still undecided in that release and nothing here depends on them.
 
 ## What changed in 0.11.2 (deployed)
 

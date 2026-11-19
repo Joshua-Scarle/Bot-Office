@@ -153,7 +153,7 @@ def test_a_blocked_reply_still_stops_the_task_loop(settings):
     assert "paused, not blocked" in item_["ask"]
 
 
-# --- caps (G3) ---
+# --- caps ---
 
 def test_per_bot_daily_cap_defers_the_turn_with_a_line_and_needs_you(settings):
     store, scheduler, _, bot, item = task_setup(settings, *fresh(20))
@@ -258,7 +258,7 @@ def test_env_defaults_for_the_caps(monkeypatch):
     assert continuation.load('{"per_bot_day": 5}')["per_bot_day"] == 5  # a saved value wins
 
 
-# --- chat-only bots (G1) ---
+# --- chat-only bots ---
 
 def test_chat_only_bot_never_continues_in_chat(settings):
     store, scheduler, _, bot = chat_setup(settings, fresh(3, "not_done"))
@@ -299,7 +299,7 @@ def test_chat_only_on_the_bot_api(settings):
         assert patched["chat_only"] is True
 
 
-# --- evidence before done (G4) ---
+# --- evidence before done ---
 
 def test_out_of_turn_start_asks_the_one_decide_function(settings, monkeypatch):
     """bot-task start / status continue from another turn (chat, routine, wake-up) is a continuation
@@ -404,7 +404,7 @@ def test_task_settle_twice_queues_one_turn(settings):
     assert len(task_queued(store, item)) == 1
 
 
-# --- the owner speaking resets the chain (G2), and claim order ---
+# --- the owner speaking resets the chain, and claim order ---
 
 def test_owner_steer_into_a_task_turn_resets_the_count(settings):
     holder = {"n": 0}
@@ -493,7 +493,7 @@ def test_bot_task_done_sends_the_evidence(tmp_path):
 
 
 def test_evidence_must_be_fresh_and_long_enough_and_is_shown(settings):
-    """G4 gate: evidence given before the task last became active (rewound, reopened, resumed) does
+    """Evidence given before the task last became active (rewound, reopened, resumed) does
     not count, nor one shorter than evidence_min; the accepted evidence is in the done note, and
     Needs-you shows the last evidence given."""
     store, scheduler, _, bot, item = task_setup(settings, "step\nBOT-OFFICE-STATUS: waiting_on_user — ok?")

@@ -2891,7 +2891,7 @@ async function loadTaskSettings() {
   const settings = await api("/v1/tasks/settings");
   tasksLabel = settings.label;
   taskPriorities = settings.priorities || taskPriorities;
-  // G10: form tasks start on their own unless BOT_OFFICE_FORM_TASKS_START=manual (the box stays editable)
+  // form tasks start on their own unless BOT_OFFICE_FORM_TASKS_START=manual (the box stays editable)
   $("assignment-start").defaultChecked = $("assignment-start").checked = settings.form_tasks_start !== "manual";
   for (const option of $("assignment-priority").options) option.defaultSelected = option.value === settings.default_priority;
   $("assignment-priority").value = settings.default_priority || "normal";
@@ -2952,7 +2952,7 @@ async function loadAssignments() {
       const bar = el("div", "tools-bar");
       const button = (label, fn) => { const b = el("button", "", label); b.type = "button"; b.onclick = fn; bar.append(b); };
       const closed = a.stage === "completed" || a.stage === "dropped";
-      // G10: Start only for a task that has not started (another bot's, or one made with "Start now" off);
+      // Start only for a task that has not started (another bot's, or one made with "Start now" off);
       // a blocked or waiting one continues
       if (!closed && a.status !== "active") button(a.status === "open" ? "Start" : "Continue", () => {
         const used = a.turns_used >= a.budget_turns || a.minutes_used >= a.budget_minutes;

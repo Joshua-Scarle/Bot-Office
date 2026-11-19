@@ -1076,7 +1076,7 @@ class Scheduler:
                         self._queue_pending_steers(key)
 
     def _cancel_dropped(self, job_ids: list[str]) -> None:
-        """P2 Q1: a dropped task's running turns stop (they settle without queueing another)."""
+        """A dropped task's running turns stop (they settle without queueing another)."""
         for job_id in job_ids:
             job = self.store.get(job_id)
             if job:
