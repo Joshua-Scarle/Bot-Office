@@ -141,7 +141,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 
 ## What changed in 0.11.10
 
-**Bots keep working until the task is done.** A chat, API, routine or wake-up turn that ends with `BOT-OFFICE-STATUS: not_done` is now continued automatically in the same session. The chat shows no extra prompts: the bot's bubble stays "Working · continuing, 3 of 10". It stops when the bot reports done, blocked or waiting_on_user, at the owner's limit (default 10 in a row, up to 50), when you press Stop, or when you have a message queued for it. A message you steer into a continuing turn starts a fresh count. It does not run while a question or approval is open, or for assignment turns (they keep their own loop and budget), bot-to-bot replies or watcher runs. A continuation keeps the source of the turn it continues, so unattended turns stay under the unattended rules. Rule 7 of the prompt now says to keep working and to use not_done only for a real pause.
+**Bots keep working until the task is done.** A chat, API, routine or wake-up turn that ends with `BOT-OFFICE-STATUS: not_done` is now continued automatically in the same session. The chat shows no extra prompts: the bot's bubble stays "Working · continuing, 3 of 10". It stops when the bot reports done, blocked or waiting_on_user, at the owner's limit (default 10 in a row, up to 50), when you press Stop, or when you have a message queued for it. A message you steer into a continuing turn starts a fresh count. It does not run while a question or approval is open, or for bot-to-bot replies or watcher runs. Assignment turns use their own loop, but the same rules apply to it (see "One continuation system" below). A continuation keeps the source of the turn it continues, so unattended turns stay under the unattended rules. Rule 7 of the prompt now says to keep working and to use not_done only for a real pause.
 
 **Two pages every bot gets, both editable by the owner:**
 
@@ -152,7 +152,7 @@ Both are inlined in every fresh prompt (system prompt first) and written as `SYS
 
 **The chat shows who wrote what.** Only messages you type use your bubble. Messages between bots (bot-msg, inbox drops, reply copies, one bot handing another an assignment), sent or received, show in the chat only as a time and a row like "2 messages with Bot-Office Lead", with that bot's icon; back-to-back messages with the same bot share one row. Click it to read that conversation in an overlay (both bots' icons and names, formatted text, Close Chat or Esc). A bot's own messages to other bots count toward Unread. Bot-Office's machinery (automatic continuations, assignment "Continue" and "Check" steps, wake-up prompts and "Not done (continuing)" lines) stays out of the chat and the Unread count; Show archived and the Details drawer still show it. Routine prompts, watcher runs and assignment starts appear as small notes, never as your messages. Messages carry `author` (owner, bot, bot_out, bot_in, bot_reply, office, system) and `peer` in the API.
 
-**A real Settings page.** The sidebar's ⚙ Settings opens settings for all bots: Rules for all bots, Bot behavior (auto-continue on/off and its limit; `GET`/`PUT /v1/settings`), Approvals, Engines (sign-in status), Voice, and Advanced (system prompt). Each bot's own settings stay in its chat.
+**A real Settings page.** The sidebar's ⚙ Settings opens settings for all bots: Rules for all bots, Bot behavior (auto-continue, its limits and the automatic-turn caps; `GET`/`PUT /v1/settings`), Approvals, Engines (sign-in status), Voice, and Advanced (system prompt). Each bot's own settings stay in its chat.
 
 **Rarely ask; approvals by class.** Bots no longer ask before every risky step. The owner picks *approval classes*, kinds of action they want done but not on the bot's own, in Settings → Approvals. On by default: sending email or messages, purchases and payments, merging / releasing / force-pushing or pushing to main, admin and system changes (sudo, systemctl, crontab...), and deleting outside the bot's workspace (including deleting through a connector). Off by default: pushing code and posting on GitHub, logging in to other computers, printers and the desktop, and any connector action. You can add your own class (a command pattern or a tool-name pattern), remove it, and set how long an approval waits (60 minutes by default; 0 waits until you answer). Classes apply in every run, your chat included; an owner `allow` action rule still wins for that action. When a bot tries one, the CLI's gate hook stops that one tool call and the bot's chat shows an Approve / Deny card with the whole action. Approve runs exactly that action once in a resume turn (the resume prompt stays out of the chat). Deny, or no answer in time, leaves the task stopped with a one-line note; an expired card can still be approved later. Rule 4 of the rules for all bots now says this: go ahead, Bot-Office asks for you, ask questions only when the goal is unclear or the choice is truly the user's. Which engines can pause, and how, is in [docs/APPROVALS.md](docs/APPROVALS.md): Claude Code, Codex with full access, Cursor and Antigravity through their hooks; opencode and Codex with restricted access cannot be paused; such bots are named in a warning in Settings → Approvals, and their SELF.md tells them never to do those actions themselves but to ask in their reply. API: `approvals` in `GET`/`PUT /v1/settings`; messages carry an `approval` card.
 
@@ -181,6 +181,37 @@ Settings (environment, read on every call; unknown values fall back to the defau
 `GET /v1/tasks/settings` returns the current values.
 
 Rollback: the database changes are additive (new columns, an index and a marker row), and 0.11.9 ignores them. Tasks created on 0.11.10 still run on 0.11.9, without priority or bot-edit marks.
+
+**One continuation system.** The chat auto-continue and the assignment run-until-done loop share one decision (`src/botoffice/continuation.py`; design in [docs/CONTINUATION.md](docs/CONTINUATION.md)). A bot is no longer continued automatically when any of these holds:
+
+- it reported blocked or waiting_on_user, or its reply says it is blocked or needs you (for example "remains blocked", "please send a photo", "can't verify");
+- a question or approval is open, or your message is waiting (an assignment's next step queues behind your message);
+- 3 turns in a row made no progress;
+- 10 automatic turns ran in a row since you last spoke, or the chat limit (10) was reached;
+- the assignment's own turn or minute budget is used;
+- an automatic-turn cap is reached.
+
+Each stop leaves a chat line that says why. A stopped assignment shows in Needs you as "paused, not blocked: ...", and your reply resumes it. Each finished turn is decided once.
+
+- **Caps.** Automatic turns are chat continuations, assignment steps and checks, and wake-ups. Your messages, Start, Reply and routines are not counted. A bot may take 20 automatic turns a day, and all bots together 20 an hour. A turn over a cap is not dropped: it waits until the window slides, and the bot's chat and Needs you name the cap and say you can raise it in Settings → Bot behavior. Saving a cap releases waiting turns at once.
+- **Done needs evidence.** An assignment counts as done only when the bot says how it verified the work: `bot-task done current --evidence "pytest: 14 passed"`. A done without evidence gets one more turn to say so. The second time, the assignment waits for you ("says it is done; no evidence"). Marking it done yourself needs no evidence. Peer review stays opt-in per task.
+- **Chat-only bots.** A checkbox in the bot's dialog (`chat_only` on `POST`/`PATCH /v1/bots`). Such a bot is never continued automatically and gets no assignment steps, checks or wake-ups of its own. Your Start or Reply gives it one turn.
+
+Settings (Settings → Bot behavior, or `PUT /v1/settings` with `{"auto_continue": {...}}`; a saved value beats the environment default):
+
+| key | default | environment default |
+|---|---|---|
+| `enabled` | true | |
+| `max` | 10 (chat chain, 1 to 50) | |
+| `no_progress` | 3 | `BOT_OFFICE_AUTO_NO_PROGRESS` |
+| `consecutive` | 10 | `BOT_OFFICE_AUTO_CONSECUTIVE` |
+| `per_bot_day` | 20, or `"unlimited"` | `BOT_OFFICE_AUTO_TURNS_PER_BOT_DAY` |
+| `per_hour` | 20 (all bots), or `"unlimited"` | `BOT_OFFICE_AUTO_TURNS_PER_HOUR` |
+| `evidence` | true | `BOT_OFFICE_DONE_NEEDS_EVIDENCE` = on/off |
+
+To raise a cap, edit it in Settings → Bot behavior, or for example `PUT /v1/settings {"auto_continue": {"per_bot_day": 40}}`.
+
+Rollback: the migration is additive (`jobs.auto_kind`, `jobs.auto_decision`, `bots.chat_only`, plus new keys in the existing `auto_continue` setting), and older code ignores it. Turns waiting on a cap run once their time passes. Not built, by design: quiet hours, a general done gate for physical or irreversible results, and a loop that starts open tasks by itself.
 
 **Live end-to-end test.** `scripts/e2e_gui.py` drives a real Chromium (or Chrome with `--channel chrome`) through the UI against a throwaway local Bot-Office with a scripted engine and two bots labelled "E2E test bot" (Enter to send, Settings and approvals, the Approve / Deny card, the bot-to-bot row and panel), or read-only against a running install with `--url`/`--token` (`--send-to` sends one real message with Enter, only to a bot whose name starts with "E2E test"). It ends with a plain PASS/FAIL list. Needs `pip install playwright` and `python -m playwright install chromium`.
 
