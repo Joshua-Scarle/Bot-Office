@@ -149,6 +149,8 @@ Character avatars. A bot can now have one of four avatar types, chosen in its se
 - **API.** `PUT /v1/bots/{id}/avatar/character {shape, color}` (names are validated), `GET /v1/avatar-characters` (the lists). `GET /v1/bots/{id}/icon` answers 404 for a character,. The stored marker is not a legal pattern seed, so the generate and preview routes refuse it, and a rollback to 0.12.1 shows such a bot's emoji.
 - Tests: `tests/test_characters.py` (API, validation, status mapping, drawing of all 480 shape/color/face combinations) and new checks in `scripts/e2e_gui.py`.
 
+Deployed 2026-11-19 06:10 PM ET (code at 3c416e0; no jobs running or queued at the restart). Live check on a throwaway bot ("ZZ chars-test (safe to delete)", Claude, deleted afterwards): a new bot started with a character; the idle face, the working face during a real turn and the done face right after it were seen, then idle again after the 20 s window; the waiting, error and sleeping faces were checked with the status rewritten in the browser only (no real question or failure was staged); no JavaScript errors; the 27 real bots, their avatars and emoji were unchanged afterwards. Rollback: on the server `git reset --hard backup/pre-0.12.2-20261119-231046` and `systemctl --user restart bot-office`; DB copy `~/backups/agentdesk.sqlite3.pre-0.12.2-20261119-231046` (no schema change, so no DB restore is needed; a character bot shows its emoji on 0.12.1). Full pytest: 1361 passed, 1 failed (the usage-digest date test, which also fails on untouched master); local browser e2e 147 passed.
+
 ## What changed in 0.12.1
 
 Small chat-speed and clarity fixes from an audit of the chat UI, engines and performance. Nothing about the engines, the queue or the data changed.
