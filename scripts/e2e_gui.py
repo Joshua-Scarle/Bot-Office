@@ -574,6 +574,7 @@ def slash_commands(page, out: Path, base: str, token: str) -> None:
     box.fill("")
     box.type("/")
     popup.wait_for(state="visible", timeout=10000)
+    page.wait_for_selector("#slash-list li[role=option]:not(.note)", timeout=10000)
     check(popup.is_visible() and rows.count() >= 5, f'typing "/" opens the command list ({rows.count()} commands)')
     check(box.get_attribute("aria-expanded") == "true" and popup.get_attribute("role") == "listbox", "the list is an ARIA listbox the box controls")
     names = page.locator("#slash-list .slash-name").all_inner_texts()
@@ -632,7 +633,9 @@ def slash_commands(page, out: Path, base: str, token: str) -> None:
     check(dialog.is_visible() and "fresh" in page.locator("#slash-confirm-text").inner_text().lower(), "a destructive command asks for a confirmation")
     shot(page, out, "slash-confirm")
     page.locator("#slash-confirm-cancel").click()
+    page.wait_for_function("() => document.getElementById('status').textContent.includes('Cancelled')", timeout=5000)
     check(dialog.is_hidden() and "Cancelled" in page.locator("#status").inner_text(), "Cancel changes nothing")
+    page.wait_for_function("() => { const b = currentBot(); return b && !['running', 'queued'].includes(b.activity); }", timeout=20000)
     box.fill("/new")
     box.press("Enter")  # list is closed after fill? open it again through typing
     page.wait_for_timeout(200)
@@ -641,7 +644,11 @@ def slash_commands(page, out: Path, base: str, token: str) -> None:
     box.press("Enter")
     dialog.wait_for(state="visible", timeout=10000)
     page.locator("#slash-confirm-ok").click()
-    page.wait_for_function("() => /session/i.test(document.getElementById('status').textContent)", timeout=10000)
+    try:
+        page.wait_for_function("() => /session/i.test(document.getElementById('status').textContent)", timeout=10000)
+    except Exception:
+        print("status was:", page.locator("#status").inner_text())
+        raise
     check("session" in page.locator("#status").inner_text().lower(), f'confirming runs it ({page.locator("#status").inner_text()})')
     # a mapped control: /model opens the model picker in Settings
     box.fill("")
