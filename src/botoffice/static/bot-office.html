@@ -195,6 +195,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
 .danger-zone p { margin: 0; font-size: 13px; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; }
 
+#board-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1em; }
 @media (max-width: 1100px) {
   .chat-head { gap: 6px 8px; padding: 10px 14px; }
   .chat-head > button { padding: 6px 9px; }
@@ -290,6 +291,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
   <aside class="sidebar" aria-label="Bots">
     <div class="brand"><span>Bot-Office</span></div>
     <button id="new-bot" class="new-bot" title="New bot">+ <span>New bot</span></button>
+    <button id="board-open" type="button">Board</button>
     <section id="needs-you" class="needs-you" aria-label="Needs you" hidden>
       <div class="needs-head"><button id="needs-toggle" class="needs-toggle" type="button" aria-expanded="false" aria-controls="needs-list">Needs you</button><button id="notify-enable" class="ghost" type="button" hidden>Turn on notifications</button></div>
       <div id="needs-list"></div>
@@ -365,6 +367,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <label class="check"><input id="voice-browser-stt" type="checkbox"> Allow the browser's own dictation when local speech-to-text is not installed (some browsers, such as Chrome, send the audio to their vendor's servers)</label>
       <p class="muted">Speech is generated and recognised on this server. Audio is never stored. Voices: Kokoro-82M (Apache-2.0).</p>
     </div>
+    <div id="board-panel" hidden><h3 id="board-heading"></h3><div id="board-columns"></div></div>
     <div id="assignments-panel" hidden>
       <div id="assignments-list"></div>
 <div id="wakeups-list"></div>
@@ -374,8 +377,8 @@ dialog textarea { min-height: 90px; resize: vertical; }
         <label>Done when<textarea id="assignment-done" rows="2" placeholder="How you and the bot will know it is finished"></textarea></label>
         <div class="tools-bar"><label>Turns<input id="assignment-turns" type="number" min="1" max="200" value="20"></label><label>Minutes<input id="assignment-minutes" type="number" min="1" max="1440" value="120"></label>
         <label>Ask me<select id="assignment-escalate"><option value="on_block">when blocked or waiting on me</option><option value="always">also when waiting on another bot</option><option value="never">never</option></select></label></div>
-        <div class="tools-bar"><label class="check"><input id="assignment-verify" type="checkbox"> One check turn against "done when" before closing</label><label class="check"><input id="assignment-start" type="checkbox" checked> Start now</label></div>
-        <div class="tools-bar"><button>Create assignment</button><button type="button" id="assignment-propose" title="Asks the bot in chat to propose a 'done when' (one normal turn)">Ask bot to propose</button></div>
+        <div class="tools-bar"><label class="check"><input id="assignment-verify" type="checkbox"> One check turn against "done when" before closing</label><label class="check"><input id="assignment-start" type="checkbox"> Start now</label></div>
+        <div class="tools-bar"><button id="assignment-create">Create assignment</button><button type="button" id="assignment-propose" title="Asks the bot in chat to propose a 'done when' (one normal turn)">Ask bot to propose</button></div>
       </form>
     </div>
     <div id="watchers-panel" hidden><div id="watchers-list"></div><pre id="watcher-runs" class="muted" hidden></pre><form id="watcher-form"><label>Name<input id="watcher-name" required maxlength="80"></label><label>Kind<select id="watcher-kind"><option value="webhook">Webhook (POST with a secret)</option><option value="path">Folder (new or changed files)</option><option value="poll">gh poll (read-only, every 5+ min)</option><option value="assignment">Another bot's assignment</option></select></label><label id="watcher-target-label">Target<input id="watcher-target" placeholder="folder path, gh command, or assignment id"></label><label>When it fires, the bot should<textarea id="watcher-prompt" required maxlength="4000"></textarea></label><p class="muted">Runs are unattended: outbound actions need your approval, at most 6 runs/hour per watcher (then it pauses), and only for engines whose action gate is proven.</p><button>Create watcher</button></form></div>
@@ -676,6 +679,8 @@ function renderBots() {
     fillAvatar(avatar, bot);
     const meta = el("span", "meta");
     meta.append(el("div", "name", bot.name), el("div", "sub", modelLabel(bot.engine, bot.model) + " · " + (bot.capability_tier || "")));
+    const counts = taskCounts[bot.id] || {in_progress: 0, waiting: 0, blocked: 0, completed_today: 0};
+    meta.append(el("div", "sub", `▶ ${counts.in_progress} · ⏸ ${counts.waiting} waiting · ${counts.blocked} blocked · ✓ ${counts.completed_today} today`));
     const dot = el("span", "dot " + (bot.status === "working" ? "running" : bot.status));
     dot.title = bot.status || "idle";
     dot.setAttribute("aria-label", dot.title);
@@ -1732,8 +1737,8 @@ async function loadMessages() {
     if (isOwnerMessage(m) && !m.archived_at) {
       const assign = el("button", "mini", "⚑");
       assign.type = "button";
-      assign.title = "Make assignment from this message";
-      assign.setAttribute("aria-label", "Make assignment");
+      assign.title = "Add to " + tasksLabel + " from this message";
+      assign.setAttribute("aria-label", "Add to " + tasksLabel);
       assign.onclick = () => openAssignments(m.text);
       whoLine.append(assign);
     }
@@ -2612,6 +2617,7 @@ $("desktop-open").onclick = async () => {
   $("memory-panel").hidden = true;
   $("routines-panel").hidden = true;
   $("assignments-panel").hidden = true;
+  $("board-panel").hidden = true;
   $("watchers-panel").hidden = true;
   $("voice-panel").hidden = true;
   $("desktop-panel").hidden = false;
@@ -2659,6 +2665,7 @@ $("agent-open").onclick = async () => {
   $("memory-panel").hidden = true;
   $("routines-panel").hidden = true;
   $("assignments-panel").hidden = true;
+  $("board-panel").hidden = true;
   $("watchers-panel").hidden = true;
   $("voice-panel").hidden = true;
   $("agent-panel").hidden = false;
@@ -2678,7 +2685,7 @@ $("agent-open").onclick = async () => {
 
 function showToolPanel(panel, title) {
   disconnectDesktop();
-  for (const id of ["desktop-panel", "agent-panel", "memory-panel", "routines-panel", "voice-panel", "assignments-panel", "watchers-panel"]) $(id).hidden = id !== panel;
+  for (const id of ["desktop-panel", "agent-panel", "memory-panel", "routines-panel", "voice-panel", "assignments-panel", "watchers-panel", "board-panel"]) $(id).hidden = id !== panel;
   $("tools-title").textContent = title;
   $("tools-dialog").showModal();
 }
@@ -2859,39 +2866,83 @@ $("routine-form").onsubmit = async (event) => {
   catch (e) { $("routines-list").textContent = e.message; }
 };
 
-/* ---- assignments (0.10.0) ---- */
+/* ---- task lists ---- */
+let tasksLabel = "Assignments";
+let taskCounts = {};
+async function loadTaskSettings() {
+  tasksLabel = (await api("/v1/tasks/settings")).label;
+  $("assignments-open").textContent = tasksLabel;
+  $("assignment-create").textContent = "Create " + tasksLabel;
+  $("board-heading").textContent = tasksLabel;
+}
+async function loadTaskCounts() {
+  taskCounts = (await api("/v1/tasks?counts=1")).bots;
+  renderBots();
+}
+const taskSections = [["not_started", "Not started"], ["in_progress", "In progress"], ["completed", "Completed"]];
+async function loadBoard() {
+  const items = await api("/v1/tasks?stage=not_started,in_progress");
+  const names = new Map(state.bots.map(b => [b.id, b.name]));
+  $("board-columns").replaceChildren(...taskSections.map(([stage, label]) => {
+    const col = el("section"); col.append(el("h4", "", label));
+    for (const a of items.filter(a => a.stage === stage)) {
+      const row = el("div", "assignment");
+      row.append(el("strong", "", a.title), el("div", "muted", (names.get(a.bot_id) || a.bot_id) + " · " + a.status.replaceAll("_", " ")));
+      col.append(row);
+    }
+    return col;
+  }));
+}
+$("board-open").onclick = () => {
+  showToolPanel("board-panel", tasksLabel);
+  loadBoard().catch(e => { $("board-columns").textContent = e.message; });
+};
 function assignmentMeter(a) {
   return a.turns_used + "/" + a.budget_turns + " turns · " + Math.round(a.minutes_used) + "/" + a.budget_minutes + " min";
 }
-async function assignmentAction(path, body) {
-  try { await api(path, {method: "POST", body: JSON.stringify(body || {})}); await loadAssignments(); }
-  catch (e) { $("assignments-list").prepend(el("p", "muted", e.message)); }
+async function assignmentAction(path, body, method = "POST") {
+  try { await api(path, {method, body: JSON.stringify(body || {})}); await loadAssignments(); }
+  catch (e) {
+    if (e.status === 409) { await loadAssignments(); $("assignments-list").prepend(el("p", "muted", "The task changed. The list has been reloaded; please try again.")); }
+    else $("assignments-list").prepend(el("p", "muted", e.message));
+  }
 }
 async function loadAssignments() {
-  const items = await api("/v1/bots/" + currentBot().id + "/assignments");
-  const rows = items.map((a) => {
-    const box = el("div", "assignment");
-    const head = el("div", "tools-bar");
-    head.append(el("strong", "", a.title), el("span", "model-pill", a.status.replaceAll("_", " ") + (a.stalled_at ? " · stalled" : "")), el("span", "muted", assignmentMeter(a)));
-    if (a.created_by !== "user") head.append(el("span", "muted", "made by bot"));
-    box.append(head);
-    if (a.status_note) box.append(el("div", "muted", a.status_note));
-    const bar = el("div", "tools-bar");
-    const button = (label, fn) => { const b = el("button", "", label); b.type = "button"; b.onclick = fn; bar.append(b); };
-    const closed = a.status === "done" || a.status === "dropped";
-    if (!closed && a.status !== "active") button("Start", () => {
-      const used = a.turns_used >= a.budget_turns || a.minutes_used >= a.budget_minutes;
-      const extra = used ? Number(prompt("Budget used up. Add how many turns?", "5") || 0) : 0;
-      assignmentAction("/v1/assignments/" + a.id + "/start", used ? {add_turns: extra, add_minutes: extra * 6} : {});
-    });
-    if (!closed && a.status !== "open") button("Stop", () => assignmentAction("/v1/assignments/" + a.id + "/stop"));
-    if (!closed) button("Reply", () => { const text = prompt("Reply to " + currentBot().name + " about this assignment"); if (text) assignmentAction("/v1/assignments/" + a.id + "/reply", {text}); });
-    if (!closed) button("Done", async () => { await api("/v1/assignments/" + a.id, {method: "PATCH", body: JSON.stringify({status: "done"})}); await loadAssignments(); });
-    if (!closed) button("Drop", async () => { if (confirm("Drop this assignment?")) { await api("/v1/assignments/" + a.id, {method: "PATCH", body: JSON.stringify({status: "dropped"})}); await loadAssignments(); } });
-    box.append(bar);
-    return box;
+  const bot = currentBot();
+  const items = await api("/v1/bots/" + bot.id + "/tasks?include_closed=1");
+  const details = await Promise.all(items.map(a => api("/v1/tasks/" + a.id)));
+  const sections = taskSections.map(([stage, label]) => {
+    const section = el("section"); section.append(el("h3", "", label));
+    const group = details.filter(a => a.stage === stage || (stage === "completed" && a.stage === "dropped"));
+    for (const a of group) {
+      const box = el("div", "assignment"), head = el("div", "tools-bar");
+      head.append(el("strong", "", a.title), el("span", "model-pill", a.status.replaceAll("_", " ") + (a.stalled ? " · stalled" : "")), el("span", "muted", assignmentMeter(a)), el("span", "muted", a.created_by + " · " + a.origin));
+      box.append(head);
+      const event = a.events[a.events.length - 1];
+      if (event) box.append(el("div", "muted", "Last event: " + event.kind + " · " + event.actor + (event.note ? " · " + event.note : "")));
+      if (a.status_note) box.append(el("div", "muted", a.status_note));
+      const bar = el("div", "tools-bar");
+      const button = (label, fn) => { const b = el("button", "", label); b.type = "button"; b.onclick = fn; bar.append(b); };
+      const closed = a.stage === "completed" || a.stage === "dropped";
+      if (!closed && a.status !== "active") button("Start", () => {
+        const used = a.turns_used >= a.budget_turns || a.minutes_used >= a.budget_minutes;
+        const extra = used ? Number(prompt("Budget used up. Add how many turns?", "5") || 0) : 0;
+        assignmentAction("/v1/tasks/" + a.id + "/start", used ? {add_turns: extra, add_minutes: extra * 6} : {});
+      });
+      if (!closed && a.status !== "open") button("Stop", () => assignmentAction("/v1/tasks/" + a.id + "/stop"));
+      if (!closed) button("Reply", () => { const text = prompt("Reply to " + bot.name); if (text) assignmentAction("/v1/tasks/" + a.id + "/reply", {text}); });
+      if (!closed) button("Done", () => assignmentAction("/v1/tasks/" + a.id, {version: a.version, status: "done"}, "PATCH"));
+      if (!closed) button("Drop", () => { if (confirm("Drop this task?")) assignmentAction("/v1/tasks/" + a.id, {version: a.version, status: "dropped"}, "PATCH"); });
+      const index = items.findIndex(x => x.id === a.id);
+      for (const [label, offset] of [["↑", -1], ["↓", 1]]) {
+        const other = items[index + offset];
+        if (other) button(label, () => assignmentAction("/v1/tasks/reorder", {bot_id: bot.id, order: offset < 0 ? [a.id, other.id] : [other.id, a.id]}));
+      }
+      box.append(bar); section.append(box);
+    }
+    return section;
   });
-  $("assignments-list").replaceChildren(...(rows.length ? rows : [el("p", "muted", "No assignments yet.")]));
+  $("assignments-list").replaceChildren(...sections);
 }
 async function loadWakeups() {
   const items = await api("/v1/bots/" + currentBot().id + "/wakeups");
@@ -2908,7 +2959,7 @@ async function loadWakeups() {
   $("wakeups-list").replaceChildren(...(rows.length ? [el("h4", "", "Wake-ups the bot scheduled"), ...rows] : []));
 }
 function openAssignments(prefill) {
-  showToolPanel("assignments-panel", "Assignments");
+  showToolPanel("assignments-panel", tasksLabel);
   if (prefill) { $("assignment-title").value = prefill.slice(0, 80).split("\n")[0]; $("assignment-goal").value = prefill; $("assignment-done").focus(); }
   loadAssignments().catch((e) => { $("assignments-list").textContent = e.message; });
   loadWakeups().catch((e) => { $("wakeups-list").textContent = e.message; });
@@ -2920,7 +2971,10 @@ $("assignment-form").onsubmit = async (event) => {
     budget_turns: Number($("assignment-turns").value), budget_minutes: Number($("assignment-minutes").value),
     escalate: $("assignment-escalate").value, verify: $("assignment-verify").checked, start: $("assignment-start").checked};
   try { await api("/v1/bots/" + currentBot().id + "/assignments", {method: "POST", body: JSON.stringify(body)}); $("assignment-form").reset(); await loadAssignments(); }
-  catch (e) { $("assignments-list").prepend(el("p", "muted", e.message)); }
+  catch (e) {
+    if (e.status === 409) { await loadAssignments(); $("assignments-list").prepend(el("p", "muted", "The task list changed. It has been reloaded; please try again.")); }
+    else $("assignments-list").prepend(el("p", "muted", e.message));
+  }
 };
 $("assignment-propose").onclick = () => {
   const goal = $("assignment-goal").value || $("assignment-title").value;
@@ -2974,7 +3028,7 @@ async function needsAction(item, action) {
   await loadNeedsYou();
 }
 async function loadNeedsYou() {
-  const items = await api("/v1/needs-you");
+  const [items] = await Promise.all([api("/v1/needs-you"), loadTaskCounts()]);
   const labels = {reply: "Reply", start: "Continue", done: "Done", retry: "Retry", dismiss: "Dismiss",
     approve: "Approve once", deny: "Deny", rerun: "Re-run", resume: "Resume", allow: "Allow +10 today",
     answer: "Answer", skip: "Skip", keep: "Keep waiting"};
@@ -3065,6 +3119,7 @@ async function start() {
   $("app").hidden = false;
   try {
     await loadBots();
+    await loadTaskSettings();
     await loadVoice();
     await loadMessages();
     poll();
