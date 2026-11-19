@@ -65,9 +65,17 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .tools-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .tools-bar select { width: auto; max-width: 100%; }
 /* bounded: many items scroll inside the panel and never push the bot list or the footer off-screen */
-.needs-you { margin: 0 8px 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; flex: none; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
-.needs-toggle { all: unset; font-weight: 700; }
-.needs-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.needs-you { margin: 0 8px 8px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; flex: none; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
+/* starts collapsed: one row with a count badge; the list opens on click and the choice is remembered */
+.needs-toggle { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 6px; width: 100%; padding: 3px 0; font-weight: 700; cursor: pointer; }
+.needs-toggle:focus-visible, #notify-enable:focus-visible { outline: 2px solid var(--accent, #6385ad); outline-offset: 2px; }
+.needs-toggle::before { content: "\25B8"; font-size: 11px; transition: transform 0.1s; }
+.needs-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+.needs-count { margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: 9px; background: #8a6d2b; color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
+.needs-head { display: grid; gap: 2px; }
+#notify-enable { justify-self: start; margin: 2px 0 4px; }
+.needs-you:not(.open) #needs-list { display: none; }
+.needs-you.open #needs-list { margin-top: 4px; }
 .needs-item { padding: 4px 0; border-top: 1px solid var(--line); }
 .needs-item .tools-bar { gap: 4px; flex-wrap: wrap; }
 .needs-ask { all: unset; cursor: pointer; display: block; }
@@ -225,9 +233,10 @@ dialog textarea { min-height: 90px; resize: vertical; }
   /* the narrow sidebar shows only "Needs you (n)"; tapping it opens the list as a bounded overlay */
   .needs-you { margin: 0 4px 6px; padding: 4px; max-height: none; overflow: visible; text-align: center; }
   .needs-head { justify-content: center; margin: 0; }
-  .needs-toggle { cursor: pointer; font-size: 11px; }
+  .needs-toggle { justify-content: center; font-size: 11px; }
+  .needs-toggle::before { display: none; }
+  .needs-count { margin-left: 0; }
   #notify-enable { display: none; }
-  .needs-you:not(.open) #needs-list { display: none; }
   .needs-you.open #needs-list { position: fixed; left: 80px; top: 8px; z-index: 30; width: min(320px, calc(100vw - 88px)); max-height: 60vh; overflow-y: auto; padding: 8px; text-align: left; background: var(--side); border: 1px solid var(--line); border-radius: 8px; }
 }
 .question-card { margin-top: 8px; padding: 12px; border: 1px solid #465063; border-radius: 10px; background: #1b202a; display: grid; gap: 8px; }
@@ -303,7 +312,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <button id="new-bot" class="new-bot" title="New bot">+ <span>New bot</span></button>
     <button id="board-open" type="button">Board</button>
     <section id="needs-you" class="needs-you" aria-label="Needs you" hidden>
-      <div class="needs-head"><button id="needs-toggle" class="needs-toggle" type="button" aria-expanded="false" aria-controls="needs-list">Needs you</button><button id="notify-enable" class="ghost" type="button" hidden>Turn on notifications</button></div>
+      <div class="needs-head"><button id="needs-toggle" class="needs-toggle" type="button" aria-expanded="false" aria-controls="needs-list"><span>Needs you</span><span id="needs-count" class="needs-count" hidden>0</span></button><button id="notify-enable" class="ghost" type="button" hidden>Turn on notifications</button></div>
       <div id="needs-list"></div>
     </section>
     <nav id="bot-list" class="bot-list"></nav>
@@ -2458,8 +2467,16 @@ function createModelPicker(input, list, { onChange, customEngine }) {
   }
   input.addEventListener("focus", () => { if (!input.disabled) { input.select(); show(); } });
   input.addEventListener("click", () => { if (!open && !input.disabled) show(); });
-  list.addEventListener("mousedown", (event) => event.preventDefault());  // dragging the scrollbar must not blur the input
-  input.addEventListener("blur", close);
+  // Pressing inside the list (an option, its padding, or its scrollbar) is not an outside click: the press
+  // keeps focus on the input, and if a browser blurs it anyway the list stays open until the button is released.
+  let pressing = false;
+  list.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    pressing = true;
+    const release = () => { pressing = false; if (open && document.activeElement !== input && !input.disabled) input.focus({ preventScroll: true }); };
+    document.addEventListener("mouseup", release, { once: true });
+  });
+  input.addEventListener("blur", () => { if (!pressing) close(); });
   input.addEventListener("input", () => { query = input.value; open = true; active = -1; render(); active = firstRow; render(); });
   input.addEventListener("keydown", (event) => {
     const key = event.key;
@@ -3266,7 +3283,8 @@ async function loadNeedsYou() {
     return row;
   }));
   $("needs-you").hidden = !items.length;
-  $("needs-toggle").textContent = `Needs you (${items.length})`;
+  $("needs-count").textContent = String(items.length);
+  $("needs-count").hidden = !items.length;
   $("notify-enable").hidden = typeof Notification === "undefined" || Notification.permission !== "default";
   const stored = sessionStorage.getItem(NEEDS_SEEN_KEY);
   let seen = new Set();
@@ -3281,10 +3299,15 @@ async function loadNeedsYou() {
   }
   sessionStorage.setItem(NEEDS_SEEN_KEY, JSON.stringify(items.map((item) => item.id)));
 }
-$("needs-toggle").onclick = () => {
-  const open = $("needs-you").classList.toggle("open");
+// collapsed unless the owner opened it; kept in localStorage (a plain button: Enter and Space toggle it)
+const NEEDS_OPEN_KEY = "bot-office-needs-open";
+function setNeedsOpen(open, remember) {
+  $("needs-you").classList.toggle("open", open);
   $("needs-toggle").setAttribute("aria-expanded", String(open));
-};
+  if (remember) { try { localStorage.setItem(NEEDS_OPEN_KEY, open ? "1" : "0"); } catch (err) { /* storage blocked: not remembered */ } }
+}
+try { setNeedsOpen(localStorage.getItem(NEEDS_OPEN_KEY) === "1", false); } catch (err) { setNeedsOpen(false, false); }
+$("needs-toggle").onclick = () => setNeedsOpen(!$("needs-you").classList.contains("open"), true);
 $("notify-enable").onclick = async () => {
   if (typeof Notification === "undefined") return;
   try { await Notification.requestPermission(); } catch (err) { /* ignored: stays off */ }

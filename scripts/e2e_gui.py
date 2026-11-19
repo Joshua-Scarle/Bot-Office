@@ -149,7 +149,8 @@ def call(base: str, token: str, method: str, path: str, body: dict | None = None
 
 def launch(pw, headed: bool, channel: str | None):
     try:
-        return pw.chromium.launch(headless=not headed, channel=channel)
+        # keep scrollbars in headless runs: the model list's scrollbar drag is checked with a real mouse
+        return pw.chromium.launch(headless=not headed, channel=channel, ignore_default_args=["--hide-scrollbars"])
     except Exception as exc:
         hint = "install Google Chrome" if channel else "run: python -m playwright install chromium"
         raise SystemExit(f"The browser is not available ({exc}); {hint}") from exc
@@ -322,6 +323,100 @@ def held_continuation(page, out: Path, base: str, token: str, app) -> None:
     call(base, token, "PUT", "/v1/settings", {"auto_continue": {"per_bot_day": 20}})
 
 
+# --- 0.11.13: searchable model list and the collapsed "Needs you" row ---
+
+def model_search(page, out: Path, base: str, token: str, mock_long_list: bool) -> None:
+    print("Model search")
+    if mock_long_list:  # a long list so the popup has a scrollbar to drag
+        models = [{"id": f"gpt-{n}.{m}-test", "display": f"gpt-{n}.{m}-test"} for n in range(1, 8) for m in range(10)]
+        body = json.dumps([{"engine": "codex", "label": "Codex", "default_model": "gpt-1.0-test", "models": models}])
+        page.route("**/v1/model-choices*", lambda route: route.fulfill(status=200, content_type="application/json", body=body))
+        unlock(page, base, token)
+    page.click("#new-bot")
+    box = page.locator("#f-model")
+    box.wait_for(timeout=10000)
+    page.wait_for_function("() => document.querySelector('#f-model').value !== ''", timeout=15000)
+    check(box.get_attribute("role") == "combobox", "the model field is a combobox")
+    box.click()
+    check(page.locator("#f-model-list").is_visible(), "clicking the model field opens the list")
+    options = page.locator("#f-model-list [role=option]").all_inner_texts()
+    total = len(options)
+    query = options[-1][2:7]  # a slice of one model's name, typed in capitals
+    box.fill("")
+    box.type(query.upper(), delay=20)
+    shown = page.locator("#f-model-list [role=option]").all_inner_texts()
+    outside = [t for t in shown if query.lower() not in t.lower()]
+    check(0 < len(shown) <= total and len(outside) <= 1,
+          f"typing {query.upper()!r} filters the list case-insensitively ({len(shown)} of {total}; only the pinned selection may differ)")
+    box.fill("zzzz-no-such-model")
+    check(page.locator("#f-model-list").get_by_text("No matches").count() == 1, 'a "No matches" row shows')
+    box.press("Escape")
+    check(not page.locator("#f-model-list").is_visible(), "Escape closes the list")
+    check(page.locator("#bot-dialog[open]").count() == 1, "the first Escape leaves the dialog open")
+    if mock_long_list:
+        box.click()
+        box.fill("")
+        listbox = page.locator("#f-model-list")
+        metrics = listbox.evaluate("(ul) => ({scroll: ul.scrollHeight, client: ul.clientHeight, bar: ul.offsetWidth - ul.clientWidth})")
+        check(metrics["scroll"] > metrics["client"] and metrics["bar"] > 0, f"the long list has a visible scrollbar ({metrics})")
+        box_ = listbox.bounding_box()
+        x, y = box_["x"] + box_["width"] - metrics["bar"] / 2, box_["y"] + 20
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 60, steps=6)
+        still_open = listbox.is_visible()
+        scrolled = listbox.evaluate("(ul) => ul.scrollTop") > 0
+        page.mouse.up()
+        check(still_open and scrolled, f"dragging the scrollbar scrolls and keeps the list open (open={still_open}, scrolled={scrolled})")
+        check(listbox.is_visible() and page.evaluate("() => document.activeElement.id") == "f-model",
+              "after releasing the scrollbar the list is open and the field keeps focus")
+        shot(page, out, "09-model-search-scrollbar")
+        page.mouse.click(5, 5)  # a real outside click
+        check(not listbox.is_visible(), "a real outside click closes the list")
+        page.unroute("**/v1/model-choices*")
+    page.keyboard.press("Escape")
+
+
+def needs_you_sidebar(page, out: Path, expect_items: bool) -> None:
+    print("Needs-you row in the sidebar")
+    # headless Chromium reports notifications as denied; pretend they can still be switched on
+    page.evaluate("""() => { Object.defineProperty(window, 'Notification', {configurable: true, value: {permission: 'default', requestPermission: async () => 'default'}}); }""")
+    page.evaluate("() => { localStorage.removeItem('bot-office-needs-open'); }")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    page.evaluate("""() => { Object.defineProperty(window, 'Notification', {configurable: true, value: {permission: 'default', requestPermission: async () => 'default'}}); return loadNeedsYou(); }""")
+    section, toggle = page.locator("#needs-you"), page.locator("#needs-toggle")
+    if not expect_items:
+        check(section.is_hidden() or toggle.get_attribute("aria-expanded") == "false", "live: the Needs-you row starts collapsed")
+        if section.is_visible():
+            shot(page, out, "sidebar-live")
+        return
+    check(section.is_visible(), "the Needs-you row shows when something needs you")
+    check(toggle.get_attribute("aria-expanded") == "false", "it starts collapsed (aria-expanded=false)")
+    check(not page.locator("#needs-list").is_visible(), "the list is not shown while collapsed")
+    count = page.locator("#needs-count").inner_text()
+    check(page.locator("#needs-count").is_visible() and count.isdigit() and int(count) >= 1, f"the row shows a count badge ({count})")
+    check(page.locator("#notify-enable").is_visible(), "Turn on notifications is reachable while collapsed")
+    shot(page, out, "sidebar-collapsed")
+    toggle.click()
+    check(toggle.get_attribute("aria-expanded") == "true" and page.locator("#needs-list").is_visible(), "clicking the row expands the list")
+    check(page.locator("#needs-list .needs-item").count() == int(count), "the list has one item per counted request")
+    check(page.locator("#notify-enable").is_visible(), "Turn on notifications is reachable while expanded")
+    shot(page, out, "sidebar-expanded")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    check(page.locator("#needs-toggle").get_attribute("aria-expanded") == "true", "expanded state is remembered after a reload")
+    page.locator("#needs-toggle").focus()
+    page.keyboard.press("Enter")
+    check(page.locator("#needs-toggle").get_attribute("aria-expanded") == "false", "Enter on the focused row collapses it")
+    page.keyboard.press("Space")
+    check(page.locator("#needs-toggle").get_attribute("aria-expanded") == "true", "Space expands it again")
+    page.keyboard.press("Enter")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    check(page.locator("#needs-toggle").get_attribute("aria-expanded") == "false", "collapsed state is remembered after a reload")
+
+
 def resolve_token(args, environ=None) -> str | None:
     """The live-mode API token: --token-file, BOT_OFFICE_TOKEN_FILE, BOT_OFFICE_TOKEN, then the
     deprecated --token (a warning on stderr; it shows in the process list)."""
@@ -365,6 +460,8 @@ def main() -> int:
             unlock(page, base, token)
             check(True, "unlocked " + base)
             settings_page(page, out, base, token, write=False)
+            model_search(page, out, base, token, mock_long_list=False)
+            needs_you_sidebar(page, out, expect_items=False)
             if args.send_to:
                 if not args.send_to.startswith(TEST_PREFIX):
                     raise SystemExit(f'--send-to only messages test bots: the name must start with "{TEST_PREFIX}"')
@@ -382,6 +479,11 @@ def main() -> int:
                 approvals_in_chat(page, out, base, app)
                 bot_to_bot(page, out, base, TOKEN)
                 held_continuation(page, out, base, TOKEN, app)
+                model_search(page, out, base, TOKEN, mock_long_list=True)
+                open_bot(page, CY)
+                send_with_enter(page, "Please send the report email to Joe.")
+                page.locator(".approval-card").last.wait_for(timeout=60000)
+                needs_you_sidebar(page, out, expect_items=True)
                 server.should_exit = True
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()

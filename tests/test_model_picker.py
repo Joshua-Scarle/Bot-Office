@@ -191,6 +191,51 @@ def test_create_bot_saves_the_chosen_engine_and_model(settings):
         assert (bot.json()["engine"], bot.json()["model"]) == ("claude", sonnet)
 
 
-def test_list_mousedown_is_prevented_so_scrollbar_drag_keeps_focus():
-    page = CHAT_PAGE.read_text()
-    assert 'list.addEventListener("mousedown", (event) => event.preventDefault())' in page
+def test_static_codex_fallback_list_has_gpt_6_2_sol():
+    from botoffice.catalog import STATIC_MODELS
+
+    ids = [m for m, _ in STATIC_MODELS["codex"]]
+    assert ids[0] == "gpt-6.1-terra" and "gpt-6.2-sol" in ids
+
+
+def test_scrollbar_drag_inside_the_list_keeps_it_open_but_outside_click_closes_it():
+    code = LOGIC + _slice("function createModelPicker(", "/* ---- settings dialog ---- */")
+    _run(code + OPTIONS + r'''
+const assert = require('assert');
+function node() {
+  return { children: [], attrs: {}, listeners: {}, hidden: false, className: "", textContent: "", value: "",
+    setAttribute(k, v) { this.attrs[k] = String(v); }, removeAttribute(k) { delete this.attrs[k]; },
+    addEventListener(t, f) { this.listeners[t] = f; }, select() {}, focus() { document.activeElement = this; },
+    replaceChildren(...c) { this.children = c; }, append(c) { this.children.push(c); } };
+}
+function el(tag, cls, text) { const n = node(); n.className = cls || ""; n.textContent = text || ""; return n; }
+const ENGINE_LABELS = {};
+const up = [];
+const document = { activeElement: null, addEventListener(t, f) { if (t === "mouseup") up.push(f); } };
+const input = node(), list = node(); list.id = "pick";
+const p = createModelPicker(input, list, { customEngine: null });
+p.setOptions(options, "codex|gpt-6.1-terra");
+input.listeners.focus(); document.activeElement = input;
+assert.strictEqual(list.hidden, false);
+
+// press on the scrollbar: default prevented, a browser that blurs anyway does not close the list
+let prevented = false;
+list.listeners.mousedown({ preventDefault() { prevented = true; } });
+assert.strictEqual(prevented, true);
+document.activeElement = null; input.listeners.blur();
+assert.strictEqual(list.hidden, false);
+assert.strictEqual(input.attrs["aria-expanded"], "true");
+up.pop()();                                           // button released: focus comes back, still open
+assert.strictEqual(document.activeElement, input); assert.strictEqual(list.hidden, false);
+
+// a real outside click (blur with no press in the list) closes it
+document.activeElement = null; input.listeners.blur();
+assert.strictEqual(list.hidden, true);
+
+// Escape closes; selecting an option closes
+input.listeners.focus(); document.activeElement = input;
+input.listeners.keydown({ key: "Escape", preventDefault() {}, stopPropagation() {} });
+assert.strictEqual(list.hidden, true);
+input.listeners.focus(); list.children[1].onmousedown({ preventDefault() {} });
+assert.strictEqual(list.hidden, true); assert.notStrictEqual(p.value, "codex|gpt-6.1-terra");
+''')
