@@ -720,7 +720,8 @@ class SlashCatalog:
                 hit = None
                 entries, source_note = self._assemble(engine, None, items)
         return {"engine": engine, "label": ENGINE_LABELS.get(engine, engine), "version": version,
-                "cached": cached, "source": "cli" if hit else "fallback", "note": source_note,
+                "cached": cached, "source": ("documented" if hit.get("probe", {}).get("documented") else "cli") if hit else "fallback",
+                "note": source_note,
                 "commands": sort_entries(set_actions(engine, entries))}
 
     async def _probe(self, engine, adapter, cwd: Path, items, usable: bool) -> Any:

@@ -440,3 +440,9 @@ def test_a_custom_file_cannot_take_over_a_control_of_bot_office(tmp_path):
     items, _ = slash.custom_files("claude", home, None)
     got = {e["name"]: e for e in slash.set_actions("claude", slash.build_claude(["clear", "model", "effort", "mine"], [], items))}
     assert got["clear"]["action"] == "map" and got["model"]["action"] == "map" and got["effort"]["action"] == "map"
+
+
+def test_codex_and_cursor_report_their_list_as_documented(tmp_path):
+    for engine in ("codex", "cursor"):
+        data = asyncio.run(_catalog(tmp_path, {engine: CliFake(engine)}).commands(engine))
+        assert data["source"] == "documented" and data["commands"]
