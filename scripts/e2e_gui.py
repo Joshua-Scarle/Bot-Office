@@ -465,6 +465,11 @@ def characters(page, out: Path, base: str, token: str, bot_id: str, name: str, s
     check(page.locator("#f-icon-preview svg.char").get_attribute("data-shape") == "star" and page.locator("#f-icon-preview svg.char").get_attribute("data-color") == "violet",
           "picking a shape and a color updates the preview")
     check(page.locator('#f-char-shapes button[data-shape=star]').get_attribute("aria-pressed") == "true", "the chosen shape is marked")
+    page.locator('#f-kind [data-kind="character"]').focus()
+    page.keyboard.press("ArrowRight")
+    check(page.locator('#f-kind [data-kind="upload"]').get_attribute("aria-checked") == "true" and page.locator("#f-kind button[tabindex='0']").count() == 1, "arrow keys move through the avatar types")
+    page.keyboard.press("ArrowLeft")
+    check(page.locator("#f-icon-preview svg.char").get_attribute("data-shape") == "star", "going back to Character keeps the pick")
     shot(page, out, "chars-picker")
     page.click("#dialog-save")
     page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)

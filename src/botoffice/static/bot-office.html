@@ -690,7 +690,7 @@ const MAX_ICON_BYTES = 2 * 1024 * 1024;
 
 const state = {
   bots: [], choices: null, selected: sessionStorage.getItem(BOT_KEY) || sessionStorage.getItem("crewdeck-bot"),
-  msgSig: "", iconUrls: new Map(), editing: null, pendingImage: null, pendingSeed: null, pendingChar: null, kind: "emoji", removeImage: false,
+  msgSig: "", iconUrls: new Map(), editing: null, pendingImage: null, pendingSeed: null, pendingChar: null, kind: "emoji", stash: {}, removeImage: false,
   timer: null, tick: 0, live: new Map(), echo: null,
   // newest message ids rendered for the selected bot (all / counted as unread)
   shown: { bot: null, max: 0, counted: 0 }, readSent: new Map(),
@@ -927,7 +927,7 @@ function charSvg(shape, color, expr, label) {
 function parseChar(seed) {
   const m = /^(?:char\|([a-z]+)\|([a-z]+)|([a-z]+):([a-z]+))$/.exec(String(seed || ""));
   const shape = m && (m[1] || m[3]), color = m && (m[2] || m[4]);
-  return m && CHAR_SHAPES.includes(shape) && color in CHAR_COLORS ? {shape, color} : null;
+  return m && CHAR_SHAPES.includes(shape) && Object.hasOwn(CHAR_COLORS, color) ? {shape, color} : null;
 }
 function charSeed(ch) { return "char|" + ch.shape + "|" + ch.color; }
 function charOf(bot) { return bot && !bot.icon_image && String(bot.avatar_seed || "").startsWith("char|") ? parseChar(bot.avatar_seed) : null; }
@@ -943,6 +943,8 @@ function botExpression(bot) {
 }
 function noteStatuses(prev, next) {
   const was = new Map(prev.map((b) => [b.id, b.status]));
+  const present = new Set(next.map((b) => b.id));
+  for (const id of [...state.doneUntil.keys()]) if (!present.has(id)) state.doneUntil.delete(id);
   let done = false;
   for (const bot of next) {
     const before = was.get(bot.id);
@@ -3699,25 +3701,26 @@ function updateIconPreview() {
   document.querySelectorAll("#f-char-colors button").forEach((b) => b.setAttribute("aria-pressed", String(Boolean(chosen) && b.dataset.color === chosen.color)));
   const color = chosen ? chosen.color : "blue";
   document.querySelectorAll("#f-char-shapes button").forEach((b) => b.replaceChildren(charSvg(b.dataset.shape, color, "idle", b.dataset.shape)));
-  document.querySelectorAll("#f-kind button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.kind === state.kind)));
+  document.querySelectorAll("#f-kind button").forEach((b) => { b.setAttribute("aria-checked", String(b.dataset.kind === state.kind)); b.tabIndex = b.dataset.kind === state.kind ? 0 : -1; });
   document.querySelectorAll(".kind-panel").forEach((p) => { p.hidden = p.dataset.panel !== state.kind; });
 }
 // which avatar type the saved bot has, as a picker choice
 function kindOf(bot) { return !bot ? "character" : bot.avatar === "upload" ? "upload" : bot.avatar === "character" ? "character" : bot.avatar === "generated" ? "pattern" : "emoji"; }
+// Each tab keeps its own pending choice, so moving between tabs never loses work and the saved result is always the open tab's
+function pendingSnapshot() { return { char: state.pendingChar, seed: state.pendingSeed, remove: state.removeImage, image: state.pendingImage }; }
 function chooseKind(kind) {
+  if (kind === state.kind) { updateIconPreview(); return; }
+  state.stash[state.kind] = pendingSnapshot();
+  const had = state.stash[kind];
+  const snap = had || { char: null, seed: null, remove: false, image: null };
+  state.pendingChar = snap.char; state.pendingSeed = snap.seed; state.removeImage = snap.remove; state.pendingImage = snap.image;
+  $("f-image").value = "";
   state.kind = kind;
-  const keep = state.editing && !state.removeImage && !state.pendingImage && !state.pendingSeed && !state.pendingChar;
-  if (kind === "emoji") {
-    clearPendingImage(); $("f-image").value = ""; state.pendingSeed = null; state.pendingChar = null;
-    state.removeImage = Boolean(!state.editing || state.editing.avatar !== "emoji");
-  } else if (kind === "character" && !state.pendingChar && !(keep && charOf(state.editing))) {
-    pickChar(charOf(state.editing) ? state.editing.avatar_seed : "square:blue");
-    return;
-  } else if (kind === "character" && !state.pendingChar) {
-    clearPendingImage(); state.pendingSeed = null; state.removeImage = false;
-  } else if (kind === "pattern" && !state.pendingSeed && !(keep && state.editing.avatar === "generated")) {
-    pickSeed(state.editing && state.editing.avatar === "generated" ? state.editing.avatar_seed : "preset-" + Math.floor(Math.random() * 12));
-    return;
+  if (!had) {
+    const saved = state.editing;
+    if (kind === "emoji") state.removeImage = Boolean(!saved || saved.avatar !== "emoji");
+    else if (kind === "character" && !(saved && charOf(saved))) { pickChar("square:blue"); return; }
+    else if (kind === "pattern" && !(saved && saved.avatar === "generated")) { pickSeed("preset-" + Math.floor(Math.random() * 12)); return; }
   }
   updateIconPreview();
 }
@@ -3745,7 +3748,18 @@ function buildCharPicker() {
   }));
 }
 document.querySelectorAll("#f-kind button").forEach((b) => { b.onclick = () => chooseKind(b.dataset.kind); });
+$("f-kind").addEventListener("keydown", (event) => {   // radio group: arrows move the choice, one tab stop
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+  if (!step) return;
+  const buttons = Array.from($("f-kind").querySelectorAll("button")), at = buttons.findIndex((b) => b.dataset.kind === state.kind);
+  const next = buttons[(at + step + buttons.length) % buttons.length];
+  event.preventDefault(); chooseKind(next.dataset.kind); next.focus();
+});
 
+function releaseStash() {
+  for (const snap of Object.values(state.stash)) if (snap.image) URL.revokeObjectURL(snap.image.url);
+  state.stash = {};
+}
 function clearPendingImage() {
   if (state.pendingImage) URL.revokeObjectURL(state.pendingImage.url);
   state.pendingImage = null;
@@ -3777,6 +3791,7 @@ async function openDialog(bot) {
   state.removeImage = false;
   state.pendingSeed = null;
   state.pendingChar = null;
+  releaseStash();
   state.kind = kindOf(bot);
   if (!bot) {   // a new bot starts with a random character (its face shows its status)
     const shape = CHAR_SHAPES[Math.floor(Math.random() * CHAR_SHAPES.length)], colors = Object.keys(CHAR_COLORS);
@@ -3854,7 +3869,7 @@ async function openDialog(bot) {
 $("new-bot").onclick = () => openDialog(null);
 $("edit-bot").onclick = () => { const bot = currentBot(); if (bot) openDialog(bot); };
 $("dialog-cancel").onclick = () => $("bot-dialog").close();
-$("bot-dialog").addEventListener("close", () => { clearPendingImage(); state.editing = null; });
+$("bot-dialog").addEventListener("close", () => { clearPendingImage(); releaseStash(); state.editing = null; });
 $("f-models-refresh").onclick = async () => {
   const button = $("f-models-refresh");
   const picked = modelPicker.value;
@@ -3944,7 +3959,7 @@ $("bot-form").onsubmit = async (event) => {
     let saved = bot
       ? await api("/v1/bots/" + bot.id, { method: "PATCH", body: JSON.stringify(body) })
       : await api("/v1/bots", { method: "POST", body: JSON.stringify(body) });
-    if (!bot) { state.editing = saved; $("dialog-title").textContent = "Bot settings"; }   // a failed avatar step must not make a retry create a second bot
+    if (!bot) { state.editing = saved; $("dialog-title").textContent = "Bot settings"; loadBots().catch(() => {}); }   // a failed avatar step must not make a retry create a second bot
     if (state.pendingImage) {
       saved = await api("/v1/bots/" + saved.id + "/icon", { method: "PUT", body: state.pendingImage.file });
     } else if (state.pendingChar && !(saved.avatar === "character" && saved.avatar_seed === charSeed(parseChar(state.pendingChar)))) {

@@ -157,7 +157,7 @@ const state = {};
 ''' + code + '''
 assert.deepEqual(parseChar("char|star|violet"), {shape: "star", color: "violet"});
 assert.deepEqual(parseChar("pill:teal"), {shape: "pill", color: "teal"});
-for (const bad of ["char|star|mauve", "char|dragon|blue", "preset-3", "", null, undefined, "char|star", "char|a|b|c", "char|Star|blue", "char:star:blue"]) assert.equal(parseChar(bad), null, String(bad));
+for (const bad of ["pill:constructor", "char|star|toString", "char|star|mauve", "char|dragon|blue", "preset-3", "", null, undefined, "char|star", "char|a|b|c", "char|Star|blue", "char:star:blue"]) assert.equal(parseChar(bad), null, String(bad));
 assert.equal(charOf({avatar_seed: "char|star|blue"}).shape, "star");
 assert.equal(charOf({avatar_seed: "char:star:blue"}), null);                              // not the stored form
 assert.equal(charSeed({shape: "star", color: "blue"}), "char|star|blue");
@@ -194,6 +194,10 @@ for (const shape of CHAR_SHAPES) for (const color of Object.keys(CHAR_COLORS)) f
 console.log(n);
 ''')
     assert out.strip() == str(8 * 10 * 6)
+
+
+def test_picker_is_a_keyboard_radio_group():
+    assert "ArrowRight" in PAGE and "b.tabIndex = b.dataset.kind === state.kind" in PAGE
 
 
 def test_markup_and_css_for_characters():
