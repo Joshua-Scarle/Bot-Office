@@ -216,6 +216,8 @@ def _square_png(data: bytes, Image, ImageOps) -> bytes:
     img.seek(0)
     if img.format == "JPEG":
         img.draft("RGB", (SIZE * 2, SIZE * 2))   # decode a JPEG at reduced size: much less memory
+        if img.size[0] * img.size[1] > MAX_UPLOAD_PIXELS:   # draft cannot shrink a very wide, short JPEG
+            raise AvatarError(413, "icon image has too many pixels")
     img.load()
     img = ImageOps.exif_transpose(img) or img
     img = img.convert("RGBA" if "A" in img.getbands() or img.mode == "P" else "RGB")

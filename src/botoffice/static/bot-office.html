@@ -1005,7 +1005,7 @@ $("new-section").onclick = startCreateSection;
 
 async function toggleSection(sec) {
   if (!state.sections) return;
-  if ($("bot-search").value.trim()) { announce("Clear the search to collapse or expand sections"); return; }   // a search shows every match
+  if ($("bot-search").value.trim()) { setStatus("Clear the search to collapse or expand sections."); announce(""); requestAnimationFrame(() => announce("Clear the search to collapse or expand sections")); return; }   // a search shows every match
   const next = !sec.collapsed;
   const target = sec.id === "ungrouped" ? state.sections.ungrouped : state.sections.sections.find((s) => s.id === sec.id);
   if (target) target.collapsed = next;
@@ -3553,15 +3553,29 @@ const modelPicker = createModelPicker($("f-model"), $("f-model-list"), { customE
 $("f-icon").oninput = updateIconPreview;
 $("f-name").oninput = () => { if (!state.editing) updateIconPreview(); };
 
-$("f-image").onchange = () => {
+async function shrinkImage(file) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 512 / Math.min(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale)); canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  } catch (err) { return null; }
+}
+$("f-image").onchange = async () => {
   const file = $("f-image").files[0];
   $("dialog-error").textContent = "";
   if (!file) return;
   if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { $("dialog-error").textContent = "Use a PNG, JPEG or WebP image."; $("f-image").value = ""; return; }
-  if (file.size > MAX_ICON_BYTES) { $("dialog-error").textContent = "Image is larger than 2 MB."; $("f-image").value = ""; return; }
   if (!file.size) { $("dialog-error").textContent = "Image is empty."; $("f-image").value = ""; return; }
+  let upload = file;
+  if (file.size > MAX_ICON_BYTES) {   // a phone photo: shrink it here (the server crops and resizes to 256 px anyway)
+    upload = await shrinkImage(file);
+    if (!upload || upload.size > MAX_ICON_BYTES) { $("dialog-error").textContent = "Image is larger than 2 MB and could not be shrunk."; $("f-image").value = ""; return; }
+  }
   clearPendingImage();
-  state.pendingImage = { file, url: URL.createObjectURL(file) };
+  state.pendingImage = { file: upload, url: URL.createObjectURL(upload) };
   state.pendingSeed = null;
   state.removeImage = false;
   updateIconPreview();
