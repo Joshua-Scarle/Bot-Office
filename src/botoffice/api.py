@@ -121,6 +121,7 @@ class AutoContinueBody(BaseModel):
     per_hour: int | Literal["unlimited"] | None = None
     evidence: bool | None = None
     evidence_min: int | None = None
+    hold_hours: int | None = None
 
 
 class ApprovalClassCreate(BaseModel):

@@ -179,6 +179,30 @@ def test_per_bot_daily_cap_defers_the_turn_with_a_line_and_needs_you(settings):
     assert sum("per-bot cap" in text for text in system_lines(store, bot)) == 2  # held again at the new cap only
 
 
+@pytest.mark.parametrize("change", ["off", "old"])
+def test_a_held_turn_is_checked_again_when_its_hold_ends(settings, change):
+    """A turn a cap held was decided before it waited: switched-off auto-continue, or a hold older
+    than hold_hours, cancels it with a line when it comes off hold; its task waits for the owner."""
+    store, scheduler, _, bot, item = task_setup(settings, *fresh(20))
+    save(store, per_bot_day=2, per_hour=None)
+    run_all(store, scheduler)
+    [held] = task_queued(store, item)
+    if change == "off":
+        save(store, enabled=False)
+    else:
+        with closing(store._connect()) as db:
+            db.execute("UPDATE jobs SET held_at=? WHERE id=?", ((now() - timedelta(hours=13)).isoformat(), str(held.id)))
+    save(store, per_bot_day=50)  # the cap no longer holds it
+    assert run_next(store, scheduler) is None
+    assert store.get(held.id).status == JobStatus.CANCELLED
+    line = system_lines(store, bot)[-1]
+    assert line.startswith("A held automatic turn was not run: ") and "Reply to keep it going" in line
+    assert ("now off" if change == "off" else "more than 12 hours") in line
+    after = scheduler.assignments.get(item.id)
+    assert after.status == "waiting_on_user" and after.status_note.startswith("paused, not blocked")
+    assert continuation.get(store)["hold_hours"] == 12
+
+
 def test_all_bots_hourly_cap_counts_every_bot(settings):
     store, scheduler, _, ada = chat_setup(settings, fresh(20, "not_done"))
     save(store, per_hour=1)

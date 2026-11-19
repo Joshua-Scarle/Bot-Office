@@ -34,7 +34,7 @@ The caps are checked when a job is claimed (`continuation.cap_gate` in `store.cl
 - `per_bot_day`: 20 per bot in a rolling 24 h.
 - `per_hour`: 20 for all bots in a rolling hour.
 
-Either can be `null`, meaning unlimited. A job over a cap is **deferred, not dropped**: `not_before` is set to when the window slides, `failure_kind='auto_cap'`. One chat line names the cap and says it can be raised in Settings. A Needs-you item (`kind: auto_cap`) stays while turns are held. Saving the settings releases held turns for a re-check. An owner chat message cancels the bot's queued chat continuations. An assignment reply cancels its loop turns.
+Either can be `null`, meaning unlimited. A held job was decided before it waited, so when its hold ends it is checked again: if auto-continue was switched off, the bot was made chat-only, its task is no longer active, or it was held longer than `hold_hours` (default 12), it is cancelled with the chat line "A held automatic turn was not run: <why>. Reply to keep it going." and its task waits for the owner ("paused, not blocked"). A job over a cap is **deferred, not dropped**: `not_before` is set to when the window slides, `failure_kind='auto_cap'`. One chat line names the cap and says it can be raised in Settings. A Needs-you item (`kind: auto_cap`) stays while turns are held. Saving the settings releases held turns for a re-check. An owner chat message cancels the bot's queued chat continuations. An assignment reply cancels its loop turns.
 
 ## Done needs evidence (G4)
 
@@ -71,8 +71,9 @@ All of these are in `GET/PUT /v1/settings` under `auto_continue`. A value saved 
 | per_hour | 20 (or null = unlimited) | BOT_OFFICE_AUTO_TURNS_PER_HOUR |
 | evidence | true | BOT_OFFICE_DONE_NEEDS_EVIDENCE (on/off) |
 | evidence_min | 12 (1..1000 characters) | BOT_OFFICE_DONE_EVIDENCE_MIN_CHARS |
+| hold_hours | 12 (1..720) | BOT_OFFICE_AUTO_HOLD_HOURS |
 
-`max` cannot be saved above `consecutive` (422): the chat chain stops at whichever comes first. If an env default later makes `consecutive` lower, `GET /v1/settings` returns the limit that applies as `auto_continue_chat_limit`, Settings shows it, and the chat bubble counts against it.
+`max` cannot be saved above `consecutive` (422): the chat chain stops at whichever comes first. If `consecutive` is later lowered below it (a save or an env default), `GET /v1/settings` returns the limit that applies as `auto_continue_chat_limit`, Settings shows it, and the chat bubble counts against it.
 
 Not built (owner answers G6, G9 and plan 6.2): quiet hours, a physical/irreversible done gate, and a pick-up loop that starts open tasks by itself.
 

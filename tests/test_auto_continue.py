@@ -229,13 +229,19 @@ def test_max_above_consecutive_is_refused_and_the_effective_limit_shown(settings
     assert refused.status_code == 422 and "consecutive" in refused.json()["detail"]
     both = client.put("/v1/settings", headers=owner, json={"auto_continue": {"max": 50, "consecutive": 50}}).json()
     assert both["auto_continue"]["max"] == 50 and both["auto_continue_chat_limit"] == 50
-    # an env default lowering consecutive later: the effective limit is shown, and the chat says "n of 5"
+    # lowering consecutive alone is allowed: the effective limit is shown
     client.put("/v1/settings", headers=owner, json={"auto_continue": {"max": 8, "consecutive": 8}})
-    store = client.app.state.store
-    raw = store.get_meta(continuation.KEY)
-    store.set_meta(continuation.KEY, raw.replace('"consecutive": 8', '"consecutive": 5'))
-    shown = client.get("/v1/settings", headers=owner).json()
+    shown = client.put("/v1/settings", headers=owner, json={"auto_continue": {"consecutive": 5}}).json()
     assert shown["auto_continue"]["max"] == 8 and shown["auto_continue_chat_limit"] == 5
     assert continuation.chat_limit(shown["auto_continue"]) == 5
     html = (Path(__file__).parents[1] / "src" / "botoffice" / "static" / "bot-office.html").read_text()
     assert "auto_continue_chat_limit" in html and "auto-continue-effective" in html
+
+
+def test_the_continuing_bubble_counts_against_the_effective_limit(settings):
+    from botoffice import continuation
+    store, scheduler, _, bot = _setup(settings, [NOT_DONE])
+    continuation.update(store, {"consecutive": 3})  # max stays 10
+    _run_one(store, scheduler)
+    [queued] = _queued(store, bot)
+    assert "Automatic continuation 1 of 3" in queued["prompt"]
