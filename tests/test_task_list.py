@@ -834,3 +834,20 @@ def test_self_md_describes_cross_bot_rules_and_drop_setting(settings, monkeypatc
     assert "edit the title and goal of a task the user created, never its done-when" in text
     for verb in ("bot-task add", "bot-task edit", "bot-task drop", "bot-task board"):
         assert verb in build_self(bot, job)
+
+
+@pytest.mark.parametrize("value", ["Infinity", "-Infinity", "NaN", "1e300"])
+def test_positions_must_be_finite_and_bounded(rig, value):
+    """{"position": Infinity} (accepted by Python's json) would make MAX(position)+1 infinite for
+    every later task: it is refused (422) on every route that takes a position."""
+    client, store, (ada, *_), tokens = rig
+    body = '{"title": "t", "position": %s}' % value
+    headers = {**H, "Content-Type": "application/json"}
+    assert client.post(f"/v1/bots/{ada.id}/tasks", headers=headers, content=body).status_code == 422
+    agent = {**tokens["Ada"], "Content-Type": "application/json"}
+    assert client.post("/v1/agent/tasks", headers=agent, content=body).status_code == 422
+    item = client.post(f"/v1/bots/{ada.id}/tasks", headers=H, json={"title": "ok", "start": False}).json()
+    edit = '{"version": 1, "position": %s}' % value
+    assert client.patch(f"/v1/tasks/{item['id']}", headers=headers, content=edit).status_code == 422
+    assert client.patch(f"/v1/agent/tasks/{item['id']}", headers=agent, content=edit).status_code == 422
+    assert Assignments(store).tasks(ada.id)[0].position is None or abs(Assignments(store).tasks(ada.id)[0].position) < 1e12

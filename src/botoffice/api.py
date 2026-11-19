@@ -6,6 +6,7 @@ import contextlib
 from contextlib import closing
 import hashlib
 import json
+import math
 import re
 import time
 from contextlib import asynccontextmanager
@@ -16,6 +17,8 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
@@ -60,6 +63,7 @@ from .assignments import (
 )
 from .domain import (
     _check_cron,
+    POSITION_LIMIT,
     Assignment,
     AssignmentCreate,
     AssignmentReply,
@@ -173,7 +177,7 @@ TASK_STAGES = {"not_started", "in_progress", "completed", "dropped"}
 class AgentTaskCreate(AgentAssignmentCreate):
     # 0.11.4: lands open unless the bot asks to start one on its own list (or a child it delegates)
     start: bool = False
-    position: float | None = None
+    position: float | None = Field(default=None, allow_inf_nan=False, ge=-POSITION_LIMIT, le=POSITION_LIMIT)
 
 
 class AgentTaskEdit(BaseModel):
@@ -185,7 +189,7 @@ class AgentTaskEdit(BaseModel):
     goal: str | None = Field(default=None, max_length=20_000)
     done_when: str | None = Field(default=None, max_length=4000)
     due_at: datetime | None = None
-    position: float | None = None
+    position: float | None = Field(default=None, allow_inf_nan=False, ge=-POSITION_LIMIT, le=POSITION_LIMIT)
     priority: Literal["urgent", "high", "normal", "low"] | None = None
 
 
@@ -1914,6 +1918,21 @@ def create_app(
     @app.exception_handler(AssignmentError)
     async def assignment_error(request: Request, exc: AssignmentError) -> JSONResponse:
         return JSONResponse({"detail": exc.detail, **exc.extra}, status_code=exc.status)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """FastAPI's 422, except that a non-finite number in the input (``Infinity``/``NaN``, which
+        Python's json accepts) is echoed as text: JSON cannot carry it and the default answer was a 500."""
+        def finite(value):
+            if isinstance(value, float) and not math.isfinite(value):
+                return str(value)
+            if isinstance(value, dict):
+                return {key: finite(item) for key, item in value.items()}
+            if isinstance(value, list | tuple):
+                return [finite(item) for item in value]
+            return value
+        errors = [{**error, "input": finite(error.get("input"))} for error in exc.errors()]
+        return JSONResponse({"detail": jsonable_encoder(errors)}, status_code=422)
 
     def _stages(value: str | None) -> list[str] | None:
         if not value:
