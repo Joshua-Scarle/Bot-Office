@@ -55,7 +55,7 @@ def messages(client, bot_id):
 
 
 def test_version_is_0_7_0():
-    assert botoffice.__version__ == "0.12.0"
+    assert botoffice.__version__ == "0.12.2"
 
 
 def test_model_choices_lists_only_signed_in_engines(settings):
@@ -211,7 +211,9 @@ def test_icon_upload_validation_and_auth(settings):
     with TestClient(create_app(settings, {"codex": FakeAdapter()})) as client:
         bot = client.post("/v1/bots", json={"name": "Pic"}, headers=H).json()
         url = f"/v1/bots/{bot['id']}/icon"
-        assert client.get(url, headers=H).headers["content-type"] == "image/png"      # 0.12.0: a generated default avatar
+        assert client.get(url, headers=H).status_code == 404                           # 0.12.2: the default is a character, drawn in the browser
+        assert client.post(f"{url}/generate", json={"seed": "preset-1"}, headers=H).status_code == 200
+        assert client.get(url, headers=H).headers["content-type"] == "image/png"      # a generated pattern is served as a PNG
         assert client.put(url, content=PNG, headers={"Content-Type": "image/png"}).status_code == 401
         assert client.put(url, content=b"", headers=H | {"Content-Type": "image/png"}).status_code == 400
         huge = PNG + b"\x00" * MAX_ICON_BYTES

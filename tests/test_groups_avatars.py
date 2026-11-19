@@ -27,6 +27,14 @@ def mk(client, name):
     return r.json()
 
 
+def mk_pattern(client, name):
+    """A bot with a generated pattern avatar (0.12.2: new bots start with a character)."""
+    bot = mk(client, name)
+    r = client.post(f"/v1/bots/{bot['id']}/icon/generate", headers=H, json={"seed": "preset-3"})
+    assert r.status_code == 200 and r.json()["avatar"] == "generated"
+    return r.json()
+
+
 def layout(client):
     r = client.get("/v1/sections", headers=H)
     assert r.status_code == 200
@@ -168,16 +176,23 @@ def test_generator_is_deterministic_valid_png_and_presets_differ():
         avatars.render_png("../../etc")
 
 
-def test_new_bots_get_a_default_generated_avatar_and_keep_their_emoji(client):
+def test_new_bots_get_a_default_character_and_keep_their_emoji(client):
     bot = client.post("/v1/bots", headers=H, json={"name": "Pic", "icon": "🦊"}).json()
-    assert bot["avatar"] == "generated" and bot["avatar_seed"] in avatars.PRESET_SEEDS and bot["icon"] == "🦊"
+    assert bot["avatar"] == "character" and avatars.is_character(bot["avatar_seed"]) and bot["icon"] == "🦊"
+    shape, color = bot["avatar_seed"].split("|")[1:]
+    assert shape in avatars.CHAR_SHAPES and color in avatars.CHAR_COLORS
+    assert client.get(f"/v1/bots/{bot['id']}/icon", headers=H).status_code == 404   # drawn in the browser, not fetched
+
+
+def test_generated_pattern_still_serves_a_png(client):
+    bot = mk_pattern(client, "Pat")
     r = client.get(f"/v1/bots/{bot['id']}/icon", headers=H)
     assert r.status_code == 200 and r.headers["content-type"] == "image/png"
     assert Image.open(io.BytesIO(r.content)).size == (256, 256)
 
 
 def test_icon_caching_etag_and_versioned_urls(client):
-    bot = mk(client, "Cache")
+    bot = mk_pattern(client, "Cache")
     r = client.get(f"/v1/bots/{bot['id']}/icon", headers=H)
     assert r.headers["cache-control"] == "private, no-cache" and r.headers["etag"]
     again = client.get(f"/v1/bots/{bot['id']}/icon", headers={**H, "If-None-Match": r.headers["etag"]})
@@ -224,7 +239,7 @@ def test_upload_is_resized_cropped_and_stored_as_png(client, fmt, mode):
     (b"x" * (2 * 1024 * 1024 + 1), 413),
 ])
 def test_upload_validation(client, payload, status):
-    bot = mk(client, "V")
+    bot = mk_pattern(client, "V")
     r = client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=payload)
     assert r.status_code == status, r.text
     if status != 200:
@@ -287,7 +302,7 @@ def test_upload_without_pillow_is_a_clear_503_and_generation_still_works(client,
     import sys
     payload = image_bytes()
     monkeypatch.setitem(sys.modules, "PIL", None)
-    bot = mk(client, "NoPil")
+    bot = mk_pattern(client, "NoPil")
     assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=payload).status_code == 503
     assert client.get(f"/v1/bots/{bot['id']}/icon", headers=H).status_code == 200
 
