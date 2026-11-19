@@ -255,3 +255,26 @@ def test_a_new_antigravity_bot_and_its_jobs_carry_no_conflicting_effort(settings
         assert job["model"] == bot["model"] and job["effort"] is None
         plain = client.post("/v1/jobs", json={"prompt": "hi", "provider": "antigravity", "model": "gemini-3.8-pro"}, headers=H).json()
         assert plain["effort"] == "medium"
+
+
+def test_the_page_hides_effort_for_the_same_models_the_server_does():
+    """bot-office.html mirrors catalog.model_carries_effort: same answers, and the settings dialog uses it."""
+    import shutil
+    import subprocess
+
+    import pytest
+
+    from botoffice.api import CHAT_PAGE
+    from botoffice.catalog import model_carries_effort
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is unavailable")
+    page = CHAT_PAGE.read_text()
+    start = page.index("function modelCarriesEffort")
+    func = page[start:page.index("\n", start)]
+    cases = [("antigravity", m) for m in ("gemini-3.8-flash-high", "gemini-3.8-flash-LOW", "x-xhigh", "gemini-3.8-pro", "gemini-high-x", "")]
+    cases += [("claude", "claude-opus-5-5"), ("codex", "gpt-6.1-high"), ("opencode", "a/b-max")]
+    script = func + f"\nconst out = {json.dumps(cases)}.map(([e, m]) => modelCarriesEffort(e, m));\nconsole.log(JSON.stringify(out));"
+    got = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True, timeout=30).stdout)
+    assert got == [model_carries_effort(e, m) for e, m in cases]
+    assert "const levels = fixed ? [] : effortsFor(engine);" in page and "modelCarriesEffort(bot.engine, bot.model)" in page

@@ -2952,7 +2952,7 @@ function fillEffortSelect() {
   const levels = fixed ? [] : effortsFor(engine);
   const bot = state.editing;
   const select = $("f-effort");
-  const keep = select.dataset.engine === engine ? select.value : null;
+  const keep = select.dataset.engine === engine && select.value ? select.value : null;  // empty after an effort-carrying model
   select.replaceChildren(...(engine === "opencode" ? [""] : []).concat(levels).map((level) => { const o = el("option", "", level || "default (unset)"); o.value = level; return o; }));
   const stored = bot && bot.engine === engine && (levels.includes(bot.effort) || (engine === "opencode" && !bot.effort)) ? (bot.effort || "") : null;
   select.value = keep ?? stored ?? defaultEffortFor(engine);

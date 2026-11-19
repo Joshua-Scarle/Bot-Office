@@ -50,6 +50,8 @@ class Desk:
 
     def reply(self, bot: str) -> str:
         _, messages = self.call("GET", f"/v1/bots/{bot}/messages")
+        if not isinstance(messages, list):
+            return ""
         texts = [m.get("text") or "" for m in messages if m.get("role") not in ("owner", "user")]
         return texts[-1] if texts else ""
 

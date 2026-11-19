@@ -338,7 +338,8 @@ def test_adapters_pass_selected_model(tmp_path):
     assert cursor[0] == "-p" and cursor[-3:] == ["--model", "composer-2.5", PROMPT_POINTER]
     agy = AntigravityAdapter(executable="agy")._exec_args(tmp_path, _job("gemini-3.8-flash-low"))
     assert agy[:2] == ["-p", "write report"]
-    assert agy[-4:] == ["--model", "gemini-3.8-flash-low", "--effort", "medium"]
+    assert agy[-2:] == ["--model", "gemini-3.8-flash-low"]  # 0.11.15: the id names its effort; --effort would conflict
+    assert AntigravityAdapter(executable="agy")._exec_args(tmp_path, _job("gemini-3.8-pro"))[-4:] == ["--model", "gemini-3.8-pro", "--effort", "medium"]
     codex = CodexAdapter(executable="codex")._exec_args(tmp_path, _job("gpt-6.1-terra"))
     assert codex == [
         "exec", "-m", "gpt-6.1-terra", "-c", "model_reasoning_effort=high", "--approve-for-me",
