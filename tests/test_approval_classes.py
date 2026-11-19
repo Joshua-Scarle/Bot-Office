@@ -261,3 +261,18 @@ def test_engines_that_cannot_pause_are_named_and_told_not_to_act(tmp_path):
     for item in approval_classes.BUILTIN:
         approval_classes.update(store, enabled={item.key: False})
     assert approval_classes.self_note(store, "opencode", "full") == ""
+
+
+def test_settings_show_unpausable_bots_by_each_class_and_docs_say_checkpoint():
+    """Settings names the bots a class can only advise next to every class that is on; the docs
+    describe classes as a checkpoint / tripwire, not enforcement."""
+    from pathlib import Path
+    root = Path(__file__).parents[1]
+    html = (root / "src" / "botoffice" / "static" / "bot-office.html").read_text()
+    start = html.index("function showApprovals(data)")
+    body = html[start:html.index("\n}\n", start)]
+    assert "c.enabled && loose.length" in body and "Advice only, can't pause: " in body
+    docs = (root / "docs" / "APPROVALS.md").read_text()
+    assert "A checkpoint, not enforcement." in docs and "fails open" in docs and "s=sudo; $s" in docs
+    readme = (root / "README.md").read_text()
+    assert "Classes are a checkpoint and a tripwire, not enforcement" in readme
