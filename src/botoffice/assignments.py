@@ -82,6 +82,7 @@ BOT_EDIT_OWNER_TASKS = ("BOT_OFFICE_BOT_EDIT_OWNER_TASKS", "title_goal", ("title
 FORM_TASKS_START = ("BOT_OFFICE_FORM_TASKS_START", "auto", ("auto", "manual"))
 # the priority of a new task that names none
 TASK_DEFAULT_PRIORITY = ("BOT_OFFICE_TASK_DEFAULT_PRIORITY", "normal", PRIORITIES)
+REORDER_EVENTS = 50  # "moved" events one reorder writes at most (the rest are counted in its "reordered" event)
 # a bot's task on another bot's list gets at most this priority (and no list position): the list's
 # own bot and the owner order that list
 CROSS_BOT_MAX_PRIORITY = ("BOT_OFFICE_CROSS_BOT_MAX_PRIORITY", "normal", PRIORITIES)
@@ -106,14 +107,22 @@ def cross_bot_priority(priority: str) -> str:
     return priority
 
 
+def became_active(db: sqlite3.Connection, assignment_id: str) -> int:
+    """The id of *assignment_id*'s last event that started its current work: a move to active or
+    open (start, reply, reopen) or a rewind; 0 if none."""
+    return db.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM assignment_events WHERE assignment_id=? AND (kind='rewound' OR "
+        "(kind='status' AND (note IN ('active','open') OR note LIKE 'active:%' OR note LIKE 'open:%')))",
+        (assignment_id,)).fetchone()[0]
+
+
 def latest_evidence(db: sqlite3.Connection, assignment_id: str, minimum: int = 1) -> str | None:
-    """The newest ``evidence`` event note of *assignment_id* given after its last move to active
-    or open (start, reply, reopen) or rewind, at least *minimum* characters long; else None."""
+    """The newest ``evidence`` event note of *assignment_id* given since it last became active
+    (``became_active``), at least *minimum* characters long; else None."""
     row = db.execute(
         "SELECT note FROM assignment_events WHERE assignment_id=? AND kind='evidence' AND length(note)>=? "
-        "AND id > COALESCE((SELECT MAX(id) FROM assignment_events WHERE assignment_id=? AND (kind='rewound' OR "
-        "(kind='status' AND (note IN ('active','open') OR note LIKE 'active:%' OR note LIKE 'open:%')))), 0) "
-        "ORDER BY id DESC LIMIT 1", (assignment_id, minimum, assignment_id)).fetchone()
+        "AND id > ? ORDER BY id DESC LIMIT 1",
+        (assignment_id, minimum, became_active(db, assignment_id))).fetchone()
     return row["note"] if row else None
 
 
@@ -125,7 +134,7 @@ def with_evidence(note: str, evidence: str | None) -> str:
 
 
 def untrusted(origin: str, text: str) -> str:
-    """Delimit text a bot wrote (not Joshua) so a recipient never reads it as his instructions."""
+    """Delimit text a bot wrote (not the owner) so a recipient never reads it as the owner's instructions."""
     text = text.replace("<<<", "‹‹‹").replace(">>>", "›››")
     return f"<<<UNTRUSTED from {origin}\n{text}\n>>>"
 
@@ -312,11 +321,13 @@ class Assignments:
         assignment_event(db, assignment_id, kind, note, job_id, actor=actor)
 
     def _change(self, db: sqlite3.Connection, row: sqlite3.Row, actor: str, fields: dict, *, kind: str,
-                note: str = "", job_id: str | None = None, expected_version: int | None = None) -> sqlite3.Row:
+                note: str = "", job_id: str | None = None, expected_version: int | None = None,
+                record: bool = True) -> sqlite3.Row:
         """The only writer of a task's fields and status. One UPDATE sets *fields*, bumps the version
         and records who changed it (``user`` | ``bot:<id>`` | ``system``); with *expected_version* it
         applies only to that version (else 409 with the current task and the changes since). Then
-        an event with the actor and the new version. Runs inside the caller's BEGIN IMMEDIATE.
+        an event with the actor and the new version (unless *record* is false: a bulk renumber
+        records the rest in one event). Runs inside the caller's BEGIN IMMEDIATE.
         Bookkeeping (budget used, turn counters, report slots, stall and dismiss flags) is not a
         change of the task and is written directly."""
         values = {key: (value.isoformat() if isinstance(value, datetime) else int(value) if isinstance(value, bool)
@@ -329,7 +340,8 @@ class Assignments:
             params.append(expected_version)
         if db.execute(query, params).rowcount == 0:
             raise self._conflict(db, self._row(db, row["id"]), expected_version)
-        self._event(db, row["id"], kind, note, job_id, actor=actor)
+        if record:
+            self._event(db, row["id"], kind, note, job_id, actor=actor)
         return self._row(db, row["id"])
 
     def _check_version(self, db: sqlite3.Connection, row: sqlite3.Row, expected_version: int | None) -> None:
@@ -871,8 +883,8 @@ class Assignments:
         """Put the listed tasks of *bot_id*'s list in this order (first = next). They take the
         places they hold in the list, so tasks left out keep their order; when some positions are
         missing (tasks from before 0.11.4) or shared, the whole list is renumbered 1..n in its
-        current order first. One event per moved task, plus one "reordered" event (the one write
-        the per-hour cap counts). With *versions* ({id: version}) a stale
+        current order first. Closed tasks keep their position. One event per moved task (at most
+        REORDER_EVENTS), plus one "reordered" event (the one write the per-hour cap counts). With *versions* ({id: version}) a stale
         task is a 409. A bot reorders only its own list."""
         ids = [str(item) for item in order]
         if len(set(ids)) != len(ids):
@@ -888,20 +900,25 @@ class Assignments:
                     if versions and row["id"] in versions:
                         self._check_version(db, row, versions[row["id"]])
                 self._check_writes(db, actor)
-                full = db.execute("SELECT * FROM assignments WHERE bot_id=? "
-                                  "ORDER BY position IS NOT NULL, position, created_at, id", (str(bot_id),)).fetchall()
+                # only open tasks hold places: a closed one is never renumbered (no version bump, no event)
+                marks = ",".join("?" for _ in CLOSED_STATUSES)
+                full = db.execute(f"SELECT * FROM assignments WHERE bot_id=? AND status NOT IN ({marks}) "
+                                  "ORDER BY position IS NOT NULL, position, created_at, id",
+                                  (str(bot_id), *CLOSED_STATUSES)).fetchall()
                 held = [row["position"] for row in full]
                 if None in held or len(set(held)) != len(held):
                     held = [float(index + 1) for index in range(len(full))]
                 places = {row["id"]: slot for row, slot in zip(full, held, strict=True)}
-                # the listed tasks take the places they hold between them, in the order given
-                for key, slot in zip(ids, sorted(places[key] for key in ids), strict=True):
+                # the listed open tasks take the places they hold between them, in the order given
+                listed = [key for key in ids if key in places]
+                for key, slot in zip(listed, sorted(places[key] for key in listed), strict=True):
                     places[key] = slot
                 moved = 0
                 for row in full:
                     if row["position"] != places[row["id"]]:
+                        # a "moved" event each for the first REORDER_EVENTS; the rest only in "reordered"
                         self._change(db, row, actor, {"position": places[row["id"]]}, kind="moved",
-                                     note=f"position {places[row['id']]:g}")
+                                     note=f"position {places[row['id']]:g}", record=moved < REORDER_EVENTS)
                         moved += 1
                 if moved and ids:
                     self._event(db, ids[0], "reordered", f"{moved} task{'s' if moved != 1 else ''} moved", actor=actor)
@@ -1248,8 +1265,9 @@ class Assignments:
         job_id = job["id"]
         evidence = self._evidence(db, row["id"])
         if continuation.read(db)["evidence"] and evidence is None:
-            if db.execute("SELECT 1 FROM assignment_events WHERE assignment_id=? AND kind='evidence_asked' LIMIT 1",
-                          (row["id"],)).fetchone():
+            # asked already for this work (since it last became active, as the evidence that counts)
+            if db.execute("SELECT 1 FROM assignment_events WHERE assignment_id=? AND kind='evidence_asked' AND id>? "
+                          "LIMIT 1", (row["id"], became_active(db, row["id"]))).fetchone():
                 self._set_status(db, row, "waiting_on_user", NO_EVIDENCE_NOTE, job_id=job_id)
                 return "no_evidence"
             if not self._go(db, row, job, "evidence").go:
@@ -1301,6 +1319,11 @@ class Assignments:
             self._set_status(db, row, "blocked", decision.why, actor="system", job_id=job["id"])
         else:
             self._set_status(db, row, "waiting_on_user", continuation.task_pause_note(decision), job_id=job["id"])
+        # paused: its pending wake-ups would revive it; the owner's reply resumes it instead
+        if db.execute("UPDATE wakeups SET status='cancelled', fired_at=? WHERE assignment_id=? AND status='pending'",
+                      (now().isoformat(), row["id"])).rowcount:
+            self._system_line(db, row["bot_id"], f'Wake-ups for "{row["title"]}" cancelled: the task is paused. '
+                              "Reply to resume.", job["id"])
         return decision
 
     def _turn(self, db: sqlite3.Connection, row: sqlite3.Row, job: sqlite3.Row, kind: str) -> continuation.Turn:
@@ -1459,7 +1482,8 @@ class Assignments:
 
     def _fire(self, db: sqlite3.Connection, wakeup: sqlite3.Row, *, change: tuple[str, str, str] | None = None) -> int:
         """Mark *wakeup* fired and queue its turn, or cancel it (daily cap, bot gone, assignment closed or
-        out of budget) with a chat line. Runs inside the caller's transaction."""
+        out of budget, or ``continuation.decide`` stops it: chat-only bot, auto-continue off, task
+        waiting on the owner or blocked) with a chat line. Runs inside the caller's transaction."""
         stamp = now()
 
         def cancel(reason: str) -> int:
@@ -1471,8 +1495,19 @@ class Assignments:
         if bot is None:
             db.execute("UPDATE wakeups SET status='cancelled' WHERE id=?", (wakeup["id"],))
             return 0
-        if bot["chat_only"]:
-            return cancel(f"{bot['name']} is chat-only, so it does not wake itself")
+        row = None
+        if wakeup["assignment_id"]:
+            row = db.execute("SELECT * FROM assignments WHERE id=?", (wakeup["assignment_id"],)).fetchone()
+            if row is None or row["status"] in CLOSED_STATUSES:
+                return cancel("its assignment is closed")
+        # a wake-up is an automatic turn: the one continuation rule decides (chat-only, off, paused task)
+        decision = continuation.decide(continuation.read(db), continuation.Turn(
+            path="task" if row else "chat", kind="wakeup", state=row["status"] if row else "continue",
+            chat_only=bool(bot["chat_only"])))
+        if not decision.go:
+            if decision.code == "chat_only":
+                return cancel(f"{bot['name']} is chat-only, so it does not wake itself")
+            return cancel(decision.why)
         if db.execute("SELECT COUNT(*) FROM wakeups WHERE bot_id=? AND status='fired' AND fired_at>=?",
                       (wakeup["bot_id"], (stamp - timedelta(days=1)).isoformat())).fetchone()[0] >= MAX_WAKEUPS_PER_DAY:
             return cancel(f"the limit of {MAX_WAKEUPS_PER_DAY} wake-ups per day was reached")
@@ -1486,10 +1521,7 @@ class Assignments:
             title = _quoted(watched) if watched else untrusted(change[2], change[0])
             prompt += f'\nAssignment {title} is now {change[1].replace("_", " ")}.'
         text = "Wake-up" + (f": {wakeup['note']}" if wakeup["note"] else "")
-        if wakeup["assignment_id"]:
-            row = db.execute("SELECT * FROM assignments WHERE id=?", (wakeup["assignment_id"],)).fetchone()
-            if row is None or row["status"] in CLOSED_STATUSES:
-                return cancel("its assignment is closed")
+        if row is not None:
             if not self._budget_left(row):
                 return cancel(f'the budget of "{row["title"]}" is used up')
             if row["status"] != "active":
