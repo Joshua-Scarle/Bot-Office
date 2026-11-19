@@ -58,6 +58,22 @@ EFFORT_LEVELS: dict[str, tuple[str, ...]] = {
 DEFAULT_EFFORT: dict[str, str] = {"codex": "high", "claude": "medium", "antigravity": "medium"}
 
 
+# Antigravity model ids such as ``gemini-3.8-flash-high`` already name their effort, and the CLI refuses
+# ``--effort`` next to one ("model conflicts with --effort"). Such a model runs with no effort flag.
+_EFFORT_IN_NAME_RE = re.compile(r"-(?:low|medium|high|xhigh|max)$", re.I)
+EFFORT_IN_NAME_ENGINES: frozenset[str] = frozenset({"antigravity"})
+
+
+def model_carries_effort(engine: str, model: str | None) -> bool:
+    """True when *model* already encodes its thinking effort, so no separate effort may be sent."""
+    return engine in EFFORT_IN_NAME_ENGINES and bool(model and _EFFORT_IN_NAME_RE.search(model))
+
+
+def effective_effort(engine: str, model: str | None, effort: str | None) -> str | None:
+    """The effort to pass to the CLI: none when the model name carries it."""
+    return None if model_carries_effort(engine, model) else effort
+
+
 def effort_levels(engine: str) -> tuple[str, ...]:
     return EFFORT_LEVELS.get(engine, ())
 

@@ -115,6 +115,7 @@ class ClaudeParser(StreamParser):
         self._partial_thinking = False
         self._has_text = False
         self._new_message = False
+        self._compact: dict[str, Any] | None = None
 
     def _text(self, text: str) -> list[Event]:
         if not text:
@@ -167,9 +168,16 @@ class ClaudeParser(StreamParser):
             self._partial_text = self._partial_thinking = False
             self._new_message = True
             return events
+        if kind == "system" and obj.get("subtype") == "compact_boundary":
+            meta = obj.get("compact_metadata")
+            self._compact = meta if isinstance(meta, dict) else {}
+            return []
         if kind == "result":
             result = obj.get("result")
             _usage(self, obj.get("usage"), obj.get("total_cost_usd"))
+            if obj.get("local_command") == "compact" and not obj.get("is_error") and not str(result or "").strip():
+                # 0.11.15: a successful /compact has an empty result; say what happened in one line
+                result = compact_status(self._compact)
             if obj.get("is_error"):
                 self.error_text = str(result or obj.get("subtype") or "error")
                 if isinstance(obj.get("api_error_status"), int):
@@ -179,6 +187,22 @@ class ClaudeParser(StreamParser):
                 self.final_text = result
                 return [("final", {"text": result})]
         return []
+
+
+def compact_status(meta: dict[str, Any] | None) -> str:
+    """One line for a finished Claude Code ``/compact``: ``Conversation compacted (40k -> 10.5k tokens, 4.7s)``."""
+    meta = meta or {}
+    before, after, took = meta.get("pre_tokens"), meta.get("post_tokens"), meta.get("duration_ms")
+
+    def tokens(value: int) -> str:
+        return f"{value / 1000:.1f}k".replace(".0k", "k") if value >= 1000 else str(value)
+
+    details = []
+    if isinstance(before, int) and isinstance(after, int) and not isinstance(before, bool):
+        details.append(f"{tokens(before)} → {tokens(after)} tokens")
+    if isinstance(took, int | float) and not isinstance(took, bool) and took > 0:
+        details.append(f"{took / 1000:.1f}s")
+    return "Conversation compacted" + (f" ({', '.join(details)})" if details else "")
 
 
 def _usage(parser: StreamParser, usage: Any, cost: Any = None) -> None:
