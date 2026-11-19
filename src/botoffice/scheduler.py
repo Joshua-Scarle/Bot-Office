@@ -68,6 +68,7 @@ def _mark_handoff_pending(bot_dir: Path) -> None:
 # their own loop; bot-to-bot replies go back to the sender; watcher runs have their own quotas). The
 # continuation keeps the source, so it runs under the same attended/unattended rules as the turn it continues.
 AUTO_CONTINUE_SOURCES = ("chat", "api", "routine", "wakeup")
+AUTO_CONTINUE_FAILED = "Could not continue automatically. Reply to keep it going."
 AUTO_CONTINUE_LINE = "Continuing automatically ({n} of {max})"
 AUTO_CONTINUE_PROMPT = (
     "Automatic continuation {n} of {max}: your previous turn ended not_done, so carry on with the same task "
@@ -116,6 +117,7 @@ class Scheduler:
         proven = await asyncio.to_thread(procs.recovery_proof, running) if running else set()
         steered: list[int] = []
         self.store.recover_interrupted(set(running) - proven, steered)
+        self.store.fail_stale_decisions(AUTO_CONTINUE_FAILED)  # left "deciding" by a crash
         for message_id in steered:
             self._log_steer_turn(message_id)  # a steer queued here is a Claude turn like any other
         self._cleanup_stale_attachments()
@@ -805,6 +807,9 @@ class Scheduler:
                     self._auto_continue(job)
                 except Exception:
                     log.exception("could not decide auto-continue for job %s", job.id)
+                    with contextlib.suppress(Exception):
+                        self.store.set_auto_decision(job.id, "error")
+                        self.store.add_message(job.bot_id, "system", AUTO_CONTINUE_FAILED, source=job.source)
         self._settle(job)
         if sink is not None:
             with contextlib.suppress(Exception):
@@ -843,7 +848,7 @@ class Scheduler:
         if not decision.go:
             self.store.add_message(bot.id, "system", continuation.chat_stop_line(decision), source=job.source)
             return decision.code
-        limit = int(settings["max"])
+        limit = continuation.chat_limit(settings)  # what the chain really gets ("n of max")
         text = AUTO_CONTINUE_LINE.format(n=number, max=limit)
 
         def mark(db, new_job: Job) -> None:
