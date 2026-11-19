@@ -28,6 +28,7 @@ CHAIN_MAX_LIMIT = 50
 AUTO_KINDS = ("chat", "loop", "verify", "evidence", "wakeup")
 HELD = "auto_cap"  # jobs.failure_kind of a turn a cap holds until its window slides
 CONTINUE_STATES = ("continue", "not_done")
+PAUSED_STATES = ("waiting_on_user", "blocked")  # task statuses only the owner's reply resumes
 DEFAULTS: dict[str, object] = {
     "enabled": True,
     "max": 10,  # chat: continuations in a row (the 0.11.10 setting)
@@ -147,8 +148,8 @@ def update(store, changes: dict[str, object]) -> dict[str, object]:
 class Turn:
     """A finished turn, as far as continuing it matters."""
     path: str  # "chat" | "task"
-    state: str = "continue"  # what the turn reported (continue, not_done, done, ...)
-    kind: str = "continue"  # what would run next: continue | verify | evidence
+    state: str = "continue"  # what the turn reported (continue, not_done, done, ...); a wake-up: its task's status
+    kind: str = "continue"  # what would run next: continue | verify | evidence | wakeup
     # (reply, status reason) of the turns in a row since the owner last spoke that reported
     # continue / not_done, oldest first, the finished turn last (the owner's own turn included)
     run: list[tuple[str, str]] = field(default_factory=list)
@@ -179,6 +180,9 @@ def decide(settings: dict[str, object], turn: Turn) -> Decision:
         return stop("off", "auto-continue is off (Settings, Auto-continue)")
     if turn.kind == "continue" and turn.state not in CONTINUE_STATES:
         return stop("status", f"it reported {turn.state.replace('_', ' ')}")
+    # a wake-up never revives a paused task: the owner's reply resumes it
+    if turn.kind == "wakeup" and turn.state in PAUSED_STATES:
+        return stop("status", f"its task is {turn.state.replace('_', ' ')}; your reply resumes it")
     if turn.budget_used:
         return stop("budget", turn.budget_used)
     if turn.question_open:
@@ -256,19 +260,21 @@ def hold(db: sqlite3.Connection, job_id: str, why: str, until: datetime, stamp: 
 
 
 def stale_hold(db: sqlite3.Connection, job_id: str, stamp: datetime) -> str | None:
-    """Why a turn a cap held should not run now that its window slid, else None. A held turn was
-    decided before it waited: what changed meanwhile is checked again (auto-continue switched off,
-    the bot made chat-only, its task no longer active) and a turn held over ``hold_hours`` is not run
-    late."""
-    job = db.execute("SELECT j.held_at, j.assignment_id, b.chat_only FROM jobs j LEFT JOIN bots b ON b.id=j.bot_id "
-                     "WHERE j.id=? AND j.failure_kind=?", (job_id, HELD)).fetchone()
-    if job is None:
+    """Why a queued automatic turn should not run now, else None. No automatic turn runs while
+    auto-continue is off or its bot is chat-only (switched since it was queued). A turn a cap held was
+    decided before it waited: what else changed meanwhile is checked again (its task no longer
+    active) and a turn held over ``hold_hours`` is not run late."""
+    job = db.execute("SELECT j.held_at, j.assignment_id, j.auto_kind, j.failure_kind, b.chat_only FROM jobs j "
+                     "LEFT JOIN bots b ON b.id=j.bot_id WHERE j.id=?", (job_id,)).fetchone()
+    if job is None or not job["auto_kind"]:
         return None
     settings = read(db)
     if not settings["enabled"]:
         return "auto-continue is now off"
     if job["chat_only"]:
         return "the bot is now chat-only"
+    if job["failure_kind"] != HELD:
+        return None
     if job["assignment_id"]:
         task = db.execute("SELECT status FROM assignments WHERE id=?", (job["assignment_id"],)).fetchone()
         if task is None or task["status"] != "active":

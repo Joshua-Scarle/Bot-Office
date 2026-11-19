@@ -332,16 +332,17 @@ def assignment_event(db: sqlite3.Connection, assignment_id: str, kind: str, note
 
 
 def _drop_stale_hold(db: sqlite3.Connection, job_id: str, why: str) -> None:
-    """A held automatic turn that should no longer run (continuation.stale_hold) is cancelled with a
+    """A queued automatic turn that should no longer run (continuation.stale_hold) is cancelled with a
     chat line; an active task it belonged to waits for the owner, so it does not stall silently."""
     stamp = now().isoformat()
-    row = db.execute("SELECT bot_id, source, assignment_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+    row = db.execute("SELECT bot_id, source, assignment_id, failure_kind FROM jobs WHERE id=?", (job_id,)).fetchone()
+    held = "A held automatic turn" if row["failure_kind"] == continuation.HELD else "An automatic turn"
     db.execute("UPDATE jobs SET status=?, finished_at=?, error=? WHERE id=?",
                (JobStatus.CANCELLED.value, stamp, f"not run: {why}", job_id))
     if row["bot_id"] and db.execute("SELECT 1 FROM bots WHERE id=?", (row["bot_id"],)).fetchone():
         db.execute("INSERT INTO messages (bot_id,role,source,text,job_id,created_at,attachments) VALUES (?,?,?,?,?,?,'[]')",
                    (row["bot_id"], "system", row["source"],
-                    f"A held automatic turn was not run: {why}. Reply to keep it going.", job_id, stamp))
+                    f"{held} was not run: {why}. Reply to keep it going.", job_id, stamp))
     if row["assignment_id"] and not db.execute("SELECT 1 FROM jobs WHERE assignment_id=? AND status IN "
                                                "('queued','running') LIMIT 1", (row["assignment_id"],)).fetchone():
         note = f"paused, not blocked: {why}. Reply to resume."
@@ -1360,14 +1361,15 @@ class JobStore:
                     db.commit()  # keeps the cancellations of turns the gate refused
                     return None
                 job_id = row["id"]
-                # 0.11.10: an automatic turn over a cap waits for its window, before it reserves a task turn
-                capped = continuation.cap_gate(db, job_id, now())
-                if capped is not None:
-                    continuation.hold(db, job_id, *capped, now())
-                    continue
+                # 0.11.10: an automatic turn runs only while auto-continue is on (a held one only if
+                # still current), and over a cap it waits for its window, before it reserves a task turn
                 stale = continuation.stale_hold(db, job_id, now())
                 if stale is not None:
                     _drop_stale_hold(db, job_id, stale)
+                    continue
+                capped = continuation.cap_gate(db, job_id, now())
+                if capped is not None:
+                    continuation.hold(db, job_id, *capped, now())
                     continue
                 refused = _assignment_gate(db, job_id)
                 if refused is None:

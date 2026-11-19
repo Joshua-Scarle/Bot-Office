@@ -544,3 +544,88 @@ def test_a_stale_evidence_does_not_close_the_loop(settings):
     run_all(store, scheduler)
     after = scheduler.assignments.get(item.id)
     assert after.status == "waiting_on_user" and after.status_note.startswith("says it is done; no evidence")
+
+
+# --- wake-ups ask the one decide function ---
+
+def due_now(store, wake):
+    with closing(store._connect()) as db:
+        db.execute("UPDATE wakeups SET due_at=? WHERE id=?", ((now() - timedelta(minutes=1)).isoformat(), str(wake.id)))
+
+
+@pytest.mark.parametrize("state", ["blocked", "waiting_on_user"])
+def test_a_wakeup_does_not_revive_a_paused_task(settings, state):
+    """The bot reports blocked / waiting and schedules a wake-up in the same turn: the wake-up is
+    skipped with a line and the task stays paused (in Needs you) until the owner replies."""
+    store, scheduler, _, bot, item = task_setup(settings, f"Need your photo.\nBOT-OFFICE-STATUS: {state} — the photo")
+    book = scheduler.assignments
+    [start] = run_all(store, scheduler)
+    wake = book.add_wakeup(bot.id, start.id, assignment_id=item.id, due_at=now() + timedelta(hours=1), note="retry")
+    due_now(store, wake)
+    assert book.fire_due() == 0
+    assert book._wakeup(wake.id).status == "cancelled"
+    assert book.get(item.id).status == state and not task_queued(store, item)
+    line = system_lines(store, bot)[-1]
+    assert line.startswith("Wake-up skipped: its task is ") and "your reply resumes it" in line
+    assert any(i["kind"] == "assignment" for i in needs_you(store))
+
+
+def test_a_wakeup_honours_auto_continue_off(settings):
+    store, scheduler, _, bot, _item = task_setup(settings, *fresh(1, "blocked"))
+    book = scheduler.assignments
+    run_all(store, scheduler)
+    save(store, enabled=False)
+    wake = book.add_wakeup(bot.id, None, due_at=now() + timedelta(hours=1), note="ping")
+    due_now(store, wake)
+    assert book.fire_due() == 0 and book._wakeup(wake.id).status == "cancelled"
+    assert "auto-continue is off" in system_lines(store, bot)[-1]
+    assert not [j for j in store.list() if j.source == "wakeup"]
+    save(store, enabled=True)
+    again = book.add_wakeup(bot.id, None, due_at=now() + timedelta(hours=1), note="ping")
+    due_now(store, again)
+    assert book.fire_due() == 1  # on again: a plain chat wake-up runs as before
+
+
+def test_a_pause_cancels_the_tasks_pending_wakeups(settings):
+    store, scheduler, _, bot, item = task_setup(settings, REAL_LOOP[0], "Still blocked on the photo.\n"
+                                                "BOT-OFFICE-STATUS: continue — wait")
+    book = scheduler.assignments
+    wake = book.add_wakeup(bot.id, None, assignment_id=item.id, due_at=now() + timedelta(hours=1), note="check")
+    other = book.add_wakeup(bot.id, None, due_at=now() + timedelta(hours=1), note="unrelated")
+    run_all(store, scheduler)
+    assert book.get(item.id).status == "waiting_on_user"
+    assert book._wakeup(wake.id).status == "cancelled" and book._wakeup(other.id).status == "pending"
+    assert any(text.startswith('Wake-ups for "Report" cancelled: the task is paused') for text in system_lines(store, bot))
+
+
+# --- switching auto-continue off ---
+
+def test_turning_auto_continue_off_stops_queued_automatic_turns(settings):
+    store, scheduler, _, bot, item = task_setup(settings, *fresh(5))
+    run_next(store, scheduler)  # the owner's Start; it queues a loop turn
+    [queued] = task_queued(store, item)
+    save(store, enabled=False)
+    assert run_next(store, scheduler) is None
+    assert store.get(queued.id).status == JobStatus.CANCELLED
+    line = system_lines(store, bot)[-1]
+    assert line == "An automatic turn was not run: auto-continue is now off. Reply to keep it going."
+    after = scheduler.assignments.get(item.id)
+    assert after.status == "waiting_on_user" and after.status_note.startswith("paused, not blocked")
+    # the owner's own turns still run while it is off
+    scheduler.assignments.reply(item.id, "carry on")
+    assert run_next(store, scheduler) is not None
+
+
+# --- the evidence ask counts since the task last became active ---
+
+def test_a_resumed_task_gets_its_evidence_ask_again(settings):
+    store, scheduler, _, _bot, item = task_setup(settings, "Finished.\nBOT-OFFICE-STATUS: done")
+    book = scheduler.assignments
+    assert len(run_all(store, scheduler)) == 2  # done, one evidence ask
+    assert book.get(item.id).status_note.startswith("says it is done; no evidence")
+    book.reply(item.id, "please finish it properly")  # resumes it: new work
+    jobs = run_all(store, scheduler)
+    assert len(jobs) == 2  # the reply's done, then its own evidence ask (not an immediate pause)
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT auto_kind FROM jobs WHERE id=?", (str(jobs[1].id),)).fetchone()[0] == "evidence"
+    assert book.get(item.id).status_note.startswith("says it is done; no evidence")
