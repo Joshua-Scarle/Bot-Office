@@ -290,3 +290,11 @@ def test_upload_without_pillow_is_a_clear_503_and_generation_still_works(client,
     bot = mk(client, "NoPil")
     assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=payload).status_code == 503
     assert client.get(f"/v1/bots/{bot['id']}/icon", headers=H).status_code == 200
+
+
+def test_default_avatars_spread_over_the_presets():
+    used = []
+    for i in range(avatars.PRESET_COUNT):
+        used.append(avatars.default_seed(f"bot-{i}", used))
+    assert sorted(used) == sorted(avatars.PRESET_SEEDS)          # twelve bots, twelve different avatars
+    assert avatars.default_seed("x", used) == avatars.default_seed("x", used)

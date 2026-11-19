@@ -211,7 +211,7 @@ def test_icon_upload_validation_and_auth(settings):
     with TestClient(create_app(settings, {"codex": FakeAdapter()})) as client:
         bot = client.post("/v1/bots", json={"name": "Pic"}, headers=H).json()
         url = f"/v1/bots/{bot['id']}/icon"
-        assert client.get(url, headers=H).status_code == 404
+        assert client.get(url, headers=H).headers["content-type"] == "image/png"      # 0.12.0: a generated default avatar
         assert client.put(url, content=PNG, headers={"Content-Type": "image/png"}).status_code == 401
         assert client.put(url, content=b"", headers=H | {"Content-Type": "image/png"}).status_code == 400
         huge = PNG + b"\x00" * MAX_ICON_BYTES
@@ -227,7 +227,7 @@ def test_icon_upload_validation_and_auth(settings):
         assert path.parent.stat().st_mode & 0o777 == 0o700
         assert client.get(url).status_code == 401
         served = client.get(url, headers=H)
-        assert served.content == PNG and served.headers["content-type"] == "image/png"
+        assert served.content[:8] == b"\x89PNG\r\n\x1a\n" and served.headers["content-type"] == "image/png"   # re-encoded, 256 px
         assert served.headers["x-content-type-options"] == "nosniff"
 
         removed = client.delete(url, headers=H)

@@ -51,10 +51,18 @@ def valid_seed(seed: str) -> bool:
     return isinstance(seed, str) and SEED_RE.match(seed) is not None
 
 
-def default_seed(bot_id) -> str:
-    """The default avatar of a bot: one of the curated presets, stable for its id."""
+def default_seed(bot_id, used=()) -> str:
+    """The default avatar of a bot: one of the curated presets. Among the presets used least by *used*
+    (the seeds other bots already have) the one the bot's id hashes to, so a small office gets distinct
+    avatars and the choice is stable for the same inputs."""
+    counts = {seed: 0 for seed in PRESET_SEEDS}
+    for seed in used:
+        if seed in counts:
+            counts[seed] += 1
+    least = min(counts.values())
+    pool = [seed for seed in PRESET_SEEDS if counts[seed] == least]
     digest = hashlib.sha256(str(bot_id).encode()).digest()
-    return PRESET_SEEDS[int.from_bytes(digest[:4], "big") % PRESET_COUNT]
+    return pool[int.from_bytes(digest[:4], "big") % len(pool)]
 
 
 def _params(seed: str) -> dict:

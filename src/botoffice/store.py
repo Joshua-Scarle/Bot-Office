@@ -955,8 +955,11 @@ class JobStore:
             if db.execute("SELECT 1 FROM meta WHERE key=?", (AVATARS_MIGRATION,)).fetchone():
                 db.rollback()
                 return
-            for row in db.execute("SELECT id FROM bots WHERE icon_image IS NULL AND avatar_seed IS NULL").fetchall():
-                db.execute("UPDATE bots SET avatar_seed=? WHERE id=?", (avatars.default_seed(row["id"]), row["id"]))
+            used = [r[0] for r in db.execute("SELECT avatar_seed FROM bots WHERE avatar_seed IS NOT NULL")]
+            for row in db.execute("SELECT id FROM bots WHERE icon_image IS NULL AND avatar_seed IS NULL ORDER BY created_at, id").fetchall():
+                seed = avatars.default_seed(row["id"], used)
+                used.append(seed)
+                db.execute("UPDATE bots SET avatar_seed=? WHERE id=?", (seed, row["id"]))
             db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (AVATARS_MIGRATION, now().isoformat()))
             db.commit()
         except BaseException:
@@ -1752,6 +1755,8 @@ class JobStore:
     ) -> Bot:
         stamp = now()
         bot_id = uuid4()
+        with closing(self._connect()) as db:
+            used = [r[0] for r in db.execute("SELECT avatar_seed FROM bots WHERE avatar_seed IS NOT NULL")]
         bot = Bot(
             id=bot_id,
             name=name,
@@ -1762,7 +1767,7 @@ class JobStore:
             cli_access=cli_access or "full",
             icon=icon or DEFAULT_ICON,
             description=description,
-            avatar_seed=avatars.default_seed(bot_id),
+            avatar_seed=avatars.default_seed(bot_id, used),
             reason=reason,
             created_at=stamp,
             updated_at=stamp,
