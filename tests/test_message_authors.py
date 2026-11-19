@@ -141,7 +141,7 @@ def test_chat_renders_by_author():
     assert 'bot.name + " → " + peer' in html and 'peer + " → " + bot.name' in html
     assert "function isOwnerMessage(m)" in html and "return isOwnerMessage(m) && (m.source" in html
     assert "bubbleClass(m)" in html and "Show more" in html
-    # inter-bot messages (Grok Bot style): a time and "N messages with <bot>", the text in an overlay
+    # inter-bot messages: a time and "N messages with <bot>", the text in an overlay
     assert "return group ? agentGroupRow(group, bot) : null;" in html
     assert '" messages with"' in html and '" message with"' in html
     assert '<dialog id="agent-chat"' in html and 'id="agent-chat-close">Close Chat</button>' in html
