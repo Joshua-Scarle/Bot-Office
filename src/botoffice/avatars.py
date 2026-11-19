@@ -42,6 +42,14 @@ PALETTES = (
 MOTIFS = 6
 PRESET_SEEDS = tuple(f"preset-{n}" for n in range(PRESET_COUNT))
 
+# 0.12.2 character avatars: drawn in the browser as inline SVG, stored in avatar_seed as "char|<shape>|<color>".
+# "|" is not allowed in a generator seed (SEED_RE), so 0.12.1 reads such a value as "no usable image" and shows
+# the emoji after a rollback. The names are the contract (the UI holds the drawings; a test keeps both lists equal).
+CHAR_PREFIX = "char|"
+CHAR_SHAPES = ("square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond")
+CHAR_COLORS = ("blue", "violet", "pink", "red", "orange", "yellow", "green", "teal", "cyan", "slate")
+CHAR_EXPRESSIONS = ("idle", "working", "waiting", "done", "error", "sleeping")
+
 
 class AvatarError(Exception):
     def __init__(self, status: int, message: str):
@@ -52,6 +60,30 @@ class AvatarError(Exception):
 
 def valid_seed(seed: str) -> bool:
     return isinstance(seed, str) and SEED_RE.fullmatch(seed) is not None
+
+
+def character_seed(shape: str, color: str) -> str | None:
+    """``char|<shape>|<color>`` for a known shape and color, else None."""
+    if shape in CHAR_SHAPES and color in CHAR_COLORS:
+        return f"{CHAR_PREFIX}{shape}|{color}"
+    return None
+
+
+def is_character(seed) -> bool:
+    return isinstance(seed, str) and seed.startswith(CHAR_PREFIX)
+
+
+def default_character(bot_id, used=()) -> str:
+    """A new bot's starting character: among the shape+color pairs *used* least by the other bots, the one the
+    bot's id hashes to (stable; a small office gets distinct faces)."""
+    counts = {character_seed(sh, co): 0 for sh in CHAR_SHAPES for co in CHAR_COLORS}
+    for seed in used:
+        if seed in counts:
+            counts[seed] += 1
+    least = min(counts.values())
+    pool = [seed for seed in counts if counts[seed] == least]
+    digest = hashlib.sha256(str(bot_id).encode()).digest()
+    return pool[int.from_bytes(digest[:4], "big") % len(pool)]
 
 
 def default_seed(bot_id, used=()) -> str:

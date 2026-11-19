@@ -117,6 +117,12 @@ from .voice.text import chunks as speech_chunks
 from .voice.wav import WavError, parse_pcm16_mono
 
 
+class AvatarCharacter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    shape: str = Field(max_length=16)
+    color: str = Field(max_length=16)
+
+
 class AvatarGenerate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     seed: str | None = Field(default=None, max_length=64)
@@ -1211,6 +1217,25 @@ def create_app(
         if updated is None:
             raise HTTPException(status_code=404, detail="bot not found")
         return updated
+
+    @app.put("/v1/bots/{bot_id}/avatar/character", response_model=Bot, dependencies=[Depends(auth)])
+    async def set_bot_character(bot_id: UUID, body: AvatarCharacter) -> Bot:
+        """0.12.2: give the bot a built-in character (shape + color; drawn in the browser, its face follows the
+        bot's status). Replaces an upload or a generated pattern."""
+        _bot(bot_id)
+        seed = avatars.character_seed(body.shape, body.color)
+        if seed is None:
+            raise HTTPException(status_code=400, detail="unknown character shape or color")
+        safefs.unlink(_icon_path(bot_id))
+        updated = store.update_bot(bot_id, icon_image=None, avatar_seed=seed)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="bot not found")
+        return updated
+
+    @app.get("/v1/avatar-characters", dependencies=[Depends(auth)])
+    async def avatar_characters() -> dict:
+        return {"shapes": list(avatars.CHAR_SHAPES), "colors": list(avatars.CHAR_COLORS),
+                "expressions": list(avatars.CHAR_EXPRESSIONS)}
 
     @app.get("/v1/avatar-presets", dependencies=[Depends(auth)])
     async def avatar_presets() -> dict:

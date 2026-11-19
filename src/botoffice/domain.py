@@ -204,8 +204,12 @@ class Bot(BaseModel):
 
     @computed_field
     @property
-    def avatar(self) -> Literal["upload", "generated", "emoji"]:
-        return "upload" if self.icon_image else "generated" if self.avatar_seed else "emoji"
+    def avatar(self) -> Literal["upload", "character", "generated", "emoji"]:
+        if self.icon_image:
+            return "upload"
+        if self.avatar_seed:
+            return "character" if self.avatar_seed.startswith("char|") else "generated"
+        return "emoji"
 
     @computed_field
     @property
