@@ -91,6 +91,7 @@ class Scheduler:
         self.memory = Memory(settings.data_dir)
         self.turns = Turns(store, settings, providers)
         self.assignments = Assignments(store)
+        self.assignments.cancel_running = self._cancel_dropped
         self.rules = Rules(store, settings.approval_ttl_min, self.protected_paths())
         self.watchers = Watchers(store, settings, self.turns, self.rules)
         self._snapshots: dict[str, tuple[str, str]] = {}
@@ -1060,6 +1061,14 @@ class Scheduler:
                     job = self.store.get(key)
                     if not job or job.status != JobStatus.RUNNING:  # else the adapter / job end handles them
                         self._queue_pending_steers(key)
+
+    def _cancel_dropped(self, job_ids: list[str]) -> None:
+        """P2 Q1: a dropped task's running turns stop (they settle without queueing another)."""
+        for job_id in job_ids:
+            job = self.store.get(job_id)
+            if job:
+                self._cancel_reasons.setdefault(str(job.id), "its task was dropped")
+                self.cancel(job)
 
     def cancel(self, job: Job) -> None:
         if job.status == JobStatus.RUNNING:

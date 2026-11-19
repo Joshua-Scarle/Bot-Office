@@ -410,6 +410,10 @@ class RoutineUpdate(BaseModel):
         return None if value is None else _check_cron(value)
 
 
+# G7: every task has one; higher first wherever tasks are listed or picked
+TaskPriority = Literal["urgent", "high", "normal", "low"]
+
+
 class Assignment(BaseModel):
     id: UUID
     bot_id: UUID
@@ -433,6 +437,7 @@ class Assignment(BaseModel):
     created_at: datetime
     updated_at: datetime
     closed_at: datetime | None = None
+    priority: TaskPriority = "normal"
 
 
 # 0.11.4 task lists: the shown stage of an assignment (computed, never stored; plan 4.2)
@@ -450,6 +455,8 @@ class Task(Assignment):
     source_job_id: str | None = None
     updated_by: str = "user"
     reviewer: str | None = None
+    # text fields a bot edited (title, goal, done_when): shown as bot-written, never as the user's
+    bot_edited: list[str] = Field(default_factory=list)
     stage: TaskStage = "not_started"
     waiting: bool = False  # waiting on the user or on a bot
     blocked: bool = False  # blocked, or flagged stalled by the watchdog
@@ -470,6 +477,8 @@ class AssignmentCreate(BaseModel):
     escalate: Escalate = "on_block"
     # queue the first turn right away
     start: bool = False
+    # None: BOT_OFFICE_TASK_DEFAULT_PRIORITY (normal)
+    priority: TaskPriority | None = None
 
 
 class AssignmentUpdate(BaseModel):
@@ -484,11 +493,14 @@ class AssignmentUpdate(BaseModel):
     # the user may close (done / dropped) or reopen an assignment; "active" goes through /start
     status: Literal["open", "done", "dropped"] | None = None
     note: str | None = Field(default=None, max_length=1000)
+    priority: TaskPriority | None = None
 
 
 class TaskCreate(AssignmentCreate):
     # list order (lower first); default: after the bot's last task
     position: float | None = None
+    # G10: None follows BOT_OFFICE_FORM_TASKS_START (auto: starts on its own); false = don't start yet
+    start: bool | None = None
 
 
 class TaskUpdate(AssignmentUpdate):
@@ -501,6 +513,8 @@ class TaskUpdate(AssignmentUpdate):
 class TaskReorder(BaseModel):
     bot_id: str = Field(min_length=1, max_length=200)
     order: list[UUID] = Field(min_length=1, max_length=500)
+    # optional: the version the client saw of each listed task; a stale one is a 409
+    versions: dict[str, int] | None = None
 
 
 class TaskNote(BaseModel):

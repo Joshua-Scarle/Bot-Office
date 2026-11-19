@@ -414,7 +414,7 @@ def test_task_list_gui_contract(settings, monkeypatch):
     with TestClient(create_app(settings, {'codex': FakeAdapter()})) as client:
         assert client.get('/v1/tasks/settings', headers={'Authorization': 'Bearer test-token'}).json()['label'] == 'Work queue'
         page = client.get('/').text
-    assert '(await api("/v1/tasks/settings")).label' in page
+    assert "settings = await api(\"/v1/tasks/settings\")" in page and "tasksLabel = settings.label" in page
     assert 'showToolPanel("assignments-panel", tasksLabel)' in page
     assert '$("board-heading").textContent = tasksLabel' in page
     assert all(label in page for label in ('Not started', 'In progress', 'Completed', 'id="board-panel"'))

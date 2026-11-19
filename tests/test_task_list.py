@@ -26,9 +26,10 @@ from botoffice.workspace import build_self, task_status_block
 H = {"Authorization": "Bearer test-token"}
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_0_11_3 = "dfeaa1d"
+RELEASE_0_11_9 = "d1d2192"  # the release before task lists (rollback target)
 OLD_ID = "6f1c2d3e-0000-4000-8000-000000000001"
 NEW_ASSIGNMENT_COLUMNS = ("version", "position", "origin", "source_message_id", "source_job_id", "updated_by",
-                          "reviewer")
+                          "reviewer", "bot_edited", "priority")
 
 
 def running_token(store, bot):
@@ -64,9 +65,11 @@ def version(store, assignment_id):
 # --- migration and rollback ---
 
 def _downgrade_to_0_11_3(path):
-    """The 0.11.3 schema by hand: drop what 0.11.4 adds (columns, index)."""
+    """The 0.11.3 schema by hand: drop what task lists add (columns, indexes, the watermark marker)."""
     with closing(sqlite3.connect(path)) as db:
         db.execute("DROP INDEX assignments_pick")
+        db.execute("DROP INDEX assignment_events_actor")
+        db.execute("DELETE FROM meta WHERE key='tasks_seen_init'")
         for column in NEW_ASSIGNMENT_COLUMNS:
             db.execute(f"ALTER TABLE assignments DROP COLUMN {column}")
         for column in ("actor", "version"):
@@ -100,8 +103,8 @@ def test_migration_adds_columns_and_keeps_existing_rows(tmp_path):
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='assignments_pick'").fetchone()
         row = db.execute("SELECT * FROM assignments WHERE id=?", (OLD_ID,)).fetchone()
         assert tuple(row)[:len(before[0])] == tuple(before[0])  # old columns untouched
-        assert (row["version"], row["origin"], row["updated_by"], row["position"], row["reviewer"]) == \
-            (1, "form", "user", None, None)
+        assert (row["version"], row["origin"], row["updated_by"], row["position"], row["reviewer"],
+                row["bot_edited"], row["priority"]) == (1, "form", "user", None, None, "", "normal")
         event = db.execute("SELECT * FROM assignment_events").fetchone()
         assert (event["actor"], event["version"]) == ("system", None)
         # the events before the upgrade are history, not "changes since your last turn"
@@ -115,7 +118,7 @@ from botoffice import __version__, needs_you
 from botoffice.assignments import Assignments
 from botoffice.domain import JobStatus
 from botoffice.store import JobStore
-assert __version__ == "0.11.3", __version__
+assert __version__ == sys.argv[2], __version__
 store = JobStore(sys.argv[1])
 book = Assignments(store)
 bot = store.find_bot("Ada")
@@ -128,38 +131,45 @@ book.add_note(item.id, bot.id, job.id, "a note")
 book.stop(item.id)
 assert book.get(item.id).status == "open"
 tasks = {a.title: a for a in book.list(bot.id)}
-assert "new on 0.11.4" in tasks and "edited by 0.11.3" in tasks, tasks
-assert book.events(tasks["new on 0.11.4"].id)
+assert "new on 0.11.10" in tasks and "edited by 0.11.3" in tasks, tasks
+assert book.events(tasks["new on 0.11.10"].id)
 needs_you.needs_you(store)
 store.delete_bot(store.find_bot("Bea").id)
 print("ok")
 '''
 
 
-def test_rollback_0_11_3_code_works_on_the_migrated_database(tmp_path):
-    if not shutil.which("git") or subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", RELEASE_0_11_3],
+@pytest.mark.parametrize("release,version_", [(RELEASE_0_11_3, "0.11.3"), (RELEASE_0_11_9, "0.11.9")])
+def test_rollback_code_works_on_the_migrated_database(tmp_path, release, version_):
+    """0.11.3 and 0.11.9 (the rollback target) run on a database migrated with task lists: their
+    INSERTs into assignments (no priority, bot_edited, version...) succeed with the defaults."""
+    if not shutil.which("git") or subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", release],
                                                  capture_output=True, check=False).returncode:
-        pytest.skip("the 0.11.3 release commit is not available")
+        pytest.skip(f"the {version_} release commit is not available")
     old = tmp_path / "old"
     old.mkdir()
-    archive = subprocess.run(["git", "-C", str(ROOT), "archive", RELEASE_0_11_3, "src"], capture_output=True, check=True)
+    archive = subprocess.run(["git", "-C", str(ROOT), "archive", release, "src"], capture_output=True, check=True)
     subprocess.run(["tar", "-x", "-C", str(old)], input=archive.stdout, check=True)
     path = tmp_path / "agentdesk.sqlite3"
     store = JobStore(path)
     ada, bea = store.create_bot("Ada", "", "codex", None), store.create_bot("Bea", "", "codex", None)
     book = Assignments(store)
-    item = book.create(ada.id, {"title": "new on 0.11.4"})
+    item = book.create(ada.id, {"title": "new on 0.11.10", "priority": "urgent"})
     book.agent_create(bea.id, {"title": "cross-bot"}, for_bot=ada.id)
     book.update(item.id, {"goal": "x"}, expected_version=1)
+    book.agent_edit(item.id, ada.id, {"title": "new on 0.11.10"}, 2)  # marks bot_edited
     script = tmp_path / "rollback.py"
     script.write_text(ROLLBACK_SCRIPT)
     env = {**os.environ, "PYTHONPATH": str(old / "src")}
-    result = subprocess.run([sys.executable, str(script), str(path)], capture_output=True, text=True, env=env,
+    result = subprocess.run([sys.executable, str(script), str(path), version_], capture_output=True, text=True, env=env,
                             cwd=tmp_path, timeout=120, check=False)
     assert result.returncode == 0 and "ok" in result.stdout, result.stderr
     # and 0.11.4 reads what 0.11.3 wrote meanwhile (defaults for the new columns)
     titles = {task.title: task for task in Assignments(JobStore(path)).tasks(ada.id)}
     assert titles["edited by 0.11.3"].version == 1 and titles["edited by 0.11.3"].origin == "form"
+    assert titles["edited by 0.11.3"].priority == "normal" and titles["edited by 0.11.3"].bot_edited == []
+    # the old code leaves the new columns alone
+    assert titles["new on 0.11.10"].priority == "urgent" and titles["new on 0.11.10"].bot_edited == ["title"]
 
 
 # --- stage view ---
@@ -174,7 +184,7 @@ def test_stage_view_maps_statuses(rig):
                                                             "blocked": True, "stalled": True}
     assert not stage("done", "2026-11-15T00:00:00+00:00")["stalled"]
     client, _store, (ada, *_), _ = rig
-    item = client.post(f"/v1/bots/{ada.id}/tasks", headers=H, json={"title": "t"}).json()
+    item = client.post(f"/v1/bots/{ada.id}/tasks", headers=H, json={"title": "t", "start": False}).json()
     assert (item["stage"], item["version"], item["origin"], item["created_by"]) == ("not_started", 1, "form", "user")
     started = client.post(f"/v1/tasks/{item['id']}/start", headers=H).json()
     assert started["stage"] == "in_progress" and started["activity"] == "next_up"
@@ -203,7 +213,7 @@ def test_counts_for_the_sidebar_in_one_request(rig):
 
 def test_patch_with_stale_version_returns_409_with_changes(rig):
     client, _store, (ada, *_), _ = rig
-    item = client.post(f"/v1/bots/{ada.id}/tasks", headers=H, json={"title": "t"}).json()
+    item = client.post(f"/v1/bots/{ada.id}/tasks", headers=H, json={"title": "t", "start": False}).json()
     first = client.patch(f"/v1/tasks/{item['id']}", headers=H, json={"version": 1, "title": "new title"})
     assert first.status_code == 200 and first.json()["version"] == 2 and first.json()["updated_by"] == "user"
     stale = client.patch(f"/v1/tasks/{item['id']}", headers=H, json={"version": 1, "goal": "other"})
@@ -276,7 +286,8 @@ def test_read_any_list_owner_assignee_and_other_bot(rig):
 def test_owner_adds_a_task_to_any_list(rig):
     client, _, (ada, *_), _ = rig
     item = client.post(f"/v1/bots/{ada.name}/tasks", headers=H, json={"title": "t", "budget_turns": 150}).json()
-    assert item["status"] == "open" and item["budget_turns"] == 150 and item["position"] == 1
+    # G10: a task from the form starts on its own
+    assert item["status"] == "active" and item["budget_turns"] == 150 and item["position"] == 1
 
 
 def test_assignee_adds_to_its_own_list_lands_open_unless_start(rig):
@@ -328,8 +339,8 @@ def test_assignee_edits_done_when_of_bot_made_task_but_never_budgets(rig):
     item = Assignments(store).agent_create(bea.id, {"title": "from Bea"}, for_bot=ada.id)
     url = f"/v1/agent/tasks/{item.id}"
     assert client.patch(url, headers=tokens["Ada"], json={"version": 1, "done_when": "x"}).json()["done_when"] == "x"
-    # budget fields are not even part of the bot's edit body
-    assert client.patch(url, headers=tokens["Ada"], json={"version": 2, "budget_turns": 200}).status_code == 400
+    # budget fields are refused by the matrix (fix 11: 403, nothing changes)
+    assert client.patch(url, headers=tokens["Ada"], json={"version": 2, "budget_turns": 200}).status_code == 403
 
 
 def test_other_bot_edits_only_tasks_it_created(rig):
@@ -396,15 +407,27 @@ def test_assignee_drops_own_and_bot_made_tasks(rig):
     assert client.post(f"/v1/agent/tasks/{own.id}/drop", headers=tokens["Ada"], json={}).status_code == 409
 
 
-def test_assignee_cannot_drop_owner_task_by_default(rig, monkeypatch):
+def test_assignee_cannot_drop_owner_task_under_owner_only(rig, monkeypatch):
     client, store, (ada, *_), tokens = rig
-    monkeypatch.delenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", raising=False)
+    monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "owner_only")
     item = Assignments(store).create(ada.id, {"title": "owner's"})
     refused = client.post(f"/v1/agent/tasks/{item.id}/drop", headers=tokens["Ada"], json={"note": "not needed"})
     assert refused.status_code == 403 and Assignments(store).task(item.id).status == "open"
-    monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "nonsense")  # unknown values mean the default
-    assert client.post(f"/v1/agent/tasks/{item.id}/drop", headers=tokens["Ada"],
-                       json={"note": "x"}).status_code == 403
+
+
+def test_drop_owner_task_default_is_with_note(rig, monkeypatch):
+    """G5: by default (and for unknown values) the assignee may drop an owner task with a note."""
+    client, store, (ada, *_), tokens = rig
+    for value in (None, "nonsense"):
+        if value is None:
+            monkeypatch.delenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", raising=False)
+        else:
+            monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", value)
+        item = Assignments(store).create(ada.id, {"title": "owner's"})
+        url = f"/v1/agent/tasks/{item.id}/drop"
+        assert client.post(url, headers=tokens["Ada"], json={"note": ""}).status_code == 400
+        assert client.post(url, headers=tokens["Ada"], json={"note": "obsolete"}).json()["stage"] == "dropped"
+    assert client.get("/v1/tasks/settings", headers=H).json()["bot_drop_owner_tasks"] == "with_note"
 
 
 def test_assignee_drops_owner_task_with_note_when_allowed_and_needs_you_shows_it(rig, monkeypatch):
@@ -464,7 +487,10 @@ def test_notes_by_owner_assignee_and_any_other_bot(rig):
                            json={"text": f"from {name}"}).status_code == 204
     notes = [(e["actor"], e["note"]) for e in events(store, item.id) if e["kind"] == "note"]
     assert [note for _, note in notes] == ["the user: from the owner", "Ada: from Ada", "Cy: from Cy"]
-    assert version(store, item.id) == 1  # a note never conflicts: the version stays
+    # fix 7: a note needs no version (never conflicts) but bumps it, so a 409 lists it
+    assert version(store, item.id) == 4
+    stale = client.patch(f"/v1/tasks/{item.id}", headers=H, json={"version": 1, "goal": "g"}).json()
+    assert [c["kind"] for c in stale["changes"]] == ["note", "note", "note"]
 
 
 def test_hard_delete_owner_only_and_closed_only(rig):
@@ -621,11 +647,11 @@ def test_label_setting_exposed(rig, monkeypatch):
     monkeypatch.delenv("BOT_OFFICE_TASKS_LABEL", raising=False)
     monkeypatch.delenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", raising=False)
     body = client.get("/v1/tasks/settings", headers=H).json()
-    assert body["label"] == "Assignments" and body["bot_drop_owner_tasks"] == "owner_only"
+    assert body["label"] == "Assignments" and body["bot_drop_owner_tasks"] == "with_note"  # G8, G5 defaults
     monkeypatch.setenv("BOT_OFFICE_TASKS_LABEL", "  Tasks ")
-    monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "with_note")
+    monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "owner_only")
     body = client.get("/v1/tasks/settings", headers=H).json()
-    assert body["label"] == "Tasks" and body["bot_drop_owner_tasks"] == "with_note"
+    assert body["label"] == "Tasks" and body["bot_drop_owner_tasks"] == "owner_only"
     assert client.get("/v1/tasks/settings").status_code == 401
 
 
@@ -715,9 +741,10 @@ def test_status_block_with_changes_stays_under_the_cap(settings):
     for i in range(8):
         book.create(bot.id, {"title": "🧪" * 60 + str(i), "goal": "x"})
         book.update(book.tasks(bot.id)[-1].id, {"title": "✏️" * 60 + str(i)})
-    changes, last = book.changes(bot.id)
+    changes, last, total = book.changes(bot.id)
     from botoffice.workspace import changes_line
-    line = changes_line(changes, bot.id)
+    line, conveyed = changes_line(changes, bot.id, total)
+    assert 0 < conveyed < total
     assert line.startswith("Changes by others since your last turn:") and "more" in line
     with closing(store._connect()) as db:
         for row in db.execute("SELECT id FROM assignments"):
@@ -733,12 +760,15 @@ def test_self_md_describes_cross_bot_rules_and_drop_setting(settings, monkeypatc
     store = JobStore(settings.data_dir / "agentdesk.sqlite3")
     bot = store.create_bot("Ada", "", "codex", None)
     job = store.create("x", "codex", bot_id=bot.id)
-    monkeypatch.delenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", raising=False)
+    monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "owner_only")
     text = build_self(bot, job)
     assert "Every bot's list is readable (`bot-task list`; `bot-task help`" in text
     assert "edit only the tasks you created there, and add notes to any task" in text
     assert "a task the user created on your list only the user can drop" in text
-    monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "with_note")
-    assert "you may drop only with a note saying why" in build_self(bot, job)
+    monkeypatch.delenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS")  # G5 default: with_note
+    text = build_self(bot, job)
+    assert "you may drop only with a note saying why" in text
+    assert "waits for that bot to pick it up; children too wait for that bot" in text
+    assert "edit the title and goal of a task the user created, never its done-when" in text
     for verb in ("bot-task add", "bot-task edit", "bot-task drop", "bot-task board"):
         assert verb in build_self(bot, job)
