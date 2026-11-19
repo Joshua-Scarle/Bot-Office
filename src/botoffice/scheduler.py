@@ -822,9 +822,10 @@ class Scheduler:
                 sink.emit("done", status=status.value, exit_code=exit_code, error=error)
 
     # a reason that names the wait for another bot's reply (the bot's own words for it)
-    _BOT_WAIT = re.compile(r"\b(?:repl(?:y|ies|ied)|answer\w*|respon(?:d|ds|se|ses)|asynchronous\w*|asynchronously|bot-msg|"
-                           r"inbox|messag(?:e|ed|es)|another bot|other bot|hear(?:ing)? back|comes? back|arrives?)\b",
-                           re.IGNORECASE)
+    _BOT_WAIT = re.compile(r"\b(?:repl(?:y|ies|ied)|asynchronous\w*|bot-msg|another bot|other bot|"
+                           r"hear(?:ing)? back|comes? back|arrives?)\b", re.IGNORECASE)
+    # a reason that addresses the owner is never rewritten
+    _OWNER_WORDS = re.compile(r"\?|\b(?:you|your|owner|user|approv\w*|decid\w*|choos\w*|pick|confirm\w*)\b", re.IGNORECASE)
 
     def _waiting_for_bot(self, job: Job, reply: str, state: str, reason: str) -> tuple[str, str]:
         """0.11.12: a turn whose only outstanding item is another bot's reply is not blocked and does not
@@ -836,7 +837,10 @@ class Scheduler:
         if state not in ("not_done", "waiting_on_user", "waiting_on_bot") or not job.bot_id:
             return state, reason
         names = self.store.outstanding_bot_replies(job.id)
-        if not names or self.store.pending_approval(job.id) or "```ask" in reply:
+        if not names or self.store.pending_approval(job.id) or "```ask" in reply \
+                or self.store.has_open_question(job.id):
+            return state, reason
+        if state != "waiting_on_bot" and self._OWNER_WORDS.search(reason):
             return state, reason
         if autocontinue.needs_user_phrase(reply, reason):
             return state, reason
