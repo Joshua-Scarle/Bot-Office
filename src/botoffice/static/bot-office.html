@@ -896,8 +896,8 @@ function bubbleClass(m) {
   if (m.author === "office") return "system office";
   return m.role === "user" && !isOwnerMessage(m) ? "system office" : m.role;
 }
-/* 0.11.10: messages between bots (bot-msg, inbox drops, reply copies, assignment hand-offs), as in
-   Grok Bot: the chat shows only a time and "2 messages with <bot>"; consecutive messages with the same
+/* 0.11.10: messages between bots (bot-msg, inbox drops, reply copies, assignment hand-offs): the
+   chat shows only a time and "2 messages with <bot>"; consecutive messages with the same
    bot (sent and received) share one row. Clicking it opens that conversation in an overlay.
    Restyle through the .agent-group and #agent-chat classes. */
 function isAgentRow(m) { return m.author === "bot_out" || m.author === "bot_in" || m.author === "bot_reply"; }
