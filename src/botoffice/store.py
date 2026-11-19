@@ -158,8 +158,7 @@ def _init_assignment_tables(db: sqlite3.Connection) -> None:
     # 0.11.4 task lists: optimistic version, list order, where a task came from, who changed it last
     # (user | bot:<id> | system), a reserved reviewer (peer review of done is not built); every
     # event records its actor and the task's version. Additive: 0.11.3 ignores these columns.
-    columns = {row["name"] for row in db.execute("PRAGMA table_info(assignments)")}
-    for column, ddl in (
+    add_columns(db, "assignments", (
         ("version", "INTEGER NOT NULL DEFAULT 1"),
         ("position", "REAL"),
         ("origin", "TEXT NOT NULL DEFAULT 'form'"),
@@ -172,18 +171,13 @@ def _init_assignment_tables(db: sqlite3.Connection) -> None:
         ("bot_edited", "TEXT NOT NULL DEFAULT ''"),
         # urgent | high | normal | low; lists, prompts and the claim order put higher first
         ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
-    ):
-        if column not in columns:
-            db.execute(f"ALTER TABLE assignments ADD COLUMN {column} {ddl}")
+    ))
     db.execute("CREATE INDEX IF NOT EXISTS assignments_pick ON assignments(bot_id, status, position, created_at)")
     # the event actor and the "changes by others" watermark land in one transaction with a
     # durable marker, so a crash in between cannot replay old history as new changes
     db.execute("BEGIN IMMEDIATE")
     try:
-        columns = {row["name"] for row in db.execute("PRAGMA table_info(assignment_events)")}
-        for column, ddl in (("actor", "TEXT NOT NULL DEFAULT 'system'"), ("version", "INTEGER")):
-            if column not in columns:
-                db.execute(f"ALTER TABLE assignment_events ADD COLUMN {column} {ddl}")
+        add_columns(db, "assignment_events", (("actor", "TEXT NOT NULL DEFAULT 'system'"), ("version", "INTEGER")))
         if not db.execute("SELECT 1 FROM meta WHERE key=?", (TASKS_SEEN_INIT,)).fetchone():
             # first start with task lists: older events are history, not "changes since your last turn"
             db.execute("UPDATE bots SET tasks_seen_event=(SELECT COALESCE(MAX(id), 0) FROM assignment_events)")
@@ -405,18 +399,48 @@ def _minute(moment: datetime) -> datetime:
     return moment.astimezone(UTC).replace(second=0, microsecond=0)
 
 
+def add_columns(db: sqlite3.Connection, table: str, specs: Sequence[tuple[str, str]]) -> set[str]:
+    """Add the columns of *specs* (name, DDL) that *table* lacks, checked and added under one write lock
+    (the caller's transaction, else BEGIN IMMEDIATE), so two processes starting at once cannot both add
+    one; a duplicate column is skipped all the same. Returns the columns this call added."""
+    own = not db.in_transaction
+    if own:
+        db.execute("BEGIN IMMEDIATE")
+    added: set[str] = set()
+    try:
+        have = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        for column, ddl in specs:
+            if column in have:
+                continue
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+                continue
+            added.add(column)
+        if own:
+            db.commit()
+    except BaseException:
+        if own:
+            db.rollback()
+        raise
+    return added
+
+
 LINK_COLUMNS = ("steered_into", "reply_to", "sender_message_id", "target_message_id")
 
 
 def _unwiden_agent_messages(db: sqlite3.Connection) -> None:
     """A database first opened by a 0.11.10 pre-release has the link columns on agent_messages
     itself: move them to agent_message_links and drop them, so 0.11.9's positional INSERT works."""
-    columns = {row["name"] for row in db.execute("PRAGMA table_info(agent_messages)")}
-    present = [column for column in LINK_COLUMNS if column in columns]
-    if not present:
-        return
-    db.execute("BEGIN IMMEDIATE")
+    db.execute("BEGIN IMMEDIATE")  # checked under the write lock: another process may have just done it
     try:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(agent_messages)")}
+        present = [column for column in LINK_COLUMNS if column in columns]
+        if not present:
+            db.rollback()
+            return
         picks = ", ".join(column if column in present else "NULL" for column in LINK_COLUMNS)
         db.execute(f"INSERT OR IGNORE INTO agent_message_links (message_id, {', '.join(LINK_COLUMNS)}) "
                    f"SELECT id, {picks} FROM agent_messages")
@@ -518,8 +542,7 @@ class JobStore:
                     log_path TEXT, error TEXT
                 )"""
             )
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
-            for column, ddl in (
+            added_jobs = add_columns(db, "jobs", (
                 ("bot_id", "TEXT"),
                 ("reason", "TEXT"),
                 ("source", "TEXT NOT NULL DEFAULT 'api'"),
@@ -565,10 +588,10 @@ class JobStore:
                 ("auto_decision", "TEXT"),
                 # when a cap first held this automatic turn (continuation.stale_hold)
                 ("held_at", "TEXT"),
-            ):
-                if column not in columns:
-                    db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
-            if "priority" not in columns:
+                # the failure_kind the job had before a cap held it (restored when it runs)
+                ("held_kind", "TEXT"),
+            ))
+            if "priority" in added_jobs:
                 # jobs queued before 0.9.0 keep their place behind Joshua's turns
                 db.execute("UPDATE jobs SET priority=CASE source WHEN 'inbox' THEN ? WHEN 'routine' THEN ? ELSE 0 END",
                            (SOURCE_PRIORITY["inbox"], SOURCE_PRIORITY["routine"]))
@@ -579,8 +602,7 @@ class JobStore:
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 )"""
             )
-            bot_columns = {row["name"] for row in db.execute("PRAGMA table_info(bots)")}
-            for column, ddl in (
+            add_columns(db, "bots", (
                 ("model", "TEXT"),
                 ("icon", "TEXT NOT NULL DEFAULT ''"),
                 ("icon_image", "TEXT"),
@@ -613,9 +635,7 @@ class JobStore:
                 ("tasks_seen_event", "INTEGER NOT NULL DEFAULT 0"),
                 # 0.11.10: a chat-only bot never continues by itself (no loop, verify or wake-up turns)
                 ("chat_only", "INTEGER NOT NULL DEFAULT 0"),
-            ):
-                if column not in bot_columns:
-                    db.execute(f"ALTER TABLE bots ADD COLUMN {column} {ddl}")
+            ))
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             # WORKING.md as it was before each turn that changed it, so an edit can roll it back
             db.execute(
@@ -635,8 +655,7 @@ class JobStore:
                     job_id TEXT, created_at TEXT NOT NULL
                 )"""
             )
-            message_columns = {row["name"] for row in db.execute("PRAGMA table_info(messages)")}
-            for column, ddl in (
+            add_columns(db, "messages", (
                 ("attachments", "TEXT NOT NULL DEFAULT '[]'"),
                 ("kind", "TEXT NOT NULL DEFAULT 'message'"),
                 # message edit / rewind: soft archive, never deleted
@@ -653,9 +672,7 @@ class JobStore:
                 ("hidden", "INTEGER NOT NULL DEFAULT 0"),
                 # 0.11.10: the chat line that carries an approval's Approve / Deny card
                 ("approval_id", "INTEGER"),
-            ):
-                if column not in message_columns:
-                    db.execute(f"ALTER TABLE messages ADD COLUMN {column} {ddl}")
+            ))
             db.execute("CREATE INDEX IF NOT EXISTS messages_bot ON messages (bot_id, id)")
             db.execute(
                 """CREATE TABLE IF NOT EXISTS routines (
@@ -664,8 +681,7 @@ class JobStore:
                     created_at TEXT NOT NULL
                 )"""
             )
-            routine_columns = {row["name"] for row in db.execute("PRAGMA table_info(routines)")}
-            for column, ddl in (
+            add_columns(db, "routines", (
                 ("name", "TEXT"),
                 # 0.9.0: what to do with runs missed while the controller was down (once | skip)
                 ("catch_up", "TEXT NOT NULL DEFAULT 'once'"),
@@ -677,9 +693,7 @@ class JobStore:
                 ("pending_run", "TEXT"),
                 # 0.10.0: "bot" when the bot made it through its job token (limited per bot)
                 ("created_by", "TEXT NOT NULL DEFAULT 'user'"),
-            ):
-                if column not in routine_columns:
-                    db.execute(f"ALTER TABLE routines ADD COLUMN {column} {ddl}")
+            ))
             # Audit trail of every stream event, kept after a bot is deleted.
             db.execute(
                 """CREATE TABLE IF NOT EXISTS job_events (
@@ -732,10 +746,9 @@ class JobStore:
                 )"""
             )
             db.execute("CREATE INDEX IF NOT EXISTS job_attempts_time ON job_attempts(automatic, finished_at)")
-            if "usage_json" not in {row["name"] for row in db.execute("PRAGMA table_info(job_attempts)")}:
-                # 0.11.0: what each retried run reported (tokens, cost), so budgets count every run
-                db.execute("ALTER TABLE job_attempts ADD COLUMN usage_json TEXT")
-            if "assignment_id" in columns and "assignment_minutes" not in columns:
+            # 0.11.0: what each retried run reported (tokens, cost), so budgets count every run
+            add_columns(db, "job_attempts", (("usage_json", "TEXT"),))
+            if "assignment_minutes" in added_jobs and "assignment_id" not in added_jobs:
                 # pre-release 0.10.0 data charged turn and minutes at settlement: settled jobs are
                 # fully charged, finished unsettled ones still owe the turn claim now charges
                 for job in db.execute("SELECT * FROM jobs WHERE assignment_id IS NOT NULL").fetchall():
@@ -1035,7 +1048,8 @@ class JobStore:
         """Attach an owner message to the bot's current turn atomically with checking its state.
 
         The turn is, in order: the bot's running job (a chat/API one first), else its oldest queued
-        chat/API job (not started yet, or parked between attempts; the steer is delivered when it starts).
+        chat/API job (not started yet, or parked between attempts; the steer is delivered when it starts),
+        never an automatic one (``auto_kind`` set, or held by a cap: it would wait with the hold).
         Assignment turns are steerable too (0.11.6): the message is part of that turn, is not a turn of its
         own and costs no budget; if it is still undelivered when the turn ends it runs as a chat turn.
         Never steered into: bot-to-bot turns (``inbox``, anything with an agent message row), whose reply
@@ -1060,9 +1074,12 @@ class JobStore:
                                  "ORDER BY source IN ('chat','api') DESC, started_at LIMIT 1",
                                  (str(bot_id),)).fetchone()
                 if not row:
+                    # never an automatic turn (a queued or cap-held continuation): the owner's message
+                    # is a turn of its own, which supersedes a queued chat continuation (enqueue_message)
                     row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='queued' "
-                                     "AND source IN ('chat','api') ORDER BY created_at, id LIMIT 1",
-                                     (str(bot_id),)).fetchone()
+                                     "AND source IN ('chat','api') AND auto_kind IS NULL "
+                                     "AND COALESCE(failure_kind,'')!=? ORDER BY created_at, id LIMIT 1",
+                                     (str(bot_id), continuation.HELD)).fetchone()
                 if not row:
                     busy = db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='running' LIMIT 1",
                                       (str(bot_id),)).fetchone()
@@ -1125,6 +1142,16 @@ class JobStore:
             db.execute("UPDATE jobs SET auto_decision='error' WHERE auto_decision='deciding'")
             db.commit()
         return len(rows)
+
+    def record_stop_decision(self, job_id: UUID | str, code: str, bot_id: UUID | str, line: str, *,
+                             source: str) -> None:
+        """A decision not to continue *job_id*: its code and the owner's chat line in one transaction."""
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE jobs SET auto_decision=? WHERE id=?", (code, str(job_id)))
+            db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,attachments) "
+                       "VALUES (?,'system',?,?,?,'[]')", (str(bot_id), source, line, now().isoformat()))
+            db.commit()
 
     def set_auto_decision(self, job_id: UUID | str, code: str) -> None:
         with closing(self._connect()) as db:
@@ -1375,6 +1402,7 @@ class JobStore:
                 if refused is None:
                     held = budgets.budget_gate(db, job_id, now())
                     if held is None:
+                        continuation.unhold(db, job_id)
                         break
                     _hold_for_budget(db, job_id, held)
                     continue

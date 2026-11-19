@@ -216,7 +216,9 @@ def test_task_cli_against_task_api(settings):
         assert conflict.returncode == 3 and 'Revised' in conflict.stderr and 'edited' in conflict.stderr
         other = Assignments(store).create(bea.id, {'title': 'Other'})
         assert run('edit', str(other.id)[:8], '--version', '1', '--title', 'No').returncode == 4
-        assert run('start', ref).returncode == 0
+        # out of the task's own turn a bot does not start it: the owner does (409, said on stderr)
+        refused = run('start', ref)
+        assert refused.returncode != 0 and "task's own turn" in refused.stderr
         assert run('drop', ref, '--note', 'obsolete').returncode == 0
         changes = run('changes', '--since', '0')
         assert changes.returncode == 0 and 'Last event:' in changes.stdout

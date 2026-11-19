@@ -933,8 +933,8 @@ class Assignments:
         """``bot-task status`` / ``bot-task done --evidence``. During a turn of this assignment the report
         is kept for the loop (the turn's own status line, if any, comes later and wins); otherwise it
         applies now. *evidence* (how the work was verified) is kept as an ``evidence`` event. Out of
-        its turn, a done without evidence (setting on) is refused (409), and a continue goes through
-        ``continuation.decide`` like the loop's own next step (refused with 409 on a stop)."""
+        its turn, a done without evidence (setting on) is refused (409), and so is any continue
+        (``_check_continue``): only the owner starts or resumes a task from outside its turn."""
         if state not in REPORT_STATES:
             raise AssignmentError(400, f"state must be one of {', '.join(REPORT_STATES)}")
         actor = actor_of(bot_id)
@@ -959,17 +959,8 @@ class Assignments:
                     raise AssignmentError(409, f"not marked done: {EVIDENCE_ASK}")
                 if not own_turn and state == "done" and (shown := self._evidence(db, row["id"])):
                     note = with_evidence(note, shown)
-                if not own_turn and state in ("continue", "not_done") and self._chat_only(db, row["bot_id"]):
-                    raise AssignmentError(409, "this bot is chat-only: it does not start or continue tasks by itself; "
-                                               "the owner starts them")
-                if not own_turn and state in ("continue", "not_done"):
-                    # a start or continue from outside the task's own turn queues an automatic loop
-                    # turn: it asks the one decision like the loop does (not stamped on the asking job,
-                    # which may be a chat turn with a decision of its own)
-                    asking = db.execute("SELECT * FROM jobs WHERE id=?", (str(job_id),)).fetchone() or {"id": str(job_id)}
-                    decision = continuation.decide(continuation.read(db), self._turn(db, row, asking, "continue"))
-                    if not decision.go:
-                        raise AssignmentError(409, f"not started: {decision.why}. The owner can start it.")
+                if state in ("continue", "not_done"):
+                    self._check_continue(db, row, str(job_id), own_turn)
                 kept = {"last_progress_at": now().isoformat(), "stalled_at": None}
                 if own_turn:
                     kept.update(reported_status=state, reported_note=note[:1000], reported_job=str(job_id))
@@ -977,8 +968,6 @@ class Assignments:
                                    job_id=str(job_id))
                 if own_turn:
                     pass  # the turn's own status line (if any) comes later and wins
-                elif state in ("continue", "not_done"):
-                    self._start(db, row, priority=LOOP_PRIORITY, actor=actor, note=note or "continued by the bot")
                 else:
                     self._set_status(db, row, state, note, actor=actor, job_id=str(job_id))
                 db.commit()
@@ -986,6 +975,24 @@ class Assignments:
                 db.rollback()
                 raise
         return self.get(assignment_id)
+
+    @staticmethod
+    def _check_continue(db: sqlite3.Connection, row: sqlite3.Row, job_id: str, own_turn: bool) -> None:
+        """A bot's ``continue`` counts only from the task's current turn while the task is active (the
+        loop then decides the next turn, through ``continuation.decide``). From any other turn (a chat,
+        a routine, an old turn of the task), or on a task that is open, paused, blocked or waiting,
+        it would start or revive work the owner did not: refused (409)."""
+        if not own_turn:
+            raise AssignmentError(409, "not continued: a bot continues a task only from that task's own turn. "
+                                       "To have it worked on, ask the owner to start it (Start in the task panel), "
+                                       "or say so in your reply")
+        if row["status"] != "active":
+            raise AssignmentError(409, f"not continued: the task is {row['status'].replace('_', ' ')}, not active; "
+                                       "only the owner starts or resumes it")
+        current = db.execute("SELECT id FROM jobs WHERE assignment_id=? AND status='running' "
+                             "ORDER BY assignment_turn DESC LIMIT 1", (row["id"],)).fetchone()
+        if current is None or current["id"] != job_id:
+            raise AssignmentError(409, "not continued: this is not the task's current turn")
 
     def save_checkpoint(self, assignment_id: UUID | str, bot_id: UUID | str, job_id: UUID | str, text: str) -> Assignment:
         if len(text.encode()) > CHECKPOINT_LIMIT:
@@ -1265,9 +1272,12 @@ class Assignments:
         job_id = job["id"]
         evidence = self._evidence(db, row["id"])
         if continuation.read(db)["evidence"] and evidence is None:
-            # asked already for this work (since it last became active, as the evidence that counts)
-            if db.execute("SELECT 1 FROM assignment_events WHERE assignment_id=? AND kind='evidence_asked' AND id>? "
-                          "LIMIT 1", (row["id"], became_active(db, row["id"]))).fetchone():
+            # asked already for this work (since it last became active, as the evidence that counts),
+            # and the owner has not written to the bot since the ask (that starts a new exchange)
+            asked = db.execute("SELECT created_at FROM assignment_events WHERE assignment_id=? AND "
+                               "kind='evidence_asked' AND id>? ORDER BY id DESC LIMIT 1",
+                               (row["id"], became_active(db, row["id"]))).fetchone()
+            if asked and not continuation.owner_spoke_since(db, row["bot_id"], asked["created_at"]):
                 self._set_status(db, row, "waiting_on_user", NO_EVIDENCE_NOTE, job_id=job_id)
                 return "no_evidence"
             if not self._go(db, row, job, "evidence").go:
@@ -1425,6 +1435,9 @@ class Assignments:
                     row = self._assignee_row(db, assignment_id, bot_id)
                     if row["status"] in CLOSED_STATUSES:
                         raise AssignmentError(409, f"assignment is {row['status']}")
+                    if stopped := self._stopped_why(db, row):
+                        raise AssignmentError(409, f"no wake-up on this task: {stopped}; a wake-up would not "
+                                                   "resume it (the owner's reply or Start does)")
                     assignment_id = row["id"]
                 if db.execute("SELECT COUNT(*) FROM wakeups WHERE bot_id=? AND status='pending'",
                               (str(bot_id),)).fetchone()[0] >= MAX_PENDING_WAKEUPS:
@@ -1442,6 +1455,26 @@ class Assignments:
                 db.rollback()
                 raise
         return self._wakeup(wakeup_id)
+
+    @staticmethod
+    def _stopped_why(db: sqlite3.Connection, row: sqlite3.Row) -> str | None:
+        """Why a wake-up may not start *row*, else None: it is paused (waiting on the owner), blocked,
+        or open because the owner stopped it (their latest status change). A task that is active,
+        open and never stopped, or waiting on another bot, may be woken."""
+        if row["status"] in continuation.PAUSED_STATES:
+            return f"it is {row['status'].replace('_', ' ')}"
+        if Assignments._owner_stopped(db, row):
+            return "the owner stopped it"
+        return None
+
+    @staticmethod
+    def _owner_stopped(db: sqlite3.Connection, row: sqlite3.Row) -> bool:
+        """*row* is open because the owner stopped it (their latest status change), not new."""
+        if row["status"] != "open":
+            return False
+        last = db.execute("SELECT actor, note FROM assignment_events WHERE assignment_id=? AND kind='status' "
+                          "ORDER BY id DESC LIMIT 1", (row["id"],)).fetchone()
+        return bool(last and last["actor"] == "user" and last["note"].startswith("open"))
 
     def _wakeup(self, wakeup_id: UUID | str) -> Wakeup:
         with closing(self.store._connect()) as db:
@@ -1487,8 +1520,10 @@ class Assignments:
         stamp = now()
 
         def cancel(reason: str) -> int:
+            # never silent: the bot's chat says which wake-up was dropped and why
             db.execute("UPDATE wakeups SET status='cancelled', fired_at=? WHERE id=?", (stamp.isoformat(), wakeup["id"]))
-            self._system_line(db, wakeup["bot_id"], f"Wake-up skipped: {reason}.")
+            named = f' ("{wakeup["note"][:80]}")' if wakeup["note"] else ""
+            self._system_line(db, wakeup["bot_id"], f"Wake-up{named} skipped: {reason}.")
             return 0
 
         bot = db.execute("SELECT * FROM bots WHERE id=?", (wakeup["bot_id"],)).fetchone()
@@ -1500,6 +1535,9 @@ class Assignments:
             row = db.execute("SELECT * FROM assignments WHERE id=?", (wakeup["assignment_id"],)).fetchone()
             if row is None or row["status"] in CLOSED_STATUSES:
                 return cancel("its assignment is closed")
+            # never a task the owner stopped (paused and blocked ones: continuation.decide below)
+            if self._owner_stopped(db, row):
+                return cancel("its task was stopped by you; Start it to resume")
         # a wake-up is an automatic turn: the one continuation rule decides (chat-only, off, paused task)
         decision = continuation.decide(continuation.read(db), continuation.Turn(
             path="task" if row else "chat", kind="wakeup", state=row["status"] if row else "continue",

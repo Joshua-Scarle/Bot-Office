@@ -1130,7 +1130,8 @@ def create_app(
         if body.approvals is not None:
             change = body.approvals
             try:
-                approval_classes.update(store, enabled=change.enabled,
+                # a new custom pattern is self-tested in a child process (up to 2 s): off the event loop
+                await asyncio.to_thread(approval_classes.update, store, enabled=change.enabled,
                                         add=[item.model_dump() for item in change.add or []],
                                         remove=change.remove, timeout_min=change.timeout_min)
             except approval_classes.ApprovalClassError as exc:
