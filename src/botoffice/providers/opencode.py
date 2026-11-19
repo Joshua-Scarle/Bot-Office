@@ -7,6 +7,7 @@ from pathlib import Path
 from .. import failures
 from ..catalog import DEFAULT_MODELS, model_error, parse_model_listing
 from ..domain import Job
+from ..slash import decode_slash
 from .base import RunResult
 from .cli import EXIT_IDLE, CliAdapter
 
@@ -59,6 +60,12 @@ class OpenCodeAdapter(CliAdapter):
         if effort := self._job_effort(job):
             args.extend(["--variant", effort])
         args.extend(f"--file={path}" for path in job.attachment_paths)
+        turn = decode_slash(job.slash)
+        if turn and turn["mode"] == "command":
+            # 0.11.14: `opencode run --command <name> <args>`; the job prompt is the arguments
+            args.extend(["--command", turn["name"]])
+            args.extend(["--", job.prompt] if job.prompt.strip() else [])
+            return args
         args.extend(["--", job.prompt])
         return args
 

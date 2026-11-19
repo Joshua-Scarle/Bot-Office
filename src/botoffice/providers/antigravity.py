@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .. import isolation, safefs
 from ..domain import Job
+from ..slash import decode_slash
 from .cli import NEEDS_LOGIN_TERMS, CliAdapter, archive_session
 
 
@@ -73,7 +74,7 @@ class AntigravityAdapter(CliAdapter):
             self._write_json(self._cwd(workspace, job) / ".agents" / "hooks.json", {"hooks": {"PreToolUse": [
                 {"matcher": "*", "hooks": [{"type": "command", "command": job.gate_command, "timeout": 30}]}]}})
         prompt = job.prompt if job is not None else ""
-        if self._stable_dir(workspace, job):
+        if self._stable_dir(workspace, job) and not (job is not None and (decode_slash(job.slash) or {}).get("mode") == "raw"):
             prompt = (f"This turn's job directory is {workspace}. Read "
                       f"{workspace / ('prompt-resume.txt' if session else 'prompt.txt')} and follow it; reply.txt, "
                       "history.md and the other files it names are in that job directory. Where it says the "

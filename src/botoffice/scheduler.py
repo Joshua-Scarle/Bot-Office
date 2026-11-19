@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import UUID
 
 from . import attachments, autocontinue, baseline, continuation, failures, isolation, needs_you, procs, safefs
+from . import slash as slash_mod
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
 from .catalog import ENGINE_LABELS
@@ -532,6 +533,8 @@ class Scheduler:
         self._sinks[str(job.id)] = sink
         token = sink.install()
         seed_generation: int | None = None
+        turn_slash = slash_mod.decode_slash(job.slash)
+        slash_turn = bool(turn_slash and turn_slash["mode"] in ("raw", "command"))  # 0.11.14: the CLI's own command line
         try:
             sink.emit("start", provider=job.provider, model=job.model, effort=job.effort, slot=job.slot)
             workspace.mkdir(parents=True, exist_ok=True, mode=isolation.workspace_mode())
@@ -610,13 +613,18 @@ class Scheduler:
                     "agent_token": self.store.issue_agent_token(job),
                     "cli_access": bot.cli_access, "resume_prompt": job.resume_prompt,
                     **self.gate_fields(job, bot, workspace)})
+                if turn_slash and slash_turn:
+                    # a slash command turn is the CLI's own command line, not the wrapped Bot Office prompt
+                    line = (slash_mod.slash_job_text(turn_slash["name"], turn_slash["args"]) if turn_slash["mode"] == "raw"
+                            else turn_slash["args"])
+                    run_job = run_job.model_copy(update={"prompt": line, "resume_prompt": line})
             else:
                 safefs.write_text(workspace / "prompt.txt", job.prompt, isolation.file_mode())
             result: RunResult = await asyncio.wait_for(
                 adapter.run(run_job, workspace, log_path, timeout),
                 timeout=timeout + 10,
             )
-            if seed_generation is not None and result.exit_code is not None:
+            if seed_generation is not None and result.exit_code is not None and not slash_turn:
                 # the provider process ran with the seed, so the fresh session has it; a
                 # cancellation or a failure before launch keeps it for the next turn
                 self.store.complete_rewind_seed(bot.id, seed_generation)
@@ -633,7 +641,7 @@ class Scheduler:
                     _mark_handoff_pending(bot_dir)
                     log.warning("Could not save settings snapshot for bot %s", bot.id, exc_info=True)
                 else:
-                    if can_resume:
+                    if can_resume and not slash_turn:  # a slash turn did not carry the handoff: the next turn still must
                         safefs.unlink(marker)
                 try:
                     save_rules_snapshot(shared, self.memory.bot_dir(bot.id))

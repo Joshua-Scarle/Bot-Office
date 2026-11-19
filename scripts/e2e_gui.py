@@ -72,9 +72,13 @@ class E2EEngine:
 
     name = "codex"
     enabled = True
+    executable = "/bin/true"  # slash commands: the catalog asks the CLI for its version
 
     def __init__(self) -> None:
         self.app = None
+
+    async def capture_bytes(self, args, timeout=15, cwd=None):
+        return 0, b"codex-cli 0.0.0-e2e", b""
 
     async def login_status(self) -> str:
         return "ok"
@@ -556,6 +560,105 @@ def file_uploads(page, out: Path, base: str, token: str) -> None:
     check(status == 413, f"an oversize file is refused with 413 ({detail[:80]})")
 
 
+# --- 0.11.14: slash commands in the chat box ---
+
+def slash_commands(page, out: Path, base: str, token: str) -> None:
+    print("Slash commands")
+    open_bot(page, ADA)
+    box = page.locator("#text")
+    popup = page.locator("#slash-list")
+    rows = page.locator("#slash-list li[role=option]:not(.note)")
+    messages = lambda: len(call(base, token, "GET", "/v1/bots/" + bot_id + "/messages"))  # noqa: E731
+    bot_id = next(b["id"] for b in call(base, token, "GET", "/v1/bots") if b["name"] == ADA)
+    box.click()
+    box.fill("")
+    box.type("/")
+    popup.wait_for(state="visible", timeout=10000)
+    check(popup.is_visible() and rows.count() >= 5, f'typing "/" opens the command list ({rows.count()} commands)')
+    check(box.get_attribute("aria-expanded") == "true" and popup.get_attribute("role") == "listbox", "the list is an ARIA listbox the box controls")
+    names = page.locator("#slash-list .slash-name").all_inner_texts()
+    check("/e2e-ping" in names and "/model" in names and "/status" in names, "it lists the CLI's commands and the user's custom prompt")
+    check(not any(n in ("/login", "/logout") for n in names), "login and logout are never listed")
+    shot(page, out, "slash-open")
+    box.type("co")
+    filtered = page.locator("#slash-list .slash-name").all_inner_texts()
+    check(filtered and all("co" in n for n in filtered) or any("co" in n for n in filtered), f'typing "co" filters the list ({filtered})')
+    box.fill("/")
+    popup.wait_for(state="visible")
+    first = page.evaluate("() => document.getElementById('text').getAttribute('aria-activedescendant')")
+    box.press("ArrowDown")
+    second = page.evaluate("() => document.getElementById('text').getAttribute('aria-activedescendant')")
+    box.press("ArrowUp")
+    third = page.evaluate("() => document.getElementById('text').getAttribute('aria-activedescendant')")
+    check(first == "slash-opt-0" and second == "slash-opt-1" and third == "slash-opt-0", "Up and Down move the highlight")
+    box.press("Escape")
+    check(popup.is_hidden() and box.input_value() == "/", "Esc closes the list and keeps the text")
+    before = messages()
+    # a picked custom command fills the box; a second Enter sends it
+    box.fill("")
+    box.type("/e2e-p")
+    page.wait_for_function("() => document.querySelectorAll('#slash-list li[role=option]').length >= 1")
+    box.press("Enter")
+    check(box.input_value() == "/e2e-ping " and popup.is_hidden() and messages() == before, "Enter picks the command (fills the box, sends nothing yet)")
+    box.type("hello there")
+    box.press("Enter")
+    check(wait_text(page, "/e2e-ping hello there", 10000), "a second Enter sends the command to the bot")
+    jobs = call(base, token, "GET", "/v1/jobs")
+    mine = [j for j in jobs if j.get("slash")]
+    check(bool(mine) and json.loads(mine[0]["slash"])["mode"] == "expand" and "Ping the bot: hello there" in mine[0]["prompt"],
+          "the custom prompt was filled in with the arguments and run as a turn")
+    check(wait_text(page, REPLY, 60000), "the bot's reply arrives")
+    # greyed out
+    box.fill("")
+    box.type("/stat")
+    page.wait_for_selector("#slash-list li.grey", timeout=10000)
+    grey = page.locator("#slash-list li.grey").first
+    check(grey.get_attribute("aria-disabled") == "true" and "Unavailable" in grey.evaluate("e => getComputedStyle(e.querySelector('.slash-desc'), '::before').content"),
+          "a command that cannot run headless is shown greyed out with a reason")
+    shot(page, out, "slash-greyed")
+    before = messages()
+    box.press("Tab")
+    box.press("Enter")
+    page.wait_for_function("() => document.getElementById('status').classList.contains('bad')", timeout=10000)
+    check("unavailable" in page.locator("#status").inner_text() and messages() == before, "running a greyed command says why and sends nothing")
+    # confirm-gated
+    box.fill("")
+    box.type("/new")
+    page.wait_for_selector("#slash-list li[role=option]")
+    box.press("Enter")
+    box.press("Enter")
+    dialog = page.locator("#slash-confirm")
+    dialog.wait_for(state="visible", timeout=10000)
+    check(dialog.is_visible() and "fresh" in page.locator("#slash-confirm-text").inner_text().lower(), "a destructive command asks for a confirmation")
+    shot(page, out, "slash-confirm")
+    page.locator("#slash-confirm-cancel").click()
+    check(dialog.is_hidden() and "Cancelled" in page.locator("#status").inner_text(), "Cancel changes nothing")
+    box.fill("/new")
+    box.press("Enter")  # list is closed after fill? open it again through typing
+    page.wait_for_timeout(200)
+    if popup.is_visible():
+        box.press("Enter")
+    box.press("Enter")
+    dialog.wait_for(state="visible", timeout=10000)
+    page.locator("#slash-confirm-ok").click()
+    page.wait_for_function("() => /session/i.test(document.getElementById('status').textContent)", timeout=10000)
+    check("session" in page.locator("#status").inner_text().lower(), f'confirming runs it ({page.locator("#status").inner_text()})')
+    # a mapped control: /model opens the model picker in Settings
+    box.fill("")
+    box.type("/model")
+    page.wait_for_selector("#slash-list li[role=option]")
+    box.press("Enter")
+    box.press("Enter")
+    page.locator("#bot-dialog").wait_for(state="visible", timeout=10000)
+    check(page.evaluate("() => document.activeElement.id") == "f-model", "/model opens Settings with the model picker focused")
+    page.locator("#dialog-cancel").click()
+    # not a command of this bot: an ordinary message, as before
+    box.fill("")
+    send_with_enter(page, "/etc/hosts is the file I mean")
+    check(wait_text(page, "/etc/hosts is the file I mean", 10000), "text that merely starts with / but is not a command is sent as a normal message")
+    wait_text(page, REPLY, 60000)
+
+
 def resolve_token(args, environ=None) -> str | None:
     """The live-mode API token: --token-file, BOT_OFFICE_TOKEN_FILE, BOT_OFFICE_TOKEN, then the
     deprecated --token (a warning on stderr; it shows in the process list)."""
@@ -610,6 +713,10 @@ def main() -> int:
                 enter_to_send(page, out, "e2e check from Bot-Office: please reply with just OK.", "OK")
         else:
             with tempfile.TemporaryDirectory(prefix="bot-office-e2e-") as tmp:
+                home = Path(tmp) / "home"  # slash commands read the CLI's custom command files from HOME
+                (home / ".codex" / "prompts").mkdir(parents=True)
+                (home / ".codex" / "prompts" / "e2e-ping.md").write_text("---\ndescription: Ping the bot (e2e)\nargument-hint: TEXT\n---\nPing the bot: $ARGUMENTS\n")
+                os.environ["HOME"] = str(home)
                 base, app, server = start_local(Path(tmp) / "data")
                 for name in (ADA, BEA, CY):
                     call(base, TOKEN, "POST", "/v1/bots", {"name": name, "default_provider": "codex"})
@@ -629,6 +736,7 @@ def main() -> int:
                 sidebar_resize(page, out)
                 open_bot(page, ADA)
                 file_uploads(page, out, base, TOKEN)
+                slash_commands(page, out, base, TOKEN)
                 server.should_exit = True
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()
