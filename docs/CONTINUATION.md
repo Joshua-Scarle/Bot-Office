@@ -95,3 +95,18 @@ Older code ignores all of these. To roll back, stop the service with no job runn
 - mark text a bot edited on an owner's task with a `[bot-edited] ` prefix (the statements are in the README): 0.11.9 does not read `assignments.bot_edited`, so it would quote that text to bots as the owner's own.
 
 Bot-message links (steered into, reply to, chat rows) live in the side table `agent_message_links`, not in `agent_messages`, because 0.11.9 inserts into `agent_messages` positionally.
+
+## Waiting for another bot's reply (0.11.12)
+
+A pending reply to a `bot-msg` is not a blocker. Three parts:
+
+- **Rules.** The rules, the task brief and the `bot-msg` note tell the bot to finish the turn (`done`, on a task `waiting_on_bot`) and that the reply wakes it.
+- **Classification** (`Scheduler._waiting_for_bot`). When a turn ends `not_done`, `waiting_on_user` or `waiting_on_bot` while a message it sent in that turn is still unanswered, and the status names the wait (or is `waiting_on_bot`), and nothing asks the owner (no needs-you phrase, no question card, no pending approval), it is a normal finish: `done` for a chat turn, `waiting_on_bot` for a task turn. It is then not incomplete and not in Needs you. `blocked`, a real question to the owner, and a `waiting_on_user` with nothing pending stay as the bot said.
+- **The wake** (`Assignments.wake_for_replies`). When the other bot's turn finishes and its reply is copied back, and again when the asking bot's own turn ends (a reply that came while it was running), each reply wakes the asker once, if the asking turn ended done / unverified / waiting on a bot. It is a wake-up (`source=wakeup`, `auto_kind=wakeup`) fired through `_fire`, so `continuation.decide` applies (auto-continue off, chat-only bots, a task paused by the guard, the owner's stop) together with the consecutive limit (counting the automatic turns since the owner last wrote), the daily wake-up limit and, at claim, the caps with their hold and chat line. The reply text is in the turn's prompt as untrusted data. Replies are tracked in `agent_message_origin` (the turn a message was sent from, and the once-only claim). Steered messages are answered by a message of the other bot, which reaches the asker as an inbox turn as before (hop and inbox limits).
+
+## Loop guard fixes (0.11.12)
+
+- A guard pause stays paused: status-change wake-ups, due wake-ups, reply wake-ups and a bot's out-of-turn `continue` all go through `decide` or are refused (409), so none resumes a task waiting on the owner. (Checked on 0.11.10; tests added.)
+- The text checks read the bot's own prose only: fenced and inline code, quoted lines and double-quoted strings are ignored, and a sentence that says a failure is fixed ("Fixed the failed test") is not unresolved. A repeat or a "still failing" sentence still counts.
+- A `bot-task status continue` report's note reaches the guard: the settled state and reason are passed to `decide`.
+

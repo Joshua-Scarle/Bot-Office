@@ -1529,7 +1529,8 @@ def create_app(
         if body.wait and binding:
             prefix = (item["note"] + " ") if item.get("note") else ""
             item["note"] = prefix + ("Queued asynchronously: agent turns cannot wait for another worker; "
-                                     "the reply will appear in chat.")
+                                     "the reply will appear in chat and wake you. Waiting for it is not a blocker: finish "
+                                     "your turn (BOT-OFFICE-STATUS: done, or waiting_on_bot on a task).")
             return item
         if body.wait:
             deadline = asyncio.get_running_loop().time() + body.timeout
