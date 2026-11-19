@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.14. What changed is recorded below: [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.15. What changed is recorded below: [0.11.15](#what-changed-in-01115), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,14 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.11.15
+
+**Antigravity default model works.** A new Antigravity bot's default pair, `gemini-3.8-flash-high` with effort `medium`, failed every turn: the CLI refuses `--effort` next to a model whose id already names an effort ("model conflicts with --effort"). Now an Antigravity model id ending in `-low`, `-medium`, `-high`, `-xhigh` or `-max` runs with no `--effort` flag (`catalog.model_carries_effort`, applied when the job is queued and again when the command line is built, so older jobs and bots are fixed too). The settings dialog hides the Thinking effort control for such a model, and the header pill and job details show no effort for it; pick a model without an effort suffix to set one. The API still accepts an effort for these models and ignores it.
+
+**`/compact` on Claude Code** shows one status line, for example `Conversation compacted (40k → 10.5k tokens, 4.7s)`, built from the CLI's `compact_boundary` event, instead of the raw result stream. The CLI's own messages (nothing to compact, not signed in) are shown as they are. The other engines' slash output was checked live; see the deploy record below.
+
+**Upload read check.** `scripts/live_check.py [engine ...] [--compact]` runs against a live install: for each engine a throwaway bot ("ZZ live-check <engine> (safe to delete)", deleted afterwards) must run one turn on its default model and effort, then read an uploaded text file and quote its unique token; `--compact` also runs `/compact` on a Claude bot. It reads `data/token` itself and never prints it. `tests/test_file_uploads.py` covers the same path without a CLI, and `scripts/e2e_gui.py` has the browser steps (screenshots `upload-read` and `compact-status`).
 
 ## What changed in 0.11.14 (deployed 2026-11-19)
 
