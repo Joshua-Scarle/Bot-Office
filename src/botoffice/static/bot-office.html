@@ -2314,7 +2314,7 @@ function pickSlash(c) {
 }
 $("text").addEventListener("input", () => { slashUi.dismissed = null; updateSlash(); });
 $("text").addEventListener("click", () => updateSlash());
-$("text").addEventListener("blur", () => setTimeout(closeSlash, 120));
+$("text").addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== $("text")) closeSlash(); }, 120));  // a stale timer must not close a list opened since
 // registered in the capture phase so that Enter picks a command instead of sending the message
 $("text").addEventListener("keydown", (event) => {
   if (!slashUi.open || event.isComposing) return;

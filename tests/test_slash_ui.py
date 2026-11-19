@@ -114,3 +114,7 @@ def test_page_wires_the_popup_and_a_confirm_for_the_destructive_command():
     assert 'id="slash-confirm"' in page and 'askConfirm("Start a fresh session?"' in page
     assert "confirm: true" in page  # the server gate is only passed after the dialog's OK
     assert page.index("trySlash(bot, text)") < page.index('api("/v1/bots/" + bot.id + "/messages"')
+
+
+def test_a_late_blur_does_not_close_a_list_opened_since():
+    assert 'document.activeElement !== $("text")) closeSlash()' in CHAT_PAGE.read_text()
