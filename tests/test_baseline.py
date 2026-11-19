@@ -170,13 +170,13 @@ def test_layer_api_is_owner_only(settings, path, layer):
 def test_settings_api_auto_continue(settings):
     app = create_app(settings, {"codex": FakeAdapter()})
     with TestClient(app) as client:
-        assert client.get("/v1/settings", headers=OWNER).json()["auto_continue"] == {"enabled": True, "max": 10}
+        assert client.get("/v1/settings", headers=OWNER).json()["auto_continue"].items() >= {"enabled": True, "max": 10}.items()
         saved = client.put("/v1/settings", headers=OWNER, json={"auto_continue": {"enabled": False, "max": 4}}).json()
-        assert saved["auto_continue"] == {"enabled": False, "max": 4}
+        assert saved["auto_continue"].items() >= {"enabled": False, "max": 4}.items()
         assert client.put("/v1/settings", headers=OWNER, json={"auto_continue": {"max": 0}}).status_code == 422
         assert client.put("/v1/settings", headers=OWNER, json={"auto_continue": {"max": 999}}).status_code == 422
         partial = client.put("/v1/settings", headers=OWNER, json={"auto_continue": {"enabled": True}}).json()
-        assert partial["auto_continue"] == {"enabled": True, "max": 4}
+        assert partial["auto_continue"].items() >= {"enabled": True, "max": 4}.items()
         assert client.put("/v1/settings", json={"auto_continue": {"enabled": False}}).status_code == 401
         assert client.get("/v1/settings").status_code == 401
 

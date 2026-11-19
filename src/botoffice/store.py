@@ -16,7 +16,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from . import attachments as attachment_files
-from . import failures
+from . import continuation, failures
 from . import usage as budgets
 from .catalog import DEFAULT_ICON, DEFAULT_ICONS, default_effort, default_model
 from .domain import Bot, Job, JobStatus, Message, Routine
@@ -44,6 +44,7 @@ BOT_FIELDS = {
     "daily_budget_json",
     "digest",
     "bot_steer",
+    "chat_only",
 }
 IDENTITY_MIGRATION = "crewdeck-identity-v1"
 EFFORT_MIGRATION = "crewdeck-effort-v1"
@@ -510,6 +511,11 @@ class JobStore:
                 # 0.11.10: automatic continuation number (0 = not one) and the turn the chain started from
                 ("continue_count", "INTEGER NOT NULL DEFAULT 0"),
                 ("continued_from", "TEXT"),
+                # 0.11.10 one continuation system: which kind of automatic turn this job is (chat,
+                # loop, verify, evidence, wakeup; NULL = not automatic, counted by the caps) and what
+                # continuation.decide said after it finished (set once)
+                ("auto_kind", "TEXT"),
+                ("auto_decision", "TEXT"),
             ):
                 if column not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
@@ -556,6 +562,8 @@ class JobStore:
                 ("bot_steer", "INTEGER NOT NULL DEFAULT 1"),
                 # 0.11.4: the last assignment_events id this bot's prompt showed ("changes by others")
                 ("tasks_seen_event", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.11.10 (G1): a chat-only bot never continues by itself (no loop, verify or wake-up turns)
+                ("chat_only", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if column not in bot_columns:
                     db.execute(f"ALTER TABLE bots ADD COLUMN {column} {ddl}")
@@ -1031,7 +1039,26 @@ class JobStore:
         """A chat or API turn of the owner is queued for this bot (it runs next and decides)."""
         with closing(self._connect()) as db:
             return db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='queued' AND source IN ('chat','api') "
-                              "LIMIT 1", (str(bot_id),)).fetchone() is not None
+                              "AND auto_kind IS NULL LIMIT 1", (str(bot_id),)).fetchone() is not None
+
+    def claim_auto_decision(self, job_id: UUID | str) -> bool:
+        """0.11.10: mark *job_id* as being decided (continue or not); False if it already was, so a
+        finished turn is continued at most once whoever calls."""
+        with closing(self._connect()) as db:
+            return db.execute("UPDATE jobs SET auto_decision='deciding' WHERE id=? AND auto_decision IS NULL",
+                              (str(job_id),)).rowcount == 1
+
+    def set_auto_decision(self, job_id: UUID | str, code: str) -> None:
+        with closing(self._connect()) as db:
+            db.execute("UPDATE jobs SET auto_decision=? WHERE id=?", (code, str(job_id)))
+
+    def chain_turns(self, root: UUID | str, until: datetime) -> list[tuple[str, str]]:
+        """(reply, status reason) of a chat continuation chain's finished turns up to *until*, oldest first."""
+        with closing(self._connect()) as db:
+            rows = db.execute("SELECT reply_text, outcome FROM jobs WHERE (id=? OR continued_from=?) AND created_at<=? "
+                              "AND status NOT IN ('queued','running') ORDER BY created_at, continue_count",
+                              (str(root), str(root), until.isoformat())).fetchall()
+        return [(row["reply_text"] or "", (row["outcome"] or "").partition(": ")[2]) for row in rows]
 
     def pending_approval(self, job_id: UUID | str) -> bool:
         with closing(self._connect()) as db:
@@ -1255,6 +1282,11 @@ class JobStore:
                     db.commit()  # keeps the cancellations of turns the gate refused
                     return None
                 job_id = row["id"]
+                # 0.11.10 (G3): an automatic turn over a cap waits for its window, before it reserves a task turn
+                capped = continuation.cap_gate(db, job_id, now())
+                if capped is not None:
+                    continuation.hold(db, job_id, *capped, now())
+                    continue
                 refused = _assignment_gate(db, job_id)
                 if refused is None:
                     held = budgets.budget_gate(db, job_id, now())
@@ -2061,6 +2093,10 @@ class JobStore:
                            (str(job.id), prompt, job.status.value, job.provider, job.created_at.isoformat(), str(bot.id), reason, source, str(routine_id) if routine_id else None, bot.model, job.effort, _priority(source) if priority is None else priority))
                 cursor = db.execute("INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments) VALUES (?,?,?,?,?,?,?,?)",
                                     (str(bot.id), "user", sender, source, text, str(job.id), now().isoformat(), json.dumps(attachment_ids or [])))
+                if sender is None and source in ("chat", "api"):
+                    # 0.11.10: the owner's message supersedes a queued (or cap-held) chat continuation
+                    db.execute("UPDATE jobs SET status='cancelled', finished_at=?, error='superseded by your message' "
+                               "WHERE bot_id=? AND status='queued' AND auto_kind='chat'", (now().isoformat(), str(bot.id)))
                 row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
                 if hook:
                     hook(db, job)

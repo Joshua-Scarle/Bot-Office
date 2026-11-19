@@ -80,6 +80,16 @@ def made_progress(reply: str, earlier: list[str]) -> bool:
     return not any(similarity(reply, old) >= REPEAT_SIMILARITY for old in earlier)
 
 
+def no_progress_run(replies: list[tuple[str, str]]) -> int:
+    """How many of the newest *replies* in a row made no progress (``made_progress``)."""
+    stalled = 0
+    for i in range(len(replies) - 1, -1, -1):
+        if made_progress(replies[i][0], [r for r, _ in replies[max(0, i - 3):i]]):
+            break
+        stalled += 1
+    return stalled
+
+
 def stop_reason(replies: list[tuple[str, str]]) -> str | None:
     """Why the loop should pause, from the run of "continue" turns since the user last spoke.
 
@@ -91,11 +101,7 @@ def stop_reason(replies: list[tuple[str, str]]) -> str | None:
         return f"the reply says it is blocked or needs you (\"{phrase}\")"
     if len(replies) >= MAX_CONSECUTIVE_CONTINUES:
         return f"{len(replies)} continues in a row without a reply from you"
-    stalled = 0
-    for i in range(len(replies) - 1, -1, -1):
-        if made_progress(replies[i][0], [r for r, _ in replies[max(0, i - 3):i]]):
-            break
-        stalled += 1
+    stalled = no_progress_run(replies)
     if stalled >= NO_PROGRESS_LIMIT:
         return f"{stalled} continues in a row with no progress"
     return None
