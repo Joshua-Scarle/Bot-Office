@@ -119,6 +119,7 @@ class AutoContinueBody(BaseModel):
     per_bot_day: int | Literal["unlimited"] | None = None
     per_hour: int | Literal["unlimited"] | None = None
     evidence: bool | None = None
+    evidence_min: int | None = None
 
 
 class ApprovalClassCreate(BaseModel):
@@ -1101,8 +1102,11 @@ def create_app(
     async def get_settings() -> dict[str, object]:
         """Settings for all bots (0.11.10). The two layers have their own routes (large texts)."""
         gates = {name: action_rules.gate_state(settings.control_dir, name) for name in action_rules.WIRED}
-        return {"auto_continue": baseline.auto_continue(store),
+        auto = baseline.auto_continue(store)
+        return {"auto_continue": auto,
                 "auto_continue_max_limit": baseline.AUTO_CONTINUE_MAX,
+                # what a chat chain really gets (max, or consecutive if lower)
+                "auto_continue_chat_limit": continuation.chat_limit(auto),
                 "auto_continue_defaults": continuation.defaults(),
                 "approvals": {**approval_classes.settings(store), "gates": gates,
                               "unpausable_bots": approval_classes.unpausable_bots(store)}}

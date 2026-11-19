@@ -1080,6 +1080,20 @@ class JobStore:
             return db.execute("UPDATE jobs SET auto_decision='deciding' WHERE id=? AND auto_decision IS NULL",
                               (str(job_id),)).rowcount == 1
 
+    def fail_stale_decisions(self, line: str) -> int:
+        """At start: a job left ``deciding`` (the process died, or ``decide`` raised, before the
+        decision was stored) gets ``error`` and one chat line *line*, so the chain never stops silently."""
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute("SELECT j.id, j.bot_id, j.source FROM jobs j JOIN bots b ON b.id=j.bot_id "
+                              "WHERE j.auto_decision='deciding'").fetchall()
+            for row in rows:
+                db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,attachments) "
+                           "VALUES (?,'system',?,?,?,'[]')", (row["bot_id"], row["source"], line, now().isoformat()))
+            db.execute("UPDATE jobs SET auto_decision='error' WHERE auto_decision='deciding'")
+            db.commit()
+        return len(rows)
+
     def set_auto_decision(self, job_id: UUID | str, code: str) -> None:
         with closing(self._connect()) as db:
             db.execute("UPDATE jobs SET auto_decision=? WHERE id=?", (code, str(job_id)))

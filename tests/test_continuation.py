@@ -466,3 +466,57 @@ def test_bot_task_done_sends_the_evidence(tmp_path):
     missing = subprocess.run([sys.executable, "-I", str(helper), "done"], env=env, capture_output=True, text=True, timeout=5, check=False)
     assert missing.returncode != 0 and "--evidence" in missing.stderr
 
+
+
+def test_evidence_must_be_fresh_and_long_enough_and_is_shown(settings):
+    """G4 gate: evidence given before the task last became active (rewound, reopened, resumed) does
+    not count, nor one shorter than evidence_min; the accepted evidence is in the done note, and
+    Needs-you shows the last evidence given."""
+    store, scheduler, _, bot, item = task_setup(settings, "step\nBOT-OFFICE-STATUS: waiting_on_user — ok?")
+    run_all(store, scheduler)
+    book = scheduler.assignments
+    chat = store.create("routine: check in", "codex", bot_id=bot.id, source="routine")
+    with pytest.raises(AssignmentError) as short:
+        book.report(item.id, bot.id, chat.id, "done", evidence="ok")
+    assert short.value.status == 400 and "at least 12" in short.value.detail
+    book.report(item.id, bot.id, chat.id, "done", evidence="pytest -q: 14 passed")
+    done = book.get(item.id)
+    assert done.status == "done" and "evidence: pytest -q: 14 passed" in done.status_note
+    assert any("evidence: pytest -q: 14 passed" in line for line in system_lines(store, bot))
+    # the owner reopens it: the old evidence no longer counts
+    book.update(item.id, {"status": "active"})
+    with pytest.raises(AssignmentError) as stale:
+        book.report(item.id, bot.id, chat.id, "done")
+    assert stale.value.status == 409 and "--evidence" in stale.value.detail
+    # waiting on the owner: Needs-you shows the last evidence given
+    book.report(item.id, bot.id, chat.id, "waiting_on_user", note="check please")
+    item2 = book.get(item.id)
+    assert item2.status == "waiting_on_user"
+    [entry] = [i for i in needs_you(store) if i.get("assignment_id") == str(item.id)]
+    assert entry["evidence"] == "pytest -q: 14 passed" and 'last evidence given: "pytest -q: 14 passed"' in entry["ask"]
+    # the minimum is a setting
+    save(store, evidence_min=2)
+    book.update(item.id, {"status": "active"})
+    book.report(item.id, bot.id, chat.id, "done", evidence="ok")
+    assert book.get(item.id).status == "done"
+
+
+def test_a_stale_evidence_does_not_close_the_loop(settings):
+    holder = {"n": 0}
+
+    def reply(job):
+        holder["n"] += 1
+        if holder["n"] == 1:
+            holder["s"].assignments.report(job.assignment_id, job.bot_id, job.id, "continue",
+                                           evidence="ran the checker: all 3 files pass")
+            return "Checked.\nBOT-OFFICE-STATUS: waiting_on_user — look?"
+        return "Finished.\nBOT-OFFICE-STATUS: done"
+
+    store, scheduler, _, _, item = task_setup(settings, reply)
+    holder["s"] = scheduler
+    run_all(store, scheduler)
+    assert scheduler.assignments.get(item.id).status == "waiting_on_user"
+    scheduler.assignments.reply(item.id, "go on")  # resumes: active again, old evidence is history
+    run_all(store, scheduler)
+    after = scheduler.assignments.get(item.id)
+    assert after.status == "waiting_on_user" and after.status_note.startswith("says it is done; no evidence")
