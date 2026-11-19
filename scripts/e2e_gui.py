@@ -455,6 +455,63 @@ def needs_you_sidebar(page, out: Path, expect_items: bool) -> None:
 
 # --- 0.11.13: bot search, resizable sidebar, files of any type in the chat ---
 
+def characters(page, out: Path, base: str, token: str, bot_id: str, name: str, state) -> None:
+    """0.12.2: pick a built-in character, see it in the sidebar, header and dialog, and watch its face follow the status."""
+    page.click("#edit-bot")
+    page.click('#f-kind [data-kind="character"]')
+    check(page.locator("#f-char-shapes button").count() == 8 and page.locator("#f-char-colors button").count() == 10, "the Character tab offers 8 shapes and 10 colors")
+    page.locator("#f-char-shapes button[data-shape=star]").click()
+    page.locator("#f-char-colors button[data-color=violet]").click()
+    check(page.locator("#f-icon-preview svg.char").get_attribute("data-shape") == "star" and page.locator("#f-icon-preview svg.char").get_attribute("data-color") == "violet",
+          "picking a shape and a color updates the preview")
+    check(page.locator('#f-char-shapes button[data-shape=star]').get_attribute("aria-pressed") == "true", "the chosen shape is marked")
+    shot(page, out, "chars-picker")
+    page.click("#dialog-save")
+    page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)
+    check(state()["avatar"] == "character" and state()["avatar_seed"] == "char:star:violet", "the character is saved")
+    page.wait_for_selector("#head-icon svg.char", timeout=10000)
+    row = page.locator(f'#bot-list .bot-row[data-bot="{bot_id}"]')
+    check(row.locator("svg.char").count() == 1 and page.locator("#head-icon svg.char").count() == 1, "the character shows in the sidebar row and the header")
+    check(not row.locator(".dot").is_visible(), "a character has no separate status dot (its face is the status)")
+    # the face follows the status the server reports (the poll response is rewritten here)
+    forced = {"status": "idle"}
+    def patch(route):
+        resp = route.fetch()
+        bots = resp.json()
+        for b in bots:
+            if b["id"] == bot_id:
+                b["status"] = forced["status"]
+        route.fulfill(response=resp, json=bots)
+    page.route("**/v1/bots", patch)
+    def face():
+        page.evaluate("loadBots()")
+        page.wait_for_timeout(250)
+        return row.locator("svg.char").get_attribute("data-expression"), page.locator("#head-icon svg.char").get_attribute("data-expression")
+    for status, want in (("working", "working"), ("queued", "working"), ("waiting", "waiting"), ("blocked", "waiting"), ("error", "error"), ("offline", "sleeping"), ("idle", "idle")):
+        forced["status"] = status
+        got = face()
+        check(got == (want, want), f"status {status} shows the {want} face in the sidebar and header ({got})")
+        if status == "working":
+            shot(page, out, "chars-live-working")
+    forced["status"] = "working"; face()
+    forced["status"] = "idle"
+    check(face() == ("done", "done"), "a bot that finished working shows the done face for a moment")
+    shot(page, out, "chars-live-done")
+    # reduced motion: the faces still differ, nothing animates
+    page.emulate_media(reduced_motion="reduce")
+    forced["status"] = "working"; face()
+    check(row.locator("svg.char .look").evaluate("(n) => getComputedStyle(n).animationName") == "none", "with reduced motion the working face does not animate")
+    page.emulate_media(reduced_motion="no-preference")
+    check(row.locator("svg.char .look").evaluate("(n) => getComputedStyle(n).animationName") == "char-look", "otherwise the eyes glance side to side")
+    page.unroute("**/v1/bots", patch)
+    page.evaluate("loadBots()")
+    # an emoji or image avatar keeps the status dot
+    call(base, token, "DELETE", f"/v1/bots/{bot_id}/icon")
+    page.evaluate("loadBots()")
+    page.wait_for_timeout(250)
+    check(row.locator(".dot").is_visible() and row.locator("svg.char").count() == 0, "an emoji avatar keeps the status dot")
+
+
 def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     """0.12.0: sidebar sections (create, rename, collapse, drag, reorder, delete) and bot avatars."""
     print("Sidebar sections and avatars")
@@ -470,8 +527,8 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     check(page.locator("#bot-list .sec-head").count() == 0, "with no sections the list is flat, as before")
     before_bots = page.locator("#bot-list .bot-item").count()
     # every bot has an avatar image (default generated), the emoji stays as data
-    page.wait_for_function("() => document.querySelectorAll('#bot-list .avatar img').length >= " + str(before_bots), timeout=10000)
-    check(True, "every bot shows an avatar image by default (%d bots)" % before_bots)
+    page.wait_for_function("() => document.querySelectorAll('#bot-list .avatar img, #bot-list .avatar svg.char').length >= " + str(before_bots), timeout=10000)
+    check(True, "every bot shows a character or an avatar image by default (%d bots)" % before_bots)
     # create two sections from the UI
     for name in ("Work", "Play"):
         page.click("#new-section")
@@ -597,7 +654,7 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     bot_id = ids[names[0]]
     state = lambda: next(b for b in call(base, token, "GET", "/v1/bots") if b["id"] == bot_id)  # noqa: E731
     page.click("#edit-bot")
-    page.wait_for_selector("#f-presets button", timeout=10000)
+    page.wait_for_selector("#f-presets button", state="attached", timeout=10000)
     check(page.locator("#f-presets button").count() == 12, "the dialog offers 12 default avatars")
     page.set_input_files("#f-image", {"name": "me.png", "mimeType": "image/png", "buffer": av.render_png("preset-5")})
     page.wait_for_selector("#f-icon-preview img")
@@ -617,6 +674,7 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=15000)
     check(state()["avatar"] == "upload", "the shrunk photo became the avatar")
     page.click("#edit-bot")
+    page.click('#f-kind [data-kind="pattern"]')
     page.click("#f-avatar-shuffle")
     page.wait_for_function("() => document.querySelector('#f-icon-preview img')")
     page.locator("#f-presets button").nth(3).click()
@@ -628,14 +686,16 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     after = state()
     check(after["avatar"] == "generated" and after["icon_image"] is None and after["avatar_seed"] not in (None, "preset-3"), f"generate replaces the upload ({after['avatar_seed']})")
     page.click("#edit-bot")
-    page.click("#f-image-remove")
-    check(page.locator("#f-icon-preview img").count() == 0, "Use emoji only shows the emoji in the preview")
+    page.click('#f-kind [data-kind="emoji"]')
+    check(page.locator("#f-icon-preview img").count() == 0 and page.locator("#f-icon-preview svg").count() == 0, "the Emoji tab shows the emoji in the preview")
     page.click("#dialog-save")
     page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)
     check(state()["avatar"] == "emoji", "the emoji becomes the avatar again")
     page.wait_for_timeout(300)
     check(page.locator("#head-icon img").count() == 0 and page.locator("#head-icon").inner_text().strip() != "", "the emoji fallback shows in the header")
+    characters(page, out, base, token, bot_id, names[0], state)
     # a failing image falls back to the emoji
+    call(base, token, "POST", f"/v1/bots/{ids[names[1]]}/icon/generate", {"seed": "preset-1"})
     page.route(f"**/v1/bots/{ids[names[1]]}/icon*", lambda route: route.fulfill(status=500, body="x"))
     page.reload()
     page.wait_for_selector("#bot-list .bot-item", timeout=15000)

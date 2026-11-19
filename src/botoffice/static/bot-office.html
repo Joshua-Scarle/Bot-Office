@@ -132,10 +132,25 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .sidebar-foot { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
 .avatar { width: 36px; height: 36px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); display: grid; place-items: center; font-size: 20px; overflow: hidden; flex: none; }
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
+/* 0.12.2 character avatars: inline SVG, the face follows the bot's status */
+.avatar.is-char { background: none; border: 0; border-radius: 0; overflow: visible; }
+.avatar.is-char svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.char .eye { fill: #12151b; stroke: #12151b; }
+.char .mark { fill: none; stroke: #12151b; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.char.sleeping .body { opacity: .55; }
+.char .face { transform-box: view-box; transform-origin: 50% 50%; }
+@media (prefers-reduced-motion: no-preference) {
+  .char.working .look { animation: char-look 1.6s ease-in-out infinite; }
+  .char.waiting .face { animation: char-bob 2.2s ease-in-out infinite; }
+}
+@keyframes char-look { 0%, 100% { transform: translateX(-2.2px); } 50% { transform: translateX(2.2px); } }
+@keyframes char-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.6px); } }
 .avatar.lg { width: 44px; height: 44px; font-size: 24px; border-radius: 13px; }
 
 .chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 /* the header controls wrap onto further rows rather than pushing any off-screen */
+.chat-head .av-wrap { width: 44px; height: 44px; flex: none; }
+.chat-head .av-wrap .dot { width: 12px; height: 12px; border-color: var(--bg, #0f1115); }
 .chat-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
 .chat-head h2 { margin: 0; font-size: 16px; }
 .chat-head .grow { flex: 1 1 180px; min-width: 0; }
@@ -265,6 +280,17 @@ dialog label > input, dialog label > select, dialog label > textarea { color: va
 dialog textarea { min-height: 90px; resize: vertical; }
 .icon-row { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: end; }
 .icon-row .avatar { width: 64px; height: 64px; font-size: 34px; border-radius: 14px; }
+.kind-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 2px; }
+.kind-row button { padding: 4px 12px; border-radius: 999px; }
+.kind-row button[aria-checked="true"] { border-color: var(--accent); color: var(--text); background: var(--raised); }
+.kind-panel[hidden] { display: none; }
+.char-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; margin: 2px 0 6px; }
+.char-grid button { padding: 2px; border-radius: 12px; aspect-ratio: 1; border: 2px solid transparent; background: var(--panel); }
+.char-grid button[aria-pressed="true"] { border-color: var(--accent); }
+.char-grid svg { width: 100%; height: 100%; display: block; }
+.char-colors { display: grid; grid-template-columns: repeat(10, 1fr); gap: 6px; margin: 2px 0 6px; }
+.char-colors button { padding: 0; border-radius: 50%; aspect-ratio: 1; border: 2px solid var(--line); }
+.char-colors button[aria-pressed="true"] { border-color: var(--text); box-shadow: 0 0 0 2px var(--accent); }
 .preset-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin: 2px 0 6px; }
 .preset-grid button { padding: 0; border-radius: 12px; aspect-ratio: 1; overflow: hidden; border: 2px solid transparent; background: var(--panel); }
 .preset-grid button[aria-pressed="true"] { border-color: var(--accent); }
@@ -402,7 +428,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
 
   <main class="chat">
     <header class="chat-head" id="chat-head" hidden>
-      <span id="head-icon" class="avatar lg"></span>
+      <span class="av-wrap"><span id="head-icon" class="avatar lg"></span><span id="head-dot" class="dot"></span></span>
       <div class="grow">
         <h2 id="head-name"></h2>
         <div id="head-desc" class="desc"></div>
@@ -564,14 +590,31 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <div class="icon-row">
       <span id="f-icon-preview" class="avatar"></span>
       <div class="icon-tools">
-        <label>Emoji<input id="f-icon" maxlength="16" placeholder="🤖"></label>
-        <span class="file-btn"><button type="button" tabindex="-1">Upload image…</button><input id="f-image" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Upload icon image"></span>
-        <button type="button" id="f-avatar-shuffle">Generate new</button>
-        <button type="button" id="f-image-remove" class="ghost">Use emoji only</button>
+        <div id="f-kind" class="kind-row" role="radiogroup" aria-label="Avatar type">
+          <button type="button" role="radio" data-kind="emoji" aria-checked="false">Emoji</button>
+          <button type="button" role="radio" data-kind="character" aria-checked="false">Character</button>
+          <button type="button" role="radio" data-kind="upload" aria-checked="false">Image</button>
+          <button type="button" role="radio" data-kind="pattern" aria-checked="false">Pattern</button>
+        </div>
       </div>
     </div>
-    <div id="f-presets" class="preset-grid" role="group" aria-label="Default avatars"></div>
-    <p class="hint">Upload a PNG, JPEG or WebP (up to 2 MB; it is cropped square and resized to 256 px), pick a default avatar, or generate one. The emoji shows if no image can load.</p>
+    <div class="kind-panel" data-panel="emoji" hidden>
+      <label>Emoji<input id="f-icon" maxlength="16" placeholder="🤖"></label>
+      <p class="hint">The emoji shows with a small status dot. It is also used where only text fits (notifications, the page title).</p>
+    </div>
+    <div class="kind-panel" data-panel="character" hidden>
+      <div id="f-char-shapes" class="char-grid" role="group" aria-label="Character shape"></div>
+      <div id="f-char-colors" class="char-colors" role="group" aria-label="Character color"></div>
+      <p class="hint">A little character whose face shows what the bot is doing: idle, working, waiting for you, done, error or asleep.</p>
+    </div>
+    <div class="kind-panel" data-panel="upload" hidden>
+      <span class="file-btn"><button type="button" tabindex="-1">Upload image…</button><input id="f-image" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Upload icon image"></span>
+      <p class="hint">PNG, JPEG or WebP, up to 2 MB; it is cropped square and resized to 256 px. It shows with a small status dot.</p>
+    </div>
+    <div class="kind-panel" data-panel="pattern" hidden>
+      <div id="f-presets" class="preset-grid" role="group" aria-label="Default avatars"></div>
+      <button type="button" id="f-avatar-shuffle">Generate new</button>
+    </div>
     <label>Description<input id="f-desc" maxlength="500" placeholder="What this bot is for"></label>
     <div class="picker"><label for="f-model">Model</label>
       <input id="f-model" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="f-model-list" autocomplete="off" spellcheck="false" maxlength="100" placeholder="Type to search models">
@@ -647,7 +690,7 @@ const MAX_ICON_BYTES = 2 * 1024 * 1024;
 
 const state = {
   bots: [], choices: null, selected: sessionStorage.getItem(BOT_KEY) || sessionStorage.getItem("crewdeck-bot"),
-  msgSig: "", iconUrls: new Map(), editing: null, pendingImage: null, pendingSeed: null, removeImage: false,
+  msgSig: "", iconUrls: new Map(), editing: null, pendingImage: null, pendingSeed: null, pendingChar: null, kind: "emoji", removeImage: false,
   timer: null, tick: 0, live: new Map(), echo: null,
   // newest message ids rendered for the selected bot (all / counted as unread)
   shown: { bot: null, max: 0, counted: 0 }, readSent: new Map(),
@@ -784,7 +827,7 @@ async function fetchChoices() {
 
 /* ---- icons ---- */
 // 0.12.0: an uploaded image or a generated avatar (avatar_seed) is served by /icon; otherwise the emoji shows
-function hasImage(bot) { return Boolean(bot.icon_image || bot.avatar_seed); }
+function hasImage(bot) { return Boolean(bot.icon_image || (bot.avatar_seed && !String(bot.avatar_seed).startsWith("char:"))); }
 async function iconUrl(bot) {
   if (!hasImage(bot)) return null;
   const key = bot.id + "|" + bot.updated_at;
@@ -802,8 +845,131 @@ async function iconUrl(bot) {
   return pending;
 }
 
+
+/* ---- character avatars (0.12.2): our own shapes, drawn inline; the face follows the bot's status ---- */
+const CHAR_SHAPES = ["square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond"];
+const CHAR_COLORS = {blue: "#3b82f6", violet: "#8b5cf6", pink: "#ec4899", red: "#ef4444", orange: "#f97316", yellow: "#facc15",
+  green: "#22c55e", teal: "#14b8a6", cyan: "#22d3ee", slate: "#94a3b8"};
+const EXPRESSIONS = ["idle", "working", "waiting", "done", "error", "sleeping"];
+const EXPRESSION_LABEL = {idle: "idle", working: "working", waiting: "waiting for you", done: "done", error: "error", sleeping: "asleep (engine offline)"};
+const DONE_MS = 20000;
+state.doneUntil = new Map(); state.doneTimer = null;
+// face centre y and half the eye gap, per shape (so the eyes sit inside every body)
+const CHAR_FACE = {square: [24, 7], circle: [24, 7], blob: [24, 7], hexagon: [24, 7], cloud: [26, 6.5], pill: [24, 8], star: [26, 5.5], diamond: [24, 6]};
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs, cls) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const key in attrs) node.setAttribute(key, attrs[key]);
+  if (cls) node.setAttribute("class", cls);
+  return node;
+}
+function polar(n, r0, amp, lobes, rot) {
+  let d = "";
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * Math.PI * 2 + rot, r = r0 + amp * Math.cos(lobes * t);
+    d += (i ? "L" : "M") + (24 + r * Math.cos(t)).toFixed(2) + " " + (24 + r * Math.sin(t)).toFixed(2);
+  }
+  return d + "Z";
+}
+function polygon(n, r, rot) {
+  const pts = [];
+  for (let i = 0; i < n; i++) { const t = (i / n) * Math.PI * 2 + rot; pts.push((24 + r * Math.cos(t)).toFixed(2) + "," + (24 + r * Math.sin(t)).toFixed(2)); }
+  return pts.join(" ");
+}
+function starPoints() {
+  const pts = [];
+  for (let i = 0; i < 10; i++) { const t = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 9.5 : 18.5; pts.push((24 + r * Math.cos(t)).toFixed(2) + "," + (25.5 + r * Math.sin(t)).toFixed(2)); }
+  return pts.join(" ");
+}
+const BLOB_PATH = polar(120, 16.4, 3.1, 8, 0);
+function charBody(shape, fill) {
+  const g = svgEl("g", {fill}, "body");
+  const round = {stroke: fill, "stroke-linejoin": "round", "stroke-width": 6};
+  if (shape === "circle") g.append(svgEl("circle", {cx: 24, cy: 24, r: 19}));
+  else if (shape === "blob") g.append(svgEl("path", {d: BLOB_PATH}));
+  else if (shape === "hexagon") g.append(svgEl("polygon", {points: polygon(6, 16, Math.PI / 6), ...round}));
+  else if (shape === "cloud") {
+    g.append(svgEl("circle", {cx: 15, cy: 27, r: 9}), svgEl("circle", {cx: 24, cy: 20, r: 11}), svgEl("circle", {cx: 34, cy: 27, r: 9}),
+      svgEl("rect", {x: 8, y: 27, width: 32, height: 11, rx: 5.5}));
+  }
+  else if (shape === "pill") g.append(svgEl("rect", {x: 3.5, y: 11, width: 41, height: 26, rx: 13}));
+  else if (shape === "star") g.append(svgEl("polygon", {points: starPoints(), ...round, "stroke-width": 5}));
+  else if (shape === "diamond") g.append(svgEl("rect", {x: 10, y: 10, width: 28, height: 28, rx: 7, transform: "rotate(45 24 24)"}));
+  else g.append(svgEl("rect", {x: 5.5, y: 5.5, width: 37, height: 37, rx: 12}));   // square
+  return g;
+}
+function charFace(shape, expr) {
+  const [cy, gap] = CHAR_FACE[shape] || CHAR_FACE.square;
+  const face = svgEl("g", {}, "face"), xs = [24 - gap, 24 + gap];
+  const eyes = svgEl("g", {}, expr === "working" ? "look" : "");
+  const mark = (d) => svgEl("path", {d}, "mark");
+  for (const x of xs) {
+    if (expr === "working") eyes.append(svgEl("rect", {x: x - 2.6, y: cy - 3.4, width: 5.2, height: 3.6, rx: 1.8}, "eye"));
+    else if (expr === "waiting") eyes.append(svgEl("circle", {cx: x, cy: cy - 2.5, r: 3.1}, "eye"));
+    else if (expr === "done") eyes.append(mark("M" + (x - 3.2) + " " + (cy - 1.6) + "Q" + x + " " + (cy - 7) + " " + (x + 3.2) + " " + (cy - 1.6)));
+    else if (expr === "error") eyes.append(mark("M" + (x - 2.8) + " " + (cy - 5.8) + "L" + (x + 2.8) + " " + (cy - 0.2) + "M" + (x + 2.8) + " " + (cy - 5.8) + "L" + (x - 2.8) + " " + (cy - 0.2)));
+    else if (expr === "sleeping") eyes.append(mark("M" + (x - 3.2) + " " + (cy - 2.6) + "Q" + x + " " + (cy + 1.2) + " " + (x + 3.2) + " " + (cy - 2.6)));
+    else eyes.append(svgEl("rect", {x: x - 1.9, y: cy - 6, width: 3.8, height: 8.4, rx: 1.9}, "eye"));
+  }
+  face.append(eyes);
+  if (expr === "waiting") face.append(svgEl("ellipse", {cx: 24, cy: cy + 6.2, rx: 1.9, ry: 2.5}, "mark"));
+  else if (expr === "done") face.append(mark("M20.4 " + (cy + 4) + "Q24 " + (cy + 8.6) + " 27.6 " + (cy + 4)));
+  else if (expr === "error") face.append(mark("M20.2 " + (cy + 7.6) + "q1.95 -2.4 3.9 0t3.9 0"));
+  return face;
+}
+function charSvg(shape, color, expr, label) {
+  const svg = svgEl("svg", {viewBox: "0 0 48 48", role: "img", "aria-label": label || EXPRESSION_LABEL[expr] || expr}, "char " + expr);
+  svg.dataset.shape = shape; svg.dataset.color = color; svg.dataset.expression = expr;
+  svg.append(charBody(shape, CHAR_COLORS[color] || CHAR_COLORS.blue), charFace(shape, expr));
+  return svg;
+}
+// "char:<shape>:<color>" (the bot's avatar_seed) or "<shape>:<color>" -> {shape, color}; null for anything else
+function parseChar(seed) {
+  const m = /^(?:char:)?([a-z]+):([a-z]+)$/.exec(String(seed || ""));
+  return m && CHAR_SHAPES.includes(m[1]) && m[2] in CHAR_COLORS ? {shape: m[1], color: m[2]} : null;
+}
+function charOf(bot) { return bot && !bot.icon_image && String(bot.avatar_seed || "").startsWith("char:") ? parseChar(bot.avatar_seed) : null; }
+// status the server already reports -> expression; "done" is the 20 s after a working/queued bot went idle
+function botExpression(bot) {
+  const status = bot && bot.status;
+  if (status === "offline") return "sleeping";
+  if (status === "error") return "error";
+  if (status === "waiting" || status === "blocked") return "waiting";
+  if (status === "working" || status === "queued") return "working";
+  if (bot && (state.doneUntil.get(bot.id) || 0) > Date.now()) return "done";
+  return "idle";
+}
+function noteStatuses(prev, next) {
+  const was = new Map(prev.map((b) => [b.id, b.status]));
+  let done = false;
+  for (const bot of next) {
+    const before = was.get(bot.id);
+    if ((before === "working" || before === "queued") && bot.status === "idle") { state.doneUntil.set(bot.id, Date.now() + DONE_MS); done = true; }
+    else if (bot.status !== "idle") state.doneUntil.delete(bot.id);
+  }
+  if (done) {
+    clearTimeout(state.doneTimer);
+    state.doneTimer = setTimeout(() => { renderBots(); renderHeader(); }, DONE_MS + 250);
+  }
+}
+// the badge for emoji, uploaded and pattern avatars; a character shows its status in its face instead
+function setDot(dot, bot) {
+  const status = bot.status || "idle";
+  dot.hidden = Boolean(charOf(bot));
+  dot.className = "dot " + (status === "working" ? "running" : status);
+  dot.title = status;
+  dot.setAttribute("aria-label", status);
+}
+
 function fillAvatar(node, bot, override) {
   node.replaceChildren();
+  const ch = override ? parseChar(override.char) : charOf(bot);
+  node.classList.toggle("is-char", Boolean(ch));
+  if (ch && !(override && override.url)) {
+    const expr = botExpression(bot);
+    node.append(charSvg(ch.shape, ch.color, expr, (bot.name || "Bot") + ": " + EXPRESSION_LABEL[expr]));
+    return;
+  }
   const fallback = (override && override.icon) || bot.icon || (bot.name || "?").slice(0, 1).toUpperCase();
   const src = override ? override.url : null;
   if (src) { const img = el("img"); img.alt = ""; img.src = src; node.append(img); return; }
@@ -1122,14 +1288,13 @@ function botRow(lay, sec, bot, filtering) {
   item.type = "button";
   const counts = taskCounts[bot.id] || {in_progress: 0, waiting: 0, blocked: 0, completed_today: 0};
   const countsText = `▶ ${counts.in_progress} · ⏸ ${counts.waiting} waiting · ${counts.blocked} blocked · ✓ ${counts.completed_today} today`;
-  item.title = bot.name + "\n" + countsText;
+  item.title = bot.name + (charOf(bot) ? " (" + EXPRESSION_LABEL[botExpression(bot)] + ")" : "") + "\n" + countsText;
   if (bot.id === state.selected) item.setAttribute("aria-current", "true");
   const wrap = el("span", "av-wrap");
   const avatar = el("span", "avatar");
   fillAvatar(avatar, bot);
-  const dot = el("span", "dot " + (bot.status === "working" ? "running" : bot.status));
-  dot.title = bot.status || "idle";
-  dot.setAttribute("aria-label", dot.title);
+  const dot = el("span", "dot");
+  setDot(dot, bot);
   wrap.append(avatar, dot);
   const meta = el("span", "meta");
   meta.append(el("div", "name", bot.name), el("div", "sub", modelLabel(bot.engine, bot.model) + " · " + (bot.capability_tier || "")), el("div", "sub counts", countsText));
@@ -1317,6 +1482,7 @@ try {
 
 async function loadBots() {
   const [bots] = await Promise.all([api("/v1/bots"), loadSections()]);
+  noteStatuses(state.bots, bots);
   state.bots = bots;
   if (!currentBot()) state.selected = state.bots.length ? state.bots[0].id : null;
   renderBots();
@@ -1423,6 +1589,7 @@ function renderHeader() {
     return;
   }
   fillAvatar($("head-icon"), bot);
+  setDot($("head-dot"), bot);
   $("head-name").textContent = bot.name;
   $("head-desc").textContent = bot.description || "";
   $("head-model").textContent = modelLabel(bot.engine, bot.model);
@@ -3503,18 +3670,69 @@ function updateIconPreview() {
   const icon = $("f-icon").value.trim() || bot.icon || "🤖";
   preview.dataset.want = "";
   if (state.pendingImage) { fillAvatar(preview, bot, { url: state.pendingImage.url, icon }); }
+  else if (state.pendingChar) { fillAvatar(preview, bot, { url: null, icon, char: state.pendingChar }); }
   else if (state.pendingSeed) {
     const seed = state.pendingSeed;
     preview.dataset.want = seed;
     fillAvatar(preview, bot, { url: null, icon });
     seedUrl(seed).then((url) => { if (url && preview.dataset.want === seed) fillAvatar(preview, bot, { url, icon }); });
   }
-  else if (state.removeImage || bot.avatar === "emoji" || !hasImage(bot)) { fillAvatar(preview, { ...bot, icon_image: null, avatar_seed: null }, { url: null, icon }); }
+  else if (state.removeImage || !(hasImage(bot) || charOf(bot))) { fillAvatar(preview, { ...bot, icon_image: null, avatar_seed: null }, { url: null, icon }); }
   else fillAvatar(preview, bot);
-  const current = state.pendingSeed || (!state.pendingImage && !state.removeImage && state.editing && !state.editing.icon_image ? state.editing.avatar_seed : null);
+  const keep = !state.pendingImage && !state.removeImage && state.editing && !state.editing.icon_image;
+  const current = state.pendingSeed || (keep && !charOf(state.editing) ? state.editing.avatar_seed : null);
   document.querySelectorAll("#f-presets button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.seed === current)));
-  $("f-image-remove").hidden = !(state.pendingImage || state.pendingSeed || (hasImage(bot) && !state.removeImage));
+  const chosen = state.pendingChar ? parseChar(state.pendingChar) : (keep && !state.pendingSeed ? charOf(state.editing) : null);
+  document.querySelectorAll("#f-char-shapes button").forEach((b) => b.setAttribute("aria-pressed", String(Boolean(chosen) && b.dataset.shape === chosen.shape)));
+  document.querySelectorAll("#f-char-colors button").forEach((b) => b.setAttribute("aria-pressed", String(Boolean(chosen) && b.dataset.color === chosen.color)));
+  const color = chosen ? chosen.color : "blue";
+  document.querySelectorAll("#f-char-shapes button").forEach((b) => b.replaceChildren(charSvg(b.dataset.shape, color, "idle", b.dataset.shape)));
+  document.querySelectorAll("#f-kind button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.kind === state.kind)));
+  document.querySelectorAll(".kind-panel").forEach((p) => { p.hidden = p.dataset.panel !== state.kind; });
 }
+// which avatar type the saved bot has, as a picker choice
+function kindOf(bot) { return !bot ? "character" : bot.avatar === "upload" ? "upload" : bot.avatar === "character" ? "character" : bot.avatar === "generated" ? "pattern" : "emoji"; }
+function chooseKind(kind) {
+  state.kind = kind;
+  const keep = state.editing && !state.removeImage && !state.pendingImage && !state.pendingSeed && !state.pendingChar;
+  if (kind === "emoji") {
+    clearPendingImage(); $("f-image").value = ""; state.pendingSeed = null; state.pendingChar = null;
+    state.removeImage = Boolean(!state.editing || state.editing.avatar !== "emoji");
+  } else if (kind === "character" && !state.pendingChar && !(keep && charOf(state.editing))) {
+    pickChar(parseChar(state.editing && state.editing.avatar_seed) ? state.editing.avatar_seed : "square:blue");
+    return;
+  } else if (kind === "character" && !state.pendingChar) {
+    clearPendingImage(); state.pendingSeed = null; state.removeImage = false;
+  } else if (kind === "pattern" && !state.pendingSeed && !(keep && state.editing.avatar === "generated")) {
+    pickSeed("preset-" + Math.floor(Math.random() * 12));
+    return;
+  }
+  updateIconPreview();
+}
+function pickChar(key) {
+  clearPendingImage(); $("f-image").value = "";
+  state.pendingSeed = null; state.pendingChar = key; state.removeImage = false; state.kind = "character";
+  updateIconPreview();
+}
+function currentCharChoice() {
+  return parseChar(state.pendingChar) || (state.editing && state.pendingSeed === null ? charOf(state.editing) : null) || { shape: "square", color: "blue" };
+}
+function buildCharPicker() {
+  const shapes = $("f-char-shapes"), colors = $("f-char-colors");
+  if (shapes.childElementCount) return;
+  shapes.replaceChildren(...CHAR_SHAPES.map((shape) => {
+    const b = el("button"); b.type = "button"; b.dataset.shape = shape; b.title = shape; b.setAttribute("aria-label", "Shape: " + shape); b.setAttribute("aria-pressed", "false");
+    b.onclick = () => pickChar(shape + ":" + currentCharChoice().color);
+    return b;
+  }));
+  colors.replaceChildren(...Object.keys(CHAR_COLORS).map((color) => {
+    const b = el("button"); b.type = "button"; b.dataset.color = color; b.title = color; b.setAttribute("aria-label", "Color: " + color); b.setAttribute("aria-pressed", "false");
+    b.style.background = CHAR_COLORS[color];
+    b.onclick = () => pickChar(currentCharChoice().shape + ":" + color);
+    return b;
+  }));
+}
+document.querySelectorAll("#f-kind button").forEach((b) => { b.onclick = () => chooseKind(b.dataset.kind); });
 
 function clearPendingImage() {
   if (state.pendingImage) URL.revokeObjectURL(state.pendingImage.url);
@@ -3522,7 +3740,7 @@ function clearPendingImage() {
 }
 function pickSeed(seed) {
   clearPendingImage(); $("f-image").value = "";
-  state.pendingSeed = seed; state.removeImage = false;
+  state.pendingSeed = seed; state.pendingChar = null; state.removeImage = false; state.kind = "pattern";
   updateIconPreview();
 }
 async function buildPresets() {
@@ -3545,8 +3763,15 @@ async function openDialog(bot) {
   state.editing = bot;
   clearPendingImage();
   state.removeImage = false;
-  state.pendingSeed = bot ? null : "preset-" + Math.floor(Math.random() * 12);   // a new bot starts with a default avatar
+  state.pendingSeed = null;
+  state.pendingChar = null;
+  state.kind = kindOf(bot);
+  if (!bot) {   // a new bot starts with a random character (its face shows its status)
+    const shape = CHAR_SHAPES[Math.floor(Math.random() * CHAR_SHAPES.length)], colors = Object.keys(CHAR_COLORS);
+    state.pendingChar = shape + ":" + colors[Math.floor(Math.random() * colors.length)];
+  }
   buildPresets();
+  buildCharPicker();
   $("dialog-title").textContent = bot ? "Bot settings" : "New bot";
   $("dialog-save").textContent = bot ? "Save" : "Create bot";
   $("f-name").value = bot ? bot.name : "";
@@ -3658,11 +3883,10 @@ $("f-image").onchange = async () => {
   }
   clearPendingImage();
   state.pendingImage = { file: upload, url: URL.createObjectURL(upload) };
-  state.pendingSeed = null;
+  state.pendingSeed = null; state.pendingChar = null; state.kind = "upload";
   state.removeImage = false;
   updateIconPreview();
 };
-$("f-image-remove").onclick = () => { clearPendingImage(); state.pendingSeed = null; $("f-image").value = ""; state.removeImage = true; updateIconPreview(); };
 
 $("bot-form").onsubmit = async (event) => {
   event.preventDefault();
@@ -3710,6 +3934,9 @@ $("bot-form").onsubmit = async (event) => {
       : await api("/v1/bots", { method: "POST", body: JSON.stringify(body) });
     if (state.pendingImage) {
       saved = await api("/v1/bots/" + saved.id + "/icon", { method: "PUT", body: state.pendingImage.file });
+    } else if (state.pendingChar && !(saved.avatar === "character" && saved.avatar_seed === "char:" + state.pendingChar)) {
+      const ch = parseChar(state.pendingChar);
+      saved = await api("/v1/bots/" + saved.id + "/avatar/character", { method: "PUT", body: JSON.stringify(ch) });
     } else if (state.pendingSeed && !(saved.avatar === "generated" && saved.avatar_seed === state.pendingSeed)) {
       saved = await api("/v1/bots/" + saved.id + "/icon/generate", { method: "POST", body: JSON.stringify({ seed: state.pendingSeed }) });
     } else if (state.removeImage && saved.avatar !== "emoji") {

@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.12.1. What changed is recorded below: [0.12.1](#what-changed-in-0121), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.12.2. What changed is recorded below: [0.12.2](#what-changed-in-0122), [0.12.1](#what-changed-in-0121), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,16 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.12.2
+
+Character avatars. A bot can now have one of four avatar types, chosen in its settings dialog (the picker has Emoji, Character, Image and Pattern tabs): the emoji as before, a built-in **character**, an uploaded **image**, or one of the 0.12.0 generated **patterns** (kept as a minor option).
+
+- **Characters** are simple colored shapes with two eye marks: 8 shapes (rounded square, circle, flower blob, hexagon, cloud, pill, star, diamond) times 10 colors, picked by shape and color. They are our own drawings, rendered inline as SVG in the browser (no image request, no third-party artwork), stored in the bot's `avatar_seed` as `char:<shape>:<color>` (no schema change).
+- **The face follows what the bot is doing**, from the status the page already has: idle (upright eyes), working or queued (narrowed eyes that glance side to side), waiting for you (wide eyes and a small open mouth, a gentle bob; also used when blocked), done (happy face for 20 seconds after a bot finishes a run), error (x eyes) and sleeping (closed eyes, dimmed; the engine is offline). Motion only plays when your system does not ask for reduced motion, and every face looks different at rest. Characters show in the sidebar rows, the chat header and the settings dialog. Emoji, image and pattern avatars keep a small status dot instead.
+- **New bots** start with a random character (change it any time). Existing bots keep what they have; nothing is switched automatically.
+- **API.** `PUT /v1/bots/{id}/avatar/character {shape, color}` (names are validated), `GET /v1/avatar-characters` (the lists). `GET /v1/bots/{id}/icon` answers 404 for a character, and the generate and preview routes refuse seeds starting with `char:`. A rollback to 0.12.1 shows such a bot's emoji.
+- Tests: `tests/test_characters.py` (API, validation, status mapping, drawing of all 480 shape/color/face combinations) and new checks in `scripts/e2e_gui.py`.
 
 ## What changed in 0.12.1
 

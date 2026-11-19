@@ -118,6 +118,12 @@ from .voice.text import chunks as speech_chunks
 from .voice.wav import WavError, parse_pcm16_mono
 
 
+class AvatarCharacter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    shape: str = Field(max_length=16)
+    color: str = Field(max_length=16)
+
+
 class AvatarGenerate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     seed: str | None = Field(default=None, max_length=64)
@@ -1174,7 +1180,7 @@ def create_app(
                 data = None
             if data is not None:
                 return _png_response(request, data, bot.icon_image, v is not None)
-        if bot.avatar_seed and avatars.valid_seed(bot.avatar_seed):
+        if bot.avatar_seed and avatars.valid_seed(bot.avatar_seed) and not avatars.is_character(bot.avatar_seed):
             data = await avatars.run(avatars.render_png, bot.avatar_seed)
             return _png_response(request, data, "image/png", v is not None)
         raise HTTPException(status_code=404, detail="no icon image")
@@ -1220,8 +1226,8 @@ def create_app(
         """Give the bot a generated avatar (a given seed, e.g. a preset, or a fresh random one). Replaces an upload."""
         _bot(bot_id)
         seed = (body.seed if body else None) or secrets.token_hex(6)
-        if not avatars.valid_seed(seed):
-            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : -")
+        if not avatars.valid_seed(seed) or avatars.is_character(seed):
+            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : - (and not start with char:)")
         await avatars.run(avatars.render_png, seed)
         safefs.unlink(_icon_path(bot_id))
         updated = store.update_bot(bot_id, icon_image=None, avatar_seed=seed)
@@ -1229,14 +1235,33 @@ def create_app(
             raise HTTPException(status_code=404, detail="bot not found")
         return updated
 
+    @app.put("/v1/bots/{bot_id}/avatar/character", response_model=Bot, dependencies=[Depends(auth)])
+    async def set_bot_character(bot_id: UUID, body: AvatarCharacter) -> Bot:
+        """0.12.2: give the bot a built-in character (shape + color; drawn in the browser, its face follows the
+        bot's status). Replaces an upload or a generated pattern."""
+        _bot(bot_id)
+        seed = avatars.character_seed(body.shape, body.color)
+        if seed is None:
+            raise HTTPException(status_code=400, detail="unknown character shape or color")
+        safefs.unlink(_icon_path(bot_id))
+        updated = store.update_bot(bot_id, icon_image=None, avatar_seed=seed)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="bot not found")
+        return updated
+
+    @app.get("/v1/avatar-characters", dependencies=[Depends(auth)])
+    async def avatar_characters() -> dict:
+        return {"shapes": list(avatars.CHAR_SHAPES), "colors": list(avatars.CHAR_COLORS),
+                "expressions": list(avatars.CHAR_EXPRESSIONS)}
+
     @app.get("/v1/avatar-presets", dependencies=[Depends(auth)])
     async def avatar_presets() -> dict:
         return {"presets": [{"seed": seed} for seed in avatars.PRESET_SEEDS]}
 
     @app.get("/v1/avatar-preview", dependencies=[Depends(auth)])
     async def avatar_preview(request: Request, seed: str) -> Response:
-        if not avatars.valid_seed(seed):
-            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : -")
+        if not avatars.valid_seed(seed) or avatars.is_character(seed):
+            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : - (and not start with char:)")
         data = await avatars.run(avatars.render_png, seed)
         return _png_response(request, data, "image/png", True)
 

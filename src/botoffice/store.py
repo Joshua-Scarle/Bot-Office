@@ -1769,7 +1769,7 @@ class JobStore:
             cli_access=cli_access or "full",
             icon=icon or DEFAULT_ICON,
             description=description,
-            avatar_seed=avatars.default_seed(bot_id, used),
+            avatar_seed=avatars.default_character(bot_id, used),
             reason=reason,
             created_at=stamp,
             updated_at=stamp,
