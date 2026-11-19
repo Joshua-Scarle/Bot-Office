@@ -129,7 +129,7 @@ def test_bot_hands_off_an_assignment(settings, monkeypatch, subtask_start):
     assert store.bot_unread(writer.id).unread_count == 1
     incoming = [m for m in store.list_messages(lead.id) if m.role == "user"]
     if subtask_start == "wait":
-        # review fix 1: the child lands open on Lead's list and waits for Lead to pick it up
+        # the child lands open on Lead's list and waits for Lead to pick it up
         assert incoming == []
         return
     [incoming] = incoming

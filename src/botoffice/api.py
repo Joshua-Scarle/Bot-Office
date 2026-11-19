@@ -167,7 +167,7 @@ class AgentAssignmentCreate(BaseModel):
     budget_turns: int = Field(default=20, ge=1, le=200)
     budget_minutes: int = Field(default=120, ge=1, le=24 * 60)
     start: bool = True
-    # G7: None = BOT_OFFICE_TASK_DEFAULT_PRIORITY (normal)
+    # None = BOT_OFFICE_TASK_DEFAULT_PRIORITY (normal)
     priority: Literal["urgent", "high", "normal", "low"] | None = None
 
 
@@ -181,7 +181,7 @@ class AgentTaskCreate(AgentAssignmentCreate):
 
 
 class AgentTaskEdit(BaseModel):
-    # fix 11: other fields are kept so Assignments.agent_edit refuses them (400 unknown, 403 not
+    # other fields are kept so Assignments.agent_edit refuses them (400 unknown, 403 not
     # allowed) instead of a partial success
     model_config = ConfigDict(extra="allow")
     version: int = Field(ge=1)
@@ -204,7 +204,7 @@ class AgentTaskReorder(BaseModel):
 class AgentStatus(BaseModel):
     state: str = Field(min_length=1, max_length=32)
     note: str = Field(default="", max_length=1000)
-    # G4: how the work was verified (tests, a check, a command's result, a file)
+    # how the work was verified (tests, a check, a command's result, a file)
     evidence: str = Field(default="", max_length=1000)
 
 
@@ -1359,7 +1359,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="note is empty")
         _assignment_call(assignments.add_note, _agent_assignment_id(job, ref), job.bot_id, job.id, body.text.strip()[:2000])
 
-    # --- 0.11.4 task lists (job token only): every list readable, cross-bot add/edit per plan 4.4 ---
+    # --- 0.11.4 task lists (job token only): every list readable, cross-bot add/edit ---
     # AssignmentError raised here is answered by the handler below (409 conflicts carry the
     # current task and the changes since the caller's version)
 
@@ -1913,7 +1913,7 @@ def create_app(
         body = body or AssignmentStart()
         return _assignment_call(assignments.start, assignment_id, body.add_turns, body.add_minutes)
 
-    # --- 0.11.4 task lists (master token): assignments with version, stage and actor (plan 4.7) ---
+    # --- 0.11.4 task lists (master token): assignments with version, stage and actor ---
 
     @app.exception_handler(AssignmentError)
     async def assignment_error(request: Request, exc: AssignmentError) -> JSONResponse:
@@ -1945,8 +1945,8 @@ def create_app(
 
     @app.get("/v1/tasks/settings", dependencies=[Depends(auth)])
     async def task_settings() -> dict:
-        """Read-only task-list settings for the GUI: its label (G8), the answers to the plan's
-        questions as they are set now (environment), the stages and priorities."""
+        """Read-only task-list settings for the GUI: its label, the owner's task-list
+        settings as they are set now (environment), the stages and priorities."""
         return {"label": tasks_label(), "bot_drop_owner_tasks": drop_rule(),
                 "cross_bot_subtask_start": choice(CROSS_BOT_SUBTASK_START),
                 "drop_cancels_turns": choice(DROP_CANCELS_TURNS),
@@ -1996,7 +1996,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="bot not found")
         fields = body.model_dump()
         if fields["start"] is None:
-            # G10: a task from the form starts on its own like a chat task, unless the owner unticks it
+            # a task from the form starts on its own like a chat task, unless the owner unticks it
             fields["start"] = choice(FORM_TASKS_START) == "auto"
         return assignments.task(assignments.create(bot.id, fields, origin="form").id)
 

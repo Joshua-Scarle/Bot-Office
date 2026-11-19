@@ -1,4 +1,4 @@
-"""0.11.10 task lists: the review fixes (p2a) and Joshua's answers, tested adversarially."""
+"""0.11.10 task lists: the review fixes and the owner's answers, tested adversarially."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def outside_untrusted(text):
     return "".join(out) + rest
 
 
-# --- fix 1: cross-bot tasks wait (BOT_OFFICE_CROSS_BOT_SUBTASK_START) ---
+# --- cross-bot tasks wait (BOT_OFFICE_CROSS_BOT_SUBTASK_START) ---
 
 @pytest.mark.parametrize("route", ["/v1/agent/tasks", "/v1/agent/assignments"])
 @pytest.mark.parametrize("setting", [None, "wait", "allow"])
@@ -117,7 +117,7 @@ def test_own_task_still_starts_when_asked(rig):
     assert item["status"] == "active"
 
 
-# --- fix 2 / P2 Q3: bot edits of the user's title and goal are marked and untrusted ---
+# --- bot edits of the user's title and goal are marked and untrusted ---
 
 def test_assignee_edits_owner_title_and_goal_marked_and_untrusted_everywhere(rig):
     client, store, (ada, *_), tokens = rig
@@ -208,7 +208,7 @@ def test_owner_rewrite_clears_the_mark_unchanged_resend_keeps_it(rig):
     assert client.patch(f"/v1/tasks/{item.id}", headers=H, json={"version": 4, "goal": "mine"}).json()["bot_edited"] == []
 
 
-# --- fix 3 / G5: drops ---
+# --- drops ---
 
 @pytest.mark.parametrize("setting", ["with_note", "owner_only"])
 def test_creator_drops_its_task_on_another_list_under_both_settings(rig, monkeypatch, setting):
@@ -227,7 +227,7 @@ def test_creator_drops_its_task_on_another_list_under_both_settings(rig, monkeyp
                        json={"note": "obsolete"}).status_code == expected
 
 
-# --- fix 4 / P2 Q1: a drop cancels the task's queued and running turns, which never re-queue ---
+# --- a drop cancels the task's queued and running turns, which never re-queue ---
 
 def _running_assignment_turn(store, book, bot, title="t"):
     item = book.create(bot.id, {"title": title, "start": True, "budget_turns": 5})
@@ -309,7 +309,7 @@ def test_scheduler_hook_calls_its_cancel_path(rig, monkeypatch):
     assert seen == [str(job.id)] and scheduler._cancel_reasons[str(job.id)] == "its task was dropped"
 
 
-# --- fix 5 / P2 Q4: "changes by others" never loses a change and a retry does not repeat it ---
+# --- "changes by others" never loses a change and a retry does not repeat it ---
 
 def _prompt(store, settings, bot, job):
     workspace = settings.data_dir / f"ws-{job.id}"
@@ -372,7 +372,7 @@ def test_changes_route_pages_with_last_event(rig):
     assert len(set(seen)) == 55 and seen == sorted(seen)
 
 
-# --- fix 6: per-bot task writes per hour ---
+# --- per-bot task writes per hour ---
 
 def test_task_write_limit_on_both_apis_owner_exempt(rig, monkeypatch):
     client, store, (ada, *_), tokens = rig
@@ -411,7 +411,7 @@ def test_a_reorder_is_one_write_for_the_hourly_cap(rig, monkeypatch):
     assert tasks
 
 
-# --- fix 7: report and checkpoint ---
+# --- report and checkpoint ---
 
 def test_report_bumps_version_and_checkpoint_on_closed_task_is_409(rig):
     client, store, (ada, *_), _ = rig
@@ -429,7 +429,7 @@ def test_report_bumps_version_and_checkpoint_on_closed_task_is_409(rig):
     assert caught.value.status == 409
 
 
-# --- fix 8: the parent is checked in the insert's transaction ---
+# --- the parent is checked in the insert's transaction ---
 
 def test_parent_closed_during_the_create_is_refused_and_nothing_is_inserted(rig, monkeypatch):
     client, store, (ada, *_), _ = rig
@@ -455,7 +455,7 @@ def test_parent_on_another_list_is_refused(rig):
     assert response.status_code in (403, 404)
 
 
-# --- fix 9: reorder ---
+# --- reorder ---
 
 def test_reorder_with_missing_positions_keeps_unlisted_tasks_in_place(rig):
     client, store, (ada, *_), _ = rig
@@ -484,7 +484,7 @@ def test_reorder_with_stale_version_is_409(rig):
     assert [raw(store, key)["position"] for key in (first.id, second.id)] == [1, 2]
 
 
-# --- fix 10: migration ---
+# --- migration ---
 
 def _drop_marker(path):
     with closing(sqlite3.connect(path)) as db:
@@ -536,7 +536,7 @@ def test_0_11_9_era_inserts_still_succeed(tmp_path):
     assert task.priority == "normal" and task.bot_edited == [] and task.version == 1
 
 
-# --- fix 11: unknown and refused fields ---
+# --- unknown and refused fields ---
 
 def test_unknown_field_is_400_and_refused_field_403_changing_nothing(rig):
     client, store, (ada, *_), tokens = rig
@@ -577,7 +577,7 @@ def test_finished_job_token_is_401(rig):
         assert call().status_code == 401
 
 
-# --- G7: priority ---
+# --- priority ---
 
 def test_priority_on_owner_and_agent_apis_and_ordering(rig):
     client, store, (ada, *_), tokens = rig
@@ -698,7 +698,7 @@ def test_bot_task_cli_marks_other_bots_text(rig):
     assert owner_task
 
 
-# --- G10: form tasks start on their own ---
+# --- form tasks start on their own ---
 
 @pytest.mark.parametrize(("setting", "body", "status"), [
     (None, {}, "active"), ("auto", {}, "active"), (None, {"start": False}, "open"),
@@ -717,7 +717,7 @@ def test_gui_start_button_only_for_open_not_started_tasks():
     assert "\"Start\" : \"Continue\"" in html or "'Start' : 'Continue'" in html
 
 
-# --- G8 ---
+# --- the task-list label ---
 
 def test_label_default_stays_assignments(rig, monkeypatch):
     client, *_ = rig

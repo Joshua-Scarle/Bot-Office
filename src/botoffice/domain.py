@@ -184,7 +184,7 @@ class Bot(BaseModel):
     digest: bool = False
     # 0.11.10: other bots' messages may steer this bot's running turn (off: they wait for a turn of their own)
     bot_steer: bool = True
-    # 0.11.10 (G1): never continues by itself (no auto-continue, loop, verify or wake-up turns)
+    # 0.11.10: never continues by itself (no auto-continue, loop, verify or wake-up turns)
     chat_only: bool = False
     # unread state for the owner (filled by GET /v1/bots and the read/unread endpoints)
     unread_count: int = 0
@@ -417,7 +417,7 @@ class RoutineUpdate(BaseModel):
         return None if value is None else _check_cron(value)
 
 
-# G7: every task has one; higher first wherever tasks are listed or picked
+# every task has one; higher first wherever tasks are listed or picked
 TaskPriority = Literal["urgent", "high", "normal", "low"]
 
 
@@ -447,7 +447,7 @@ class Assignment(BaseModel):
     priority: TaskPriority = "normal"
 
 
-# 0.11.4 task lists: the shown stage of an assignment (computed, never stored; plan 4.2)
+# 0.11.4 task lists: the shown stage of an assignment (computed, never stored)
 TaskStage = Literal["not_started", "in_progress", "completed", "dropped"]
 TaskOrigin = Literal["form", "chat", "auto", "bot", "routine"]
 
@@ -506,7 +506,7 @@ class AssignmentUpdate(BaseModel):
 class TaskCreate(AssignmentCreate):
     # list order (lower first); default: after the bot's last task
     position: float | None = Field(default=None, allow_inf_nan=False, ge=-POSITION_LIMIT, le=POSITION_LIMIT)
-    # G10: None follows BOT_OFFICE_FORM_TASKS_START (auto: starts on its own); false = don't start yet
+    # None follows BOT_OFFICE_FORM_TASKS_START (auto: starts on its own); false = don't start yet
     start: bool | None = None
 
 

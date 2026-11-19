@@ -52,7 +52,7 @@ READS_MIGRATION = "reads-seeded-v1"
 # 0.9.0: Grok bridge rate/hop state moved from JSON files into SQLite (imported once)
 BRIDGE_IMPORT = "bridge_json_import"
 TASKS_SEEN_INIT = "tasks_seen_init"  # meta key: the "changes by others" watermark was set (task lists)
-# G7: an assignment's priority as a sort key (urgent 0 .. low 3; anything else counts as normal)
+# an assignment's priority as a sort key (urgent 0 .. low 3; anything else counts as normal)
 PRIORITY_RANK = "(CASE {0}priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'low' THEN 3 ELSE 2 END)"
 BRIDGE_JSON = ("grok_bridge_rate.json", "grok_bridge_threads.json")
 # roles that count as unread: what the bot (or the system) said, never the prompts it received
@@ -167,17 +167,17 @@ def _init_assignment_tables(db: sqlite3.Connection) -> None:
         ("source_job_id", "TEXT"),
         ("updated_by", "TEXT NOT NULL DEFAULT 'user'"),
         ("reviewer", "TEXT"),
-        # P2 review fix 2 / Q3: the text fields a bot edited (comma list of title, goal, done_when);
+        # the text fields a bot edited (comma list of title, goal, done_when);
         # prompts delimit those as untrusted even on a task the user created
         ("bot_edited", "TEXT NOT NULL DEFAULT ''"),
-        # G7: urgent | high | normal | low; lists, prompts and the claim order put higher first
+        # urgent | high | normal | low; lists, prompts and the claim order put higher first
         ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
     ):
         if column not in columns:
             db.execute(f"ALTER TABLE assignments ADD COLUMN {column} {ddl}")
     db.execute("CREATE INDEX IF NOT EXISTS assignments_pick ON assignments(bot_id, status, position, created_at)")
     # the event actor and the "changes by others" watermark land in one transaction with a
-    # durable marker, so a crash in between cannot replay old history as new changes (fix 10)
+    # durable marker, so a crash in between cannot replay old history as new changes
     db.execute("BEGIN IMMEDIATE")
     try:
         columns = {row["name"] for row in db.execute("PRAGMA table_info(assignment_events)")}
@@ -610,7 +610,7 @@ class JobStore:
                 ("bot_steer", "INTEGER NOT NULL DEFAULT 1"),
                 # 0.11.4: the last assignment_events id this bot's prompt showed ("changes by others")
                 ("tasks_seen_event", "INTEGER NOT NULL DEFAULT 0"),
-                # 0.11.10 (G1): a chat-only bot never continues by itself (no loop, verify or wake-up turns)
+                # 0.11.10: a chat-only bot never continues by itself (no loop, verify or wake-up turns)
                 ("chat_only", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if column not in bot_columns:
@@ -708,10 +708,19 @@ class JobStore:
             db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_sent ON agent_message_links (sender_message_id)")
             db.execute("CREATE INDEX IF NOT EXISTS agent_message_links_received ON agent_message_links (target_message_id)")
             # what the code reads: an agent message with its links (seq orders equal timestamps)
-            db.execute("DROP VIEW IF EXISTS agent_messages_x")
-            db.execute("CREATE VIEW agent_messages_x AS SELECT m.*, m.rowid AS seq, l.steered_into, l.reply_to, "
-                       "l.sender_message_id, l.target_message_id FROM agent_messages m "
-                       "LEFT JOIN agent_message_links l ON l.message_id=m.id")
+            # (rebuilt only when missing or different: stores opened at once must not race on it)
+            view = ("CREATE VIEW agent_messages_x AS SELECT m.*, m.rowid AS seq, l.steered_into, l.reply_to, "
+                    "l.sender_message_id, l.target_message_id FROM agent_messages m "
+                    "LEFT JOIN agent_message_links l ON l.message_id=m.id")
+            found = db.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name='agent_messages_x'").fetchone()
+            if found is None or found[0] != view:
+                if found is not None:
+                    db.execute("DROP VIEW IF EXISTS agent_messages_x")
+                try:
+                    db.execute(view)
+                except sqlite3.OperationalError as exc:
+                    if "already exists" not in str(exc):
+                        raise
 
             # one row per finished attempt that was re-queued (automatic or manual retry)
             db.execute(
@@ -1342,7 +1351,7 @@ class JobStore:
                     "AND (bot_id IS NULL OR NOT EXISTS (SELECT 1 FROM jobs AS active "
                     "WHERE active.bot_id=queued.bot_id AND active.status='running')) "
                     "AND (not_before IS NULL OR not_before <= ?) "
-                    # G7: among equal job priorities, the turn of the more urgent task goes first
+                    # among equal job priorities, the turn of the more urgent task goes first
                     "ORDER BY priority, COALESCE((SELECT " + PRIORITY_RANK.format("a.") + " FROM assignments AS a "
                     "WHERE a.id=queued.assignment_id), 2), created_at, id LIMIT 1",
                     (JobStatus.QUEUED.value, *sorted(enabled_providers), now().isoformat()),
@@ -1351,7 +1360,7 @@ class JobStore:
                     db.commit()  # keeps the cancellations of turns the gate refused
                     return None
                 job_id = row["id"]
-                # 0.11.10 (G3): an automatic turn over a cap waits for its window, before it reserves a task turn
+                # 0.11.10: an automatic turn over a cap waits for its window, before it reserves a task turn
                 capped = continuation.cap_gate(db, job_id, now())
                 if capped is not None:
                     continuation.hold(db, job_id, *capped, now())
