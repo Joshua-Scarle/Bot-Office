@@ -46,7 +46,7 @@ def test_opencode_effort_can_be_unset(settings):
         assert response.status_code == 200 and response.json()["effort"] is None
         page = client.get("/").text
         assert 'default (unset)' in page
-        assert '$("f-custom").value = ""; fillEffortSelect()' in page
+        assert 'onChange: () => { fillEffortSelect(); updateTier(); }' in page
 
 
 def test_image_composer_smoke():

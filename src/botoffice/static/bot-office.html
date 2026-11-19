@@ -192,6 +192,14 @@ dialog textarea { min-height: 90px; resize: vertical; }
 .icon-tools label { flex: 0 0 110px; }
 .file-btn { position: relative; overflow: hidden; display: inline-block; }
 .file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.picker { position: relative; display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.picker input { color: var(--text); font-size: 15px; }
+.picker ul { position: absolute; top: 100%; left: 0; right: 0; z-index: 5; margin: 2px 0 0; padding: 4px; list-style: none; max-height: 240px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .4); }
+.picker li { padding: 6px 8px; border-radius: 6px; color: var(--text); font-size: 14px; cursor: pointer; }
+.picker li[aria-selected="true"] { font-weight: 600; }
+.picker li[aria-selected="true"]::before { content: "✓ "; color: var(--accent); }
+.picker li.active { background: var(--line); }
+.picker li.empty { color: var(--muted); cursor: default; }
 .hint { font-size: 12px; color: var(--muted); margin: -6px 0 0; }
 .danger-zone { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 8px; }
 .danger-zone p { margin: 0; font-size: 13px; }
@@ -464,8 +472,10 @@ dialog textarea { min-height: 90px; resize: vertical; }
       </div>
     </div>
     <label>Description<input id="f-desc" maxlength="500" placeholder="What this bot is for"></label>
-    <label>Model<select id="f-model"></select></label>
-    <label id="f-custom-row" hidden>OpenCode model (pick above or type any provider/model)<input id="f-custom" maxlength="100" placeholder="provider/model" list="f-custom-list"><datalist id="f-custom-list"></datalist><button type="button" id="f-models-refresh" class="ghost">Refresh model list</button></label>
+    <div class="picker"><label for="f-model">Model</label>
+      <input id="f-model" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="f-model-list" autocomplete="off" spellcheck="false" maxlength="100" placeholder="Type to search models">
+      <ul id="f-model-list" role="listbox" aria-label="Models" hidden></ul></div>
+    <div id="f-custom-row" hidden><button type="button" id="f-models-refresh" class="ghost">Refresh model list</button></div>
     <p class="hint" id="f-tier"></p>
     <label id="f-effort-row">Thinking effort<select id="f-effort"></select></label>
     <p class="hint" id="f-effort-hint">Applies from the next turn. Past jobs keep the effort they ran with.</p>
@@ -630,7 +640,12 @@ function modelLabel(engine, model) {
   return (ENGINE_LABELS[engine] || engine) + " · " + (model || "default");
 }
 
-async function loadChoices() {
+let choicesLoading = null;
+function loadChoices() {  // one request at a time: callers share it instead of refilling the form twice
+  if (!choicesLoading) choicesLoading = fetchChoices().finally(() => { choicesLoading = null; });
+  return choicesLoading;
+}
+async function fetchChoices() {
   try {
     state.choices = await api("/v1/model-choices");
     const n = state.choices.length;
@@ -2366,48 +2381,145 @@ $("voice-auto").onchange = () => { const on = $("voice-auto").checked; setAutoRe
 $("voice-browser-stt").onchange = () => saveVoicePrefs({ browser_stt: $("voice-browser-stt").checked });
 $("voice-preview").onclick = () => { player.queue = []; playMessage({ id: -1, text: "Hello. This is how your bots will sound when they read a reply aloud." }); };
 
+/* ---- model picker: one searchable combobox for every model choice ---- */
+// options: {value: "engine|model", engine, id, display, group}; the matching is pure so tests can run it.
+function modelMatches(option, query) {
+  const q = (query || "").trim().toLowerCase();
+  return !q || [option.display, option.id, option.engine, option.group].some((text) => (text || "").toLowerCase().includes(q));
+}
+
+// the same provider/model rule the server enforces for OpenCode (catalog.model_error)
+function validCustomModel(text) {
+  const parts = text.split("/");
+  return parts.length >= 2 && parts.every(Boolean) && !text.startsWith("-") && !/[\s|]/.test(text);
+}
+
+// What the list shows for a query: matches, the current selection pinned on top when filtered out,
+// and a "use this typed provider/model" row where a custom model is allowed. `first` is the row
+// Enter picks after typing (the first real match, not the pinned selection).
+function modelListItems(options, query, selected, customEngine) {
+  const items = options.filter((o) => modelMatches(o, query));
+  const matched = items.length;
+  const current = options.find((o) => o.value === selected);
+  const pinned = current && !items.includes(current);
+  if (pinned) items.unshift(current);
+  const typed = (query || "").trim();
+  if (customEngine && validCustomModel(typed) && !options.some((o) => o.engine === customEngine && o.id === typed)) {
+    items.push({ value: customEngine + "|" + typed, engine: customEngine, id: typed, display: "Use custom model: " + typed, group: "", custom: true });
+  }
+  const first = items.length > (pinned ? 1 : 0) ? (pinned ? 1 : 0) : -1;
+  return { items, noMatches: !matched && !items.some((o) => o.custom), first };
+}
+
+function nextActiveIndex(active, count, key) {
+  if (!count) return -1;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowDown") return active < 0 || active >= count - 1 ? 0 : active + 1;
+  if (key === "ArrowUp") return active <= 0 ? count - 1 : active - 1;
+  return active;
+}
+
+function createModelPicker(input, list, { onChange, customEngine }) {
+  const picker = { options: [], value: "", dirty: false, customEngine };
+  let open = false, query = "", active = -1, shown = [], firstRow = -1;
+  const selectedOption = () => picker.options.find((o) => o.value === picker.value) || null;
+  const labelOf = () => { const o = selectedOption(); return o ? o.display : picker.value ? picker.value.slice(picker.value.indexOf("|") + 1) : ""; };
+  function render() {
+    const { items, noMatches, first } = modelListItems(picker.options, query, picker.value, picker.customEngine);
+    shown = items; firstRow = first;
+    if (active >= items.length) active = items.length - 1;
+    list.replaceChildren(...items.map((o, i) => {
+      const li = el("li", i === active ? "active" : "", o.display);
+      li.id = list.id + "-" + i;
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", o.value === picker.value ? "true" : "false");
+      li.onmousedown = (event) => { event.preventDefault(); choose(o); };
+      return li;
+    }));
+    if (noMatches) { const li = el("li", "empty", "No matches"); li.setAttribute("role", "presentation"); list.append(li); }
+    if (active >= 0) input.setAttribute("aria-activedescendant", list.id + "-" + active); else input.removeAttribute("aria-activedescendant");
+    list.hidden = !open;
+    input.setAttribute("aria-expanded", String(open));
+  }
+  function close() { open = false; query = ""; active = -1; input.value = labelOf(); render(); }
+  function choose(o) {
+    const changed = o.value !== picker.value;
+    if (o.custom) picker.options = picker.options.concat([{ ...o, display: (ENGINE_LABELS[o.engine] || o.engine) + " · " + o.id }]);
+    picker.value = o.value; picker.dirty = true;
+    close();
+    if (changed && onChange) onChange(picker.value);
+  }
+  function show() {
+    open = true;
+    const at = shown.findIndex((o) => o.value === picker.value);
+    active = at;
+    render();
+  }
+  input.addEventListener("focus", () => { if (!input.disabled) { input.select(); show(); } });
+  input.addEventListener("click", () => { if (!open && !input.disabled) show(); });
+  list.addEventListener("mousedown", (event) => event.preventDefault());  // dragging the scrollbar must not blur the input
+  input.addEventListener("blur", close);
+  input.addEventListener("input", () => { query = input.value; open = true; active = -1; render(); active = firstRow; render(); });
+  input.addEventListener("keydown", (event) => {
+    const key = event.key;
+    if (key === "ArrowDown" || key === "ArrowUp" || key === "Home" && open || key === "End" && open) {
+      event.preventDefault();
+      if (!open) { show(); if (key === "ArrowDown" || key === "ArrowUp") return; }
+      active = nextActiveIndex(active, shown.length, key); render();
+    } else if (key === "Enter" && open) {
+      event.preventDefault();  // never submits the form
+      if (shown[active]) choose(shown[active]);
+    } else if (key === "Escape" && (open || query)) {
+      event.preventDefault(); event.stopPropagation();  // the first Esc closes the list, not the dialog
+      close();
+    } else if (key === "Tab") close();
+  });
+  // options replace the list; a user's pick survives a late reload, otherwise `preferred` is selected
+  picker.setOptions = (options, preferred) => {
+    picker.options = options;
+    if (!(picker.dirty && picker.value)) picker.value = preferred || "";
+    else if (!options.some((o) => o.value === picker.value) && !(picker.customEngine && picker.value.startsWith(picker.customEngine + "|"))) picker.value = preferred || "";
+    close();
+  };
+  picker.reset = () => { picker.dirty = false; picker.value = ""; };
+  picker.setDisabled = (disabled) => { input.disabled = disabled; };
+  picker.setValue = (value) => { picker.value = value; close(); };
+  return picker;
+}
+
 /* ---- settings dialog ---- */
 function fillModelSelect(bot) {
-  const select = $("f-model");
-  select.replaceChildren();
   const loaded = Array.isArray(state.choices);
   const choices = state.choices || [];
-  let current = null;
-  if (bot) {
-    current = bot.engine + "|" + (bot.model || "");
-    const known = choices.some((c) => c.engine === bot.engine && c.models.some((m) => m.id === bot.model));
-    if (!known) {
-      const suffix = loaded ? " (current, not in the signed-in list)" : " (current)";
-      const opt = el("option", "", modelLabel(bot.engine, bot.model) + suffix);
-      opt.value = current;
-      select.append(opt);
-    }
-  }
+  const options = [];
+  let preferred = "";
   for (const choice of choices) {
-    const group = document.createElement("optgroup");
-    group.label = choice.label;
-    for (const m of choice.models) {
-      const opt = el("option", "", m.display);
-      opt.value = choice.engine + "|" + m.id;
-      group.append(opt);
+    for (const m of choice.models) options.push({ value: choice.engine + "|" + m.id, engine: choice.engine, id: m.id, display: m.display, group: choice.label });
+  }
+  if (bot) {
+    preferred = bot.engine + "|" + (bot.model || "");
+    if (!options.some((o) => o.value === preferred)) {
+      const suffix = loaded ? " (current, not in the signed-in list)" : " (current)";
+      options.unshift({ value: preferred, engine: bot.engine, id: bot.model || "", display: modelLabel(bot.engine, bot.model) + suffix, group: ENGINE_LABELS[bot.engine] || bot.engine });
     }
-    select.append(group);
+  } else if (choices.length) {
+    const first = choices.find((c) => c.models.length);
+    if (first) preferred = first.engine + "|" + (first.default_model && first.models.some((m) => m.id === first.default_model) ? first.default_model : first.models[0].id);
   }
-  if (current) select.value = current;
-  else if (choices.length) {
-    const first = choices[0];
-    select.value = first.engine + "|" + (first.default_model && first.models.some((m) => m.id === first.default_model) ? first.default_model : first.models[0].id);
-  }
-  const none = !select.options.length;
+  modelPicker.customEngine = choiceFor("opencode") ? "opencode" : null;
+  modelPicker.setOptions(options, preferred);
+  const none = !options.length;
+  modelPicker.setDisabled(none);
   $("f-model-hint").textContent = none
     ? (state.choices ? "No engine is signed in yet. Sign in to a CLI on the host, then reopen this dialog." : "Loading models…")
-    : "Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.";
+    : "Only signed-in engines are listed. Type to search by name, id or engine; OpenCode also takes any typed provider/model. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.";
   $("dialog-save").disabled = none;
   fillEffortSelect();
   updateTier();
 }
 
-function selectedEngine() { return ($("f-model").value || "").split("|")[0]; }
+function selectedEngine() { return (modelPicker.value || "").split("|")[0]; }
 
 function choiceFor(engine) { return (state.choices || []).find((c) => c.engine === engine) || null; }
 function effortsFor(engine) { const c = choiceFor(engine); return c && c.efforts ? c.efforts : (FALLBACK_EFFORTS[engine] || []); }
@@ -2425,14 +2537,13 @@ function fillEffortSelect() {
   select.dataset.engine = engine;
   // engines without an effort flag (Cursor) get no control at all
   $("f-custom-row").hidden = engine !== "opencode";
-  const oc = choiceFor("opencode");
-  $("f-custom-list").replaceChildren(...(oc ? oc.models : []).map((m) => { const o = el("option", ""); o.value = m.id; return o; }));
   $("f-effort-row").hidden = !levels.length;
   $("f-effort-hint").hidden = !levels.length;
 }
 
 function updateTier() {
-  const [engine, model] = ($("f-model").value || "").split("|");
+  const [engine, ...rest] = (modelPicker.value || "").split("|");
+  const model = rest.join("|");
   let tier = "";
   const choice = choiceFor(engine);
   const option = choice && choice.models.find((m) => m.id === model);
@@ -2466,7 +2577,7 @@ async function openDialog(bot) {
   $("f-icon").value = bot ? bot.icon || "" : "";
   $("f-desc").value = bot ? bot.description || "" : "";
   $("f-instructions").value = bot ? bot.instructions || "" : "";
-  $("f-custom").value = bot && bot.engine === "opencode" ? bot.model || "" : "";
+  modelPicker.reset();
   $("f-image").value = "";
   $("f-effort").dataset.engine = "";
   $("session-zone").hidden = !bot;
@@ -2533,19 +2644,18 @@ $("dialog-cancel").onclick = () => $("bot-dialog").close();
 $("bot-dialog").addEventListener("close", () => { clearPendingImage(); state.editing = null; });
 $("f-models-refresh").onclick = async () => {
   const button = $("f-models-refresh");
-  const picked = $("f-model").value, typed = $("f-custom").value;
+  const picked = modelPicker.value;
   button.disabled = true;
   try {
     state.choices = await api("/v1/model-choices?refresh=1");
     fillModelSelect(state.editing);
-    if ([...$("f-model").options].some((o) => o.value === picked)) $("f-model").value = picked;
-    $("f-custom").value = typed;
+    if (picked) modelPicker.setValue(picked);
     fillEffortSelect(); updateTier();
   } catch (err) {
     if (err instanceof AuthError) handleError(err); else $("dialog-error").textContent = String(err && err.message || err);
   } finally { button.disabled = false; }
 };
-$("f-model").onchange = () => { $("f-custom").value = ""; fillEffortSelect(); updateTier(); };
+const modelPicker = createModelPicker($("f-model"), $("f-model-list"), { customEngine: null, onChange: () => { fillEffortSelect(); updateTier(); } });
 $("f-icon").oninput = updateIconPreview;
 $("f-name").oninput = () => { if (!state.editing) updateIconPreview(); };
 
@@ -2568,8 +2678,8 @@ $("bot-form").onsubmit = async (event) => {
   const err = $("dialog-error");
   err.textContent = "";
   const bot = state.editing;
-  let [engine, model] = ($("f-model").value || "").split("|");
-  if (engine === "opencode" && $("f-custom").value.trim()) model = $("f-custom").value.trim();
+  const [engine, ...rest] = (modelPicker.value || "").split("|");
+  const model = rest.join("|");
   if (!engine || !model) { err.textContent = "Pick a model."; return; }
   const name = $("f-name").value.trim();
   if (!name) { err.textContent = "Name is required."; return; }

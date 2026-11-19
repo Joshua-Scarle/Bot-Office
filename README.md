@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.12. What changed is recorded below: [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.13. What changed is recorded below: [0.11.13](#what-changed-in-01113-model-search-and-a-collapsed-needs-you), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,10 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.11.13 (model search and a collapsed Needs you)
+
+Every model choice is now one searchable picker (the New bot / Bot settings form, including the OpenCode picker from 0.10.7). Type to filter by model name, id or engine (case-insensitive); Up/Down, Home/End, Enter and Esc work, "No matches" is shown when nothing fits, and the current selection stays listed and marked while you filter. For OpenCode, a typed `provider/model` is offered as a custom choice and validated as before. Fixed: opening New bot before the model list had loaded showed an empty menu, and the late load then reset your pick to the first engine, Codex; the list is now loaded once, shared, and never overwrites a pick. No API or data changes.
 
 ## What changed in 0.11.12
 
