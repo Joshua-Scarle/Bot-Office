@@ -525,7 +525,9 @@ class Assignments:
             return
         limit = _limit(TASK_WRITES_PER_HOUR)
         since = (now() - timedelta(hours=1)).isoformat()
-        written = db.execute("SELECT COUNT(*) FROM assignment_events WHERE actor=? AND created_at>=?",
+        # a reorder is one write however many tasks it moves: its "moved" events are not counted,
+        # its one "reordered" event is
+        written = db.execute("SELECT COUNT(*) FROM assignment_events WHERE actor=? AND created_at>=? AND kind!='moved'",
                              (actor, since)).fetchone()[0]
         if written >= limit:
             raise AssignmentError(429, f"at most {limit} task writes per bot per hour; try again later")
@@ -869,7 +871,8 @@ class Assignments:
         """Put the listed tasks of *bot_id*'s list in this order (first = next). They take the
         places they hold in the list, so tasks left out keep their order; when some positions are
         missing (tasks from before 0.11.4) or shared, the whole list is renumbered 1..n in its
-        current order first. One event per moved task. With *versions* ({id: version}) a stale
+        current order first. One event per moved task, plus one "reordered" event (the one write
+        the per-hour cap counts). With *versions* ({id: version}) a stale
         task is a 409. A bot reorders only its own list."""
         ids = [str(item) for item in order]
         if len(set(ids)) != len(ids):
@@ -894,10 +897,14 @@ class Assignments:
                 # the listed tasks take the places they hold between them, in the order given
                 for key, slot in zip(ids, sorted(places[key] for key in ids), strict=True):
                     places[key] = slot
+                moved = 0
                 for row in full:
                     if row["position"] != places[row["id"]]:
                         self._change(db, row, actor, {"position": places[row["id"]]}, kind="moved",
                                      note=f"position {places[row['id']]:g}")
+                        moved += 1
+                if moved and ids:
+                    self._event(db, ids[0], "reordered", f"{moved} task{'s' if moved != 1 else ''} moved", actor=actor)
                 db.commit()
             except BaseException:
                 db.rollback()

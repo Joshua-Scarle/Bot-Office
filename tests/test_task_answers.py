@@ -391,6 +391,26 @@ def test_task_write_limit_on_both_apis_owner_exempt(rig, monkeypatch):
         assert client.post("/v1/bots/Ada/tasks", headers=H, json={"title": f"o{index}"}).status_code == 201
 
 
+def test_a_reorder_is_one_write_for_the_hourly_cap(rig, monkeypatch):
+    """Reordering a long list writes a "moved" event per task but spends one write of the cap."""
+    client, store, (ada, *_), tokens = rig
+    book = Assignments(store)
+    tasks = [book.create(ada.id, {"title": f"t{index}", "start": False}) for index in range(30)]
+    monkeypatch.setenv("BOT_OFFICE_TASK_WRITES_PER_HOUR", "3")
+    for _ in range(2):
+        order = [str(task.id) for task in reversed(book.tasks(ada.id))]
+        assert client.post("/v1/agent/tasks/reorder", headers=tokens["Ada"], json={"order": order}).status_code == 200
+    with closing(store._connect()) as db:
+        moved = db.execute("SELECT COUNT(*) FROM assignment_events WHERE kind='moved' AND actor=?",
+                           (f"bot:{ada.id}",)).fetchone()[0]
+        marks = db.execute("SELECT note FROM assignment_events WHERE kind='reordered'").fetchall()
+    assert moved >= 30 and len(marks) == 2 and marks[0]["note"].endswith("tasks moved")
+    # two reorders = two writes: one more write fits, the next is over the cap
+    assert client.post("/v1/agent/tasks", headers=tokens["Ada"], json={"title": "fits"}).status_code == 201
+    assert client.post("/v1/agent/tasks", headers=tokens["Ada"], json={"title": "over"}).status_code == 429
+    assert tasks
+
+
 # --- fix 7: report and checkpoint ---
 
 def test_report_bumps_version_and_checkpoint_on_closed_task_is_409(rig):
