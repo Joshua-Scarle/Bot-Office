@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -25,6 +27,19 @@ PATTERN_LIMIT = 500
 TIMEOUT_DEFAULT = 60
 TIMEOUT_MAX = 7 * 24 * 60
 CUSTOM_KINDS = ("shell", "tool")
+# an owner's pattern sees at most this much of a command (the bot controls the input); a longer
+# command is taken as in the class (it asks), so padding cannot push the matching part out of reach
+CUSTOM_MATCH_CHARS = 4096
+SELF_TEST_SECONDS = 2.0
+# run on save in a child process: a pattern that backtracks badly on these long inputs is refused
+_SELF_TEST = """
+import re, sys
+pattern = re.compile(sys.argv[1], int(sys.argv[2]))
+chars = set("a0 /-._x=:") | {c for c in sys.argv[1] if c.isprintable()}
+for c in sorted(chars):
+    for tail in ("", "\\x00", "!"):
+        pattern.search((c * %d)[:%d - len(tail)] + tail)
+""" % (CUSTOM_MATCH_CHARS, CUSTOM_MATCH_CHARS)
 
 _SEGMENT = re.compile(r"[;&|\n]")
 _SEP = r"(?:^|[;&|(`]|\$\(|\b(?:then|do|else|xargs|exec|env|nohup|time|sudo)\s)\s*"
@@ -75,8 +90,13 @@ class ApprovalClass:
     tools: re.Pattern | None = None
     mcp_only: bool = False
     check: Callable[[str], bool] | None = None
+    custom: bool = False  # an owner's pattern: bounded input (CUSTOM_MATCH_CHARS)
 
     def matches(self, tool: str, command: str) -> bool:
+        if self.custom:
+            if self.shell and len(command) > CUSTOM_MATCH_CHARS:
+                return True
+            tool = tool[:CUSTOM_MATCH_CHARS]
         if command and (any(pattern.search(command) for pattern in self.shell)
                         or (self.check is not None and self.check(command))):
             return True
@@ -164,8 +184,21 @@ def _custom_class(item: dict) -> ApprovalClass | None:
     except (KeyError, TypeError, re.error):
         return None
     if item["kind"] == "tool":
-        return ApprovalClass(item["key"], item["label"], "", True, tools=pattern)
-    return ApprovalClass(item["key"], item["label"], "", True, shell=(pattern,))
+        return ApprovalClass(item["key"], item["label"], "", True, tools=pattern, custom=True)
+    return ApprovalClass(item["key"], item["label"], "", True, shell=(pattern,), custom=True)
+
+
+def _self_test(pattern: str, flags: int) -> None:
+    """ApprovalClassError if *pattern* takes over SELF_TEST_SECONDS on long, repetitive inputs
+    (catastrophic backtracking such as ``(a+)+$``): every tool call would pay that in the gate."""
+    try:
+        subprocess.run([sys.executable, "-I", "-c", _SELF_TEST, pattern, str(int(flags))], check=True,
+                       timeout=SELF_TEST_SECONDS, capture_output=True)
+    except subprocess.TimeoutExpired as exc:
+        raise ApprovalClassError("this pattern is too slow on long commands (it backtracks); "
+                                 "simplify it, e.g. avoid nested repeats like (a+)+") from exc
+    except subprocess.CalledProcessError as exc:
+        raise ApprovalClassError("invalid pattern") from exc
 
 
 def settings(store: JobStore) -> dict:
@@ -213,6 +246,7 @@ def update(store: JobStore, *, enabled: dict[str, bool] | None = None, add: list
             re.compile(pattern)
         except re.error as exc:
             raise ApprovalClassError(f"invalid pattern: {exc}") from exc
+        _self_test(pattern, re.IGNORECASE if kind == "tool" else 0)
         if len(custom) >= CUSTOM_LIMIT:
             raise ApprovalClassError(f"at most {CUSTOM_LIMIT} classes of your own")
         number = 1 + max([int(entry["key"].split("-")[1]) for entry in custom

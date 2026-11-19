@@ -1,6 +1,10 @@
 """0.11.10 approval classes: the owner picks kinds of action that wait for their yes; bots rarely ask."""
+import json
+import shutil
+import subprocess
 from contextlib import closing
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -276,3 +280,58 @@ def test_settings_show_unpausable_bots_by_each_class_and_docs_say_checkpoint():
     assert "A checkpoint, not enforcement." in docs and "fails open" in docs and "s=sudo; $s" in docs
     readme = (root / "README.md").read_text()
     assert "Classes are a checkpoint and a tripwire, not enforcement" in readme
+
+
+# --- custom patterns: the bot controls the input ---
+
+def test_a_custom_pattern_that_backtracks_is_refused_on_save(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    for slow in (r"(a+)+$", r"^(\s*)*$", r"(x+x+)+y"):
+        with pytest.raises(approval_classes.ApprovalClassError, match="too slow"):
+            approval_classes.update(store, add=[{"label": "Slow", "kind": "shell", "pattern": slow}])
+    assert not [item for item in approval_classes.settings(store)["classes"] if not item["builtin"]]
+    approval_classes.update(store, add=[{"label": "Deploys", "kind": "shell", "pattern": r"\bmake\s+deploy\b"}])
+    job = running(store, bot)
+    assert rules.decide(job, bash("make deploy")).preset == "custom-1"
+
+
+def test_a_custom_pattern_sees_a_bounded_command_and_a_longer_one_asks(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    approval_classes.update(store, add=[{"label": "Deploys", "kind": "shell", "pattern": r"\bmake\s+deploy\b"}])
+    [custom] = [item for item in approval_classes.active(store) if item.key == "custom-1"]
+    assert not custom.matches("Bash", "ls " + "a" * 4000)
+    # padding past the bound cannot hide the matching part: a longer command is in the class
+    padded = "echo " + " " * approval_classes.CUSTOM_MATCH_CHARS + "; make deploy"
+    assert custom.matches("Bash", padded)
+    assert rules.decide(running(store, bot), bash(padded)).preset == "custom-1"
+    # built-in classes are not affected by the bound
+    assert not [item for item in approval_classes.active(store) if item.custom is False
+                and item.matches("Bash", "ls " + "a" * 5000)]
+
+
+def test_the_approval_card_collapses_whitespace_and_says_what_is_clipped():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "src" / "botoffice" / "static" / "bot-office.html").read_text()
+    start = html.index("const APPROVAL_SHOWN_CHARS")
+    preview = html[start:html.index("function renderApproval", start)]
+    card = html[html.index("function renderApproval"):html.index("function renderQuestion")]
+    assert "more characters" in preview and "more lines" in preview and "in all" in preview
+    assert "blank lines⟩" in preview and "spaces⟩" in preview
+    assert "approvalPreview(a.summary" in card and '"Show all"' in card and "a.summary" in card.split("all.onclick")[1]
+    assert "innerHTML" not in card
+    node = shutil.which("node")
+    if node is None:
+        return
+    script = preview + """
+const out = {};
+out.pad = approvalPreview("ls" + " ".repeat(300) + "&& rm -rf ~");
+out.lines = approvalPreview("echo hi" + "\\n".repeat(60) + "rm -rf ~");
+out.long = approvalPreview("x".repeat(2000));
+out.short = approvalPreview("git status");
+console.log(JSON.stringify(out));
+"""
+    result = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert result["pad"]["shown"] == "ls ⟨300 spaces⟩ && rm -rf ~" and result["pad"]["changed"]
+    assert result["lines"]["shown"] == "echo hi\n⟨59 blank lines⟩\nrm -rf ~"
+    assert result["long"]["more"] == "… 1400 more characters not shown (2000 in all)"
+    assert result["short"] == {"shown": "git status", "more": "", "changed": False}

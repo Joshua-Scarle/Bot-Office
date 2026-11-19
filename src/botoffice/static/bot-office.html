@@ -1572,12 +1572,41 @@ function approvalState(a) {
   if (a.status === "denied") return "Denied · the task is stopped";
   return a.resumed ? "Approved · the bot didn't use it within a day" : "No answer in time · the task is stopped";
 }
+/* the card shows long whitespace runs collapsed and a clipped command with what is left out, so a
+   padded command cannot hide its tail below the scroll; "Show all" (and Needs you) has the exact text */
+const APPROVAL_SHOWN_CHARS = 600, APPROVAL_SHOWN_LINES = 12;
+function approvalPreview(text) {
+  const compact = text.replace(/\n[ \t]*(?:\n[ \t]*){2,}/g, m => "\n⟨" + (m.split("\n").length - 2) + " blank lines⟩\n")
+    .replace(/[ \t]{4,}/g, m => " ⟨" + m.length + " spaces⟩ ");
+  let shown = compact.split("\n").slice(0, APPROVAL_SHOWN_LINES).join("\n");
+  if (shown.length > APPROVAL_SHOWN_CHARS) shown = shown.slice(0, APPROVAL_SHOWN_CHARS);
+  const moreChars = compact.length - shown.length;
+  const moreLines = compact.split("\n").length - shown.split("\n").length;
+  const more = moreChars > 0 ? "… " + moreChars + " more characters" + (moreLines > 0 ? ", " + moreLines + " more lines" : "") +
+    " not shown (" + text.length + " in all)" : "";
+  return { shown, more, changed: shown !== text };
+}
 function renderApproval(a, bot) {
   const card = el("div", "approval-card " + a.status);
   card.setAttribute("role", "group");
   card.setAttribute("aria-label", "Approval " + a.id);
   card.append(el("strong", "", bot.name + " wants to: " + a.label));
-  card.append(el("pre", "approval-command", a.summary));
+  const preview = approvalPreview(a.summary || "");
+  const command = el("pre", "approval-command", preview.shown);
+  card.append(command);
+  if (preview.changed) {
+    const line = el("div", "muted approval-more", preview.more || "Long runs of spaces or blank lines are shown collapsed.");
+    const all = el("button", "", "Show all");
+    all.type = "button";
+    all.onclick = () => {
+      const whole = command.dataset.whole !== "1";
+      command.textContent = whole ? a.summary : preview.shown;
+      command.dataset.whole = whole ? "1" : "";
+      all.textContent = whole ? "Show less" : "Show all";
+    };
+    line.append(" ", all);
+    card.append(line);
+  }
   card.append(el("div", "muted", approvalState(a)));
   if (a.status === "pending" || (a.status === "expired" && !a.resumed)) {
     const bar = el("div", "tools-bar");
