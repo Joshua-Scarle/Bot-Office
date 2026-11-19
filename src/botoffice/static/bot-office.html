@@ -824,7 +824,7 @@ function composerPlaceholder(bot, busy, queueing) {
   return "Steer " + bot.name + " while it works (Ctrl+V to paste images)";
 }
 function steerHint(bot, queueing) {
-  if (!queueing && bot.activity === "queued") return "Your message joins the waiting turn and is delivered when it starts.";
+  if (!queueing && bot.activity === "queued") return "Your message joins the waiting turn and is delivered when it starts (an automatic turn that waits is replaced by yours).";
   if (queueing && bot.steering === "queue" && bot.activity === "running") return bot.name + "'s engine cannot take a message while it works, so yours runs as the next turn.";
   if (queueing) return "Your message waits until the current turn is finished.";
   if (bot.steering === "live") return "Live: " + bot.name + " gets your message right away and carries on.";
@@ -900,7 +900,11 @@ function agentGroups(messages) {
   }
   return groups;
 }
-function botByName(name) { return state.bots.find((b) => b.name === name) || { id: "peer:" + name, name, icon: null }; }
+/* a peer that is gone (deleted, renamed) still gets a placeholder, never undefined */
+function botByName(name) {
+  const label = name || "another bot";
+  return (state.bots || []).find((b) => b && b.name === label) || { id: "peer:" + label, name: label, icon: null };
+}
 function accentColor(name) {
   let h = 0;
   for (const c of name || "") h = (h * 31 + c.charCodeAt(0)) % 360;
@@ -966,6 +970,8 @@ function renderMarkdown(text) {
   return root;
 }
 function openAgentChat(bot, peerName, focusId) {
+  if (!bot) return;  // the chat's own bot was deleted meanwhile
+  peerName = peerName || "another bot";
   const peer = botByName(peerName);
   const title = $("agent-chat-title");
   title.replaceChildren(smallAvatar(bot), el("span", "", bot.name), el("span", "agent-swap", "⇄"),
@@ -973,7 +979,7 @@ function openAgentChat(bot, peerName, focusId) {
   const list = $("agent-chat-list");
   list.replaceChildren();
   let focus = null;
-  for (const m of state.lastMessages) {
+  for (const m of state.lastMessages || []) {
     if (!isAgentRow(m) || (m.peer || "another bot") !== peerName || m.pending) continue;
     const sender = m.author === "bot_out" ? bot : peer;
     const item = el("div", "agent-msg");

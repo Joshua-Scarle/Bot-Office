@@ -24,7 +24,8 @@ Checked (local mode): Enter sends (bubble shows, box clears, Send comes back; Sh
 line), the bot's reply arrives, continuation prompts never look like the owner's messages,
 Settings (rules, behavior, approvals: switch a class, add and remove your own, timeout), the
 Approve / Deny card in the chat (deny leaves a short note; approve runs it once and hides the
-resume prompt), and the bot-to-bot row and its "A ⇄ B" panel with Close Chat. Screenshots of each
+resume prompt), the bot-to-bot row and its "A ⇄ B" panel with Close Chat, and a continuation held
+by the per-bot cap that your next message supersedes (it runs as its own turn). Screenshots of each
 step go to --out. It ends with a plain PASS/FAIL list; exit code 0 means every check passed.
 Browser: Playwright's Chromium by default, or an installed Chrome with --channel chrome.
 """
@@ -49,7 +50,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 TOKEN = "e2e-token"
 # every bot this script makes or messages is labelled as a test bot
-ADA, BEA = "E2E test bot Ada", "E2E test bot Bea"
+ADA, BEA, CY = "E2E test bot Ada", "E2E test bot Bea", "E2E test bot Cy"
 TEST_PREFIX = "E2E test"
 REPLY = "Hello from the e2e bot."
 FAILURES: list[str] = []
@@ -85,6 +86,10 @@ class E2EEngine:
         prompt = job.prompt or ""
         if job.source == "inbox":
             text = "Got it, thanks.\n\nBOT-OFFICE-STATUS: done"
+        elif "missing part" in prompt:  # the owner's answer (the prompt also carries the earlier chat)
+            text = f"{REPLY}\n\nBOT-OFFICE-STATUS: done"
+        elif "work in parts" in prompt or "Automatic continuation" in prompt:
+            text = "One more part written.\n\nBOT-OFFICE-STATUS: not_done — next: the following part"
         elif "send the report email" in prompt or "granted by the user" in prompt:
             event = {"hook_event_name": "PreToolUse", "tool_name": "mcp__gmail__send_message",
                      "tool_input": {"to": "joe@example.com", "subject": "Weekly report"}}
@@ -288,6 +293,35 @@ def bot_to_bot(page, out: Path, base: str, token: str) -> None:
     shot(page, out, "08-received-row")
 
 
+def held_continuation(page, out: Path, base: str, token: str, app) -> None:
+    print("A cap-held continuation and your message")
+    store = app.state.scheduler.store
+    call(base, token, "PUT", "/v1/settings", {"auto_continue": {"per_bot_day": 1}})
+    bot = next(item for item in call(base, token, "GET", "/v1/bots") if item["name"] == CY)
+    open_bot(page, CY)
+    send_with_enter(page, "Please work in parts on the report.")
+    held = None
+    for _ in range(120):
+        with contextlib.closing(store._connect()) as db:
+            held = db.execute("SELECT id FROM jobs WHERE bot_id=? AND status='queued' AND failure_kind='auto_cap'",
+                              (bot["id"],)).fetchone()
+        if held:
+            break
+        time.sleep(0.5)
+    check(held is not None, "the second automatic turn is held by the per-bot cap")
+    check(wait_text(page, "Automatic work paused", 20000), "the chat says automatic work is paused")
+    shot(page, out, "09-held")
+    send_with_enter(page, "Here is the missing part, finish now.")
+    check(wait_text(page, REPLY, 60000), "your message runs as its own turn and the bot answers")
+    with contextlib.closing(store._connect()) as db:
+        row = db.execute("SELECT status, error FROM jobs WHERE id=?", (held["id"],)).fetchone() if held else None
+        steered = db.execute("SELECT COUNT(*) FROM messages WHERE steer_job_id=?", (held["id"],)).fetchone()[0] if held else 1
+    check(bool(row) and row["status"] == "cancelled" and steered == 0,
+          "the held continuation is superseded, not given your message")
+    shot(page, out, "10-owner-turn")
+    call(base, token, "PUT", "/v1/settings", {"auto_continue": {"per_bot_day": 20}})
+
+
 def resolve_token(args, environ=None) -> str | None:
     """The live-mode API token: --token-file, BOT_OFFICE_TOKEN_FILE, BOT_OFFICE_TOKEN, then the
     deprecated --token (a warning on stderr; it shows in the process list)."""
@@ -339,7 +373,7 @@ def main() -> int:
         else:
             with tempfile.TemporaryDirectory(prefix="bot-office-e2e-") as tmp:
                 base, app, server = start_local(Path(tmp) / "data")
-                for name in (ADA, BEA):
+                for name in (ADA, BEA, CY):
                     call(base, TOKEN, "POST", "/v1/bots", {"name": name, "default_provider": "codex"})
                 unlock(page, base, TOKEN)
                 open_bot(page, ADA)
@@ -347,6 +381,7 @@ def main() -> int:
                 settings_page(page, out, base, TOKEN, write=True)
                 approvals_in_chat(page, out, base, app)
                 bot_to_bot(page, out, base, TOKEN)
+                held_continuation(page, out, base, TOKEN, app)
                 server.should_exit = True
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()

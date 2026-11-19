@@ -4,6 +4,7 @@ import asyncio
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -142,7 +143,13 @@ def test_editing_an_assignment_reply_reruns_it_in_the_assignment(settings):
     run_all(store, scheduler)
     reply_job = book.reply(item.id, "answer one")
     run_all(store, scheduler)
-    wake = book.add_wakeup(bot.id, reply_job, assignment_id=item.id, due_at=now() + timedelta(hours=1))
+    # a wake-up the bot set before the task paused (a bot cannot add one on a paused task)
+    wake_id = str(uuid4())
+    with closing(store._connect()) as db:
+        db.execute("INSERT INTO wakeups (id,bot_id,assignment_id,due_at,note,created_by_job,status,created_at) "
+                   "VALUES (?,?,?,?,'',?,'pending',?)", (wake_id, str(bot.id), str(item.id),
+                   (now() + timedelta(hours=1)).isoformat(), reply_job, now().isoformat()))
+    wake = book._wakeup(wake_id)
     other = book.create(bot.id, {"title": "Other", "start": True})
     run_all(store, scheduler)
     assert book.get(other.id).status == "waiting_on_user"

@@ -844,14 +844,17 @@ class Scheduler:
             path="chat", state="not_done", run=run, automatic=number - 1, chat_only=bot.chat_only,
             question_open=self.store.has_open_question(job.id), approval_pending=self.store.pending_approval(job.id),
             owner_waiting=self.store.user_turn_waiting(bot.id)))
-        self.store.set_auto_decision(job.id, decision.code)
+        # the marker stays "deciding" until the stop line or the queued continuation is written, in
+        # the same transaction, so a crash in between is recovered at start (fail_stale_decisions)
         if not decision.go:
-            self.store.add_message(bot.id, "system", continuation.chat_stop_line(decision), source=job.source)
+            self.store.record_stop_decision(job.id, decision.code, bot.id, continuation.chat_stop_line(decision),
+                                            source=job.source)
             return decision.code
         limit = continuation.chat_limit(settings)  # what the chain really gets ("n of max")
         text = AUTO_CONTINUE_LINE.format(n=number, max=limit)
 
         def mark(db, new_job: Job) -> None:
+            db.execute("UPDATE jobs SET auto_decision=? WHERE id=?", (decision.code, str(job.id)))
             db.execute("UPDATE jobs SET continue_count=?, continued_from=?, auto_kind='chat' WHERE id=?",
                        (number, str(root), str(new_job.id)))
             # the owner sees the working bubble carry on ("continuing, n of max"), not these lines
