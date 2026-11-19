@@ -12,12 +12,13 @@ import io
 import math
 import re
 import struct
+import threading
 import zlib
 from functools import lru_cache
 
 SIZE = 256
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
-MAX_UPLOAD_PIXELS = 24_000_000
+MAX_UPLOAD_PIXELS = 12_000_000
 PRESET_COUNT = 12
 SEED_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 
@@ -48,7 +49,7 @@ class AvatarError(Exception):
 
 
 def valid_seed(seed: str) -> bool:
-    return isinstance(seed, str) and SEED_RE.match(seed) is not None
+    return isinstance(seed, str) and SEED_RE.fullmatch(seed) is not None
 
 
 def default_seed(bot_id, used=()) -> str:
@@ -125,35 +126,49 @@ def _png(rows: list[bytes], size: int) -> bytes:
             + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
-@lru_cache(maxsize=64)
+_RENDER_SLOTS = threading.BoundedSemaphore(2)   # at most two renders or upload decodes at once
+GENERATOR_VERSION = 1                           # part of every ETag: bump it if the drawing changes
+_PRESET_PNGS: dict[str, bytes] = {}             # the 12 defaults are kept for good, whatever other seeds do
+
+
 def render_png(seed: str) -> bytes:
     """The generated avatar for a seed: a SIZE x SIZE RGB PNG (the UI rounds the corners)."""
     if not valid_seed(seed):
         raise ValueError("invalid avatar seed")
-    p = _params(seed)
-    (c1, c2, tint, strength) = p["palette"]
-    if p["dark"]:
-        tint, strength = (0, 0, 0), strength * 0.7
-    ga = math.cos(p["angle"] * 0.5 + 0.6)
-    gb = math.sin(p["angle"] * 0.5 + 0.6)
-    px = 1.0 / SIZE
-    rows: list[bytes] = []
-    for y in range(SIZE):
-        v = (y + 0.5) / SIZE
-        row = bytearray()
-        for x in range(SIZE):
-            u = (x + 0.5) / SIZE
-            t = min(1.0, max(0.0, 0.5 + ((u - 0.5) * ga + (v - 0.5) * gb)))
-            cov = _coverage(p["motif"], u, v, p, px) * strength
-            for ch in range(3):
-                base = c1[ch] + (c2[ch] - c1[ch]) * t
-                row.append(int(base + (tint[ch] - base) * cov + 0.5))
-        rows.append(bytes(row))
-    return _png(rows, SIZE)
+    if seed in PRESET_SEEDS:
+        if seed not in _PRESET_PNGS:
+            _PRESET_PNGS[seed] = _render(seed)
+        return _PRESET_PNGS[seed]
+    return _render(seed)
+
+
+@lru_cache(maxsize=64)
+def _render(seed: str) -> bytes:
+    with _RENDER_SLOTS:
+        p = _params(seed)
+        (c1, c2, tint, strength) = p["palette"]
+        if p["dark"]:
+            tint, strength = (0, 0, 0), strength * 0.7
+        ga = math.cos(p["angle"] * 0.5 + 0.6)
+        gb = math.sin(p["angle"] * 0.5 + 0.6)
+        px = 1.0 / SIZE
+        rows: list[bytes] = []
+        for y in range(SIZE):
+            v = (y + 0.5) / SIZE
+            row = bytearray()
+            for x in range(SIZE):
+                u = (x + 0.5) / SIZE
+                t = min(1.0, max(0.0, 0.5 + ((u - 0.5) * ga + (v - 0.5) * gb)))
+                cov = _coverage(p["motif"], u, v, p, px) * strength
+                for ch in range(3):
+                    base = c1[ch] + (c2[ch] - c1[ch]) * t
+                    row.append(int(base + (tint[ch] - base) * cov + 0.5))
+            rows.append(bytes(row))
+        return _png(rows, SIZE)
 
 
 def etag(data: bytes) -> str:
-    return '"' + hashlib.sha256(data).hexdigest()[:24] + '"'
+    return '"' + hashlib.sha256(bytes([GENERATOR_VERSION]) + data).hexdigest()[:24] + '"'
 
 
 def normalise_upload(data: bytes) -> bytes:
@@ -178,21 +193,28 @@ def normalise_upload(data: bytes) -> bytes:
     except ImportError as exc:  # pragma: no cover - depends on the install
         raise AvatarError(503, "image uploads need the Pillow package on the server") from exc
     try:
-        img = Image.open(io.BytesIO(data), formats=["PNG", "JPEG", "WEBP", "GIF"])
-        width, height = img.size
-        if width < 1 or height < 1 or width * height > MAX_UPLOAD_PIXELS:
-            raise AvatarError(413, "icon image has too many pixels")
-        img.seek(0)
-        img.load()
-        img = ImageOps.exif_transpose(img) or img
-        img = img.convert("RGBA" if "A" in img.getbands() or img.mode == "P" else "RGB")
-        side = min(img.size)
-        left, top = (img.width - side) // 2, (img.height - side) // 2
-        img = img.crop((left, top, left + side, top + side)).resize((SIZE, SIZE), Image.LANCZOS)
-        out = io.BytesIO()
-        img.save(out, format="PNG", optimize=True)
+        with _RENDER_SLOTS:
+            return _square_png(data, Image, ImageOps)
     except AvatarError:
         raise
     except Exception as exc:  # corrupt, truncated, bomb, unsupported: all the same to the caller
         raise AvatarError(415, "icon is not a valid PNG, JPEG or WebP image") from exc
+
+
+def _square_png(data: bytes, Image, ImageOps) -> bytes:
+    img = Image.open(io.BytesIO(data), formats=["PNG", "JPEG", "WEBP", "GIF"])
+    width, height = img.size
+    if width < 1 or height < 1 or width * height > MAX_UPLOAD_PIXELS:
+        raise AvatarError(413, "icon image has too many pixels")
+    img.seek(0)
+    if img.format == "JPEG":
+        img.draft("RGB", (SIZE * 2, SIZE * 2))   # decode a JPEG at reduced size: much less memory
+    img.load()
+    img = ImageOps.exif_transpose(img) or img
+    img = img.convert("RGBA" if "A" in img.getbands() or img.mode == "P" else "RGB")
+    side = min(img.size)
+    left, top = (img.width - side) // 2, (img.height - side) // 2
+    img = img.crop((left, top, left + side, top + side)).resize((SIZE, SIZE), Image.LANCZOS)
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
     return out.getvalue()

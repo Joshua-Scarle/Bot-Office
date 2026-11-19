@@ -564,6 +564,28 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     lay = layout()
     check(len(lay["sections"]) == 1 and ids[names[0]] in lay["ungrouped"]["bot_ids"], "confirming deletes the section and its bots go to Ungrouped")
     check({b["id"] for b in call(base, token, "GET", "/v1/bots")} >= set(ids.values()), "no bot was deleted")
+    # naming a section while a search shows nothing still works (the search is cleared), and a bot can be
+    # dropped into an empty section's body, not only onto its header
+    page.fill("#bot-search", "no-such-bot-zzz")
+    page.click("#new-section")
+    check(page.locator("#bot-list .sec-rename").count() == 1 and page.locator("#bot-search").input_value() == "", "starting a section clears a search that matched nothing")
+    page.fill("#bot-list .sec-rename", "Spare")
+    page.press("#bot-list .sec-rename", "Enter")
+    page.wait_for_function("() => [...document.querySelectorAll('.sec-name')].some((e) => e.textContent === 'Spare')")
+    spare = next(sec["id"] for sec in layout()["sections"] if sec["name"] == "Spare")
+    row(names[1]).drag_to(page.locator(f'.sec[data-section="{spare}"] .sec-empty'))
+    page.wait_for_timeout(500)
+    check(next(sec for sec in layout()["sections"] if sec["id"] == spare)["bot_ids"] == [ids[names[1]]], "dropping a bot into an empty section's body moves it there")
+    page.click("#new-section")
+    page.fill("#bot-list .sec-rename", "Typed then clicked away")
+    page.locator("#bot-list .bot-item").first.click()
+    page.wait_for_timeout(500)
+    check(any(sec["name"] == "Typed then clicked away" for sec in layout()["sections"]), "clicking away from the name box keeps what was typed")
+    for sec in layout()["sections"]:
+        if sec["name"] in ("Spare", "Typed then clicked away"):
+            call(base, token, "DELETE", f"/v1/sections/{sec['id']}")
+    page.reload()
+    page.wait_for_selector("#bot-list .bot-item", timeout=15000)
     # avatars: upload, generate, preset, emoji fallback
     from botoffice import avatars as av
     open_bot(page, names[0])

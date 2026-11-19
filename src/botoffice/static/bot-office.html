@@ -59,7 +59,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .bot-item .name { font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-item .sub { font-size: 12px; line-height: 16px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bot-item .meta { min-width: 0; }
-.bot-item:not(.active) .sub.counts { display: none; }
+.bot-item:not(.active) .sub.counts { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }   /* hidden visually, still read by screen readers */
 .av-wrap { position: relative; width: 36px; height: 36px; }
 .av-wrap .dot { position: absolute; right: -2px; bottom: -2px; width: 11px; height: 11px; border: 2px solid var(--side-bg, #121419); box-sizing: border-box; }
 .bot-item.active .av-wrap .dot { border-color: var(--raised); }
@@ -76,6 +76,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .row-menu { position: absolute; right: 6px; top: 13px; background: var(--raised); }
 .bot-row:hover .row-menu, .bot-row:focus-within .row-menu, .sec-head:hover .sec-menu, .sec-head:focus-within .sec-menu { opacity: 1; }
 .bot-row:hover .unread, .bot-row:focus-within .unread { visibility: hidden; }
+@media (hover: none) { .row-menu, .sec-menu { opacity: 1; } .bot-row:hover .unread { visibility: visible; } }
 .row-menu:hover, .sec-menu:hover { color: var(--text); background: rgba(255,255,255,.08); }
 .row-menu:focus-visible, .sec-menu:focus-visible, .sec-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; opacity: 1; }
 /* section headers: small uppercase label, chevron left, count right, sticky while the list scrolls */
@@ -842,13 +843,14 @@ function sectionOfBot(lay, botId) {
 }
 
 function renderBots() {
-  if (state.drag || state.renaming) { state.sidebarDirty = true; return; }   // never replace a row mid-drag or mid-rename
+  if (state.drag || state.renaming || state.moving) { state.sidebarDirty = true; return; }   // never replace a row mid-drag or mid-rename
   renderSidebar();
 }
 function renderSidebar() {
   state.sidebarDirty = false;
   const list = $("bot-list");
-  if (!state.bots.length) {
+  const hasSections = Boolean(state.sections && state.sections.sections.length) || state.draftSection;
+  if (!state.bots.length && !hasSections) {
     list.replaceChildren(el("p", "muted pad", "No bots yet. Create one to start."));
     return;
   }
@@ -869,7 +871,7 @@ function renderSidebar() {
   const ungShown = lay.ungrouped.bots.filter(match);
   shown += ungShown.length;
   if (!filtering || ungShown.length) nodes.push(sectionNode(lay, lay.ungrouped, ungShown, filtering, !grouped));
-  if (!shown) {
+  if (!shown && !hasSections) {
     const empty = el("p", "muted pad", `No bots match "${query}".`);
     empty.id = "bot-empty"; empty.setAttribute("role", "status");
     list.replaceChildren(empty);
@@ -878,6 +880,7 @@ function renderSidebar() {
   list.replaceChildren(...nodes);
   const editing = list.querySelector(".sec-rename");
   if (editing) { editing.focus(); editing.select(); }
+  else if (state.renaming) { state.renaming = null; state.draftSection = false; }   // never leave the sidebar waiting on an input that is not there
 }
 
 function sectionNode(lay, sec, visible, filtering, headless) {
@@ -902,7 +905,9 @@ function sectionNode(lay, sec, visible, filtering, headless) {
   });
   wrap.addEventListener("drop", (event) => {
     if (!state.drag || state.drag.type !== "bot" || event.target.closest(".bot-row, .sec-head")) return;
-    event.preventDefault(); finishDrop(() => moveBot(state.drag.id, sec.id, 1e6));
+    event.preventDefault();
+    const dragId = state.drag.id;
+    finishDrop(() => moveBot(dragId, sec.id, 1e6));
   });
   return wrap;
 }
@@ -929,7 +934,7 @@ function sectionHead(lay, sec, open, filtering) {
   if (!isUng) {
     const menu = el("button", "sec-menu", "⋯");
     menu.type = "button"; menu.setAttribute("aria-haspopup", "menu"); menu.setAttribute("aria-label", "Options for section " + sec.name);
-    menu.onclick = () => openMenu(menu, sectionMenuItems(lay, sec));
+    menu.onclick = () => openMenu(menu, sectionMenuItems(sec.id));
     head.append(menu);
     head.draggable = !filtering;
     head.addEventListener("dragstart", (event) => startDrag(event, { type: "section", id: sec.id }, head));
@@ -967,7 +972,7 @@ function renameInput(value, id) {
     if (event.key === "Enter") { event.preventDefault(); finish(true); }
     else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); finish(false); }
   });
-  input.addEventListener("blur", () => finish(false));
+  input.addEventListener("blur", () => finish(true));   // clicking away keeps what was typed
   return input;
 }
 function draftSectionNode() {
@@ -985,17 +990,19 @@ async function saveSectionName(id, name, previous) {
   } catch (err) { sidebarFail(err, id === null ? "Could not create the section" : "Could not rename the section"); }
   renderSidebar();
 }
+function clearSearchForEdit() { const box = $("bot-search"); if (box && box.value) box.value = ""; }
 function startCreateSection() {
+  clearSearchForEdit();
   state.draftSection = true; state.renaming = { id: null };
   renderSidebar();
   const input = $("bot-list").querySelector(".sec-rename");
   if (input) input.scrollIntoView({ block: "nearest" });
 }
-function startRename(sec) { state.renaming = { id: sec.id }; renderSidebar(); }
+function startRename(sec) { clearSearchForEdit(); state.renaming = { id: sec.id }; renderSidebar(); }
 $("new-section").onclick = startCreateSection;
 
 async function toggleSection(sec) {
-  if (!state.sections) return;
+  if (!state.sections || $("bot-search").value.trim()) return;   // a search shows every match, whatever the state
   const next = !sec.collapsed;
   const target = sec.id === "ungrouped" ? state.sections.ungrouped : state.sections.sections.find((s) => s.id === sec.id);
   if (target) target.collapsed = next;
@@ -1030,18 +1037,21 @@ function confirmDeleteSection(sec) {
 }
 
 async function moveBot(botId, sectionId, index) {
+  state.moving = true;
   try {
     state.sections = await api("/v1/bots/" + botId + "/section", { method: "PUT", body: JSON.stringify({ section_id: sectionId === "ungrouped" ? null : sectionId, index: Math.min(Math.max(0, Math.floor(index)), 100000) }) });
     const bot = state.bots.find((b) => b.id === botId);
     const sec = sectionOfBot(sidebarLayout(), botId);
     announce((bot ? bot.name : "Bot") + " moved to " + (sec ? sec.name : "Ungrouped") + ", position " + (sec ? sec.bots.findIndex((b) => b.id === botId) + 1 : 1));
   } catch (err) { sidebarFail(err, "Could not move the bot"); }
+  state.moving = false;
   renderBots();
   focusSidebar('.bot-row[data-bot="' + botId + '"] .bot-item');
 }
 function moveBotStep(lay, bot, delta) {
   const sec = sectionOfBot(lay, bot.id);
   if (!sec) return;
+  if ($("bot-search").value.trim()) { announce("Clear the search to reorder bots"); return; }
   const at = sec.bots.findIndex((b) => b.id === bot.id), to = at + delta;
   if (to < 0 || to >= sec.bots.length) { announce(bot.name + " is already " + (delta < 0 ? "first" : "last") + " in " + sec.name); return; }
   moveBot(bot.id, sec.id, to);
@@ -1050,11 +1060,13 @@ async function placeSection(lay, id, targetId, after) {
   const ids = lay.sections.map((s) => s.id).filter((s) => s !== id);
   const at = targetId === "ungrouped" ? ids.length : ids.indexOf(targetId) + (after ? 1 : 0);
   ids.splice(Math.max(0, at), 0, id);
+  state.moving = true;
   try {
     state.sections = await api("/v1/sections/order", { method: "PUT", body: JSON.stringify({ ids }) });
     const sec = state.sections.sections.find((s) => s.id === id);
     announce("Section " + (sec ? sec.name : "") + " moved to position " + (ids.indexOf(id) + 1));
   } catch (err) { sidebarFail(err, "Could not reorder the sections"); }
+  state.moving = false;
   renderBots();
   focusSidebar('.sec-head[data-section="' + id + '"] .sec-toggle');
 }
@@ -1108,10 +1120,10 @@ function botRow(lay, sec, bot, filtering) {
   item.oncontextmenu = (event) => { event.preventDefault(); markUnread(bot.id); };
   const menu = el("button", "row-menu", "⋯");
   menu.type = "button"; menu.setAttribute("aria-haspopup", "menu"); menu.setAttribute("aria-label", "Options for " + bot.name);
-  menu.onclick = () => openMenu(menu, botMenuItems(lay, sec, bot));
+  menu.onclick = () => openMenu(menu, botMenuItems(bot.id));
   item.addEventListener("keydown", (event) => {
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) { event.preventDefault(); moveBotStep(lay, bot, event.key === "ArrowUp" ? -1 : 1); }
-    else if ((event.key === "m" || event.key === "M") && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); openMenu(menu, botMenuItems(lay, sec, bot)); }
+    else if ((event.key === "m" || event.key === "M") && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); openMenu(menu, botMenuItems(bot.id)); }
   });
   row.append(item, menu);
   row.draggable = !filtering;
@@ -1176,26 +1188,32 @@ function openMenu(anchor, items) {
   const first = menu.querySelector('button[role="menuitem"]:not([disabled])');
   if (first) first.focus();
 }
-function botMenuItems(lay, sec, bot) {
-  const at = sec.bots.findIndex((b) => b.id === bot.id);
+// The menu items look the layout up when they run, so a poll that re-rendered the list meanwhile cannot make them stale
+function botMenuItems(botId) {
+  const lay = sidebarLayout(), sec = sectionOfBot(lay, botId), bot = state.bots.find((b) => b.id === botId);
+  if (!sec || !bot) return [];
+  const at = sec.bots.findIndex((b) => b.id === botId), filtering = Boolean($("bot-search").value.trim());
   const items = [{ label: "Move to" }];
   for (const target of [...lay.sections, lay.ungrouped]) {
     if (target.id === sec.id) continue;
-    items.push({ text: target.name, run: () => moveBot(bot.id, target.id, 1e6) });
+    items.push({ text: target.name, run: () => moveBot(botId, target.id, 1e6) });
   }
   if (items.length === 1) items.push({ text: "Create a section first (+ New section)", run: () => {}, disabled: true });
   items.push({ label: "Order" },
-    { text: "Move up", disabled: at <= 0, run: () => moveBotStep(lay, bot, -1) },
-    { text: "Move down", disabled: at < 0 || at >= sec.bots.length - 1, run: () => moveBotStep(lay, bot, 1) });
+    { text: "Move up", disabled: filtering || at <= 0, run: () => moveBotStep(sidebarLayout(), bot, -1) },
+    { text: "Move down", disabled: filtering || at < 0 || at >= sec.bots.length - 1, run: () => moveBotStep(sidebarLayout(), bot, 1) });
   return items;
 }
-function sectionMenuItems(lay, sec) {
-  const at = lay.sections.findIndex((s) => s.id === sec.id);
+function sectionMenuItems(sectionId) {
+  const lay = sidebarLayout(), sec = lay.sections.find((s) => s.id === sectionId);
+  if (!sec) return [];
+  const at = lay.sections.findIndex((s) => s.id === sectionId), filtering = Boolean($("bot-search").value.trim());
+  const fresh = () => sidebarLayout().sections.find((s) => s.id === sectionId);
   return [
-    { text: "Rename", run: () => startRename(sec) },
-    { text: "Move up", disabled: at <= 0, run: () => moveSectionStep(lay, sec, -1) },
-    { text: "Move down", disabled: at < 0 || at >= lay.sections.length - 1, run: () => moveSectionStep(lay, sec, 1) },
-    { text: "Delete…", danger: true, run: () => confirmDeleteSection(sec) },
+    { text: "Rename", run: () => { const now = fresh(); if (now) startRename(now); } },
+    { text: "Move up", disabled: filtering || at <= 0, run: () => { const now = fresh(); if (now) moveSectionStep(sidebarLayout(), now, -1); } },
+    { text: "Move down", disabled: filtering || at < 0 || at >= lay.sections.length - 1, run: () => { const now = fresh(); if (now) moveSectionStep(sidebarLayout(), now, 1); } },
+    { text: "Delete…", danger: true, run: () => { const now = fresh(); if (now) confirmDeleteSection(now); } },
   ];
 }
 

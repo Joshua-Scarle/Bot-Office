@@ -183,7 +183,7 @@ def test_icon_caching_etag_and_versioned_urls(client):
     again = client.get(f"/v1/bots/{bot['id']}/icon", headers={**H, "If-None-Match": r.headers["etag"]})
     assert again.status_code == 304 and not again.content
     v = client.get(f"/v1/bots/{bot['id']}/icon?v=1", headers=H)
-    assert "immutable" in v.headers["cache-control"]
+    assert "max-age=86400" in v.headers["cache-control"]
     assert client.get(f"/v1/bots/{bot['id']}/icon").status_code == 401
 
 
@@ -298,3 +298,22 @@ def test_default_avatars_spread_over_the_presets():
         used.append(avatars.default_seed(f"bot-{i}", used))
     assert sorted(used) == sorted(avatars.PRESET_SEEDS)          # twelve bots, twelve different avatars
     assert avatars.default_seed("x", used) == avatars.default_seed("x", used)
+
+
+def test_seed_with_a_trailing_newline_is_refused(client):
+    assert not avatars.valid_seed("abc\n")
+    bot = mk(client, "NL")
+    assert client.post(f"/v1/bots/{bot['id']}/icon/generate", headers=H, json={"seed": "abc\n"}).status_code == 400
+
+
+def test_presets_are_kept_and_etag_names_the_generator():
+    avatars.render_png("preset-1")
+    assert "preset-1" in avatars._PRESET_PNGS
+    assert avatars.etag(b"x") == avatars.etag(b"x") and avatars.etag(b"x") != avatars.etag(b"y")
+
+
+def test_jpeg_upload_uses_reduced_decode_and_still_yields_256(client):
+    bot = mk(client, "Big")
+    r = client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=image_bytes("JPEG", (3000, 2000)))
+    assert r.status_code == 200
+    assert Image.open(io.BytesIO(client.get(f"/v1/bots/{bot['id']}/icon", headers=H).content)).size == (256, 256)

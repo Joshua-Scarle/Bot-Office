@@ -137,7 +137,7 @@ class Sections:
             return section_id
 
         section_id = self._write(run)
-        return next(s for s in self.layout()["sections"] if s["id"] == section_id)
+        return self._found(section_id)
 
     def update(self, section_id: str, name: object = None, collapsed: bool | None = None) -> dict:
         def run(db):
@@ -157,10 +157,15 @@ class Sections:
                 db.execute("UPDATE bot_sections SET collapsed=? WHERE id=?", (1 if collapsed else 0, section_id))
 
         self._write(run)
-        layout = self.layout()
         if section_id == UNGROUPED_ALIAS:
-            return {"id": UNGROUPED_ALIAS, "name": "Ungrouped", **layout["ungrouped"]}
-        return next(s for s in layout["sections"] if s["id"] == section_id)
+            return {"id": UNGROUPED_ALIAS, "name": "Ungrouped", **self.layout()["ungrouped"]}
+        return self._found(section_id)
+
+    def _found(self, section_id: str) -> dict:
+        found = next((s for s in self.layout()["sections"] if s["id"] == section_id), None)
+        if found is None:   # removed by another request between the write and this read
+            raise SectionError(404, "section not found")
+        return found
 
     def delete(self, section_id: str) -> list[str]:
         """Remove a section; its bots go to the top of Ungrouped, in their order. Returns those bot ids."""

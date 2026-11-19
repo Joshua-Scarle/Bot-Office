@@ -1138,7 +1138,7 @@ def create_app(
         headers = {
             "ETag": tag,
             "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, max-age=31536000, immutable" if versioned else "private, no-cache",
+            "Cache-Control": "private, max-age=86400" if versioned else "private, no-cache",
             "Content-Security-Policy": "default-src 'none'; sandbox",
         }
         if request.headers.get("if-none-match") == tag:
@@ -1183,7 +1183,8 @@ def create_app(
         safefs.mkdir(memory.bot_dir(bot_id), isolation.shared_dir_mode())
         safefs.write_bytes(_icon_path(bot_id), png, 0o600)
         updated = store.update_bot(bot_id, icon_image="image/png")
-        if updated is None:
+        if updated is None:   # deleted while the image was being processed
+            safefs.unlink(_icon_path(bot_id))
             raise HTTPException(status_code=404, detail="bot not found")
         return updated
 
@@ -1193,7 +1194,8 @@ def create_app(
         _bot(bot_id)
         safefs.unlink(_icon_path(bot_id))
         updated = store.update_bot(bot_id, icon_image=None, avatar_seed=None)
-        assert updated is not None
+        if updated is None:
+            raise HTTPException(status_code=404, detail="bot not found")
         return updated
 
     @app.post("/v1/bots/{bot_id}/icon/generate", response_model=Bot, dependencies=[Depends(auth)])
@@ -1206,7 +1208,8 @@ def create_app(
         await asyncio.to_thread(avatars.render_png, seed)
         safefs.unlink(_icon_path(bot_id))
         updated = store.update_bot(bot_id, icon_image=None, avatar_seed=seed)
-        assert updated is not None
+        if updated is None:
+            raise HTTPException(status_code=404, detail="bot not found")
         return updated
 
     @app.get("/v1/avatar-presets", dependencies=[Depends(auth)])
