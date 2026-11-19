@@ -792,7 +792,7 @@ function liveStatus(view, now) {
   const at = typeof now === "number" ? now : Date.now();
   if (view.status === "queued") {
     if (view.notBefore && new Date(view.notBefore).getTime() > at)
-      return "Waiting to retry at " + new Date(view.notBefore).toLocaleTimeString([], { timeStyle: "short", timeZoneName: "short" });
+      return "Waiting to retry at " + new Date(view.notBefore).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
     return "Waiting to start";
   }
   if (view.phase === "thinking") return "Thinking";
@@ -1056,7 +1056,7 @@ function jobRow(job, view, current) {
   box.append(head, el("div", "drawer-meta", meta.join(" · ")));
   if (current && view) box.append(el("div", "drawer-meta", "Now: " + liveStatus(view)));
   if (job.not_before && new Date(job.not_before) > new Date())
-    box.append(el("div", "drawer-meta", "Retry at " + new Date(job.not_before).toLocaleTimeString([], { timeStyle: "short", timeZoneName: "short" })));
+    box.append(el("div", "drawer-meta", "Retry at " + new Date(job.not_before).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZoneName: "short" })));
   if (job.error) box.append(el("div", "drawer-meta bad", clip(job.error, 300)));
   if (view) box.append(stepsDetails(view));
   box.append(logDetails(job.id));
