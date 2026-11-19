@@ -34,10 +34,10 @@ def test_set_character_stores_seed_and_replaces_pattern(client):
     client.post(f"/v1/bots/{bot['id']}/icon/generate", headers=H, json={"seed": "preset-2"})
     r = client.put(f"/v1/bots/{bot['id']}/avatar/character", headers=H, json={"shape": "star", "color": "violet"})
     assert r.status_code == 200
-    assert r.json()["avatar"] == "character" and r.json()["avatar_seed"] == "char:star:violet"
+    assert r.json()["avatar"] == "character" and r.json()["avatar_seed"] == "char|star|violet"
     assert client.get(f"/v1/bots/{bot['id']}/icon", headers=H).status_code == 404
     again = client.get(f"/v1/bots/{bot['id']}", headers=H).json()
-    assert again["avatar_seed"] == "char:star:violet" and again["icon"] == bot["icon"]
+    assert again["avatar_seed"] == "char|star|violet" and again["icon"] == bot["icon"]
 
 
 @pytest.mark.parametrize("body", [{"shape": "star", "color": "mauve"}, {"shape": "dragon", "color": "blue"},
@@ -56,10 +56,11 @@ def test_character_needs_auth_and_a_real_bot(client):
     assert client.put("/v1/bots/00000000-0000-0000-0000-000000000000/avatar/character", headers=H, json=body).status_code == 404
 
 
-def test_generate_and_preview_refuse_the_character_prefix(client):
+def test_generate_and_preview_refuse_the_character_marker(client):
     bot = mk(client)
-    assert client.post(f"/v1/bots/{bot['id']}/icon/generate", headers=H, json={"seed": "char:star:blue"}).status_code == 400
-    assert client.get("/v1/avatar-preview?seed=char:star:blue", headers=H).status_code == 400
+    assert client.post(f"/v1/bots/{bot['id']}/icon/generate", headers=H, json={"seed": "char|star|blue"}).status_code == 400
+    assert client.post(f"/v1/bots/{bot['id']}/icon/generate", headers=H, json={"seed": "char:star:blue"}).status_code == 200   # plain text, a normal seed
+    assert client.get("/v1/avatar-preview?seed=char%7Cstar%7Cblue", headers=H).status_code == 400
 
 
 def test_upload_then_character_and_back_to_emoji(client):
@@ -94,9 +95,9 @@ def test_default_characters_are_distinct_and_stable():
     assert avatars.default_character("x", used) == avatars.default_character("x", used)
 
 
-def test_old_code_view_of_a_character_seed_is_not_an_image(client):
-    # a rolled-back server serves /icon by seed; a char: seed must not be a valid generator seed there either
-    assert avatars.valid_seed("char:star:blue")      # legal text, so the 0.12.0 column accepts it
+def test_rollback_safe_marker_is_not_a_generator_seed(client):
+    # 0.12.1 serves /icon only for seeds matching SEED_RE and otherwise 404s, so the page shows the emoji
+    assert not avatars.valid_seed("char|star|blue")
     bot = mk(client)
     client.put(f"/v1/bots/{bot['id']}/avatar/character", headers=H, json={"shape": "star", "color": "blue"})
     assert client.get(f"/v1/bots/{bot['id']}/icon", headers=H).status_code == 404
@@ -154,11 +155,13 @@ def test_character_parsing_accepts_only_known_names():
 const assert = require("assert");
 const state = {};
 ''' + code + '''
-assert.deepEqual(parseChar("char:star:violet"), {shape: "star", color: "violet"});
+assert.deepEqual(parseChar("char|star|violet"), {shape: "star", color: "violet"});
 assert.deepEqual(parseChar("pill:teal"), {shape: "pill", color: "teal"});
-for (const bad of ["char:star:mauve", "char:dragon:blue", "preset-3", "", null, undefined, "char:star", "char:a:b:c", "char:Star:blue"]) assert.equal(parseChar(bad), null, String(bad));
-assert.equal(charOf({avatar_seed: "char:star:blue"}).shape, "star");
-assert.equal(charOf({avatar_seed: "char:star:blue", icon_image: "image/png"}), null);   // an upload wins
+for (const bad of ["char|star|mauve", "char|dragon|blue", "preset-3", "", null, undefined, "char|star", "char|a|b|c", "char|Star|blue", "char:star:blue"]) assert.equal(parseChar(bad), null, String(bad));
+assert.equal(charOf({avatar_seed: "char|star|blue"}).shape, "star");
+assert.equal(charOf({avatar_seed: "char:star:blue"}), null);                              // not the stored form
+assert.equal(charSeed({shape: "star", color: "blue"}), "char|star|blue");
+assert.equal(charOf({avatar_seed: "char|star|blue", icon_image: "image/png"}), null);   // an upload wins
 assert.equal(charOf({avatar_seed: "preset-1"}), null);
 assert.equal(charOf({}), null);
 ''')

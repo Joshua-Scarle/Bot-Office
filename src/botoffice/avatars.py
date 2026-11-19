@@ -42,9 +42,10 @@ PALETTES = (
 MOTIFS = 6
 PRESET_SEEDS = tuple(f"preset-{n}" for n in range(PRESET_COUNT))
 
-# 0.12.2 character avatars: drawn in the browser as inline SVG, stored in avatar_seed as "char:<shape>:<color>".
-# The names are the contract (the UI holds the drawings; a test keeps both lists equal).
-CHAR_PREFIX = "char:"
+# 0.12.2 character avatars: drawn in the browser as inline SVG, stored in avatar_seed as "char|<shape>|<color>".
+# "|" is not allowed in a generator seed (SEED_RE), so 0.12.1 reads such a value as "no usable image" and shows
+# the emoji after a rollback. The names are the contract (the UI holds the drawings; a test keeps both lists equal).
+CHAR_PREFIX = "char|"
 CHAR_SHAPES = ("square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond")
 CHAR_COLORS = ("blue", "violet", "pink", "red", "orange", "yellow", "green", "teal", "cyan", "slate")
 CHAR_EXPRESSIONS = ("idle", "working", "waiting", "done", "error", "sleeping")
@@ -62,9 +63,9 @@ def valid_seed(seed: str) -> bool:
 
 
 def character_seed(shape: str, color: str) -> str | None:
-    """``char:<shape>:<color>`` for a known shape and color, else None."""
+    """``char|<shape>|<color>`` for a known shape and color, else None."""
     if shape in CHAR_SHAPES and color in CHAR_COLORS:
-        return f"{CHAR_PREFIX}{shape}:{color}"
+        return f"{CHAR_PREFIX}{shape}|{color}"
     return None
 
 

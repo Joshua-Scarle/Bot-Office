@@ -1180,7 +1180,7 @@ def create_app(
                 data = None
             if data is not None:
                 return _png_response(request, data, bot.icon_image, v is not None)
-        if bot.avatar_seed and avatars.valid_seed(bot.avatar_seed) and not avatars.is_character(bot.avatar_seed):
+        if bot.avatar_seed and avatars.valid_seed(bot.avatar_seed):
             data = await avatars.run(avatars.render_png, bot.avatar_seed)
             return _png_response(request, data, "image/png", v is not None)
         raise HTTPException(status_code=404, detail="no icon image")
@@ -1226,8 +1226,8 @@ def create_app(
         """Give the bot a generated avatar (a given seed, e.g. a preset, or a fresh random one). Replaces an upload."""
         _bot(bot_id)
         seed = (body.seed if body else None) or secrets.token_hex(6)
-        if not avatars.valid_seed(seed) or avatars.is_character(seed):
-            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : - (and not start with char:)")
+        if not avatars.valid_seed(seed):
+            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : - ")
         await avatars.run(avatars.render_png, seed)
         safefs.unlink(_icon_path(bot_id))
         updated = store.update_bot(bot_id, icon_image=None, avatar_seed=seed)
@@ -1260,8 +1260,8 @@ def create_app(
 
     @app.get("/v1/avatar-preview", dependencies=[Depends(auth)])
     async def avatar_preview(request: Request, seed: str) -> Response:
-        if not avatars.valid_seed(seed) or avatars.is_character(seed):
-            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : - (and not start with char:)")
+        if not avatars.valid_seed(seed):
+            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : - ")
         data = await avatars.run(avatars.render_png, seed)
         return _png_response(request, data, "image/png", True)
 

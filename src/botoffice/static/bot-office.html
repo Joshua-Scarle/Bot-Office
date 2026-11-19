@@ -609,7 +609,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </div>
     <div class="kind-panel" data-panel="upload" hidden>
       <span class="file-btn"><button type="button" tabindex="-1">Upload image…</button><input id="f-image" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Upload icon image"></span>
-      <p class="hint">PNG, JPEG or WebP, up to 2 MB; it is cropped square and resized to 256 px. It shows with a small status dot.</p>
+      <p class="hint">PNG, JPEG or WebP, up to 2 MB; it is cropped square and resized to 256 px. It shows with a small status dot. Nothing changes until you choose a file.</p>
     </div>
     <div class="kind-panel" data-panel="pattern" hidden>
       <div id="f-presets" class="preset-grid" role="group" aria-label="Default avatars"></div>
@@ -827,7 +827,7 @@ async function fetchChoices() {
 
 /* ---- icons ---- */
 // 0.12.0: an uploaded image or a generated avatar (avatar_seed) is served by /icon; otherwise the emoji shows
-function hasImage(bot) { return Boolean(bot.icon_image || (bot.avatar_seed && !String(bot.avatar_seed).startsWith("char:"))); }
+function hasImage(bot) { return Boolean(bot.icon_image || (bot.avatar_seed && !String(bot.avatar_seed).startsWith("char|"))); }
 async function iconUrl(bot) {
   if (!hasImage(bot)) return null;
   const key = bot.id + "|" + bot.updated_at;
@@ -923,12 +923,14 @@ function charSvg(shape, color, expr, label) {
   svg.append(charBody(shape, CHAR_COLORS[color] || CHAR_COLORS.blue), charFace(shape, expr));
   return svg;
 }
-// "char:<shape>:<color>" (the bot's avatar_seed) or "<shape>:<color>" -> {shape, color}; null for anything else
+// "char|<shape>|<color>" (the bot's avatar_seed) or the picker's "<shape>:<color>" -> {shape, color}; null for anything else
 function parseChar(seed) {
-  const m = /^(?:char:)?([a-z]+):([a-z]+)$/.exec(String(seed || ""));
-  return m && CHAR_SHAPES.includes(m[1]) && m[2] in CHAR_COLORS ? {shape: m[1], color: m[2]} : null;
+  const m = /^(?:char\|([a-z]+)\|([a-z]+)|([a-z]+):([a-z]+))$/.exec(String(seed || ""));
+  const shape = m && (m[1] || m[3]), color = m && (m[2] || m[4]);
+  return m && CHAR_SHAPES.includes(shape) && color in CHAR_COLORS ? {shape, color} : null;
 }
-function charOf(bot) { return bot && !bot.icon_image && String(bot.avatar_seed || "").startsWith("char:") ? parseChar(bot.avatar_seed) : null; }
+function charSeed(ch) { return "char|" + ch.shape + "|" + ch.color; }
+function charOf(bot) { return bot && !bot.icon_image && String(bot.avatar_seed || "").startsWith("char|") ? parseChar(bot.avatar_seed) : null; }
 // status the server already reports -> expression; "done" is the 20 s after a working/queued bot went idle
 function botExpression(bot) {
   const status = bot && bot.status;
@@ -947,10 +949,16 @@ function noteStatuses(prev, next) {
     if ((before === "working" || before === "queued") && bot.status === "idle") { state.doneUntil.set(bot.id, Date.now() + DONE_MS); done = true; }
     else if (bot.status !== "idle") state.doneUntil.delete(bot.id);
   }
-  if (done) {
-    clearTimeout(state.doneTimer);
-    state.doneTimer = setTimeout(() => { renderBots(); renderHeader(); }, DONE_MS + 250);
-  }
+  if (done) scheduleDoneRefresh();
+}
+// one timer, set for the earliest "done" window still open; it redraws and arms itself for the next one
+function scheduleDoneRefresh() {
+  clearTimeout(state.doneTimer);
+  const now = Date.now();
+  for (const [id, until] of state.doneUntil) if (until <= now) state.doneUntil.delete(id);
+  if (!state.doneUntil.size) return;
+  const next = Math.min(...state.doneUntil.values());
+  state.doneTimer = setTimeout(() => { renderBots(); renderHeader(); scheduleDoneRefresh(); }, next - now + 250);
 }
 // the badge for emoji, uploaded and pattern avatars; a character shows its status in its face instead
 function setDot(dot, bot) {
@@ -966,7 +974,7 @@ function fillAvatar(node, bot, override) {
   const ch = override ? parseChar(override.char) : charOf(bot);
   node.classList.toggle("is-char", Boolean(ch));
   if (ch && !(override && override.url)) {
-    const expr = botExpression(bot);
+    const expr = (override && override.expr) || botExpression(bot);
     node.append(charSvg(ch.shape, ch.color, expr, (bot.name || "Bot") + ": " + EXPRESSION_LABEL[expr]));
     return;
   }
@@ -1703,7 +1711,11 @@ function accentColor(name) {
   for (const c of name || "") h = (h * 31 + c.charCodeAt(0)) % 360;
   return "hsl(" + h + " 70% 72%)";
 }
-function smallAvatar(bot) { const av = el("span", "avatar xs"); fillAvatar(av, bot); return av; }
+// views drawn once (the empty chat, bot-to-bot rows) show a character's calm idle face, not a state that would go stale
+function staticAvatar(node, bot) {
+  if (charOf(bot)) fillAvatar(node, bot, { url: null, icon: bot.icon, char: bot.avatar_seed, expr: "idle" }); else fillAvatar(node, bot);
+}
+function smallAvatar(bot) { const av = el("span", "avatar xs"); staticAvatar(av, bot); return av; }
 function agentGroupRow(group, bot) {
   const first = group.items[0];
   const wrap = el("div", "agent-group" + (first.archived_at ? " archived" : ""));
@@ -2671,7 +2683,7 @@ async function loadMessages() {
   if (!messages.length) {
     const box2 = el("div", "empty");
     const av = el("div", "avatar");
-    fillAvatar(av, bot);
+    staticAvatar(av, bot);
     box2.append(av, el("p", "", "Say hello to " + bot.name + "."));
     nodes.push(box2);
   }
@@ -3699,12 +3711,12 @@ function chooseKind(kind) {
     clearPendingImage(); $("f-image").value = ""; state.pendingSeed = null; state.pendingChar = null;
     state.removeImage = Boolean(!state.editing || state.editing.avatar !== "emoji");
   } else if (kind === "character" && !state.pendingChar && !(keep && charOf(state.editing))) {
-    pickChar(parseChar(state.editing && state.editing.avatar_seed) ? state.editing.avatar_seed : "square:blue");
+    pickChar(charOf(state.editing) ? state.editing.avatar_seed : "square:blue");
     return;
   } else if (kind === "character" && !state.pendingChar) {
     clearPendingImage(); state.pendingSeed = null; state.removeImage = false;
   } else if (kind === "pattern" && !state.pendingSeed && !(keep && state.editing.avatar === "generated")) {
-    pickSeed("preset-" + Math.floor(Math.random() * 12));
+    pickSeed(state.editing && state.editing.avatar === "generated" ? state.editing.avatar_seed : "preset-" + Math.floor(Math.random() * 12));
     return;
   }
   updateIconPreview();
@@ -3932,9 +3944,10 @@ $("bot-form").onsubmit = async (event) => {
     let saved = bot
       ? await api("/v1/bots/" + bot.id, { method: "PATCH", body: JSON.stringify(body) })
       : await api("/v1/bots", { method: "POST", body: JSON.stringify(body) });
+    if (!bot) { state.editing = saved; $("dialog-title").textContent = "Bot settings"; }   // a failed avatar step must not make a retry create a second bot
     if (state.pendingImage) {
       saved = await api("/v1/bots/" + saved.id + "/icon", { method: "PUT", body: state.pendingImage.file });
-    } else if (state.pendingChar && !(saved.avatar === "character" && saved.avatar_seed === "char:" + state.pendingChar)) {
+    } else if (state.pendingChar && !(saved.avatar === "character" && saved.avatar_seed === charSeed(parseChar(state.pendingChar)))) {
       const ch = parseChar(state.pendingChar);
       saved = await api("/v1/bots/" + saved.id + "/avatar/character", { method: "PUT", body: JSON.stringify(ch) });
     } else if (state.pendingSeed && !(saved.avatar === "generated" && saved.avatar_seed === state.pendingSeed)) {

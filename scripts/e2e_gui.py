@@ -468,7 +468,7 @@ def characters(page, out: Path, base: str, token: str, bot_id: str, name: str, s
     shot(page, out, "chars-picker")
     page.click("#dialog-save")
     page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)
-    check(state()["avatar"] == "character" and state()["avatar_seed"] == "char:star:violet", "the character is saved")
+    check(state()["avatar"] == "character" and state()["avatar_seed"] == "char|star|violet", "the character is saved")
     page.wait_for_selector("#head-icon svg.char", timeout=10000)
     row = page.locator(f'#bot-list .bot-row[data-bot="{bot_id}"]')
     check(row.locator("svg.char").count() == 1 and page.locator("#head-icon svg.char").count() == 1, "the character shows in the sidebar row and the header")

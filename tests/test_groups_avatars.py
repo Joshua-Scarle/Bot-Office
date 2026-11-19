@@ -179,7 +179,7 @@ def test_generator_is_deterministic_valid_png_and_presets_differ():
 def test_new_bots_get_a_default_character_and_keep_their_emoji(client):
     bot = client.post("/v1/bots", headers=H, json={"name": "Pic", "icon": "🦊"}).json()
     assert bot["avatar"] == "character" and avatars.is_character(bot["avatar_seed"]) and bot["icon"] == "🦊"
-    shape, color = bot["avatar_seed"].split(":")[1:]
+    shape, color = bot["avatar_seed"].split("|")[1:]
     assert shape in avatars.CHAR_SHAPES and color in avatars.CHAR_COLORS
     assert client.get(f"/v1/bots/{bot['id']}/icon", headers=H).status_code == 404   # drawn in the browser, not fetched
 

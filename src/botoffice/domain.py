@@ -208,7 +208,7 @@ class Bot(BaseModel):
         if self.icon_image:
             return "upload"
         if self.avatar_seed:
-            return "character" if self.avatar_seed.startswith("char:") else "generated"
+            return "character" if self.avatar_seed.startswith("char|") else "generated"
         return "emoji"
 
     @computed_field
