@@ -244,7 +244,11 @@ def test_root_page_is_dark_bot_office_with_strict_csp(settings):
     assert "color-scheme: dark" in html
     assert "http://" not in html and "https://" not in html and "test-token" not in html
     assert 'type="password"' in html and "bot-office-token" in html and "crewdeck-token" in html and "agentdesk-token" in html
-    assert "sessionStorage" in html and "localStorage" not in html
+    assert "sessionStorage" in html
+    # localStorage holds only the two layout preferences (0.11.13); the token stays in sessionStorage
+    import re as _re
+    assert set(_re.findall(r"localStorage\.\w+\(\s*([A-Z_]+)", html)) <= {"NEEDS_OPEN_KEY", "SIDEBAR_KEY"}
+    assert "localStorage" in html and not _re.search(r"localStorage[^;\n]*(?:TOKEN|getToken|token)", html)
     assert '"Authorization": "Bearer "' in html and "?token" not in html
     assert 'style="' not in html  # CSP below forbids inline style attributes
     csp = page.headers["content-security-policy"]
