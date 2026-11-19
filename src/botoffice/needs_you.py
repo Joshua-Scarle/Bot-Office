@@ -80,6 +80,20 @@ def needs_you(store: JobStore) -> list[dict]:
                 "ask": _assignment_ask(row, state, bot["name"]), "at": row["stalled_at"] or row["updated_at"],
                 "actions": ASSIGNMENT_ACTIONS,
             })
+        # 0.11.4 (G5 with_note): a task Joshua created that its bot dropped, until he dismisses it
+        for row in db.execute("SELECT * FROM assignments WHERE status='dropped' AND created_by='user' "
+                              "AND updated_by LIKE 'bot:%' AND dismissed_at IS NULL AND closed_at>=? "
+                              "ORDER BY closed_at DESC LIMIT 50", ((stamp - FAILED_WINDOW).isoformat(),)):
+            bot = bots.get(row["bot_id"])
+            if bot is None:
+                continue
+            items.append({
+                "id": f"a:{row['id']}:dropped_by_bot:{row['closed_at']}", "kind": "assignment",
+                "state": "dropped_by_bot", "bot_id": row["bot_id"], "bot_name": bot["name"],
+                "notify": bool(bot["notify"]), "assignment_id": row["id"], "title": row["title"],
+                "ask": f'{bot["name"]} dropped your task "{row["title"]}": {row["status_note"] or "no note"}',
+                "at": row["closed_at"], "actions": ["dismiss"],
+            })
         since = (stamp - FAILED_WINDOW).isoformat()
         # only actionable failures, filtered before the limit: login/usage failures of any turn
         # (assignment turns too, whatever their escalation), others of unattended non-assignment turns

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import attachments, baseline as baseline_mod, failures, isolation, safefs
-from .assignments import Assignments
+from .assignments import BOT_ASSIGNMENTS_PER_DAY, BOT_BUDGET_MINUTES, BOT_BUDGET_TURNS, Assignments, _limit, drop_rule
 from .cron import _matches, parse_cron, to_cron_time
 from .catalog import ENGINE_LABELS
 from .compaction import RECENT_MESSAGES, WORKING_FILE, cap_working
@@ -173,10 +173,23 @@ def build_self(bot: Bot, job: Job, timeout: int | None = None, *, extra: str = "
 - Desktop: {desktop}
 - Commands: `bot-msg [--queue] <bot-name-or-id> "<message>"` messages another bot: it reaches the bot right away, even mid-task, or with --queue at its next turn (its answer arrives in your chat); `desk` (see DESKTOP.md); `bot-task` (assignments, wake-ups, your own routines; `bot-task help`). Ask Joshua with `desk ask` or `bot-office-ask` and a JSON object with options, optional multiSelect and steps. Use `desk say "<short note>"` for a lasting progress note. Prefer deciding over asking; do not use your engine’s own question tool. Show an image in chat with `![description](path)` in your final reply, or `desk attach <file>` / `bot-office-attach <file>` (path in this workspace; PNG, JPEG, GIF or WebP; up to 6, 10 MiB each).
 - Limits: a turn stops after {minutes}; bot-to-bot: one message per bot pair per 10 seconds, at most 3 back-and-forth messages per exchange; Grok bridge: 30 sends per day, one per minute per bot.
-- Assignments: at most 20 turns / 120 minutes each unless the user sets more; children you create for other bots: at most 3 open per parent, 2 levels deep; you may read a child and add notes, only its bot changes its status.
+- Assignments: at most 20 turns / 120 minutes each unless the user sets more. {task_rules()}
 - Wake-ups: 5 minutes to 30 days ahead, at most 5 pending and 24 fired per day. Your own routines: at most 10, at least 15 minutes apart.
 - Files here: RULES-FOR-ALL-BOTS.md and SYSTEM-PROMPT.md (how every bot works, set by the user), instructions.md (your profile, set by the user), memory.md, shared-memory.md, WORKING.md, worklog.md (your recent turns, one line each, newest last), history.md.
 {extra}"""
+
+
+def task_rules() -> str:
+    """SELF.md: what a bot may do with its own and other bots' task lists (plan 4.4, G5 setting)."""
+    owner_tasks = ("a task the user created on your list only the user can drop" if drop_rule() == "owner_only"
+                   else "a task the user created on your list you may drop only with a note saying why (the user sees it)")
+    return (f"Every bot's list is readable (`bot-task list`; `bot-task help` lists all commands). You may add a task "
+            f"to another bot's list (it lands not started and nothing starts it automatically; it counts against your "
+            f"{_limit(BOT_ASSIGNMENTS_PER_DAY)} new assignments per day; budget at most {BOT_BUDGET_TURNS} turns / "
+            f"{BOT_BUDGET_MINUTES} minutes), edit only the tasks you created there, and add notes to any task; only "
+            "a list's own bot changes a task's status, completes it or reorders the list. Edits need the version "
+            "you last saw (a stale one is refused). You may drop tasks you created and bot-made tasks on your list; "
+            f"{owner_tasks}. Children with a parent: at most 3 open per parent, 2 levels deep.")
 
 
 def _settings_hashes(bot: Bot) -> dict[str, str]:
@@ -521,19 +534,52 @@ def _list_lines(label: str, lines: list[str], limit: int = 5, budget: int = 500,
     return f"- {label}: " + ("; ".join(shown) or "none") + suffix + "\n"
 
 
-def task_status_block(tasks: list) -> str:
-    lines = ["\nYour tasks (Bot-Office keeps these; they survive session resets):"]
+STATUS_BLOCK_LIMIT = 1500  # bytes
+
+
+def changes_line(changes: list[dict], bot_id: object = None) -> str:
+    """"Changes by others since your last turn: ..." from Assignments.changes (kinds and ids only;
+    no free text a bot wrote). Empty when there are none."""
+    if not changes:
+        return ""
+    verbs = {"created": "added", "moved": "moved", "note": "added a note to", "checkpoint": "saved a checkpoint of",
+             "budget": "changed the budget of", "rewound": "rewound", "report": "reported on"}
+    items = []
+    for event in changes:
+        who = "the user" if event["actor"] == "user" else (_short(event["actor_name"], 40) or "a deleted bot")
+        task = str(event["assignment_id"])[:8]
+        if event["kind"] == "edited":
+            what = f"edited the {_short(event['note'], 60)} of {task}"
+        elif event["kind"] == "status":
+            what = f"set {task} to " + event["note"].partition(":")[0].replace("_", " ")
+        else:
+            what = f"{verbs.get(event['kind'], event['kind'].replace('_', ' '))} {task}"
+        where = "" if bot_id is None or str(event["task_bot"]) == str(bot_id) else " (on another bot's list)"
+        items.append(f"{who} {what}{where}")
+    return _list_lines("Changes by others since your last turn", items, limit=6, budget=350).removeprefix("- ")
+
+
+def task_status_block(tasks: list, changes: str = "") -> str:
+    """The task list in every prompt (fresh and resume), at most STATUS_BLOCK_LIMIT bytes."""
     labels = {"open": "not started", "active": "in progress", "waiting_on_user": "waiting on you",
               "waiting_on_bot": "waiting on bot", "blocked": "blocked"}
-    for task in tasks[:5]:
-        detail = task.checkpoint or task.status_note
-        lines.append(f"- [{labels.get(task.status, task.status)}] {str(task.id)[:8]} {_short(task.title, 130)}"
-                     + (f" — {_short(detail, 100)}" if detail else ""))
-    if len(tasks) > 5:
-        lines.append(f"and {len(tasks) - 5} more (`bot-task list`)")
-    if not tasks:
-        lines.append("- none")
-    return untrusted_data("task-status", "\n".join(lines)) + "\n"
+    shown = min(len(tasks), 5)
+    while True:
+        lines = ["\nYour tasks (Bot-Office keeps these; they survive session resets):"]
+        for task in tasks[:shown]:
+            detail = task.checkpoint or task.status_note
+            lines.append(f"- [{labels.get(task.status, task.status)}] {str(task.id)[:8]} {_short(task.title, 130)}"
+                         + (f" — {_short(detail, 100)}" if detail else ""))
+        if len(tasks) > shown:
+            lines.append(f"and {len(tasks) - shown} more (`bot-task list`)")
+        if not tasks:
+            lines.append("- none")
+        if changes:
+            lines.append(changes.rstrip("\n"))
+        block = untrusted_data("task-status", "\n".join(lines)) + "\n"
+        if len(block.encode()) <= STATUS_BLOCK_LIMIT or shown == 0:
+            return block
+        shown -= 1
 
 
 def self_extra(store: JobStore, bot: Bot, job: Job, working: str, moment: datetime) -> tuple[str, list, str]:
@@ -656,7 +702,9 @@ def prepare_bot_workspace(
     paths = _stable_paths(store, bot, ids)
     job.attachment_paths = paths
     extra, tasks, stable_extra = self_extra(store, bot, job, working, moment or datetime.now(UTC))
-    status_block = task_status_block(tasks)
+    # 0.11.4: what others changed since the last prompt; store.issue_agent_token marks it seen
+    changes, job.tasks_seen_event = Assignments(store).changes(bot.id)
+    status_block = task_status_block(tasks, changes_line(changes, bot.id))
     brief = assignment_brief(store, job)
     retry = retry_note(job, timeout_note(store, job) if job.failure_kind == "timeout" and job.attempts else "")
     seen = {m.id for m in messages}  # a steer already in the history is not shown twice

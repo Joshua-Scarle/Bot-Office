@@ -26,7 +26,8 @@ def test_metrics_readonly_and_counts(tmp_path):
     assert metrics['M3']['rows'][0]['not_finished'] == 1
     assert metrics['M4']['rows'][0]['unfinished_chat_turns'] == 1
     assert metrics['M5']['columns'] == ['waiting_turns']
-    assert 'skipped' in metrics['M9'] and 'skipped' in metrics['M10']
+    # task_evidence is P5; assignments.origin exists since 0.11.4 (P2), so M10 is computed
+    assert 'skipped' in metrics['M9'] and metrics['M10']['rows'][0]['ratio'] == 0
     assert metrics['M11']['rows'][0]['bot_msgs'] == 0
     assert path.read_bytes() == before
     assert 'owner_msgs | nudges | percent' in subprocess.check_output(
