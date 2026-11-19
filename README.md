@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.11.13. What changed is recorded below: [0.11.13](#what-changed-in-01113-search-resize-and-files), [0.11.12](#what-changed-in-01112-deployed-2026-11-19), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.11.13. What changed is recorded below: [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112-deployed-2026-11-19), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -139,7 +139,7 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
-## What changed in 0.11.13 (search, resize and files)
+## What changed in 0.11.13 (deployed 2026-11-19)
 
 **Model search.** Every model choice is one searchable picker (New bot / Bot settings, including the OpenCode picker). Type to filter by model name, id or engine (case-insensitive); Up/Down, Home/End, Enter and Esc work, "No matches" shows when nothing fits, and the current selection stays listed while you filter. Dragging the list's scrollbar no longer closes it; only a real outside click, Esc or a selection does. Opening New bot before the list loaded no longer resets your pick to Codex. `gpt-6.2-sol` is in the fallback Codex list.
 
