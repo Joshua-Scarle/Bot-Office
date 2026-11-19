@@ -741,4 +741,4 @@ def test_self_md_describes_cross_bot_rules_and_drop_setting(settings, monkeypatc
     monkeypatch.setenv("BOT_OFFICE_BOT_DROP_OWNER_TASKS", "with_note")
     assert "you may drop only with a note saying why" in build_self(bot, job)
     for verb in ("bot-task add", "bot-task edit", "bot-task drop", "bot-task board"):
-        assert verb not in build_self(bot, job)  # part B writes those verbs
+        assert verb in build_self(bot, job)
