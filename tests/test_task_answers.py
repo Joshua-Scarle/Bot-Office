@@ -703,3 +703,30 @@ def test_label_default_stays_assignments(rig, monkeypatch):
     client, *_ = rig
     monkeypatch.delenv("BOT_OFFICE_TASKS_LABEL", raising=False)
     assert client.get("/v1/tasks/settings", headers=H).json()["label"] == "Assignments"
+
+
+# --- review round 1, issue 6: no queue-jumping on another bot's list ---
+
+def test_cross_bot_create_ignores_position_and_caps_priority(rig, monkeypatch):
+    client, store, (ada, bea, _), tokens = rig
+    book = Assignments(store)
+    first = book.create(ada.id, {"title": "Ada's own", "start": False})
+    made = client.post("/v1/agent/tasks", headers=tokens["Bea"],
+                       json={"title": "x", "for_bot": "Ada", "priority": "urgent", "position": -1000}).json()
+    assert made["priority"] == "normal"
+    assert raw(store, made["id"])["position"] != -1000
+    assert [task.title for task in book.tasks(ada.id)][0] == "Ada's own" and first
+    # editing it later cannot raise it either
+    edited = client.patch(f"/v1/agent/tasks/{made['id']}", headers=tokens["Bea"],
+                          json={"version": made["version"], "priority": "high"}).json()
+    assert edited["priority"] == "normal"
+    # lowering is fine; on its own list a bot sets any priority
+    low = client.post("/v1/agent/tasks", headers=tokens["Bea"], json={"title": "y", "for_bot": "Ada", "priority": "low"})
+    assert low.json()["priority"] == "low"
+    own = client.post("/v1/agent/tasks", headers=tokens["Bea"], json={"title": "z", "priority": "urgent"}).json()
+    assert own["priority"] == "urgent"
+    # the cap is a setting
+    monkeypatch.setenv("BOT_OFFICE_CROSS_BOT_MAX_PRIORITY", "high")
+    assert client.post("/v1/agent/tasks", headers=tokens["Bea"],
+                       json={"title": "w", "for_bot": "Ada", "priority": "urgent"}).json()["priority"] == "high"
+    assert client.get("/v1/tasks/settings", headers=H).json()["cross_bot_max_priority"] == "high"

@@ -44,6 +44,7 @@ from .desktop import run_desktop_command
 from .assignments import (
     BOT_EDIT_OWNER_TASKS,
     BOT_ROUTINE_MIN_GAP,
+    CROSS_BOT_MAX_PRIORITY,
     CROSS_BOT_SUBTASK_START,
     DROP_CANCELS_TURNS,
     FORM_TASKS_START,
@@ -1932,6 +1933,7 @@ def create_app(
                 "bot_edit_owner_tasks": choice(BOT_EDIT_OWNER_TASKS),
                 "form_tasks_start": choice(FORM_TASKS_START),
                 "default_priority": choice(TASK_DEFAULT_PRIORITY),
+                "cross_bot_max_priority": choice(CROSS_BOT_MAX_PRIORITY),
                 "task_writes_per_hour": _limit(TASK_WRITES_PER_HOUR),
                 "priorities": list(PRIORITIES),
                 "stages": ["not_started", "in_progress", "completed", "dropped"]}
