@@ -432,18 +432,29 @@ class CliAdapter:
 
     async def _capture(self, args: tuple[str, ...], timeout: float = 15) -> tuple[int, str] | None:
         """Run a short, non-chat CLI command and return (returncode, lowercased output)."""
+        got = await self.capture_bytes(args, timeout=timeout)
+        if got is None:
+            return None
+        code, stdout, stderr = got
+        return code, (stdout + b"\n" + stderr).decode(errors="replace")
+
+    async def capture_bytes(self, args: tuple[str, ...], timeout: float = 15, cwd: Path | None = None,
+                            ) -> tuple[int, bytes, bytes] | None:
+        """Run a short CLI command (service-user environment, no job) and return (returncode, stdout, stderr);
+        None if it could not start or timed out. Used for model lists and slash command lists."""
         if not self.executable:
             return None
         proc = None
         try:
-            argv, env, header = self._spawn([self.executable, *args], self._env())
+            argv, env, header = self._spawn([self.executable, *args], self._env(), cwd)
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=str(cwd) if cwd is not None and isolation.active() is None else None,
                 start_new_session=True,
-                **({"stdin": asyncio.subprocess.PIPE} if header else {}),
+                **({"stdin": asyncio.subprocess.PIPE} if header else {"stdin": asyncio.subprocess.DEVNULL}),
             )
             communicate = proc.communicate(header) if header else proc.communicate()
             stdout, stderr = await asyncio.wait_for(communicate, timeout=timeout)
@@ -457,7 +468,7 @@ class CliAdapter:
             raise
         except OSError:
             return None
-        return proc.returncode or 0, (stdout + b"\n" + stderr).decode(errors="replace")
+        return proc.returncode or 0, stdout, stderr
 
     def _remember_models(self, output: str) -> None:
         models = parse_model_listing(output)

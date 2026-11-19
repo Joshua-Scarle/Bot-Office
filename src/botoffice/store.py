@@ -25,6 +25,8 @@ BOT_DATES = ("created_at", "updated_at")
 # 0.11.6: shown on a message that could not steer the running turn and became the next one
 BUSY_WITH_BOT_NOTE = ("The bot is answering another bot, and a message to that turn would go to the other bot, "
                       "so yours is queued as the next turn.")
+SLASH_BUSY_NOTE = ("The bot is running a slash command, which cannot take a message mid-run, "
+                   "so yours is queued as the next turn.")
 STEER_ENDED_NOTE = "It could not be delivered before the turn ended, so it runs as the next turn."
 BOT_FIELDS = {
     "name",
@@ -590,6 +592,8 @@ class JobStore:
                 ("held_at", "TEXT"),
                 # the failure_kind the job had before a cap held it (restored when it runs)
                 ("held_kind", "TEXT"),
+                # 0.11.14: slash command turn (JSON name/args/mode), see slash.py
+                ("slash", "TEXT"),
             ))
             if "priority" in added_jobs:
                 # jobs queued before 0.9.0 keep their place behind Joshua's turns
@@ -1072,10 +1076,11 @@ class JobStore:
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             if job_id:
-                row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND id=? AND status='running'",
+                row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND id=? AND status='running' AND slash IS NULL",
                                  (str(bot_id), str(job_id))).fetchone()
             else:
-                row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='running' AND source!='inbox' "
+                # a slash command turn (0.11.14) takes no steer: its prompt is the bare command line
+                row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='running' AND source!='inbox' AND slash IS NULL "
                                  "AND NOT EXISTS (SELECT 1 FROM agent_messages a WHERE a.job_id=jobs.id) "
                                  "ORDER BY source IN ('chat','api') DESC, started_at LIMIT 1",
                                  (str(bot_id),)).fetchone()
@@ -1083,13 +1088,17 @@ class JobStore:
                     # never an automatic turn (a queued or cap-held continuation): the owner's message
                     # is a turn of its own, which supersedes a queued chat continuation (enqueue_message)
                     row = db.execute("SELECT * FROM jobs WHERE bot_id=? AND status='queued' "
-                                     "AND source IN ('chat','api') AND auto_kind IS NULL "
+                                     "AND source IN ('chat','api') AND auto_kind IS NULL AND slash IS NULL "
                                      "AND COALESCE(failure_kind,'')!=? ORDER BY created_at, id LIMIT 1",
                                      (str(bot_id), continuation.HELD)).fetchone()
                 if not row:
-                    busy = db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='running' LIMIT 1",
-                                      (str(bot_id),)).fetchone()
+                    busy = db.execute("SELECT slash FROM jobs WHERE bot_id=? AND status='running' "
+                                      "ORDER BY slash IS NULL LIMIT 1", (str(bot_id),)).fetchone()
+                    queued_slash = db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='queued' AND slash IS NOT NULL "
+                                              "LIMIT 1", (str(bot_id),)).fetchone()
                     db.rollback()
+                    if (busy and busy["slash"]) or (not busy and queued_slash):
+                        return None, SLASH_BUSY_NOTE
                     return None, (BUSY_WITH_BOT_NOTE if busy else None)
             if not row:
                 db.rollback()
