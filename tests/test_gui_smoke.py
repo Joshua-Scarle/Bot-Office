@@ -295,6 +295,123 @@ def test_read_aloud_gui_smoke():
     assert 'role === "assistant" && m.kind !== "say" && !m.pending' in page
 
 
+def test_api_gives_up_on_a_stalled_request():
+    """A request that never completes must end in a visible error, not leave the composer greyed out for good."""
+    import shutil
+    import subprocess
+    import pytest
+    from botoffice.api import CHAT_PAGE
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is unavailable")
+    page = CHAT_PAGE.read_text()
+    start = page.index("const API_TIMEOUT_MS")
+    end = page.index("\nfunction handleError", start)
+    script = r"""
+const assert = require('assert');
+class AuthError extends Error {}
+function getToken() { return 't'; }
+let mode = 'hang';
+globalThis.fetch = (url, options) => new Promise((resolve, reject) => {
+  if (mode === 'ok') return resolve({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ a: 1 }) });
+  options.signal.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; reject(e); });
+});
+""" + page[start:end] + r"""
+(async () => {
+  await assert.rejects(api('/v1/bots/x/messages', { method: 'POST', body: '{}', timeoutMs: 40 }),
+    (e) => e.timeout === true && e.status === 0 && /No answer from the server/.test(e.message));
+  mode = 'ok';
+  assert.deepStrictEqual(await api('/v1/bots', { timeoutMs: 40 }), { a: 1 });
+  assert.ok(/API_TIMEOUT_MS = 30000/.test(String(API_TIMEOUT_MS)) || API_TIMEOUT_MS === 30000);
+})().catch((err) => { console.error(err); process.exit(1); });
+"""
+    subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_composer_is_freed_when_the_chat_refresh_hangs_and_a_second_enter_says_why():
+    import shutil
+    import subprocess
+    import pytest
+    from botoffice.api import CHAT_PAGE
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is unavailable")
+    page = CHAT_PAGE.read_text()
+    start = page.index('$("composer").onsubmit = async (event) => {')
+    end = page.index("\nfunction autoGrow()", start)
+    handler = page[start:end]
+    script = r"""
+const assert = require('assert');
+const elements = { composer: {}, text: {value: 'hello'}, 'queue-next': {checked: false}, messages: {} };
+const $ = (id) => elements[id];
+let bot = {id: 'one'}, state = {selected: 'one'}, draftRevision = 0, sendingImages = false;
+const pendingImages = [];
+let posts = 0, statuses = [], resolvePost;
+const API_TIMEOUT_MS = 30000;
+function currentBot() { return bot; }
+function api() { posts++; return new Promise((resolve) => { resolvePost = resolve; }); }
+function removeImage() {} function updateImages() {} function autoGrow() {} function renderBots() {} function renderHeader() {}
+function setStatus(t) { statuses.push(t); } function handleError(e) { throw e; } function deleteUpload() {}
+function loadMessages() { return new Promise(() => {}); }   // the chat refresh never answers
+""" + handler + r"""
+const guard = setTimeout(() => { console.error("composer hung: Send was never freed"); process.exit(1); }, 4000);
+(async () => {
+  const first = elements.composer.onsubmit({preventDefault() {}});
+  assert.strictEqual(sendingImages, true);
+  elements.text.value = 'hello again';
+  await elements.composer.onsubmit({preventDefault() {}});   // second Enter while the POST is in flight
+  assert.strictEqual(posts, 1, 'no duplicate POST');
+  assert.ok(statuses.some((t) => /Still sending/.test(t)), 'second Enter must say why nothing happened');
+  resolvePost({ delivery: 'start', message: {} });
+  await first;                                              // returns although loadMessages never settles
+  assert.strictEqual(sendingImages, false, 'Send is free once the message is accepted');
+  assert.strictEqual(elements.text.value, 'hello again');   // the changed draft is kept
+  clearTimeout(guard);
+})().catch((err) => { console.error(err); process.exit(1); });
+"""
+    subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_composer_timeout_warns_that_the_message_may_have_been_sent():
+    import shutil
+    import subprocess
+    import pytest
+    from botoffice.api import CHAT_PAGE
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is unavailable")
+    page = CHAT_PAGE.read_text()
+    start = page.index('$("composer").onsubmit = async (event) => {')
+    end = page.index("\nfunction autoGrow()", start)
+    handler = page[start:end]
+    script = r"""
+const assert = require('assert');
+const elements = { composer: {}, text: {value: 'hello'}, 'queue-next': {checked: false}, messages: {} };
+const $ = (id) => elements[id];
+let bot = {id: 'one'}, state = {selected: 'one'}, draftRevision = 0, sendingImages = false;
+const pendingImages = [];
+let shown = null, refreshed = 0;
+const API_TIMEOUT_MS = 30000;
+function currentBot() { return bot; }
+function api() { const e = new Error('No answer from the server after 30 s.'); e.timeout = true; e.status = 0; return Promise.reject(e); }
+function removeImage() {} function updateImages() {} function autoGrow() {} function renderBots() {} function renderHeader() {}
+function setStatus() {} function handleError(e) { shown = e.message; } function deleteUpload() {}
+function loadMessages() { refreshed++; return Promise.resolve(); }
+""" + handler + r"""
+(async () => {
+  await elements.composer.onsubmit({preventDefault() {}});
+  assert.ok(/may have been sent/.test(shown), shown);
+  assert.strictEqual(refreshed, 1, 'chat is refreshed after a timeout');
+  assert.strictEqual(sendingImages, false, 'Send is free again');
+  assert.strictEqual(elements.text.value, 'hello', 'the draft is kept for a retry');
+})().catch((err) => { console.error(err); process.exit(1); });
+"""
+    subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
 def test_task_list_gui_contract(settings, monkeypatch):
     monkeypatch.setenv('BOT_OFFICE_TASKS_LABEL', 'Work queue')
     with TestClient(create_app(settings, {'codex': FakeAdapter()})) as client:

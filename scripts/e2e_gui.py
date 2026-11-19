@@ -36,6 +36,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -51,6 +52,7 @@ sys.path.insert(0, str(ROOT / "src"))
 TOKEN = "e2e-token"
 # every bot this script makes or messages is labelled as a test bot
 ADA, BEA, CY = "E2E test bot Ada", "E2E test bot Bea", "E2E test bot Cy"
+CLAUDE_BOT = "E2E test bot Claude"
 TEST_PREFIX = "E2E test"
 REPLY = "Hello from the e2e bot."
 FAILURES: list[str] = []
@@ -88,8 +90,12 @@ class E2EEngine:
         log_path.write_text("e2e run\n", encoding="utf-8")
         await asyncio.sleep(1.5)  # long enough to see the working state
         prompt = job.prompt or ""
+        uploads = re.findall(r"^- (/\S+/uploads/\S+)$", prompt, re.M)
         if job.source == "inbox":
             text = "Got it, thanks.\n\nBOT-OFFICE-STATUS: done"
+        elif uploads and "quote the code" in prompt:  # 0.11.15: like a CLI opening the file the prompt names
+            quoted = " ".join(Path(path).read_text().strip() for path in uploads)
+            text = f"The file says: {quoted}\n\nBOT-OFFICE-STATUS: done"
         elif "missing part" in prompt:  # the owner's answer (the prompt also carries the earlier chat)
             text = f"{REPLY}\n\nBOT-OFFICE-STATUS: done"
         elif "work in parts" in prompt or "Automatic continuation" in prompt:
@@ -111,6 +117,29 @@ class E2EEngine:
         return RunResult("succeeded", exit_code=0, final_text=text)
 
 
+class E2EClaude(E2EEngine):
+    """A Claude Code stand-in: lists commands from a real init event and answers /compact with the real stream lines."""
+
+    name = "claude"
+
+    async def capture_bytes(self, args, timeout=15, cwd=None):
+        if "/context" in args:
+            return 0, (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "slash" / "claude-init.jsonl").read_bytes(), b""
+        return 0, b"2.1.319 (Claude Code)", b""
+
+    async def run(self, job, workspace, log_path, timeout):
+        from botoffice.providers.base import RunResult
+        from botoffice.providers.streams import ClaudeParser
+        log_path.write_text("e2e claude run\n", encoding="utf-8")
+        await asyncio.sleep(1)
+        parser = ClaudeParser()
+        # the lines `claude -p --resume <id> --output-format stream-json --verbose /compact` printed (trimmed)
+        for line in ({"type": "system", "subtype": "compact_boundary", "compact_metadata": {"trigger": "manual", "pre_tokens": 39951, "post_tokens": 10491, "duration_ms": 4686}},
+                     {"type": "result", "subtype": "success", "is_error": False, "result": "", "local_command": "compact", "num_turns": 0}):
+            parser.feed(line)
+        return RunResult("succeeded", exit_code=0, final_text=parser.final_text)
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -124,9 +153,9 @@ def start_local(data_dir: Path):
     from botoffice.config import Settings
     port = free_port()
     settings = Settings(data_dir=data_dir, token=TOKEN, port=port, job_timeout=60,
-                        enabled_providers=frozenset({"codex"}), voice_mode="off")
+                        enabled_providers=frozenset({"codex", "claude"}), voice_mode="off")
     engine = E2EEngine()
-    app = create_app(settings, {"codex": engine})
+    app = create_app(settings, {"codex": engine, "claude": E2EClaude()})
     engine.app = app
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -667,6 +696,40 @@ def slash_commands(page, out: Path, base: str, token: str) -> None:
     wait_text(page, REPLY, 60000)
 
 
+# --- 0.11.15: a real turn reads an uploaded file; /compact shows a status line ---
+
+def upload_read(page, out: Path) -> None:
+    print("A turn reads an uploaded file")
+    import tempfile as _tf
+    token = "UPLOADTOKEN-e2e-7c41d9"
+    with _tf.TemporaryDirectory(prefix="e2e-note-") as tmp:
+        note = Path(tmp) / "secret-note.txt"
+        note.write_text(f"The secret code is {token}. Nothing else matters.\n")
+        page.set_input_files("#image-file", [str(note)])
+        page.wait_for_function("() => [...document.querySelectorAll('#attachment-list .attachment-item')].every((i) => i.textContent.includes('Ready'))", timeout=15000)
+        send_with_enter(page, "I attached a text file. Please quote the code in it.")
+    check(wait_text(page, "The file says: The secret code is " + token, 60000), "the reply quotes the unique token from the uploaded file")
+    shot(page, out, "upload-read")
+
+
+def compact_status(page, out: Path, base: str, token: str) -> None:
+    print("/compact on a Claude bot")
+    call(base, token, "POST", "/v1/bots", {"name": CLAUDE_BOT, "default_provider": "claude"})
+    page.reload()  # the new bot is listed after a reload; the session keeps the unlock
+    open_bot(page, CLAUDE_BOT)
+    box = page.locator("#text")
+    box.click()
+    box.fill("")
+    box.type("/compact")
+    page.wait_for_selector("#slash-list li[role=option]", timeout=10000)
+    box.press("Enter")
+    box.press("Enter")
+    check(wait_text(page, "Conversation compacted (40k → 10.5k tokens, 4.7s)", 30000), "/compact shows a one-line status in the chat")
+    thread = page.locator("#thread").inner_text()
+    check("is_error" not in thread and "duration_api_ms" not in thread, "no raw result JSON is shown")
+    shot(page, out, "compact-status")
+
+
 def resolve_token(args, environ=None) -> str | None:
     """The live-mode API token: --token-file, BOT_OFFICE_TOKEN_FILE, BOT_OFFICE_TOKEN, then the
     deprecated --token (a warning on stderr; it shows in the process list)."""
@@ -745,6 +808,9 @@ def main() -> int:
                 open_bot(page, ADA)
                 file_uploads(page, out, base, TOKEN)
                 slash_commands(page, out, base, TOKEN)
+                open_bot(page, ADA)
+                upload_read(page, out)
+                compact_status(page, out, base, TOKEN)
                 server.should_exit = True
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()

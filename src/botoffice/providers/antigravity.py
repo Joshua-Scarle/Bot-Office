@@ -4,6 +4,7 @@ import contextlib
 from pathlib import Path
 
 from .. import isolation, safefs
+from ..catalog import effective_effort
 from ..domain import Job
 from ..slash import decode_slash
 from .cli import NEEDS_LOGIN_TERMS, CliAdapter, archive_session
@@ -92,7 +93,7 @@ class AntigravityAdapter(CliAdapter):
         model = self._job_model(job)
         if model:
             args += ["--model", model]
-        effort = self._job_effort(job)
+        effort = effective_effort(self.name, model, self._job_effort(job))
         if effort:
             args += ["--effort", effort]
         return args

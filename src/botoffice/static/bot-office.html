@@ -601,6 +601,8 @@ const FALLBACK_EFFORTS = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   antigravity: ["low", "medium", "high", "xhigh", "max"],
 };
+// mirrors catalog.model_carries_effort: an Antigravity id such as gemini-3.8-flash-high names its own effort
+function modelCarriesEffort(engine, model) { return engine === "antigravity" && /-(?:low|medium|high|xhigh|max)$/i.test(model || ""); }
 const FALLBACK_DEFAULT_EFFORT = { codex: "high", claude: "medium", antigravity: "medium" };
 
 function getToken() {
@@ -623,24 +625,41 @@ function rememberBot(id) {
 
 class AuthError extends Error {}
 
+// A request that never completes (a stalled tunnel or server) used to leave the composer greyed out for good.
+// Every call now has a deadline; voice calls decode or synthesise audio and get a longer one. Pass timeoutMs: 0 for none.
+const API_TIMEOUT_MS = 30000;
+const API_VOICE_TIMEOUT_MS = 120000;
 async function api(path, options = {}) {
+  const { timeoutMs, ...fetchOptions } = options;
   const headers = { "Authorization": "Bearer " + getToken() };
-  if (options.body !== undefined && !(options.body instanceof Blob)) headers["Content-Type"] = "application/json";
-  if (options.body instanceof Blob) headers["Content-Type"] = options.body.type || "application/octet-stream";
-  const response = await fetch(path, { ...options, headers, cache: "no-store", credentials: "omit" });
-  if (response.status === 401) throw new AuthError("Token rejected");
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    let detail = body.detail;
-    if (Array.isArray(detail)) detail = detail.map((d) => d.msg).join("; ");
-    const error = new Error(detail || response.statusText || ("HTTP " + response.status));
-    error.status = response.status;
-    error.body = body;
-    throw error;
-  }
-  if (response.status === 204) return null;
-  const type = response.headers.get("content-type") || "";
-  return type.includes("application/json") ? response.json() : response.blob();
+  if (fetchOptions.body !== undefined && !(fetchOptions.body instanceof Blob)) headers["Content-Type"] = "application/json";
+  if (fetchOptions.body instanceof Blob) headers["Content-Type"] = fetchOptions.body.type || "application/octet-stream";
+  const limit = timeoutMs !== undefined ? timeoutMs : (path.startsWith("/v1/voice/") ? API_VOICE_TIMEOUT_MS : API_TIMEOUT_MS);
+  const ctrl = new AbortController();
+  const timer = limit > 0 ? setTimeout(() => ctrl.abort(), limit) : null;
+  try {
+    const response = await fetch(path, { ...fetchOptions, headers, cache: "no-store", credentials: "omit", signal: ctrl.signal });
+    if (response.status === 401) throw new AuthError("Token rejected");
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      let detail = body.detail;
+      if (Array.isArray(detail)) detail = detail.map((d) => d.msg).join("; ");
+      const error = new Error(detail || response.statusText || ("HTTP " + response.status));
+      error.status = response.status;
+      error.body = body;
+      throw error;
+    }
+    if (response.status === 204) return null;
+    const type = response.headers.get("content-type") || "";
+    return type.includes("application/json") ? await response.json() : await response.blob();
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      const error = new Error("No answer from the server after " + Math.round(limit / 1000) + " s. Check the connection and try again.");
+      error.status = 0; error.timeout = true;
+      throw error;
+    }
+    throw err;
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 function handleError(err, where) {
@@ -957,8 +976,9 @@ function renderHeader() {
   $("head-name").textContent = bot.name;
   $("head-desc").textContent = bot.description || "";
   $("head-model").textContent = modelLabel(bot.engine, bot.model);
-  $("head-effort").hidden = !bot.effort;
-  $("head-effort").textContent = bot.effort ? "effort: " + bot.effort : "";
+  const shownEffort = modelCarriesEffort(bot.engine, bot.model) ? "" : bot.effort;
+  $("head-effort").hidden = !shownEffort;
+  $("head-effort").textContent = shownEffort ? "effort: " + shownEffort : "";
   $("head-tier").textContent = bot.capability_tier || "";
   const busy = bot.activity === "running" || bot.activity === "queued";
   // a running turn on an engine that cannot take input mid-run: said up front, not found out later
@@ -1444,7 +1464,7 @@ function jobRow(job, view, current) {
     stop.onclick = () => stopJob(job.id, stop);
     head.append(stop);
   }
-  const meta = [modelLabel(job.provider, job.model), job.effort ? "effort " + job.effort : "",
+  const meta = [modelLabel(job.provider, job.model), job.effort && !modelCarriesEffort(job.provider, job.model) ? "effort " + job.effort : "",
                 job.attempts > 1 ? "attempt " + job.attempts : "",
                 job.started_at ? "started " + new Date(job.started_at).toLocaleTimeString([], { timeStyle: "short" })
                   : "created " + new Date(job.created_at).toLocaleTimeString([], { timeStyle: "short" })].filter(Boolean);
@@ -2127,7 +2147,8 @@ $("composer").onsubmit = async (event) => {
     try { handled = await trySlash(bot, text); } finally { submitting = false; }
     if (handled) return;
   }
-  if (pendingImages.some((item) => !item.id || item.bot !== bot.id) || sendingImages) return;
+  if (sendingImages) { setStatus("Still sending the previous message… it gives up after " + Math.round(API_TIMEOUT_MS / 1000) + " s."); return; }
+  if (pendingImages.some((item) => !item.id || item.bot !== bot.id)) { setStatus("Waiting for the image upload to finish."); return; }
   const sentImages = [...pendingImages];
   const body = { text: text || (sentImages.every((item) => item.file) ? "Please see the attached files." : sentImages.some((item) => item.file) ? "Please see the attachments." : "Please see attached images."), attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
@@ -2145,10 +2166,18 @@ $("composer").onsubmit = async (event) => {
     if (posted?.delivery === "queue" && posted.delivery_note) setStatus(posted.delivery_note);  // never a silent queue
     renderBots();
     state.msgSig = "";
-    const box = $("messages");
-    await loadMessages();
-    box.scrollTop = box.scrollHeight;
-  } catch (err) { handleError(err); }
+    // the message is in: free the composer now, so a slow or stuck chat refresh cannot leave Send greyed out
+    for (const item of sentImages) item.sending = false;
+    sendingImages = false; updateImages();
+    loadMessages().then(() => { const box = $("messages"); box.scrollTop = box.scrollHeight; }).catch(handleError);
+  } catch (err) {
+    if (err && err.timeout) {
+      // the server may have accepted it even though no answer came back: refresh the chat and warn before a retry duplicates it
+      err.message = "No answer from the server. The message may have been sent: check the chat before sending it again.";
+      loadMessages().catch(() => {});
+    }
+    handleError(err);
+  }
   finally { for (const item of sentImages) { item.sending = false; if (item.removed && !item.idSent) deleteUpload(item); } sendingImages = false; updateImages(); }
 };
 
@@ -2918,10 +2947,12 @@ function defaultEffortFor(engine) { const c = choiceFor(engine); return (c && c.
 
 function fillEffortSelect() {
   const engine = selectedEngine();
-  const levels = effortsFor(engine);
+  const model = (modelPicker.value || "").split("|").slice(1).join("|");
+  const fixed = modelCarriesEffort(engine, model);  // the model name already carries its effort: offer no second one
+  const levels = fixed ? [] : effortsFor(engine);
   const bot = state.editing;
   const select = $("f-effort");
-  const keep = select.dataset.engine === engine ? select.value : null;
+  const keep = select.dataset.engine === engine && select.options.length ? select.value : null;  // no options after an effort-carrying model
   select.replaceChildren(...(engine === "opencode" ? [""] : []).concat(levels).map((level) => { const o = el("option", "", level || "default (unset)"); o.value = level; return o; }));
   const stored = bot && bot.engine === engine && (levels.includes(bot.effort) || (engine === "opencode" && !bot.effort)) ? (bot.effort || "") : null;
   select.value = keep ?? stored ?? defaultEffortFor(engine);
