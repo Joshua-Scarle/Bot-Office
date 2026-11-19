@@ -577,6 +577,12 @@ class JobStore:
                 "ts TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'reserved')"
             )
             db.execute("CREATE INDEX IF NOT EXISTS bridge_sends_ts ON bridge_sends(ts)")
+            # 0.11.10: failed and refused sends are recorded too (state failed/dropped, why in error);
+            # only sent/reserved rows count against the bridge caps (BRIDGE_COUNTED)
+            bridge_cols = {row["name"] for row in db.execute("PRAGMA table_info(bridge_sends)")}
+            for column in ("target", "error"):
+                if column not in bridge_cols:
+                    db.execute(f"ALTER TABLE bridge_sends ADD COLUMN {column} TEXT")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS bridge_threads (thread_id TEXT PRIMARY KEY, hop INTEGER NOT NULL, "
                 "updated_at TEXT NOT NULL)"
@@ -623,8 +629,8 @@ class JobStore:
     # --- Grok bridge state (rate limits and thread hops; network I/O happens outside) ---
 
     def bridge_reserve(self, bot: str, thread_id: str | None, moment: datetime, *, per_bot_seconds: int,
-                       daily_limit: int, max_hops: int,
-                       per_bot_daily: int | None = None) -> tuple[int | None, int, str | None]:
+                       daily_limit: int, max_hops: int, per_bot_daily: int | None = None,
+                       target: str | None = None) -> tuple[int | None, int, str | None]:
         """Check the limits, then reserve a send and advance the thread hop in one short write
         transaction, committed before the webhook call. Returns (reservation id, hop, None),
         or (None, hop, reason) when the send must be dropped. A reservation whose process died
@@ -638,20 +644,21 @@ class JobStore:
                 reason = None
                 if hop > max_hops:
                     reason = f"hop limit of {max_hops} reached"
-                elif db.execute("SELECT count(*) FROM bridge_sends WHERE ts>=? AND state!='failed'",
+                elif db.execute("SELECT count(*) FROM bridge_sends WHERE ts>=? AND state IN ('sent','reserved')",
                                 ((moment - timedelta(hours=24)).isoformat(),)).fetchone()[0] >= daily_limit:
                     reason = f"daily limit of {daily_limit} sends reached"
                 elif per_bot_daily is not None and db.execute(
-                        "SELECT count(*) FROM bridge_sends WHERE bot=? AND ts>=? AND state!='failed'",
+                        "SELECT count(*) FROM bridge_sends WHERE bot=? AND ts>=? AND state IN ('sent','reserved')",
                         (bot, (moment - timedelta(hours=24)).isoformat())).fetchone()[0] >= per_bot_daily:
                     reason = f"daily limit of {per_bot_daily} sends per bot reached"
-                elif db.execute("SELECT 1 FROM bridge_sends WHERE bot=? AND ts>? AND state!='failed' LIMIT 1",
+                elif db.execute("SELECT 1 FROM bridge_sends WHERE bot=? AND ts>? AND state IN ('sent','reserved') LIMIT 1",
                                 (bot, (moment - timedelta(seconds=per_bot_seconds)).isoformat())).fetchone():
                     reason = f"rate limit: at most one send per {per_bot_seconds}s per bot"
                 if reason:
                     db.rollback()
                     return None, hop, reason
-                cursor = db.execute("INSERT INTO bridge_sends (bot, ts) VALUES (?,?)", (bot, moment.isoformat()))
+                cursor = db.execute("INSERT INTO bridge_sends (bot, ts, target) VALUES (?,?,?)",
+                                    (bot, moment.isoformat(), target))
                 if thread_id:
                     db.execute("INSERT INTO bridge_threads VALUES (?,?,?) ON CONFLICT(thread_id) DO UPDATE "
                                "SET hop=excluded.hop, updated_at=excluded.updated_at", (thread_id, hop, now().isoformat()))
@@ -661,12 +668,23 @@ class JobStore:
                 db.rollback()
                 raise
 
-    def bridge_settle(self, reservation: int, sent: bool, thread_id: str | None = None, hop: int = 0) -> None:
-        """A sent reservation stays counted; a failed one is released and its hop step undone
-        (unless the thread moved on meanwhile)."""
+    def bridge_record(self, bot: str, moment: datetime, state: str, error: str | None, target: str | None = None) -> None:
+        """Log a send that never reserved quota (refused, misconfigured, limit hit, API unreachable).
+        state is 'failed' or 'dropped'; neither counts against the caps. Never raises."""
+        with contextlib.suppress(sqlite3.Error), closing(self._connect()) as db:
+            db.execute("INSERT INTO bridge_sends (bot, ts, state, target, error) VALUES (?,?,?,?,?)",
+                       (bot, moment.astimezone(UTC).isoformat(), state, target, (error or "")[:300] or None))
+            db.commit()
+
+    def bridge_settle(self, reservation: int, sent: bool, thread_id: str | None = None, hop: int = 0,
+                      error: str | None = None) -> None:
+        """A sent reservation stays counted (*error* notes an unsure delivery); a failed one is
+        released (kept as a 'failed' row with its error) and its hop step undone (unless the
+        thread moved on meanwhile)."""
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("UPDATE bridge_sends SET state=? WHERE id=?", ("sent" if sent else "failed", reservation))
+            db.execute("UPDATE bridge_sends SET state=?, error=? WHERE id=?",
+                       ("sent" if sent else "failed", (error or "")[:300] or None, reservation))
             if not sent and thread_id:
                 db.execute("UPDATE bridge_threads SET hop=hop-1 WHERE thread_id=? AND hop=?", (thread_id, hop))
             db.commit()

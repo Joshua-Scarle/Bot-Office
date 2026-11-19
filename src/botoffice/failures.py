@@ -7,7 +7,7 @@ the scheduler retries the same job row later (see ``retry_at``).
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 USAGE_LIMIT = "usage_limit"
@@ -140,13 +140,19 @@ RE_DATE_AT = re.compile(r"(?:resets?|try again|available)\s+(?:on\s+|at\s+)?" + 
 RE_AT = re.compile(r"(?:resets?|try again)\s+(?:at\s+)?" + _TIME + _ZONE, re.I)
 
 
-def _zone(name: str | None) -> ZoneInfo:
+def _zone(name: str | None, default: tzinfo | None) -> tzinfo | None:
+    """The zone a message names; else *default*. None means the host's local zone (the CLI ran here)."""
     if name:
         try:
             return ZoneInfo(name)
         except (ZoneInfoNotFoundError, ValueError):
             pass
-    return DISPLAY_TZ
+    return default
+
+
+def _wall(naive: datetime, zone: tzinfo | None) -> datetime:
+    """*naive* wall-clock time read in *zone* (None: the host's local zone, DST-aware)."""
+    return naive.astimezone() if zone is None else naive.replace(tzinfo=zone)
 
 
 def _hour(hour: str, minute: str | None, meridiem: str | None) -> tuple[int, int] | None:
@@ -162,11 +168,13 @@ def _hour(hour: str, minute: str | None, meridiem: str | None) -> tuple[int, int
     return h, m
 
 
-def parse_reset(text: str | None, now: datetime) -> datetime | None:
+def parse_reset(text: str | None, now: datetime, default_zone: tzinfo | None = None) -> datetime | None:
     """When a usage limit lifts, from the provider's own message; None if not stated.
 
-    Times are read in the zone the message names, else America/New_York; a time of day
-    already past rolls over to the next day.
+    Times are read in the zone the message names, else *default_zone*; None (the default) is the
+    host's local zone, because the provider CLIs print clock times in the zone of the machine they
+    run on (Codex on the VPS: "try again at Nov 21st, 2026 1:15 AM" is Europe/Berlin = 7:15 PM ET,
+    proven against its raw resets_at epoch). A time of day already past rolls over to the next day.
     """
     if not text:
         return None
@@ -179,19 +187,19 @@ def parse_reset(text: str | None, now: datetime) -> datetime | None:
     if match := RE_DATE_AT.search(text):
         y, mo, d, month_name, day, year2, hour, minute, meridiem, zone_name = match.groups()
         clock = _hour(hour, minute, meridiem)
-        zone = _zone(zone_name)
+        zone = _zone(zone_name, default_zone)
         local_now = now.astimezone(zone)
         if clock:
             try:
                 if y:
-                    date = datetime(int(y), int(mo), int(d), *clock, tzinfo=zone)
+                    date = _wall(datetime(int(y), int(mo), int(d), *clock), zone)
                 else:
                     month = _MONTHS.get(month_name[:3].lower())
                     if month is None:
                         raise ValueError
-                    date = datetime(int(year2 or local_now.year), month, int(day), *clock, tzinfo=zone)
+                    date = _wall(datetime(int(year2 or local_now.year), month, int(day), *clock), zone)
                     if not year2 and date < local_now - timedelta(days=1):
-                        date = date.replace(year=date.year + 1)
+                        date = _wall(datetime(date.year + 1, month, int(day), *clock), zone)
                 return date
             except ValueError:
                 pass
@@ -199,11 +207,12 @@ def parse_reset(text: str | None, now: datetime) -> datetime | None:
         hour, minute, meridiem, zone_name = match.groups()
         clock = _hour(hour, minute, meridiem)
         if clock:
-            zone = _zone(zone_name)
+            zone = _zone(zone_name, default_zone)
             local_now = now.astimezone(zone)
-            moment = local_now.replace(hour=clock[0], minute=clock[1], second=0, microsecond=0)
+            moment = _wall(local_now.replace(hour=clock[0], minute=clock[1], second=0, microsecond=0,
+                                             tzinfo=None), zone)
             if moment <= local_now:
-                moment += timedelta(days=1)
+                moment = _wall(moment.astimezone(zone).replace(tzinfo=None) + timedelta(days=1), zone)
             return moment
     return None
 

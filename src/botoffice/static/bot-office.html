@@ -792,7 +792,7 @@ function liveStatus(view, now) {
   const at = typeof now === "number" ? now : Date.now();
   if (view.status === "queued") {
     if (view.notBefore && new Date(view.notBefore).getTime() > at)
-      return "Waiting to retry at " + new Date(view.notBefore).toLocaleTimeString([], { timeStyle: "short" });
+      return "Waiting to retry at " + new Date(view.notBefore).toLocaleTimeString([], { timeStyle: "short", timeZoneName: "short" });
     return "Waiting to start";
   }
   if (view.phase === "thinking") return "Thinking";
@@ -1056,7 +1056,7 @@ function jobRow(job, view, current) {
   box.append(head, el("div", "drawer-meta", meta.join(" · ")));
   if (current && view) box.append(el("div", "drawer-meta", "Now: " + liveStatus(view)));
   if (job.not_before && new Date(job.not_before) > new Date())
-    box.append(el("div", "drawer-meta", "Retry at " + new Date(job.not_before).toLocaleTimeString([], { timeStyle: "short" })));
+    box.append(el("div", "drawer-meta", "Retry at " + new Date(job.not_before).toLocaleTimeString([], { timeStyle: "short", timeZoneName: "short" })));
   if (job.error) box.append(el("div", "drawer-meta bad", clip(job.error, 300)));
   if (view) box.append(stepsDetails(view));
   box.append(logDetails(job.id));
@@ -2629,7 +2629,14 @@ async function loadNeedsYou() {
     return row;
   }));
   $("needs-you").hidden = !items.length;
-  $("needs-toggle").textContent = `Needs you (${items.length})`;
+  // one count per assignment (item.group), and how many of those only wait on photos/files from you
+  const groups = new Map();
+  for (const item of items) {
+    const key = item.group || item.id;
+    if (groups.get(key) !== "action") groups.set(key, item.category || "action");
+  }
+  const materials = [...groups.values()].filter((c) => c === "materials").length;
+  $("needs-toggle").textContent = `Needs you (${groups.size})` + (materials ? ` \u00b7 ${materials} waiting on photos/files` : "");
   $("notify-enable").hidden = typeof Notification === "undefined" || Notification.permission !== "default";
   const stored = sessionStorage.getItem(NEEDS_SEEN_KEY);
   let seen = new Set();

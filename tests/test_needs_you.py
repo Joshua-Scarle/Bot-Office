@@ -11,6 +11,7 @@ from botoffice.assignments import Assignments
 from botoffice.domain import JobStatus
 from botoffice.providers.fake import FakeAdapter
 from botoffice.scheduler import Scheduler
+from botoffice import needs_you
 from botoffice.store import JobStore, now
 
 H = {"Authorization": "Bearer test-token"}
@@ -180,3 +181,31 @@ def test_bot_notify_and_timeout_flow_into_needs_you():
     # permission is only ever asked from the button's click handler
     assert html.count("requestPermission") == 1
     assert "notificationsAllowed()" in html
+
+
+def test_incomplete_turns_never_count_and_an_assignment_counts_once(settings):
+    """Printer Writing Bot case: dozens of incomplete turns plus assignments waiting for photos."""
+    with client_for(settings) as client:
+        store = client.app.state.store
+        book = Assignments(store)
+        ada = store.create_bot("Ada", "", "codex", None)
+        photos = book.create(ada.id, {"title": "Worksheet"})
+        other = book.create(ada.id, {"title": "Pick a branch"})
+        with closing(book._tx()) as db:
+            book._set_status(db, book._row(db, photos.id), "waiting_on_user", "need photos to check alignment")
+            book._set_status(db, book._row(db, other.id), "waiting_on_user", "which branch should I use?")
+            db.commit()
+        for index in range(72):
+            job = store.create("x", "codex", bot_id=ada.id, source="chat" if index % 2 else "assignment")
+            set_row(store, "jobs", job.id, status="incomplete", failure_kind="incomplete", error="Not done: waiting",
+                    finished_at=now().isoformat())
+        items = needs(client)
+        assert sorted(i["kind"] for i in items) == ["assignment", "assignment"]  # 72 incomplete turns: no items
+        by_title = {i["title"]: i for i in items}
+        assert by_title["Worksheet"]["category"] == "materials"
+        assert by_title["Pick a branch"]["category"] == "action"
+        assert needs_you.count_items(items) == {"total": 2, "materials": 1}
+        # a question on the same assignment is a second item but not a second count
+        extra = {"id": "q:1:open", "kind": "question", "state": "open", "ask": "asks: ?", "assignment_id": photos.id}
+        again = needs_you._annotate([*items, extra])
+        assert needs_you.count_items(again) == {"total": 2, "materials": 0}  # the question is a real ask
