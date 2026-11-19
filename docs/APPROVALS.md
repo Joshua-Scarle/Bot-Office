@@ -34,7 +34,7 @@ Order of decisions: protected secrets are always refused; then the owner's actio
 | Controlling printers and the screen | off | PrusaLink and OctoPrint commands, `desk click/type/key` |
 | Any connector action | off | every connector (MCP) tool call, including reads |
 
-Your own classes match a command pattern or a tool-name pattern (regular expressions). Matching is a tripwire on the tool's name and its command line, not a sandbox: a bot that hides a command inside a script it wrote first is not caught. The bot's own instructions tell it not to work around a refused step.
+Your own classes match a command pattern or a tool-name pattern (regular expressions). A pattern sees at most the first 4096 characters; a longer command counts as in your class, so it asks. A pattern that is too slow on long, repetitive input (nested repeats such as `(a+)+`) is refused when you save it. Matching is a tripwire on the tool's name and its command line, not a sandbox: a bot that hides a command inside a script it wrote first is not caught. The bot's own instructions tell it not to work around a refused step.
 
 ## Which engines can pause
 
