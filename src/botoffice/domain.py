@@ -23,6 +23,7 @@ CatchUp = Literal["once", "skip"]
 # 0.10.0 assignments: a goal a bot works on across turns until done (see assignments.py)
 AssignmentStatus = Literal["open", "active", "waiting_on_user", "waiting_on_bot", "blocked", "done", "dropped"]
 CLOSED_STATUSES = ("done", "dropped")
+POSITION_LIMIT = 1e12  # task list positions: finite and far from where +1 stops changing a float
 # when an assignment shows up in Needs-you: never, when blocked or waiting on the user, or always
 Escalate = Literal["never", "on_block", "always"]
 
@@ -455,7 +456,7 @@ class Task(Assignment):
     """An assignment as the task-list API shows it: its version (send it back to edit), list
     position, origin, last actor and the computed stage with its flags."""
     version: int = 1
-    position: float | None = None
+    position: float | None = Field(default=None, allow_inf_nan=False)
     origin: str = "form"
     source_message_id: int | None = None
     source_job_id: str | None = None
@@ -504,7 +505,7 @@ class AssignmentUpdate(BaseModel):
 
 class TaskCreate(AssignmentCreate):
     # list order (lower first); default: after the bot's last task
-    position: float | None = None
+    position: float | None = Field(default=None, allow_inf_nan=False, ge=-POSITION_LIMIT, le=POSITION_LIMIT)
     # G10: None follows BOT_OFFICE_FORM_TASKS_START (auto: starts on its own); false = don't start yet
     start: bool | None = None
 
@@ -512,7 +513,7 @@ class TaskCreate(AssignmentCreate):
 class TaskUpdate(AssignmentUpdate):
     # the version the client last saw (required): a stale one is answered 409 with the current task
     version: int = Field(ge=1)
-    position: float | None = None
+    position: float | None = Field(default=None, allow_inf_nan=False, ge=-POSITION_LIMIT, le=POSITION_LIMIT)
     reviewer: str | None = Field(default=None, max_length=200)
 
 
