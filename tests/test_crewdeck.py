@@ -220,7 +220,13 @@ def test_icon_upload_validation_and_auth(settings):
         assert client.put(url, content=svg, headers=H | {"Content-Type": "image/svg+xml"}).status_code == 415
         assert client.put(url, content=b"hello", headers=H | {"Content-Type": "image/png"}).status_code == 415
 
-        ok = client.put(url, content=PNG, headers=H | {"Content-Type": "image/png"})
+        import io
+
+        from PIL import Image
+        real = io.BytesIO()
+        Image.new("RGB", (40, 30), (9, 9, 9)).save(real, format="PNG")
+        assert client.put(url, content=PNG, headers=H | {"Content-Type": "image/png"}).status_code == 415   # 0.12.0: fully decoded
+        ok = client.put(url, content=real.getvalue(), headers=H | {"Content-Type": "image/png"})
         assert ok.status_code == 200 and ok.json()["icon_image"] == "image/png"
         path = settings.data_dir / "bots" / bot["id"] / "icon"
         assert path.stat().st_mode & 0o777 == 0o600
