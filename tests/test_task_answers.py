@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from botoffice.api import create_app
-from botoffice.assignments import AssignmentError, Assignments
+from botoffice.assignments import REORDER_EVENTS, AssignmentError, Assignments
 from botoffice.domain import JobStatus
 from botoffice.memory import Memory
 from botoffice.providers.fake import FakeAdapter
@@ -471,6 +471,35 @@ def test_reorder_with_missing_positions_keeps_unlisted_tasks_in_place(rig):
     # the unlisted ones (0 and 2) hold their slots; 3 and 1 swap theirs
     assert order[0] in ("0", "2") and set(order) == {"0", "1", "2", "3"}
     assert order.index("3") < order.index("1")
+
+
+def test_reorder_renumbers_only_open_tasks_and_bounds_its_events(rig):
+    """A closed task keeps its version and position (no spurious 409 for an owner editing it, no
+    event); a renumber of a long list writes at most REORDER_EVENTS "moved" events."""
+    client, store, (ada, *_), _ = rig
+    book = Assignments(store)
+    first, closed, second = (book.create(ada.id, {"title": str(index), "start": False}) for index in range(3))
+    book.update(closed.id, {"status": "done"})
+    version = raw(store, closed.id)["version"]
+    with closing(store._connect()) as db:
+        db.execute("UPDATE assignments SET position=NULL WHERE id=?", (str(first.id),))  # forces a renumber
+    book.reorder(ada.id, [second.id, closed.id, first.id])
+    assert raw(store, closed.id)["version"] == version
+    with closing(store._connect()) as db:
+        assert not db.execute("SELECT 1 FROM assignment_events WHERE assignment_id=? AND kind='moved'",
+                              (str(closed.id),)).fetchone()
+    assert raw(store, second.id)["position"] < raw(store, first.id)["position"]
+    many = [book.create(ada.id, {"title": f"m{index}", "start": False}) for index in range(REORDER_EVENTS + 20)]
+    with closing(store._connect()) as db:
+        db.execute("UPDATE assignments SET position=NULL WHERE bot_id=?", (str(ada.id),))
+        before = db.execute("SELECT COUNT(*) FROM assignment_events WHERE kind='moved'").fetchone()[0]
+    book.reorder(ada.id, [item.id for item in reversed(many)])
+    with closing(store._connect()) as db:
+        moved = db.execute("SELECT COUNT(*) FROM assignment_events WHERE kind='moved'").fetchone()[0] - before
+        mark = db.execute("SELECT note FROM assignment_events WHERE kind='reordered' ORDER BY id DESC").fetchone()
+    assert moved == REORDER_EVENTS and mark["note"] == f"{REORDER_EVENTS + 22} tasks moved"
+    order = sorted(many, key=lambda item: raw(store, item.id)["position"])
+    assert [item.id for item in order] == [item.id for item in reversed(many)]
 
 
 def test_reorder_with_stale_version_is_409(rig):

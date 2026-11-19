@@ -219,7 +219,7 @@ To raise a cap, edit it in Settings → Bot behavior, or for example `PUT /v1/se
 Rollback: the migration is additive (`jobs.auto_kind`, `jobs.auto_decision`, `bots.chat_only`, plus new keys in the existing `auto_continue` setting), and older code ignores it. Before starting 0.11.9 on the migrated database, stop the service with no job running and run:
 
 ```bash
-sqlite3 ~/printpilot-agentdesk/data/agentdesk.sqlite3 "UPDATE messages SET steer_status='delivered' WHERE source='inbox' AND steer_status='pending'; UPDATE jobs SET status='cancelled', error='rollback' WHERE status='queued' AND failure_kind='auto_cap';"
+sqlite3 data/agentdesk.sqlite3 "UPDATE messages SET steer_status='delivered' WHERE source='inbox' AND steer_status='pending'; UPDATE jobs SET status='cancelled', error='rollback' WHERE status='queued' AND failure_kind='auto_cap';"
 ```
 
 The first statement drains bot messages still waiting to steer a turn (0.11.9 would re-queue them as if you had typed them). The second cancels automatic turns held by a cap (0.11.9 would run them without the cap check). Hidden machinery rows and approval cards show as plain lines in 0.11.9.

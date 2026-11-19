@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d1d2192"  # 0.11.9
-INTERNAL = re.compile(r"Joshua|Engineer \d|\bG\d{1,2}\b|\bplan (?:\d|G\d|P\d)|\bP\d Q\d|review fix \d|\bfix \d+\b")
+INTERNAL = re.compile(r"Joshua|printpilot-agentdesk|/home/\w|Engineer \d|\bG\d{1,2}\b|\bplan (?:\d|G\d|P\d)|\bP\d Q\d|review fix \d|\bfix \d+\b")
 
 
 def _added_lines() -> list[str]:
@@ -32,6 +32,16 @@ def _added_lines() -> list[str]:
 def test_added_lines_name_no_owner_and_no_internal_plan_references():
     bad = [line for line in _added_lines() if INTERNAL.search(line)]
     assert bad == []
+
+
+def test_the_untrusted_helper_and_the_rollback_line_name_no_owner():
+    source = (ROOT / "src/botoffice/assignments.py").read_text(encoding="utf-8")
+    start = source.index("def untrusted(")
+    helper = source[start:source.index("\n\n", start)]
+    assert "Joshua" not in helper and " his " not in helper and "the owner" in helper
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    rollback = next(line for line in readme.splitlines() if "steer_status='delivered'" in line and "sqlite3" in line)
+    assert rollback.startswith("sqlite3 data/agentdesk.sqlite3 ")
 
 
 def test_the_bot_prompt_says_the_owner_not_a_name():
