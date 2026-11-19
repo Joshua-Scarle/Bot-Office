@@ -25,7 +25,7 @@ def up(client, bot, name, data, **kw):
 
 @pytest.mark.parametrize("name,data", [
     ("report.pdf", b"%PDF-1.7 body"), ("data.csv", b"a,b\n1,2\n"), ("part.stl", b"solid x\nendsolid"),
-    ("part.step", b"ISO-10303-21;"), ("print.gcode", b"G28\nG1 X1"), ("bundle.zip", b"PK\x03\x04zip"),
+    ("part.step", b"ISO-10303-21;"), ("print.gcode", b"M104 S200\n; sliced"), ("bundle.zip", b"PK\x03\x04zip"),
     ("run.sh", b"#!/bin/sh\nrm -rf /\n"), ("x.svg", b"<svg onload=alert(1)>"),
 ])
 def test_any_file_is_stored_safely_and_served_as_a_download(client_bot, name, data):
