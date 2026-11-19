@@ -284,7 +284,8 @@ def test_bot_created_work_has_a_daily_allowance(settings, monkeypatch):
 
 # --- security 4: cross-bot text is delimited as untrusted data ---
 
-def test_bot_written_assignment_text_is_delimited_as_untrusted(settings):
+def test_bot_written_assignment_text_is_delimited_as_untrusted(settings, monkeypatch):
+    monkeypatch.setenv("BOT_OFFICE_CROSS_BOT_SUBTASK_START", "allow")  # the child starts (0.11.9 behaviour)
     settings.ensure_dirs()
     store = JobStore(settings.data_dir / "agentdesk.sqlite3")
     book = Assignments(store)

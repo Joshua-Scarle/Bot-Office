@@ -158,6 +158,30 @@ Both are inlined in every fresh prompt (system prompt first) and written as `SYS
 
 **Bot messages steer too.** A message from one bot to another now reaches the other bot's running turn the way your own messages do, instead of always waiting for its next turn. The sender decides: `bot-msg <bot> "..."` steers by default; `bot-msg --queue <bot> "..."` (or `desk message --queue`, or `"mode": "queue"` on `POST /v1/bots/{sender}/message-agent`) waits for a turn of its own, for anything that can wait. A steered message is marked as from that bot (information, not the user's instructions), arrives after any message of yours waiting for the same turn, and is not answered by the turn's own reply, since that reply belongs to the receiver's task: the receiver answers with a message of its own, and the prompt tells it to. If the receiver is idle the message starts a turn as before; it is never steered into a turn that is itself answering a bot, or into an engine that can't take a message mid-run; and if the turn ends before reading it, it becomes an ordinary queued bot turn whose reply goes back to the sender. Guards: a bot can't message itself; one message per pair per 10 seconds; steered messages count toward the hourly inbox caps; and an exchange between two bots allows three asks with their answers (the answer to a steered ask takes the ask's hop, as a queued turn's reply always has). Each bot has a switch in its settings, "Other bots' messages reach it while it works" (`bot_steer`, on by default); off, bot messages to it queue. The API returns `delivery` (`steer`, `start` or `queue`) and `mode`; a steered message's status is `sent`, then `delivered`.
 
+**Task lists.** Each bot has a task list (the sidebar label stays "Assignments"). Owner and bots can add, edit, reorder, start and drop tasks. Every write carries a version, and a stale write gets a 409 listing what changed. Each prompt shows the bot its open tasks and the changes others made since its last turn. Bots use `bot-task` (`add`, `edit`, `start`, `drop`, `status`, `changes`, ...). Further rules:
+
+- Tasks have a priority (urgent, high, normal, low). Lists, prompts and the queue put higher priority first. Set it with `bot-task add/edit --priority` or the badge and selector in the panel.
+- A task added from the form starts on its own; untick "Start now" to leave it open. Start appears only on open tasks that never started.
+- A task one bot adds to another bot's list lands open and waits for that bot.
+- On its own list, a bot may edit the title and goal of a task you created, never its done-when. Such edits are marked "Edited by a bot", and prompts show them as untrusted text until you rewrite them.
+- Dropping a task (by you or a bot) cancels its queued and running turns, and they do not come back.
+- A bot's task writes are capped per hour.
+
+Settings (environment, read on every call; unknown values fall back to the default):
+
+- `BOT_OFFICE_CROSS_BOT_SUBTASK_START` = `wait` (default) or `allow`: whether a bot's subtask on another bot's list may start at once. A task without a parent always lands open.
+- `BOT_OFFICE_BOT_DROP_OWNER_TASKS` = `with_note` (default) or `owner_only`: whether a bot may drop a task you created on its list, with a note shown in Needs you.
+- `BOT_OFFICE_DROP_CANCELS_TURNS` = `on` (default) or `off`.
+- `BOT_OFFICE_BOT_EDIT_OWNER_TASKS` = `title_goal` (default) or `off`.
+- `BOT_OFFICE_FORM_TASKS_START` = `auto` (default) or `manual`.
+- `BOT_OFFICE_TASK_DEFAULT_PRIORITY` = `normal` (default), `urgent`, `high` or `low`.
+- `BOT_OFFICE_TASK_WRITES_PER_HOUR` = `200` (default).
+- `BOT_OFFICE_TASKS_LABEL` = `Assignments` (default).
+
+`GET /v1/tasks/settings` returns the current values.
+
+Rollback: the database changes are additive (new columns, an index and a marker row), and 0.11.9 ignores them. Tasks created on 0.11.10 still run on 0.11.9, without priority or bot-edit marks.
+
 **Live end-to-end test.** `scripts/e2e_gui.py` drives a real Chromium (or Chrome with `--channel chrome`) through the UI against a throwaway local Bot-Office with a scripted engine and two bots labelled "E2E test bot" (Enter to send, Settings and approvals, the Approve / Deny card, the bot-to-bot row and panel), or read-only against a running install with `--url`/`--token` (`--send-to` sends one real message with Enter, only to a bot whose name starts with "E2E test"). It ends with a plain PASS/FAIL list. Needs `pip install playwright` and `python -m playwright install chromium`.
 
 ## What changed in 0.11.9

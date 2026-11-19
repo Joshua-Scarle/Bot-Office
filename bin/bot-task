@@ -12,9 +12,10 @@ HELP = """bot-task: your assignments, wake-ups and routines (works only inside a
 
   bot-task tasks [--bot NAME|--all] [--closed]    task lists by stage
   bot-task board                                  all bots’ open tasks
-  bot-task add TITLE [--goal G] [--done-when D] [--for BOT] [--parent ID|current] [--first]
+  bot-task add TITLE [--goal G] [--done-when D] [--for BOT] [--parent ID|current] [--first] [--priority P]
+        P: urgent | high | normal | low (default normal); a task for another bot waits for that bot to start it
   bot-task start ID|current | block ID --note TEXT | wait ID --on user|BOT --note TEXT
-  bot-task drop ID --note TEXT | edit ID --version N [--title T] [--goal G] [--done-when D] [--due DATE] [--position N]
+  bot-task drop ID --note TEXT | edit ID --version N [--title T] [--goal G] [--done-when D] [--due DATE] [--position N] [--priority P]
   bot-task changes [--since EVENT_ID]
   bot-task list                                   your open assignments and the children you created
   bot-task show [<id>|current]                    one assignment with its recent events
@@ -33,6 +34,7 @@ HELP = """bot-task: your assignments, wake-ups and routines (works only inside a
 """
 
 UNITS = {"m": 1, "h": 60, "d": 24 * 60}
+PRIORITIES = ("urgent", "high", "normal", "low")
 
 
 def call(method, path, body=None):
@@ -104,6 +106,7 @@ def main(argv):
             for item in items:
                 if item["stage"] != stage and not (stage == "completed" and item["stage"] == "dropped"): continue
                 flags = [item["status"]] if item.get("waiting") or item.get("blocked") or item["stage"] == "dropped" else []
+                if item.get("priority", "normal") != "normal": flags.append(item["priority"])
                 print(f"  {item['id'][:8]}  [{label}" + (" · " + ", ".join(flags) if flags else "") + f"]  {item['title']}  ({item['turns_used']}/{item['budget_turns']} turns, {round(item['minutes_used'])}/{item['budget_minutes']} min)  {item['created_by']} / {item['origin']}")
     elif command == "add":
         parser.add_argument("title")
@@ -112,6 +115,7 @@ def main(argv):
         parser.add_argument("--for", dest="for_bot")
         parser.add_argument("--parent", dest="parent_id")
         parser.add_argument("--first", action="store_true")
+        parser.add_argument("--priority", choices=PRIORITIES)
         args = parser.parse_args(rest)
         body = {k: v for k, v in vars(args).items() if v is not None and k != "first"}
         if args.first:
@@ -133,6 +137,7 @@ def main(argv):
         parser.add_argument("--done-when")
         parser.add_argument("--due", dest="due_at")
         parser.add_argument("--position", type=float)
+        parser.add_argument("--priority", choices=PRIORITIES)
         args = parser.parse_args(rest)
         body = {k: v for k, v in vars(args).items() if k != "id" and v is not None}
         if len(body) == 1: parser.error("at least one field is required")
@@ -157,6 +162,8 @@ def main(argv):
         for event in result["changes"]:
             print(f"{event['id']}  {event['assignment_id'][:8]}  {event['kind']}  {event['actor']}  {event.get('title', '')}  {event.get('note', '')}")
         print(f"Last event: {result['last_event']}")
+        if result.get("more"):
+            print(f"More changes: bot-task changes --since {result['last_event']}")
     elif command == "list":
         for item in call("GET", "/v1/agent/assignments"):
             show(item)

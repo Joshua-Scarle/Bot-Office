@@ -50,6 +50,9 @@ EFFORT_MIGRATION = "crewdeck-effort-v1"
 READS_MIGRATION = "reads-seeded-v1"
 # 0.9.0: Grok bridge rate/hop state moved from JSON files into SQLite (imported once)
 BRIDGE_IMPORT = "bridge_json_import"
+TASKS_SEEN_INIT = "tasks_seen_init"  # meta key: the "changes by others" watermark was set (task lists)
+# G7: an assignment's priority as a sort key (urgent 0 .. low 3; anything else counts as normal)
+PRIORITY_RANK = "(CASE {0}priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'low' THEN 3 ELSE 2 END)"
 BRIDGE_JSON = ("grok_bridge_rate.json", "grok_bridge_threads.json")
 # roles that count as unread: what the bot (or the system) said, never the prompts it received
 # (0.11.10: plus the bot's own messages to other bots, see _UNREAD_WHERE)
@@ -163,17 +166,33 @@ def _init_assignment_tables(db: sqlite3.Connection) -> None:
         ("source_job_id", "TEXT"),
         ("updated_by", "TEXT NOT NULL DEFAULT 'user'"),
         ("reviewer", "TEXT"),
+        # P2 review fix 2 / Q3: the text fields a bot edited (comma list of title, goal, done_when);
+        # prompts delimit those as untrusted even on a task the user created
+        ("bot_edited", "TEXT NOT NULL DEFAULT ''"),
+        # G7: urgent | high | normal | low; lists, prompts and the claim order put higher first
+        ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
     ):
         if column not in columns:
             db.execute(f"ALTER TABLE assignments ADD COLUMN {column} {ddl}")
     db.execute("CREATE INDEX IF NOT EXISTS assignments_pick ON assignments(bot_id, status, position, created_at)")
-    columns = {row["name"] for row in db.execute("PRAGMA table_info(assignment_events)")}
-    for column, ddl in (("actor", "TEXT NOT NULL DEFAULT 'system'"), ("version", "INTEGER")):
-        if column not in columns:
-            db.execute(f"ALTER TABLE assignment_events ADD COLUMN {column} {ddl}")
-    if "actor" not in columns:
-        # first start on 0.11.4: older events are history, not "changes since your last turn"
-        db.execute("UPDATE bots SET tasks_seen_event=(SELECT COALESCE(MAX(id), 0) FROM assignment_events)")
+    # the event actor and the "changes by others" watermark land in one transaction with a
+    # durable marker, so a crash in between cannot replay old history as new changes (fix 10)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(assignment_events)")}
+        for column, ddl in (("actor", "TEXT NOT NULL DEFAULT 'system'"), ("version", "INTEGER")):
+            if column not in columns:
+                db.execute(f"ALTER TABLE assignment_events ADD COLUMN {column} {ddl}")
+        if not db.execute("SELECT 1 FROM meta WHERE key=?", (TASKS_SEEN_INIT,)).fetchone():
+            # first start with task lists: older events are history, not "changes since your last turn"
+            db.execute("UPDATE bots SET tasks_seen_event=(SELECT COALESCE(MAX(id), 0) FROM assignment_events)")
+            db.execute("INSERT INTO meta (key, value) VALUES (?, ?)", (TASKS_SEEN_INIT, now().isoformat()))
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+    # the per-actor write limit (BOT_OFFICE_TASK_WRITES_PER_HOUR) counts these
+    db.execute("CREATE INDEX IF NOT EXISTS assignment_events_actor ON assignment_events(actor, created_at)")
     db.execute(
         """CREATE TABLE IF NOT EXISTS wakeups (
             id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, assignment_id TEXT, due_at TEXT, on_assignment TEXT,
@@ -1227,7 +1246,9 @@ class JobStore:
                     "AND (bot_id IS NULL OR NOT EXISTS (SELECT 1 FROM jobs AS active "
                     "WHERE active.bot_id=queued.bot_id AND active.status='running')) "
                     "AND (not_before IS NULL OR not_before <= ?) "
-                    "ORDER BY priority, created_at, id LIMIT 1",
+                    # G7: among equal job priorities, the turn of the more urgent task goes first
+                    "ORDER BY priority, COALESCE((SELECT " + PRIORITY_RANK.format("a.") + " FROM assignments AS a "
+                    "WHERE a.id=queued.assignment_id), 2), created_at, id LIMIT 1",
                     (JobStatus.QUEUED.value, *sorted(enabled_providers), now().isoformat()),
                 ).fetchone()
                 if not row:
