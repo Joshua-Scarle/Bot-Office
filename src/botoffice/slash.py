@@ -358,6 +358,7 @@ def render_template(body: str, args: str) -> str:
         words = args.split()
     out = []
     i = 0
+    used = False
     while i < len(body):
         ch = body[i]
         if ch != "$":
@@ -370,16 +371,18 @@ def render_template(body: str, args: str) -> str:
             i += 2
         elif rest.startswith("ARGUMENTS"):
             out.append(args.strip())
+            used = True
             i += 1 + len("ARGUMENTS")
         elif rest[:1].isdigit() and rest[0] != "0":
             index = int(rest[0])
+            used = True
             out.append(words[index - 1] if index <= len(words) else "")
             i += 2
         else:
             out.append("$")
             i += 1
     text = "".join(out).strip()
-    if "$ARGUMENTS" not in body and args.strip() and not re.search(r"\$[1-9]", body):
+    if not used and args.strip():
         text += "\n\n" + args.strip()  # a command that takes no placeholder still gets what the user typed after it
     return text
 
@@ -436,7 +439,8 @@ def build_claude(names: list[str], terminal: list[str], items: list[tuple[str, P
             continue
         if name.startswith("__"):
             continue  # internal
-        if name in custom:
+        controlled = name in MAPPED_ALL or name in CLAUDE_GREY  # a control of Bot Office or a greyed command keeps its name
+        if name in custom and not controlled:
             meta, body = _frontmatter(_read(custom[name][0]))
             desc = meta.get("description") or _first_line(body)
             hint = meta.get("argument-hint") or ""
@@ -446,7 +450,7 @@ def build_claude(names: list[str], terminal: list[str], items: list[tuple[str, P
         elif ":" in name:
             plugin, _, rest = name.partition(":")
             out[name] = entry(name, f"{rest.replace('-', ' ')} (plugin {plugin})", source="plugin", kind="plugin")
-        elif name in CLAUDE_DESCRIPTIONS or name in CLAUDE_MAPPED or name in terminal:
+        elif controlled or name in CLAUDE_DESCRIPTIONS or name in CLAUDE_MAPPED or name in terminal:
             out[name] = _classify_builtin("claude", name, CLAUDE_DESCRIPTIONS.get(name, ""), "cli",
                                           CLAUDE_GREY.get(name), terminal=name in terminal)
         else:

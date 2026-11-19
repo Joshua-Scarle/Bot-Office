@@ -2129,6 +2129,7 @@ $("show-archived").onclick = () => {
   loadMessages().catch(handleError);
 };
 
+let submitting = false;
 $("composer").onsubmit = async (event) => {
   event.preventDefault();
   const bot = currentBot();
@@ -2136,7 +2137,13 @@ $("composer").onsubmit = async (event) => {
   const draft = $("text").value;
   const text = draft.trim();
   if (!bot || (!text && !pendingImages.length)) return;
-  if (text.startsWith("/") && !pendingImages.length && await trySlash(bot, text)) return;
+  if (text.startsWith("/") && !pendingImages.length) {
+    if (submitting) return;  // the list may still be loading: a second Enter must not send the text twice
+    submitting = true;
+    let handled;
+    try { handled = await trySlash(bot, text); } finally { submitting = false; }
+    if (handled) return;
+  }
   if (sendingImages) { setStatus("Still sending the previous message… it gives up after " + Math.round(API_TIMEOUT_MS / 1000) + " s."); return; }
   if (pendingImages.some((item) => !item.id || item.bot !== bot.id)) { setStatus("Waiting for the image upload to finish."); return; }
   const sentImages = [...pendingImages];
@@ -2228,10 +2235,10 @@ function slashDescription(c) {
 const slashUi = { open: false, active: -1, shown: [], query: "", dismissed: null, loading: null };
 slashUi.cache = new Map();
 function slashKey(bot) { return bot.id + "|" + bot.default_provider; }
-async function slashCommands(bot, refresh) {
+async function slashCommands(bot, refresh, bypass) {
   const key = slashKey(bot);
   const hit = slashUi.cache.get(key);
-  if (hit && !refresh && Date.now() - hit.at < 600000) return hit.data;
+  if (hit && !refresh && !bypass && Date.now() - hit.at < 600000) return hit.data;
   if (!slashUi.loading || slashUi.loading.key !== key) {
     const promise = api("/v1/bots/" + bot.id + "/slash-commands" + (refresh ? "?refresh=1" : ""))
       .then((data) => { slashUi.cache.set(key, { at: data.source === "fallback" ? Date.now() - 570000 : Date.now(), data }); return data; })
@@ -2347,7 +2354,11 @@ async function trySlash(bot, text) {
   };
   let data;
   try { data = await slashCommands(bot); } catch (err) { if (err instanceof AuthError) throw err; return false; }
-  const c = slashFind(data.commands, parts.name);
+  let c = slashFind(data.commands, parts.name);
+  if (!c) {  // maybe a command file made in the last minutes: ask once more, bypassing the browser's copy
+    try { data = await slashCommands(bot, false, true); } catch (err) { if (err instanceof AuthError) throw err; return false; }
+    c = slashFind(data.commands, parts.name);
+  }
   if (!c) return false;  // not one of this bot's commands: an ordinary message, as before
   closeSlash();
   if (c.action === "grey") { setStatus("/" + c.name + " is unavailable: " + slashDescription(c)); $("status").classList.add("bad"); return true; }
@@ -2360,6 +2371,7 @@ async function trySlash(bot, text) {
   try {
     if (c.action === "map") {
       if (c.target === "new") {
+        if (bot.activity === "running" || bot.activity === "queued") { setStatus("Cannot start a fresh session while " + bot.name + " is working; try again when it is idle."); $("status").classList.add("bad"); return true; }
         if (!(await askConfirm("Start a fresh session?", "Start a fresh " + bot.default_provider + " session for " + bot.name + " on its next turn? Its chat history, memory and WORKING.md are kept; the CLI forgets the conversation it was in.", "Start fresh session"))) { setStatus("Cancelled."); return true; }
         const out = await api("/v1/bots/" + bot.id + "/slash", { method: "POST", body: JSON.stringify({ name: c.name, args: parts.args, confirm: true }) });
         clearDraft();

@@ -425,3 +425,18 @@ def test_a_damaged_cache_entry_is_dropped_and_asked_again(tmp_path, monkeypatch)
         catalog._cache[key] = {"probe": {"oops": 1}}
     data = asyncio.run(catalog.commands("claude"))
     assert data["commands"] and data["cached"] is False  # the damaged entry was dropped and asked again
+
+
+def test_arguments_are_kept_when_the_body_only_escapes_a_dollar():
+    assert slash.render_template("Cost $$ARGUMENTS", "5") == "Cost $ARGUMENTS\n\n5"
+    assert slash.render_template("Do $ARGUMENTS", "x") == "Do x"
+
+
+def test_a_custom_file_cannot_take_over_a_control_of_bot_office(tmp_path):
+    home = tmp_path / "home"
+    (home / ".claude" / "commands").mkdir(parents=True)
+    for name in ("clear", "model", "effort"):
+        (home / ".claude" / "commands" / f"{name}.md").write_text("do something else")
+    items, _ = slash.custom_files("claude", home, None)
+    got = {e["name"]: e for e in slash.set_actions("claude", slash.build_claude(["clear", "model", "effort", "mine"], [], items))}
+    assert got["clear"]["action"] == "map" and got["model"]["action"] == "map" and got["effort"]["action"] == "map"
