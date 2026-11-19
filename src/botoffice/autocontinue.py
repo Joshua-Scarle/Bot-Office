@@ -69,12 +69,12 @@ def prose(text: str) -> str:
 # and does not hedge ("but", "still", "not yet") does not report anything unresolved.
 _FIXED = re.compile(r"\b(?:fix(?:ed|es)?|resolv(?:ed|es)|repair(?:ed|s)?|no longer|now (?:pass(?:es)?|work(?:s|ing)?)|"
                     r"(?:all )?(?:tests? )?(?:pass(?:es|ed)?|green)|passing)\b", re.IGNORECASE)
-_HEDGED = re.compile(r"\b(?:but|however|yet|still|remain(?:s|ed|ing)?|unresolved|not|never)\b|n't", re.IGNORECASE)
+_HEDGED = re.compile(r"\b(?:but|however|yet|still|remain(?:s|ed|ing)?|unresolved|not|never)\b|\bfail(?:s|ed|ing)? to\b|n't", re.IGNORECASE)
 
 
 def _unresolved_in(text: str) -> bool:
     """True when *text* (prose only) has a sentence that reports something unresolved."""
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", _clean(text)):
+    for sentence in re.split(r"(?<=[.!?;])\s+|\n+", _clean(text)):
         if _UNRESOLVED.search(sentence) and not (_FIXED.search(sentence) and not _HEDGED.search(sentence)):
             return True
     return False
