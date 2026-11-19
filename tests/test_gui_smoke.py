@@ -1,3 +1,4 @@
+import re
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
 
@@ -46,7 +47,7 @@ def test_opencode_effort_can_be_unset(settings):
         assert response.status_code == 200 and response.json()["effort"] is None
         page = client.get("/").text
         assert 'default (unset)' in page
-        assert '$("f-custom").value = ""; fillEffortSelect()' in page
+        assert 'onChange: () => { fillEffortSelect(); updateTier(); }' in page
 
 
 def test_image_composer_smoke():
@@ -248,7 +249,9 @@ def test_unread_gui_smoke():
     # background reads never clear a manual unread; the revision travels with every read
     assert "if (!explicit && bot.marked_unread) return;" in page
     assert "let revision = click ? click.revision : bot.read_revision || 0;" in page
-    assert "localStorage" not in page
+    # unread state is never kept in the browser; localStorage holds only the two layout preferences
+    assert "localStorage.getItem(NEEDS_OPEN_KEY)" in page and "localStorage.getItem(SIDEBAR_KEY)" in page
+    assert "unread" not in "".join(re.findall(r"localStorage[^;]*;", page)).lower()
 
 
 def test_edit_gui_smoke():

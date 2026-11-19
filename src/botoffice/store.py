@@ -2377,14 +2377,18 @@ class JobStore:
         if chars > SEED_MAX_CHARS:
             raise EditError(413, f"the remaining chat is too long to seed a fresh session ({chars} > {SEED_MAX_CHARS} characters)")
         images = [(m.id, name) for m in messages for name in m.attachments]
-        if len(images) > SEED_MAX_IMAGES:
-            raise EditError(413, f"the remaining chat has too many images to seed ({len(images)} > {SEED_MAX_IMAGES})")
+        # only real images count against the image caps; an uploaded file is just named in the seed (checked to exist)
+        pictures = [item for item in images if not attachment_files.is_file_id(item[1])]
+        if len(pictures) > SEED_MAX_IMAGES:
+            raise EditError(413, f"the remaining chat has too many images to seed ({len(pictures)} > {SEED_MAX_IMAGES})")
         total = 0
         for _, name in images:
             try:
-                total += attachment_files.size(self.path.parent, bot_id, name)
+                length = attachment_files.size(self.path.parent, bot_id, name)
+                if not attachment_files.is_file_id(name):
+                    total += length
             except (OSError, ValueError) as exc:
-                raise EditError(409, f"image {name} of the remaining chat is missing") from exc
+                raise EditError(409, f"{'file' if attachment_files.is_file_id(name) else 'image'} {name} of the remaining chat is missing") from exc
         if total > SEED_MAX_IMAGE_BYTES:
             raise EditError(413, "the remaining chat's images are too large to seed")
         return RewindSeed(messages, images)

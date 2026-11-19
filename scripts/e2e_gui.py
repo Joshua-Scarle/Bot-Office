@@ -149,7 +149,8 @@ def call(base: str, token: str, method: str, path: str, body: dict | None = None
 
 def launch(pw, headed: bool, channel: str | None):
     try:
-        return pw.chromium.launch(headless=not headed, channel=channel)
+        # keep scrollbars in headless runs: the model list's scrollbar drag is checked with a real mouse
+        return pw.chromium.launch(headless=not headed, channel=channel, ignore_default_args=["--hide-scrollbars"])
     except Exception as exc:
         hint = "install Google Chrome" if channel else "run: python -m playwright install chromium"
         raise SystemExit(f"The browser is not available ({exc}); {hint}") from exc
@@ -322,6 +323,239 @@ def held_continuation(page, out: Path, base: str, token: str, app) -> None:
     call(base, token, "PUT", "/v1/settings", {"auto_continue": {"per_bot_day": 20}})
 
 
+# --- 0.11.13: searchable model list and the collapsed "Needs you" row ---
+
+def model_search(page, out: Path, base: str, token: str, mock_long_list: bool) -> None:
+    print("Model search")
+    if mock_long_list:  # a long list so the popup has a scrollbar to drag
+        models = [{"id": f"gpt-{n}.{m}-test", "display": f"gpt-{n}.{m}-test"} for n in range(1, 8) for m in range(10)]
+        body = json.dumps([{"engine": "codex", "label": "Codex", "default_model": "gpt-1.0-test", "models": models}])
+        page.route("**/v1/model-choices*", lambda route: route.fulfill(status=200, content_type="application/json", body=body))
+        page.reload()  # the token is kept for the tab: the page comes back unlocked
+        page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    page.click("#new-bot")
+    box = page.locator("#f-model")
+    box.wait_for(timeout=10000)
+    page.wait_for_function("() => document.querySelector('#f-model').value !== ''", timeout=15000)
+    check(box.get_attribute("role") == "combobox", "the model field is a combobox")
+    box.click()
+    check(page.locator("#f-model-list").is_visible(), "clicking the model field opens the list")
+    options = page.locator("#f-model-list [role=option]").all_inner_texts()
+    total = len(options)
+    query = options[-1][2:7]  # a slice of one model's name, typed in capitals
+    box.fill("")
+    box.type(query.upper(), delay=20)
+    shown = page.locator("#f-model-list [role=option]").all_inner_texts()
+    outside = [t for t in shown if query.lower() not in t.lower()]
+    check(0 < len(shown) <= total and len(outside) <= 1,
+          f"typing {query.upper()!r} filters the list case-insensitively ({len(shown)} of {total}; only the pinned selection may differ)")
+    box.fill("zzzz-no-such-model")
+    check(page.locator("#f-model-list").get_by_text("No matches").count() == 1, 'a "No matches" row shows')
+    box.press("Escape")
+    check(not page.locator("#f-model-list").is_visible(), "Escape closes the list")
+    check(page.locator("#bot-dialog[open]").count() == 1, "the first Escape leaves the dialog open")
+    if mock_long_list:
+        box.click()
+        box.fill("")
+        listbox = page.locator("#f-model-list")
+        metrics = listbox.evaluate("(ul) => ({scroll: ul.scrollHeight, client: ul.clientHeight, bar: ul.offsetWidth - ul.clientWidth})")
+        check(metrics["scroll"] > metrics["client"] and metrics["bar"] > 0, f"the long list has a visible scrollbar ({metrics})")
+        box_ = listbox.bounding_box()
+        x, y = box_["x"] + box_["width"] - metrics["bar"] / 2, box_["y"] + 20
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 60, steps=6)
+        still_open = listbox.is_visible()
+        scrolled = listbox.evaluate("(ul) => ul.scrollTop") > 0
+        page.mouse.up()
+        check(still_open and scrolled, f"dragging the scrollbar scrolls and keeps the list open (open={still_open}, scrolled={scrolled})")
+        check(listbox.is_visible() and page.evaluate("() => document.activeElement.id") == "f-model",
+              "after releasing the scrollbar the list is open and the field keeps focus")
+        shot(page, out, "09-model-search-scrollbar")
+        page.mouse.click(5, 5)  # a real outside click
+        check(not listbox.is_visible(), "a real outside click closes the list")
+        page.unroute("**/v1/model-choices*")
+    page.keyboard.press("Escape")
+
+
+def needs_you_sidebar(page, out: Path, expect_items: bool) -> None:
+    print("Needs-you row in the sidebar")
+    # headless Chromium reports notifications as denied; pretend they can still be switched on
+    page.evaluate("""() => { Object.defineProperty(window, 'Notification', {configurable: true, value: {permission: 'default', requestPermission: async () => 'default'}}); }""")
+    page.evaluate("() => { localStorage.removeItem('bot-office-needs-open'); }")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    page.evaluate("""() => { Object.defineProperty(window, 'Notification', {configurable: true, value: {permission: 'default', requestPermission: async () => 'default'}}); return loadNeedsYou(); }""")
+    section, toggle = page.locator("#needs-you"), page.locator("#needs-toggle")
+    if not expect_items:
+        check(section.is_hidden() or toggle.get_attribute("aria-expanded") == "false", "live: the Needs-you row starts collapsed")
+        if section.is_visible():
+            shot(page, out, "sidebar-live")
+        return
+    check(section.is_visible(), "the Needs-you row shows when something needs you")
+    check(toggle.get_attribute("aria-expanded") == "false", "it starts collapsed (aria-expanded=false)")
+    check(not page.locator("#needs-list").is_visible(), "the list is not shown while collapsed")
+    count = page.locator("#needs-count").inner_text()
+    check(page.locator("#needs-count").is_visible() and count.isdigit() and int(count) >= 1, f"the row shows a count badge ({count})")
+    check(page.locator("#notify-enable").is_visible(), "Turn on notifications is reachable while collapsed")
+    shot(page, out, "sidebar-collapsed")
+    toggle.click()
+    check(toggle.get_attribute("aria-expanded") == "true" and page.locator("#needs-list").is_visible(), "clicking the row expands the list")
+    check(page.locator("#needs-list .needs-item").count() == int(count), "the list has one item per counted request")
+    check(page.locator("#notify-enable").is_visible(), "Turn on notifications is reachable while expanded")
+    shot(page, out, "sidebar-expanded")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    check(page.locator("#needs-toggle").get_attribute("aria-expanded") == "true", "expanded state is remembered after a reload")
+    page.locator("#needs-toggle").wait_for(state="visible", timeout=15000)  # the row appears once the list is loaded
+    page.locator("#needs-toggle").focus()
+    page.keyboard.press("Enter")
+    check(page.locator("#needs-toggle").get_attribute("aria-expanded") == "false", "Enter on the focused row collapses it")
+    page.keyboard.press("Space")
+    check(page.locator("#needs-toggle").get_attribute("aria-expanded") == "true", "Space expands it again")
+    page.keyboard.press("Enter")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    page.locator("#needs-toggle").wait_for(state="visible", timeout=15000)
+    check(page.locator("#needs-toggle").get_attribute("aria-expanded") == "false", "collapsed state is remembered after a reload")
+
+
+# --- 0.11.13: bot search, resizable sidebar, files of any type in the chat ---
+
+def sidebar_search(page, out: Path) -> None:
+    print("Sidebar bot search")
+    page.evaluate("() => localStorage.clear()")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    page.wait_for_selector("#bot-list .bot-item", timeout=15000)
+    search = page.locator("#bot-search")
+    total = page.locator("#bot-list .bot-item").count()
+    check(search.is_visible() and total >= 1, f"the search box is in the sidebar ({total} bots)")
+    all_names = page.locator("#bot-list .bot-item .name").all_inner_texts()
+    sub = page.locator("#bot-list .bot-item .sub").first.inner_text().split(" · ")[0]
+    target = all_names[-1]
+    word = target.split()[-1]  # the last word of one bot's name
+    search.click()
+    search.type(word.upper(), delay=20)
+    names = page.locator("#bot-list .bot-item .name").all_inner_texts()
+    check(names == [n for n in all_names if word.lower() in n.lower()] and 1 <= len(names) < len(all_names) or len(all_names) == 1,
+          f"typing {word.upper()!r} filters the list case-insensitively ({names})")
+    search.fill("no-such-bot-zzz")
+    check(page.locator("#bot-empty").is_visible() and page.locator("#bot-list .bot-item").count() == 0, "an empty-result message shows")
+    model_word = sub.split()[-1]
+    search.fill("")
+    expected = sum(1 for t in page.locator("#bot-list .bot-item .meta").all_inner_texts() if model_word.lower() in t.lower())
+    search.fill(model_word)
+    check(page.locator("#bot-list .bot-item").count() >= expected >= 1, f"the model ({model_word!r}) matches too ({expected} bots show it)")
+    search.fill(word)
+    shot(page, out, "search-filtering")
+    search.press("Escape")
+    check(search.input_value() == "" and page.evaluate("() => document.activeElement.id") != "bot-search"
+          and page.locator("#bot-list .bot-item").count() == total, "Esc clears the box, blurs it and restores the list")
+    page.locator("body").click(position={"x": 700, "y": 400})
+    page.keyboard.press("/")
+    check(page.evaluate("() => document.activeElement.id") == "bot-search", '"/" focuses the search box')
+    page.keyboard.press("Escape")
+    page.keyboard.press("Control+k")
+    check(page.evaluate("() => document.activeElement.id") == "bot-search", "Ctrl+K focuses the search box")
+    page.keyboard.press("Escape")
+
+
+def sidebar_resize(page, out: Path) -> None:
+    print("Resizable sidebar")
+    page.evaluate("() => localStorage.removeItem('bot-office-sidebar-width')")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    width = lambda: round(page.locator(".sidebar").bounding_box()["width"])  # noqa: E731
+    handle = page.locator("#sidebar-resize")
+    start = width()
+    check(handle.get_attribute("role") == "separator" and handle.evaluate("(h) => getComputedStyle(h).cursor") == "col-resize",
+          f"a col-resize separator handle exists (sidebar {start}px)")
+    box = handle.bounding_box()
+    x, y = box["x"] + box["width"] / 2, box["y"] + 300
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 100, y, steps=8)
+    page.mouse.up()
+    check(width() == start + 100, f"dragging the handle widens the sidebar ({start} -> {width()})")
+    shot(page, out, "sidebar-resized")
+    box = handle.bounding_box()
+    page.mouse.move(box["x"] + 3, y)
+    page.mouse.down()
+    page.mouse.move(2000, y, steps=5)
+    page.mouse.up()
+    check(width() == 520, f"it stops at the 520px maximum ({width()})")
+    page.mouse.move(handle.bounding_box()["x"] + 3, y)
+    page.mouse.down()
+    page.mouse.move(0, y, steps=5)
+    page.mouse.up()
+    check(width() == 200, f"it stops at the 200px minimum ({width()})")
+    handle.focus()
+    page.keyboard.press("ArrowRight")
+    check(width() == 216, "ArrowRight widens by 16px from the keyboard")
+    page.reload()
+    page.wait_for_selector("#app:not([hidden])", timeout=15000)
+    check(width() == 216, f"the width is remembered after a reload ({width()})")
+    handle.dblclick()
+    check(width() == 272, "double-click resets to the default width")
+
+
+def file_uploads(page, out: Path, base: str, token: str) -> None:
+    print("Uploads of any file type")
+    import tempfile as _tf
+    with _tf.TemporaryDirectory(prefix="e2e-files-") as tmp:
+        stl = Path(tmp) / "bracket v2.stl"
+        stl.write_bytes(b"solid bracket\n" + b"x" * 2048 + b"endsolid bracket\n")
+        pdf = Path(tmp) / "../evil name.pdf".split("/")[-1]
+        pdf.write_bytes(b"%PDF-1.4 e2e")
+        page.set_input_files("#image-file", [str(stl), str(pdf)])
+        page.wait_for_function("() => document.querySelectorAll('#attachment-list .file-chip').length === 2", timeout=10000)
+        page.wait_for_function("() => [...document.querySelectorAll('#attachment-list .attachment-item')].every((i) => i.textContent.includes('Ready'))", timeout=15000)
+        chips = page.locator("#attachment-list .file-chip").all_inner_texts()
+        check(any("bracket v2.stl" in c and "KB" in c for c in chips), f"pending file chips show name and size ({chips})")
+        send_with_enter(page, "Here are the CAD files.")
+        page.wait_for_selector("#thread .file-chip", timeout=15000)
+        chat = page.locator("#thread .file-chip").first
+        page.wait_for_function("() => document.querySelector('#thread .file-chip .file-size').textContent !== ''", timeout=10000)
+        text = chat.inner_text()
+        check("bracket_v2.stl" in text and "KB" in text, f"the chat shows the file as a chip with name and size ({text!r})")
+        shot(page, out, "file-chip")
+        with page.expect_download(timeout=10000) as info:
+            chat.click()
+        download = info.value
+        check(download.suggested_filename == "bracket_v2.stl", f"clicking the chip downloads it ({download.suggested_filename})")
+        # a drop of a non-image file attaches it too
+        page.evaluate("""() => {
+            const dt = new DataTransfer(); dt.items.add(new File(["a,b\\n1,2\\n"], "table.csv", {type: "text/csv"}));
+            document.getElementById("composer").dispatchEvent(new DragEvent("drop", {dataTransfer: dt, bubbles: true, cancelable: true}));
+        }""")
+        page.wait_for_function("() => [...document.querySelectorAll('#attachment-list .file-chip')].some((c) => c.textContent.includes('table.csv'))", timeout=10000)
+        check(True, "dropping a CSV attaches it as a file chip")
+        # a paste of a file does too
+        page.evaluate("""() => {
+            const dt = new DataTransfer(); dt.items.add(new File([new Uint8Array([80, 75, 3, 4])], "bundle.zip", {type: "application/zip"}));
+            document.getElementById("text").dispatchEvent(new ClipboardEvent("paste", {clipboardData: dt, bubbles: true, cancelable: true}));
+        }""")
+        page.wait_for_function("() => [...document.querySelectorAll('#attachment-list .file-chip')].some((c) => c.textContent.includes('bundle.zip'))", timeout=10000)
+        check(True, "pasting a zip attaches it as a file chip")
+        page.evaluate("""() => { for (const b of document.querySelectorAll('#attachment-list .attachment-item button')) b.click(); }""")
+        # a file over the limit gets a clear error
+        call(base, token, "GET", "/v1/bots")
+    bot_id = page.evaluate("() => state.selected")
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(f"{base}/v1/bots/{bot_id}/attachments?name=big.bin", data=b"0", method="POST",
+                                 headers={"Authorization": "Bearer " + token, "Content-Length": str(10**12)})
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        status, detail = 0, ""
+    except urllib.error.HTTPError as exc:
+        status, detail = exc.code, exc.read().decode()
+    except Exception as exc:  # the server may close the connection after the early 413
+        status, detail = 413, str(exc)
+    check(status == 413, f"an oversize file is refused with 413 ({detail[:80]})")
+
+
 def resolve_token(args, environ=None) -> str | None:
     """The live-mode API token: --token-file, BOT_OFFICE_TOKEN_FILE, BOT_OFFICE_TOKEN, then the
     deprecated --token (a warning on stderr; it shows in the process list)."""
@@ -365,6 +599,10 @@ def main() -> int:
             unlock(page, base, token)
             check(True, "unlocked " + base)
             settings_page(page, out, base, token, write=False)
+            model_search(page, out, base, token, mock_long_list=False)
+            needs_you_sidebar(page, out, expect_items=False)
+            sidebar_search(page, out)
+            sidebar_resize(page, out)
             if args.send_to:
                 if not args.send_to.startswith(TEST_PREFIX):
                     raise SystemExit(f'--send-to only messages test bots: the name must start with "{TEST_PREFIX}"')
@@ -382,6 +620,15 @@ def main() -> int:
                 approvals_in_chat(page, out, base, app)
                 bot_to_bot(page, out, base, TOKEN)
                 held_continuation(page, out, base, TOKEN, app)
+                model_search(page, out, base, TOKEN, mock_long_list=True)
+                open_bot(page, BEA)  # a bot that has not asked for an approval yet
+                send_with_enter(page, "Please send the report email to Joe.")
+                page.locator(".approval-card").last.wait_for(timeout=60000)
+                needs_you_sidebar(page, out, expect_items=True)
+                sidebar_search(page, out)
+                sidebar_resize(page, out)
+                open_bot(page, ADA)
+                file_uploads(page, out, base, TOKEN)
                 server.should_exit = True
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()

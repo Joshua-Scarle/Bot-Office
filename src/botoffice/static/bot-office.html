@@ -40,8 +40,13 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .lock h1 { margin: 0; font-size: 22px; }
 
 /* App layout */
-.app { display: grid; grid-template-columns: 272px minmax(0, 1fr); height: 100vh; }
-.sidebar { background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.app { display: grid; grid-template-columns: var(--sidebar-w, 272px) minmax(0, 1fr); height: 100vh; }
+.sidebar { position: relative; background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+/* drag handle on the sidebar's right edge: pointer drag, arrow keys, double-click resets */
+.sidebar-resize { position: absolute; top: 0; right: -3px; bottom: 0; width: 7px; cursor: col-resize; z-index: 20; touch-action: none; }
+.sidebar-resize:hover, .sidebar-resize.dragging, .sidebar-resize:focus-visible { background: var(--accent, #6385ad); opacity: .55; outline: none; }
+body.resizing-sidebar { cursor: col-resize; user-select: none; }
+.bot-search { margin: 0 8px 8px; width: calc(100% - 16px); }
 .brand { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 8px; font-weight: 700; font-size: 17px; letter-spacing: .2px; }
 .new-bot { margin: 4px 12px 10px; text-align: left; }
 .bot-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 2px; }
@@ -65,9 +70,17 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .tools-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .tools-bar select { width: auto; max-width: 100%; }
 /* bounded: many items scroll inside the panel and never push the bot list or the footer off-screen */
-.needs-you { margin: 0 8px 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; flex: none; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
-.needs-toggle { all: unset; font-weight: 700; }
-.needs-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.needs-you { margin: 0 8px 8px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; flex: none; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
+/* starts collapsed: one row with a count badge; the list opens on click and the choice is remembered */
+.needs-toggle { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 6px; width: 100%; padding: 3px 0; font-weight: 700; cursor: pointer; }
+.needs-toggle:focus-visible, #notify-enable:focus-visible { outline: 2px solid var(--accent, #6385ad); outline-offset: 2px; }
+.needs-toggle::before { content: "\25B8"; font-size: 11px; transition: transform 0.1s; }
+.needs-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+.needs-count { margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: 9px; background: #8a6d2b; color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
+.needs-head { display: grid; gap: 2px; }
+#notify-enable { justify-self: start; margin: 2px 0 4px; }
+.needs-you:not(.open) #needs-list { display: none; }
+.needs-you.open #needs-list { margin-top: 4px; }
 .needs-item { padding: 4px 0; border-top: 1px solid var(--line); }
 .needs-item .tools-bar { gap: 4px; flex-wrap: wrap; }
 .needs-ask { all: unset; cursor: pointer; display: block; }
@@ -149,6 +162,12 @@ input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px s
 .composer { padding: 12px 20px 16px; border-top: 1px solid var(--line); }
 .attachment-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .attachment-item { position: relative; font-size: 12px; }
+.file-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--raised); color: inherit; font: inherit; font-size: 12px; text-align: left; }
+button.file-chip { cursor: pointer; }
+button.file-chip:hover { border-color: var(--accent, #6385ad); }
+.file-chip .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.file-chip .file-size { color: var(--muted); white-space: nowrap; flex: none; }
+.attachment-item.is-file { padding-right: 18px; }
 .attachment-item img, .chat-image { max-width: 120px; max-height: 90px; border-radius: 8px; object-fit: contain; cursor: pointer; }
 .attachment-item button { position: absolute; top: 0; right: 0; padding: 1px 5px; }
 #image-view img { max-width: 85vw; max-height: 80vh; }
@@ -192,6 +211,14 @@ dialog textarea { min-height: 90px; resize: vertical; }
 .icon-tools label { flex: 0 0 110px; }
 .file-btn { position: relative; overflow: hidden; display: inline-block; }
 .file-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.picker { position: relative; display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.picker input { color: var(--text); font-size: 15px; }
+.picker ul { position: absolute; top: 100%; left: 0; right: 0; z-index: 5; margin: 2px 0 0; padding: 4px; list-style: none; max-height: 240px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .4); }
+.picker li { padding: 6px 8px; border-radius: 6px; color: var(--text); font-size: 14px; cursor: pointer; }
+.picker li[aria-selected="true"] { font-weight: 600; }
+.picker li[aria-selected="true"]::before { content: "✓ "; color: var(--accent); }
+.picker li.active { background: var(--line); }
+.picker li.empty { color: var(--muted); cursor: default; }
 .hint { font-size: 12px; color: var(--muted); margin: -6px 0 0; }
 .danger-zone { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 8px; }
 .danger-zone p { margin: 0; font-size: 13px; }
@@ -204,6 +231,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
 }
 @media (max-width: 720px) {
   .app { grid-template-columns: 76px minmax(0, 1fr); }
+  .sidebar-resize, .bot-search { display: none; }
   .brand span, .bot-item .meta, .bot-item .dot, .sidebar-foot .muted { display: none; }
   .bot-item .unread { grid-row: 1; grid-column: 1; justify-self: end; align-self: start; font-size: 10px; padding: 0 5px; }
   .bot-item { grid-template-columns: 36px; justify-content: center; }
@@ -217,9 +245,10 @@ dialog textarea { min-height: 90px; resize: vertical; }
   /* the narrow sidebar shows only "Needs you (n)"; tapping it opens the list as a bounded overlay */
   .needs-you { margin: 0 4px 6px; padding: 4px; max-height: none; overflow: visible; text-align: center; }
   .needs-head { justify-content: center; margin: 0; }
-  .needs-toggle { cursor: pointer; font-size: 11px; }
+  .needs-toggle { justify-content: center; font-size: 11px; }
+  .needs-toggle::before { display: none; }
+  .needs-count { margin-left: 0; }
   #notify-enable { display: none; }
-  .needs-you:not(.open) #needs-list { display: none; }
   .needs-you.open #needs-list { position: fixed; left: 80px; top: 8px; z-index: 30; width: min(320px, calc(100vw - 88px)); max-height: 60vh; overflow-y: auto; padding: 8px; text-align: left; background: var(--side); border: 1px solid var(--line); border-radius: 8px; }
 }
 .question-card { margin-top: 8px; padding: 12px; border: 1px solid #465063; border-radius: 10px; background: #1b202a; display: grid; gap: 8px; }
@@ -294,12 +323,14 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <div class="brand"><span>Bot-Office</span></div>
     <button id="new-bot" class="new-bot" title="New bot">+ <span>New bot</span></button>
     <button id="board-open" type="button">Board</button>
+    <input id="bot-search" class="bot-search" type="search" placeholder="Search bots ( / )" aria-label="Search bots by name, description or model" autocomplete="off" spellcheck="false">
     <section id="needs-you" class="needs-you" aria-label="Needs you" hidden>
-      <div class="needs-head"><button id="needs-toggle" class="needs-toggle" type="button" aria-expanded="false" aria-controls="needs-list">Needs you</button><button id="notify-enable" class="ghost" type="button" hidden>Turn on notifications</button></div>
+      <div class="needs-head"><button id="needs-toggle" class="needs-toggle" type="button" aria-expanded="false" aria-controls="needs-list"><span>Needs you</span><span id="needs-count" class="needs-count" hidden>0</span></button><button id="notify-enable" class="ghost" type="button" hidden>Turn on notifications</button></div>
       <div id="needs-list"></div>
     </section>
     <nav id="bot-list" class="bot-list"></nav>
     <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="office-settings" class="ghost" type="button" title="Settings for all bots">⚙ Settings</button><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
+    <div id="sidebar-resize" class="sidebar-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar" aria-valuemin="200" aria-valuemax="520" aria-valuenow="272" tabindex="0" title="Drag to resize; double-click to reset"></div>
   </aside>
 
   <main class="chat">
@@ -332,10 +363,10 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <div class="composer-inner">
         <div id="attachment-list" class="attachment-list"></div>
         <label id="queue-option" hidden><input id="queue-next" type="checkbox"> Send after this turn instead of steering</label>
-        <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+        <input id="image-file" type="file" multiple hidden>
         <div class="composer-row">
-          <button id="attach" type="button" title="Attach images" aria-label="Attach images">📎</button>
-          <textarea id="text" rows="1" placeholder="Message (Ctrl+V to paste images)" aria-label="Message"></textarea>
+          <button id="attach" type="button" title="Attach files or images" aria-label="Attach files or images">📎</button>
+          <textarea id="text" rows="1" placeholder="Message (Ctrl+V or drop files to attach)" aria-label="Message"></textarea>
           <button id="mic" type="button" title="Dictate (Ctrl+Shift+M)" aria-label="Dictate" aria-pressed="false" hidden>🎤</button>
           <button id="stop" type="button" class="danger" title="Stop the turn that is running" hidden>Stop</button>
           <button id="send" class="primary">Send</button>
@@ -464,8 +495,10 @@ dialog textarea { min-height: 90px; resize: vertical; }
       </div>
     </div>
     <label>Description<input id="f-desc" maxlength="500" placeholder="What this bot is for"></label>
-    <label>Model<select id="f-model"></select></label>
-    <label id="f-custom-row" hidden>OpenCode model (pick above or type any provider/model)<input id="f-custom" maxlength="100" placeholder="provider/model" list="f-custom-list"><datalist id="f-custom-list"></datalist><button type="button" id="f-models-refresh" class="ghost">Refresh model list</button></label>
+    <div class="picker"><label for="f-model">Model</label>
+      <input id="f-model" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="f-model-list" autocomplete="off" spellcheck="false" maxlength="100" placeholder="Type to search models">
+      <ul id="f-model-list" role="listbox" aria-label="Models" hidden></ul></div>
+    <div id="f-custom-row" hidden><button type="button" id="f-models-refresh" class="ghost">Refresh model list</button></div>
     <p class="hint" id="f-tier"></p>
     <label id="f-effort-row">Thinking effort<select id="f-effort"></select></label>
     <p class="hint" id="f-effort-hint">Applies from the next turn. Past jobs keep the effort they ran with.</p>
@@ -613,7 +646,12 @@ function modelLabel(engine, model) {
   return (ENGINE_LABELS[engine] || engine) + " · " + (model || "default");
 }
 
-async function loadChoices() {
+let choicesLoading = null;
+function loadChoices() {  // one request at a time: callers share it instead of refilling the form twice
+  if (!choicesLoading) choicesLoading = fetchChoices().finally(() => { choicesLoading = null; });
+  return choicesLoading;
+}
+async function fetchChoices() {
   try {
     state.choices = await api("/v1/model-choices");
     const n = state.choices.length;
@@ -662,13 +700,30 @@ function fillAvatar(node, bot, override) {
 /* ---- sidebar ---- */
 function currentBot() { return state.bots.find((b) => b.id === state.selected) || null; }
 
+// The sidebar search matches a bot's name, description, model (id and shown label) and engine, every word of the
+// query anywhere in them, ignoring case. It filters only the bot list: the Needs-you row is never filtered,
+// because those requests wait on the owner whichever bot they belong to.
+function botMatches(bot, query, label) {
+  const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  const hay = [bot.name, bot.description, bot.model, label, bot.engine].filter(Boolean).join(" ").toLowerCase();
+  return words.every((word) => hay.includes(word));
+}
 function renderBots() {
   const list = $("bot-list");
   if (!state.bots.length) {
     list.replaceChildren(el("p", "muted pad", "No bots yet. Create one to start."));
     return;
   }
-  list.replaceChildren(...state.bots.map((bot) => {
+  const query = $("bot-search") ? $("bot-search").value.trim() : "";
+  const shown = state.bots.filter((bot) => botMatches(bot, query, modelLabel(bot.engine, bot.model)));
+  if (!shown.length) {
+    const empty = el("p", "muted pad", `No bots match "${query}".`);
+    empty.id = "bot-empty"; empty.setAttribute("role", "status");
+    list.replaceChildren(empty);
+    return;
+  }
+  list.replaceChildren(...shown.map((bot) => {
     const item = el("button", "bot-item" + (bot.id === state.selected ? " active" : ""));
     item.type = "button";
     item.title = bot.name;
@@ -689,6 +744,84 @@ function renderBots() {
     item.oncontextmenu = (event) => { event.preventDefault(); markUnread(bot.id); };
     return item;
   }));
+}
+
+const searchBox = $("bot-search");
+searchBox.addEventListener("input", renderBots);
+searchBox.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault(); event.stopPropagation();
+    searchBox.value = ""; renderBots(); searchBox.blur();
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    const first = $("bot-list").querySelector(".bot-item");
+    if (first) first.click();
+  }
+});
+// "/" (outside text fields) or Ctrl/Cmd-K focuses the search
+document.addEventListener("keydown", (event) => {
+  const k = event.key, target = event.target;
+  const typing = target && target.matches && target.matches("input, textarea, select") || (target && target.isContentEditable);
+  const open = document.querySelector("dialog[open]");
+  if (!(k === "k" && (event.ctrlKey || event.metaKey)) && !(k === "/" && !typing && !event.ctrlKey && !event.metaKey && !event.altKey)) return;
+  if (open || $("app").hidden || getComputedStyle(searchBox).display === "none") return;
+  event.preventDefault(); searchBox.focus(); searchBox.select();
+});
+
+/* ---- resizable sidebar ---- */
+const SIDEBAR_KEY = "bot-office-sidebar-width", SIDEBAR_DEFAULT = 272, SIDEBAR_MIN = 200, SIDEBAR_MAX = 520;
+function clampSidebarWidth(width, viewport) {
+  const n = Number(width);
+  const top = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, (viewport || SIDEBAR_MAX + 320) - 320));
+  return Math.round(Math.min(top, Math.max(SIDEBAR_MIN, Number.isFinite(n) ? n : SIDEBAR_DEFAULT)));
+}
+function setSidebarWidth(width, remember) {
+  const w = clampSidebarWidth(width, window.innerWidth);
+  $("app").style.setProperty("--sidebar-w", w + "px");
+  $("sidebar-resize").setAttribute("aria-valuenow", String(w));
+  $("sidebar-resize").setAttribute("aria-valuemax", String(clampSidebarWidth(SIDEBAR_MAX, window.innerWidth)));
+  if (remember) { try { localStorage.setItem(SIDEBAR_KEY, String(w)); } catch (err) { /* storage blocked: not remembered */ } }
+  return w;
+}
+function resetSidebarWidth() {
+  $("app").style.removeProperty("--sidebar-w");
+  $("sidebar-resize").setAttribute("aria-valuenow", String(SIDEBAR_DEFAULT));
+  try { localStorage.removeItem(SIDEBAR_KEY); } catch (err) { /* ignored */ }
+}
+try {
+  const saved = localStorage.getItem(SIDEBAR_KEY);
+  if (saved !== null) setSidebarWidth(saved, false);
+} catch (err) { /* ignored */ }
+{
+  const handle = $("sidebar-resize");
+  let drag = null;
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    event.preventDefault();
+    drag = { x: event.clientX, width: $("app").querySelector(".sidebar").getBoundingClientRect().width };
+    try { handle.setPointerCapture(event.pointerId); } catch (err) { /* ignored */ }
+    handle.classList.add("dragging"); document.body.classList.add("resizing-sidebar");
+  });
+  handle.addEventListener("pointermove", (event) => { if (drag) setSidebarWidth(drag.width + event.clientX - drag.x, false); });
+  const finish = (event) => {
+    if (!drag) return;
+    setSidebarWidth(drag.width + event.clientX - drag.x, true);
+    drag = null; handle.classList.remove("dragging"); document.body.classList.remove("resizing-sidebar");
+  };
+  handle.addEventListener("pointerup", finish);
+  handle.addEventListener("pointercancel", () => { drag = null; handle.classList.remove("dragging"); document.body.classList.remove("resizing-sidebar"); });
+  handle.addEventListener("dblclick", resetSidebarWidth);
+  handle.addEventListener("keydown", (event) => {
+    const current = Number(handle.getAttribute("aria-valuenow")) || SIDEBAR_DEFAULT, step = event.shiftKey ? 50 : 16;
+    if (event.key === "ArrowLeft") setSidebarWidth(current - step, true);
+    else if (event.key === "ArrowRight") setSidebarWidth(current + step, true);
+    else if (event.key === "Home") setSidebarWidth(SIDEBAR_MIN, true);
+    else if (event.key === "End") setSidebarWidth(SIDEBAR_MAX, true);
+    else if (event.key === "Enter") resetSidebarWidth();
+    else return;
+    event.preventDefault();
+  });
+  window.addEventListener("resize", () => { const saved = $("app").style.getPropertyValue("--sidebar-w"); if (saved) setSidebarWidth(parseInt(saved, 10), false); });
 }
 
 async function loadBots() {
@@ -819,9 +952,9 @@ function renderHeader() {
 }
 /* what a message sent now does, per engine (bot.steering comes from the server) */
 function composerPlaceholder(bot, busy, queueing) {
-  if (!busy) return "Message (Ctrl+V to paste images)";
+  if (!busy) return "Message (Ctrl+V or drop files to attach)";
   if (queueing) return "Message " + bot.name + " (it runs after the current turn)";
-  return "Steer " + bot.name + " while it works (Ctrl+V to paste images)";
+  return "Steer " + bot.name + " while it works (Ctrl+V or drop files to attach)";
 }
 function steerHint(bot, queueing) {
   if (!queueing && bot.activity === "queued") return "Your message joins the waiting turn and is delivered when it starts (an automatic turn that waits is replaced by yours).";
@@ -1331,13 +1464,29 @@ const pendingImages = [];
 const imageCache = new Map();
 let sendingImages = false;
 let draftRevision = 0;
+function formatBytes(n) {
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10 * 1024 ? 1 : 0) + " KB";
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + " MB";
+  return (n / 1024 / 1024 / 1024).toFixed(1) + " GB";
+}
+const FILE_ID = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{32}-(.+)$/;
+function fileChip(name, size) {
+  const chip = el("span", "file-chip");
+  chip.title = name;
+  chip.append(el("span", "file-icon", "📄"), el("span", "file-name", name), el("span", "file-size", size === undefined ? "" : formatBytes(size)));
+  return chip;
+}
 function updateImages() {
   $("attachment-list").replaceChildren(...pendingImages.map((item) => {
-    const box = el("div", "attachment-item");
-    const img = document.createElement("img"); img.src = item.preview; img.alt = "Selected image";
-    const remove = el("button", "", "×"); remove.type = "button"; remove.setAttribute("aria-label", "Remove image");
+    const box = el("div", "attachment-item" + (item.file ? " is-file" : ""));
+    let shown;
+    if (item.file) shown = fileChip(item.file.name, item.file.size);
+    else { shown = document.createElement("img"); shown.src = item.preview; shown.alt = "Selected image"; }
+    const remove = el("button", "", "×"); remove.type = "button"; remove.setAttribute("aria-label", item.file ? "Remove file " + item.file.name : "Remove image");
     remove.onclick = () => { removeImage(item); updateImages(); };
-    box.append(img, remove, el("div", item.error ? "bad" : "", item.error || (item.id ? "Ready" : "Uploading…")));
+    box.append(shown, remove, el("div", item.error ? "bad" : "", item.error || (item.id ? "Ready" : "Uploading…")));
     return box;
   }));
   $("send").disabled = sendingImages || pendingImages.some((item) => !item.id);
@@ -1348,7 +1497,7 @@ function deleteUpload(item) {
 function removeImage(item, sent = false) {
   const i = pendingImages.indexOf(item); if (i >= 0) pendingImages.splice(i, 1);
   item.removed = true; if (!sent) deleteUpload(item);
-  URL.revokeObjectURL(item.preview);
+  if (item.preview) URL.revokeObjectURL(item.preview);
 }
 function clearImages() { for (const item of [...pendingImages]) removeImage(item); updateImages(); }
 function clearImageCache() { for (const url of imageCache.values()) URL.revokeObjectURL(url); imageCache.clear(); }
@@ -1356,11 +1505,15 @@ async function addImages(files) {
   const bot = currentBot(); if (!bot) return 0;
   let added = 0;
   for (const file of files) {
-    if (pendingImages.length >= 6) { setStatus("Maximum 6 images per message.", true); break; }
-    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)) { setStatus("Choose a PNG, JPEG, GIF or WebP image.", true); continue; }
-    if (file.size > 10 * 1024 * 1024) { setStatus("Images must be at most 10 MiB.", true); continue; }
-    const item = { preview: URL.createObjectURL(file), bot: bot.id }; pendingImages.push(item); added++; updateImages();
-    api("/v1/bots/" + bot.id + "/attachments", {method: "POST", body: file}).then((result) => { item.id = result.id; if (item.removed) deleteUpload(item); }).catch((error) => { item.error = error.message; }).finally(updateImages);
+    if (pendingImages.length >= 6) { setStatus("Maximum 6 attachments per message.", true); break; }
+    const isImage = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type);
+    if (isImage && file.size > 10 * 1024 * 1024) { setStatus("Images must be at most 10 MiB.", true); continue; }
+    if (!file.size) { setStatus((file.name || "That file") + " is empty.", true); continue; }
+    // any other type is uploaded as a file by name; the server's limit (50 MB unless configured) answers with a clear error
+    const item = isImage ? { preview: URL.createObjectURL(file), bot: bot.id } : { file: { name: file.name || "file", size: file.size }, bot: bot.id };
+    pendingImages.push(item); added++; updateImages();
+    const url = "/v1/bots/" + bot.id + "/attachments" + (isImage ? "" : "?name=" + encodeURIComponent(file.name || "file"));
+    api(url, {method: "POST", body: file, timeoutMs: isImage ? undefined : 0}).then((result) => { item.id = result.id; if (item.removed) deleteUpload(item); }).catch((error) => { item.error = error.message; }).finally(updateImages);
   }
   return added;
 }
@@ -1380,7 +1533,7 @@ function clipboardImageFiles(clipboard, hasText) {
   function add(file) {
     if (!file) return;
     const type = file.type.toLowerCase();
-    if (!pasteImageTypes.includes(type) && (hasText || (type && type !== "application/octet-stream"))) return;
+    if (!pasteImageTypes.includes(type) && hasText) return;  // text plus a preview picture (a copied table): the text wins
     const key = [file.name, file.size, file.lastModified, file.type].join("|");
     if (!seen.has(key)) { seen.add(key); result.push(file); }
   }
@@ -1402,7 +1555,8 @@ async function normalizePastedImage(file) {
   else if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) detected = "image/jpeg";
   else if (bytes.length >= 6 && ["GIF87a", "GIF89a"].includes(String.fromCharCode(...bytes.slice(0, 6)))) detected = "image/gif";
   else if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") detected = "image/webp";
-  return detected ? new File([file], file.name || "pasted-image", {type: detected}) : null;
+  if (detected) return new File([file], file.name || "pasted-image", {type: detected});
+  return file.name ? file : null;  // any other named file (PDF, CSV, STL, G-code, zip...) is attached as a file
 }
 function clipboardHtmlImages(html, hasText) {
   if (!html) return [];
@@ -1450,7 +1604,7 @@ async function fetchPastedImage(url) {
 }
 function clipboardHasFileManagerImages(clipboard) {
   return ["text/uri-list", "x-special/gnome-copied-files"].some((type) =>
-    clipboard.getData(type).split(/\r?\n/).some((line) => /^file:\/\//i.test(line.trim()) && /\.(png|jpe?g|gif|webp)(?:[?#].*)?$/i.test(line.trim())));
+    clipboard.getData(type).split(/\r?\n/).some((line) => /^file:\/\//i.test(line.trim())));
 }
 async function resolvePastedImages(candidates, botId, text) {
   const files = [];
@@ -1465,7 +1619,7 @@ async function resolvePastedImages(candidates, botId, text) {
         const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
         file = new File([bytes], "pasted-image", {type: candidate.type});
       }
-      if (file.size > pasteMaxBytes) throw new Error("Images must be at most 10 MiB.");
+      if (file.size > pasteMaxBytes && (candidate instanceof URL || candidate.base64 !== undefined || pasteImageTypes.includes(file.type.toLowerCase()))) throw new Error("Images must be at most 10 MiB.");
       const image = await normalizePastedImage(file);
       if (image) files.push(image);
     } catch (error) { setStatus(error.message === "Images must be at most 10 MiB." ? error.message : "Could not read pasted image."); }
@@ -1499,6 +1653,28 @@ $("image-close").onclick = () => $("image-view").close();
 $("agent-chat-close").onclick = () => $("agent-chat").close();
 // a click on the backdrop (outside the panel) closes it too; Esc is the dialog's own
 $("agent-chat").addEventListener("click", (e) => { if (e.target === $("agent-chat")) $("agent-chat").close(); });
+const fileInfoCache = new Map();
+// a file in the chat: a chip with its name and size; clicking downloads it (never opened in the page)
+function chatFileChip(botId, id) {
+  const name = FILE_ID.exec(id)[1];
+  const chip = el("button", "file-chip");
+  chip.type = "button"; chip.title = "Download " + name; chip.setAttribute("aria-label", "Download file " + name);
+  const size = el("span", "file-size", "");
+  chip.append(el("span", "file-icon", "📄"), el("span", "file-name", name), size);
+  const key = botId + "/" + id;
+  const known = fileInfoCache.get(key);
+  if (known !== undefined) size.textContent = formatBytes(known);
+  else api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "/info").then((info) => { fileInfoCache.set(key, info.size); size.textContent = formatBytes(info.size); }).catch(() => {});
+  chip.onclick = async () => {
+    try {
+      const blob = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id), {timeoutMs: 0});
+      const url = URL.createObjectURL(new Blob([blob], {type: "application/octet-stream"}));
+      const link = document.createElement("a"); link.href = url; link.download = name; document.body.append(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (error) { setStatus("Could not download " + name + ": " + error.message, true); }
+  };
+  return chip;
+}
 async function imageUrl(botId, id) {
   const key = botId + "/" + id;
   if (imageCache.has(key)) {
@@ -1513,6 +1689,7 @@ async function imageUrl(botId, id) {
   return url;
 }
 function showAttachment(wrap, botId, id) {
+  if (/^\d{4}-\d{2}-\d{2}-[0-9a-f]{32}-./.test(id)) { wrap.append(chatFileChip(botId, id)); return; }
   const img = document.createElement("img"); img.className = "chat-image"; img.alt = "Attached image";
   imageUrl(botId, id).then((url) => { img.src = url; }).catch(() => { img.alt = "Image unavailable"; });
   img.onclick = () => { imageUrl(botId, id).then((url) => { img.src = url; $("image-full").src = url; $("image-view").showModal(); }).catch(() => { img.alt = "Image unavailable"; }); };
@@ -1920,7 +2097,7 @@ $("composer").onsubmit = async (event) => {
   const text = draft.trim();
   if (!bot || (!text && !pendingImages.length) || pendingImages.some((item) => !item.id || item.bot !== bot.id) || sendingImages) return;
   const sentImages = [...pendingImages];
-  const body = { text: text || "Please see attached images.", attachments: sentImages.map((item) => item.id) };
+  const body = { text: text || (sentImages.every((item) => item.file) ? "Please see the attached files." : sentImages.some((item) => item.file) ? "Please see the attachments." : "Please see attached images."), attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
   sendingImages = true; for (const item of sentImages) item.sending = true; updateImages();
   try {
@@ -2339,48 +2516,153 @@ $("voice-auto").onchange = () => { const on = $("voice-auto").checked; setAutoRe
 $("voice-browser-stt").onchange = () => saveVoicePrefs({ browser_stt: $("voice-browser-stt").checked });
 $("voice-preview").onclick = () => { player.queue = []; playMessage({ id: -1, text: "Hello. This is how your bots will sound when they read a reply aloud." }); };
 
+/* ---- model picker: one searchable combobox for every model choice ---- */
+// options: {value: "engine|model", engine, id, display, group}; the matching is pure so tests can run it.
+function modelMatches(option, query) {
+  const q = (query || "").trim().toLowerCase();
+  return !q || [option.display, option.id, option.engine, option.group].some((text) => (text || "").toLowerCase().includes(q));
+}
+
+// the same provider/model rule the server enforces for OpenCode (catalog.model_error)
+function validCustomModel(text) {
+  const parts = text.split("/");
+  return parts.length >= 2 && parts.every(Boolean) && !text.startsWith("-") && !/[\s|]/.test(text);
+}
+
+// What the list shows for a query: matches, the current selection pinned on top when filtered out,
+// and a "use this typed provider/model" row where a custom model is allowed. `first` is the row
+// Enter picks after typing (the first real match, not the pinned selection).
+function modelListItems(options, query, selected, customEngine) {
+  const items = options.filter((o) => modelMatches(o, query));
+  const matched = items.length;
+  const current = options.find((o) => o.value === selected);
+  const pinned = current && !items.includes(current);
+  if (pinned) items.unshift(current);
+  const typed = (query || "").trim();
+  if (customEngine && validCustomModel(typed) && !options.some((o) => o.engine === customEngine && o.id === typed)) {
+    items.push({ value: customEngine + "|" + typed, engine: customEngine, id: typed, display: "Use custom model: " + typed, group: "", custom: true });
+  }
+  const first = items.length > (pinned ? 1 : 0) ? (pinned ? 1 : 0) : -1;
+  return { items, noMatches: !matched && !items.some((o) => o.custom), first };
+}
+
+function nextActiveIndex(active, count, key) {
+  if (!count) return -1;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowDown") return active < 0 || active >= count - 1 ? 0 : active + 1;
+  if (key === "ArrowUp") return active <= 0 ? count - 1 : active - 1;
+  return active;
+}
+
+function createModelPicker(input, list, { onChange, customEngine }) {
+  const picker = { options: [], value: "", dirty: false, customEngine };
+  let open = false, query = "", active = -1, shown = [], firstRow = -1;
+  const selectedOption = () => picker.options.find((o) => o.value === picker.value) || null;
+  const labelOf = () => { const o = selectedOption(); return o ? o.display : picker.value ? picker.value.slice(picker.value.indexOf("|") + 1) : ""; };
+  function render() {
+    const { items, noMatches, first } = modelListItems(picker.options, query, picker.value, picker.customEngine);
+    shown = items; firstRow = first;
+    if (active >= items.length) active = items.length - 1;
+    list.replaceChildren(...items.map((o, i) => {
+      const li = el("li", i === active ? "active" : "", o.display);
+      li.id = list.id + "-" + i;
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", o.value === picker.value ? "true" : "false");
+      li.onmousedown = (event) => { event.preventDefault(); choose(o); };
+      return li;
+    }));
+    if (noMatches) { const li = el("li", "empty", "No matches"); li.setAttribute("role", "presentation"); list.append(li); }
+    if (active >= 0) input.setAttribute("aria-activedescendant", list.id + "-" + active); else input.removeAttribute("aria-activedescendant");
+    list.hidden = !open;
+    input.setAttribute("aria-expanded", String(open));
+  }
+  function close() { open = false; query = ""; active = -1; input.value = labelOf(); render(); }
+  function choose(o) {
+    const changed = o.value !== picker.value;
+    if (o.custom) picker.options = picker.options.concat([{ ...o, display: (ENGINE_LABELS[o.engine] || o.engine) + " · " + o.id }]);
+    picker.value = o.value; picker.dirty = true;
+    close();
+    if (changed && onChange) onChange(picker.value);
+  }
+  function show() {
+    open = true;
+    const at = shown.findIndex((o) => o.value === picker.value);
+    active = at;
+    render();
+  }
+  input.addEventListener("focus", () => { if (!input.disabled) { input.select(); show(); } });
+  input.addEventListener("click", () => { if (!open && !input.disabled) show(); });
+  // Pressing inside the list (an option, its padding, or its scrollbar) is not an outside click: the press
+  // keeps focus on the input, and if a browser blurs it anyway the list stays open until the button is released.
+  let pressing = false;
+  list.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    pressing = true;
+    const release = () => { pressing = false; if (open && document.activeElement !== input && !input.disabled) input.focus({ preventScroll: true }); };
+    document.addEventListener("mouseup", release, { once: true });
+  });
+  input.addEventListener("blur", () => { if (!pressing) close(); });
+  input.addEventListener("input", () => { query = input.value; open = true; active = -1; render(); active = firstRow; render(); });
+  input.addEventListener("keydown", (event) => {
+    const key = event.key;
+    if (key === "ArrowDown" || key === "ArrowUp" || key === "Home" && open || key === "End" && open) {
+      event.preventDefault();
+      if (!open) { show(); if (key === "ArrowDown" || key === "ArrowUp") return; }
+      active = nextActiveIndex(active, shown.length, key); render();
+    } else if (key === "Enter" && open) {
+      event.preventDefault();  // never submits the form
+      if (shown[active]) choose(shown[active]);
+    } else if (key === "Escape" && (open || query)) {
+      event.preventDefault(); event.stopPropagation();  // the first Esc closes the list, not the dialog
+      close();
+    } else if (key === "Tab") close();
+  });
+  // options replace the list; a user's pick survives a late reload, otherwise `preferred` is selected
+  picker.setOptions = (options, preferred) => {
+    picker.options = options;
+    if (!(picker.dirty && picker.value)) picker.value = preferred || "";
+    else if (!options.some((o) => o.value === picker.value) && !(picker.customEngine && picker.value.startsWith(picker.customEngine + "|"))) picker.value = preferred || "";
+    close();
+  };
+  picker.reset = () => { picker.dirty = false; picker.value = ""; };
+  picker.setDisabled = (disabled) => { input.disabled = disabled; };
+  picker.setValue = (value) => { picker.value = value; close(); };
+  return picker;
+}
+
 /* ---- settings dialog ---- */
 function fillModelSelect(bot) {
-  const select = $("f-model");
-  select.replaceChildren();
   const loaded = Array.isArray(state.choices);
   const choices = state.choices || [];
-  let current = null;
-  if (bot) {
-    current = bot.engine + "|" + (bot.model || "");
-    const known = choices.some((c) => c.engine === bot.engine && c.models.some((m) => m.id === bot.model));
-    if (!known) {
-      const suffix = loaded ? " (current, not in the signed-in list)" : " (current)";
-      const opt = el("option", "", modelLabel(bot.engine, bot.model) + suffix);
-      opt.value = current;
-      select.append(opt);
-    }
-  }
+  const options = [];
+  let preferred = "";
   for (const choice of choices) {
-    const group = document.createElement("optgroup");
-    group.label = choice.label;
-    for (const m of choice.models) {
-      const opt = el("option", "", m.display);
-      opt.value = choice.engine + "|" + m.id;
-      group.append(opt);
+    for (const m of choice.models) options.push({ value: choice.engine + "|" + m.id, engine: choice.engine, id: m.id, display: m.display, group: choice.label });
+  }
+  if (bot) {
+    preferred = bot.engine + "|" + (bot.model || "");
+    if (!options.some((o) => o.value === preferred)) {
+      const suffix = loaded ? " (current, not in the signed-in list)" : " (current)";
+      options.unshift({ value: preferred, engine: bot.engine, id: bot.model || "", display: modelLabel(bot.engine, bot.model) + suffix, group: ENGINE_LABELS[bot.engine] || bot.engine });
     }
-    select.append(group);
+  } else if (choices.length) {
+    const first = choices.find((c) => c.models.length);
+    if (first) preferred = first.engine + "|" + (first.default_model && first.models.some((m) => m.id === first.default_model) ? first.default_model : first.models[0].id);
   }
-  if (current) select.value = current;
-  else if (choices.length) {
-    const first = choices[0];
-    select.value = first.engine + "|" + (first.default_model && first.models.some((m) => m.id === first.default_model) ? first.default_model : first.models[0].id);
-  }
-  const none = !select.options.length;
+  modelPicker.customEngine = choiceFor("opencode") ? "opencode" : null;
+  modelPicker.setOptions(options, preferred);
+  const none = !options.length;
+  modelPicker.setDisabled(none);
   $("f-model-hint").textContent = none
     ? (state.choices ? "No engine is signed in yet. Sign in to a CLI on the host, then reopen this dialog." : "Loading models…")
-    : "Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.";
+    : "Only signed-in engines are listed. Type to search by name, id or engine; OpenCode also takes any typed provider/model. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.";
   $("dialog-save").disabled = none;
   fillEffortSelect();
   updateTier();
 }
 
-function selectedEngine() { return ($("f-model").value || "").split("|")[0]; }
+function selectedEngine() { return (modelPicker.value || "").split("|")[0]; }
 
 function choiceFor(engine) { return (state.choices || []).find((c) => c.engine === engine) || null; }
 function effortsFor(engine) { const c = choiceFor(engine); return c && c.efforts ? c.efforts : (FALLBACK_EFFORTS[engine] || []); }
@@ -2398,14 +2680,13 @@ function fillEffortSelect() {
   select.dataset.engine = engine;
   // engines without an effort flag (Cursor) get no control at all
   $("f-custom-row").hidden = engine !== "opencode";
-  const oc = choiceFor("opencode");
-  $("f-custom-list").replaceChildren(...(oc ? oc.models : []).map((m) => { const o = el("option", ""); o.value = m.id; return o; }));
   $("f-effort-row").hidden = !levels.length;
   $("f-effort-hint").hidden = !levels.length;
 }
 
 function updateTier() {
-  const [engine, model] = ($("f-model").value || "").split("|");
+  const [engine, ...rest] = (modelPicker.value || "").split("|");
+  const model = rest.join("|");
   let tier = "";
   const choice = choiceFor(engine);
   const option = choice && choice.models.find((m) => m.id === model);
@@ -2439,7 +2720,7 @@ async function openDialog(bot) {
   $("f-icon").value = bot ? bot.icon || "" : "";
   $("f-desc").value = bot ? bot.description || "" : "";
   $("f-instructions").value = bot ? bot.instructions || "" : "";
-  $("f-custom").value = bot && bot.engine === "opencode" ? bot.model || "" : "";
+  modelPicker.reset();
   $("f-image").value = "";
   $("f-effort").dataset.engine = "";
   $("session-zone").hidden = !bot;
@@ -2506,19 +2787,18 @@ $("dialog-cancel").onclick = () => $("bot-dialog").close();
 $("bot-dialog").addEventListener("close", () => { clearPendingImage(); state.editing = null; });
 $("f-models-refresh").onclick = async () => {
   const button = $("f-models-refresh");
-  const picked = $("f-model").value, typed = $("f-custom").value;
+  const picked = modelPicker.value;
   button.disabled = true;
   try {
     state.choices = await api("/v1/model-choices?refresh=1");
     fillModelSelect(state.editing);
-    if ([...$("f-model").options].some((o) => o.value === picked)) $("f-model").value = picked;
-    $("f-custom").value = typed;
+    if (picked) modelPicker.setValue(picked);
     fillEffortSelect(); updateTier();
   } catch (err) {
     if (err instanceof AuthError) handleError(err); else $("dialog-error").textContent = String(err && err.message || err);
   } finally { button.disabled = false; }
 };
-$("f-model").onchange = () => { $("f-custom").value = ""; fillEffortSelect(); updateTier(); };
+const modelPicker = createModelPicker($("f-model"), $("f-model-list"), { customEngine: null, onChange: () => { fillEffortSelect(); updateTier(); } });
 $("f-icon").oninput = updateIconPreview;
 $("f-name").oninput = () => { if (!state.editing) updateIconPreview(); };
 
@@ -2541,8 +2821,8 @@ $("bot-form").onsubmit = async (event) => {
   const err = $("dialog-error");
   err.textContent = "";
   const bot = state.editing;
-  let [engine, model] = ($("f-model").value || "").split("|");
-  if (engine === "opencode" && $("f-custom").value.trim()) model = $("f-custom").value.trim();
+  const [engine, ...rest] = (modelPicker.value || "").split("|");
+  const model = rest.join("|");
   if (!engine || !model) { err.textContent = "Pick a model."; return; }
   const name = $("f-name").value.trim();
   if (!name) { err.textContent = "Name is required."; return; }
@@ -3129,7 +3409,8 @@ async function loadNeedsYou() {
     return row;
   }));
   $("needs-you").hidden = !items.length;
-  $("needs-toggle").textContent = `Needs you (${items.length})`;
+  $("needs-count").textContent = String(items.length);
+  $("needs-count").hidden = !items.length;
   $("notify-enable").hidden = typeof Notification === "undefined" || Notification.permission !== "default";
   const stored = sessionStorage.getItem(NEEDS_SEEN_KEY);
   let seen = new Set();
@@ -3144,10 +3425,15 @@ async function loadNeedsYou() {
   }
   sessionStorage.setItem(NEEDS_SEEN_KEY, JSON.stringify(items.map((item) => item.id)));
 }
-$("needs-toggle").onclick = () => {
-  const open = $("needs-you").classList.toggle("open");
+// collapsed unless the owner opened it; kept in localStorage (a plain button: Enter and Space toggle it)
+const NEEDS_OPEN_KEY = "bot-office-needs-open";
+function setNeedsOpen(open, remember) {
+  $("needs-you").classList.toggle("open", open);
   $("needs-toggle").setAttribute("aria-expanded", String(open));
-};
+  if (remember) { try { localStorage.setItem(NEEDS_OPEN_KEY, open ? "1" : "0"); } catch (err) { /* storage blocked: not remembered */ } }
+}
+try { setNeedsOpen(localStorage.getItem(NEEDS_OPEN_KEY) === "1", false); } catch (err) { setNeedsOpen(false, false); }
+$("needs-toggle").onclick = () => setNeedsOpen(!$("needs-you").classList.contains("open"), true);
 $("notify-enable").onclick = async () => {
   if (typeof Notification === "undefined") return;
   try { await Notification.requestPermission(); } catch (err) { /* ignored: stays off */ }

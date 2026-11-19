@@ -942,13 +942,17 @@ def create_app(
         return memory.bot_dir(bot_id) / ICON_FILE
 
     @app.post("/v1/bots/{bot_id}/attachments", status_code=201, dependencies=[Depends(auth)])
-    async def upload_attachment(bot_id: UUID, request: Request) -> dict:
+    async def upload_attachment(bot_id: UUID, request: Request, name: str | None = None) -> dict:
+        """Raw body upload. Without ``name`` the body must be an image (10 MiB). With ``name`` (0.11.13) an image is
+        still stored as an image; anything else is stored as a file of that name (BOT_OFFICE_MAX_UPLOAD_MB, 50)."""
         _bot(bot_id)
+        limit = attachments.max_file_bytes() if name else attachments.MAX_BYTES
+        too_big = f"file too large (the limit is {limit // (1024 * 1024)} MB)" if name else "image too large"
         length = request.headers.get("content-length")
         if length:
             try:
-                if int(length) > attachments.MAX_BYTES:
-                    raise HTTPException(status_code=413, detail="image too large")
+                if int(length) > limit:
+                    raise HTTPException(status_code=413, detail=too_big)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="invalid content length") from exc
         if upload_slots.locked():
@@ -962,24 +966,31 @@ def create_app(
             attachment_uploads[bot_id] = recent
             data = bytearray()
             async for chunk in request.stream():
-                if len(data) + len(chunk) > attachments.MAX_BYTES:
-                    raise HTTPException(status_code=413, detail="image too large")
+                if len(data) + len(chunk) > limit:
+                    raise HTTPException(status_code=413, detail=too_big)
                 data.extend(chunk)
             if not data:
-                raise HTTPException(status_code=400, detail="image is empty")
+                raise HTTPException(status_code=400, detail="file is empty" if name else "image is empty")
             mime = _sniff_image(data)
-            if not mime:
+            if not mime and not name:
                 raise HTTPException(status_code=415, detail="unsupported image")
+            if mime and len(data) > attachments.MAX_BYTES:
+                raise HTTPException(status_code=413, detail="image too large")
             try:
                 async with attachment_global_lock, attachment_lock(bot_id):
                     _bot(bot_id)
                     refs = await asyncio.to_thread(store.attachment_references)
-                    name = await attachment_io(attachments.save, settings.data_dir, bot_id, bytes(data), mime, refs)
+                    if mime:
+                        stored = await attachment_io(attachments.save, settings.data_dir, bot_id, data, mime, refs)
+                    else:
+                        stored = await attachment_io(attachments.save_file, settings.data_dir, bot_id, data, name or "file", refs)
             except OverflowError as exc:
                 raise HTTPException(status_code=507, detail=str(exc)) from exc
             except (ValueError, OSError) as exc:
                 raise HTTPException(status_code=400, detail="invalid attachment directory") from exc
-            return {"id": name, "mime": mime, "size": len(data), "url": f"/v1/bots/{bot_id}/attachments/{name}"}
+            return {"id": stored, "mime": mime or "application/octet-stream", "size": len(data), "kind": "image" if mime else "file",
+                    "name": None if mime else attachments.display_name(stored),
+                    "url": f"/v1/bots/{bot_id}/attachments/{stored}"}
 
     @app.delete("/v1/bots/{bot_id}/attachments/{attachment_id}", status_code=204, dependencies=[Depends(auth)])
     async def delete_attachment(bot_id: UUID, attachment_id: str) -> None:
@@ -993,16 +1004,35 @@ def create_app(
             except (ValueError, OSError) as exc:
                 raise HTTPException(status_code=404, detail="attachment not found") from exc
 
+    @app.get("/v1/bots/{bot_id}/attachments/{attachment_id}/info", dependencies=[Depends(auth)])
+    async def attachment_info(bot_id: UUID, attachment_id: str) -> dict:
+        """Name, size and kind of a stored image or file (for the chat's file chips)."""
+        _bot(bot_id)
+        try:
+            size = await asyncio.to_thread(attachments.size, settings.data_dir, bot_id, attachment_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=404, detail="attachment not found") from exc
+        is_file = attachments.is_file_id(attachment_id)
+        return {"id": attachment_id, "kind": "file" if is_file else "image", "size": size,
+                "name": attachments.display_name(attachment_id)}
+
     @app.get("/v1/bots/{bot_id}/attachments/{attachment_id}", dependencies=[Depends(auth)])
     async def get_attachment(bot_id: UUID, attachment_id: str) -> Response:
         _bot(bot_id)
         try:
             data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
             mime = _sniff_image(data)
-            if not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
+            if attachments.is_file_id(attachment_id):
+                mime = None  # a file is data: only ever served as a download, whatever it contains
+            elif not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
                 raise ValueError("invalid image")
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=404, detail="attachment not found") from exc
+        if mime is None:
+            label = attachments.display_name(attachment_id)
+            return Response(data, media_type="application/octet-stream", headers={
+                "X-Content-Type-Options": "nosniff", "Content-Disposition": f'attachment; filename="{label}"',
+                "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})
         return Response(data, media_type=mime, headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": "inline", "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})
 
     @app.get("/v1/bots/{bot_id}/icon", dependencies=[Depends(auth)])
@@ -1603,14 +1633,7 @@ def create_app(
             async with attachment_global_lock, attachment_lock(bot_id):
                 _bot(bot_id)
                 ids = list(dict.fromkeys(body.attachments))
-                for attachment_id in ids:
-                    try:
-                        data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
-                        mime = _sniff_image(data)
-                        if not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
-                            raise ValueError("invalid image")
-                    except (ValueError, OSError) as exc:
-                        raise HTTPException(status_code=400, detail="attachment not found") from exc
+                await _check_attachments(bot_id, ids)
                 message, job, delivery, note = _post_owner_message_ex(
                     bot, body.text, reason=body.reason, attachments=ids, queue=body.mode == "queue")
         except TurnError as exc:
@@ -1620,10 +1643,13 @@ def create_app(
     async def _check_attachments(bot_id: UUID, ids: list[str]) -> None:
         for attachment_id in ids:
             try:
-                data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
-                mime = _sniff_image(data)
-                if not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
-                    raise ValueError("invalid image")
+                if attachments.is_file_id(attachment_id):
+                    await asyncio.to_thread(attachments.size, settings.data_dir, bot_id, attachment_id)  # lstat only
+                else:
+                    data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
+                    mime = _sniff_image(data)
+                    if not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
+                        raise ValueError("invalid image")
             except (ValueError, OSError) as exc:
                 raise HTTPException(status_code=400, detail="attachment not found") from exc
 
