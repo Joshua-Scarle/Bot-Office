@@ -13,7 +13,8 @@ HELP = """bot-task: your assignments, wake-ups and routines (works only inside a
   bot-task tasks [--bot NAME|--all] [--closed]    task lists by stage
   bot-task board                                  all bots’ open tasks
   bot-task add TITLE [--goal G] [--done-when D] [--for BOT] [--parent ID|current] [--first] [--priority P]
-        P: urgent | high | normal | low (default normal); a task for another bot waits for that bot to start it
+        P: urgent | high | normal | low (default normal); a task for another bot waits for that bot to start it,
+        at most normal priority and at the end of its list (--first applies to your own list only)
   bot-task start ID|current | block ID --note TEXT | wait ID --on user|BOT --note TEXT
   bot-task done ID|current --evidence "how you verified it" [--note TEXT]
         a task counts as done only with evidence: tests run, a check, a command's result, a file
@@ -131,16 +132,15 @@ def main(argv):
         parser.add_argument("--priority", choices=PRIORITIES)
         args = parser.parse_args(rest)
         body = {k: v for k, v in vars(args).items() if v is not None and k != "first"}
-        if args.first:
-            params = {"closed": 1}
-            if args.for_bot: params["bot"] = args.for_bot
-            items = call("GET", "/v1/agent/tasks?" + urllib.parse.urlencode(params))
+        if args.first and args.for_bot:
+            print("bot-task: --first is ignored on another bot's list; that bot and the owner order it", file=sys.stderr)
+        first = args.first and not args.for_bot
+        if first:
+            items = call("GET", "/v1/agent/tasks?" + urllib.parse.urlencode({"closed": 1}))
             body["position"] = min((i["position"] for i in items if i.get("position") is not None), default=0) - 1
         created = call("POST", "/v1/agent/tasks", body)
-        if args.first and not args.for_bot and any(i.get("position") is None for i in items):
+        if first and any(i.get("position") is None for i in items):
             call("POST", "/v1/agent/tasks/reorder", {"order": [created["id"]] + [i["id"] for i in items]})
-        elif args.first and args.for_bot and any(i.get("position") is None for i in items):
-            print("bot-task: older tasks without positions may still appear first; the list owner can reorder them", file=sys.stderr)
         show_task(created)
     elif command == "edit":
         parser.add_argument("id")
