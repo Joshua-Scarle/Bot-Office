@@ -37,12 +37,14 @@ DEFAULTS: dict[str, object] = {
     "per_hour": 20,  # all bots together. None = unlimited
     "evidence": True,  # G4: a task counts as done only with evidence of how it was verified
     "evidence_min": 12,  # the shortest evidence text (characters) that counts
+    "hold_hours": 12,  # an automatic turn a cap held longer than this is dropped with a line, not run late
 }
 ENV = {"no_progress": "BOT_OFFICE_AUTO_NO_PROGRESS", "consecutive": "BOT_OFFICE_AUTO_CONSECUTIVE",
        "per_bot_day": "BOT_OFFICE_AUTO_TURNS_PER_BOT_DAY", "per_hour": "BOT_OFFICE_AUTO_TURNS_PER_HOUR",
-       "evidence": "BOT_OFFICE_DONE_NEEDS_EVIDENCE", "evidence_min": "BOT_OFFICE_DONE_EVIDENCE_MIN_CHARS"}
+       "evidence": "BOT_OFFICE_DONE_NEEDS_EVIDENCE", "evidence_min": "BOT_OFFICE_DONE_EVIDENCE_MIN_CHARS",
+       "hold_hours": "BOT_OFFICE_AUTO_HOLD_HOURS"}
 BOUNDS = {"max": (1, CHAIN_MAX_LIMIT), "no_progress": (1, 100), "consecutive": (1, 1000),
-          "per_bot_day": (1, 100_000), "per_hour": (1, 100_000), "evidence_min": (1, 1000)}
+          "per_bot_day": (1, 100_000), "per_hour": (1, 100_000), "evidence_min": (1, 1000), "hold_hours": (1, 720)}
 CAPS = ("per_bot_day", "per_hour")
 WINDOWS = {"per_bot_day": timedelta(hours=24), "per_hour": timedelta(hours=1)}
 UNLIMITED = "unlimited"
@@ -128,8 +130,9 @@ def update(store, changes: dict[str, object]) -> dict[str, object]:
     saved = {key: value for key, value in (saved if isinstance(saved, dict) else {}).items() if key in DEFAULTS}
     saved.update(checked)
     after = load(json.dumps(saved))
-    if int(after["max"]) > int(after["consecutive"]):
-        # the chat chain also stops at "consecutive": a larger max would never be reached
+    if "max" in checked and int(after["max"]) > int(after["consecutive"]):
+        # the chat chain also stops at "consecutive": a larger max would never be reached (lowering
+        # consecutive alone is fine: GET /v1/settings shows the effective chat limit)
         raise ValueError(f"max ({after['max']}) cannot be more than consecutive ({after['consecutive']}): "
                          "the chat stops at whichever comes first; raise consecutive too")
     store.set_meta(KEY, json.dumps(saved))
@@ -245,11 +248,34 @@ def cap_line(why: str, until: datetime) -> str:
 def hold(db: sqlite3.Connection, job_id: str, why: str, until: datetime, stamp: datetime) -> None:
     """Defer the job to *until* (claim skips it till then) with one chat line per held job."""
     row = db.execute("SELECT bot_id, source, failure_kind FROM jobs WHERE id=?", (job_id,)).fetchone()
-    db.execute("UPDATE jobs SET not_before=?, failure_kind=?, error=? WHERE id=?",
-               (until.isoformat(), HELD, f"held: {why}", job_id))
+    db.execute("UPDATE jobs SET not_before=?, failure_kind=?, error=?, held_at=COALESCE(held_at, ?) WHERE id=?",
+               (until.isoformat(), HELD, f"held: {why}", stamp.isoformat(), job_id))
     if row["failure_kind"] != HELD and db.execute("SELECT 1 FROM bots WHERE id=?", (row["bot_id"],)).fetchone():
         db.execute("INSERT INTO messages (bot_id,role,source,text,job_id,created_at,attachments) VALUES (?,?,?,?,?,?,'[]')",
                    (row["bot_id"], "system", row["source"], cap_line(why, until), job_id, stamp.isoformat()))
+
+
+def stale_hold(db: sqlite3.Connection, job_id: str, stamp: datetime) -> str | None:
+    """Why a turn a cap held should not run now that its window slid, else None. A held turn was
+    decided before it waited: what changed meanwhile is checked again (auto-continue switched off,
+    the bot made chat-only, its task no longer active) and a turn held over ``hold_hours`` is not run
+    late."""
+    job = db.execute("SELECT j.held_at, j.assignment_id, b.chat_only FROM jobs j LEFT JOIN bots b ON b.id=j.bot_id "
+                     "WHERE j.id=? AND j.failure_kind=?", (job_id, HELD)).fetchone()
+    if job is None:
+        return None
+    settings = read(db)
+    if not settings["enabled"]:
+        return "auto-continue is now off"
+    if job["chat_only"]:
+        return "the bot is now chat-only"
+    if job["assignment_id"]:
+        task = db.execute("SELECT status FROM assignments WHERE id=?", (job["assignment_id"],)).fetchone()
+        if task is None or task["status"] != "active":
+            return "its task is no longer active"
+    if job["held_at"] and datetime.fromisoformat(job["held_at"]) + timedelta(hours=int(settings["hold_hours"])) < stamp:
+        return f"it waited more than {settings['hold_hours']} hours for a cap"
+    return None
 
 
 def release_held(store) -> int:

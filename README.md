@@ -194,7 +194,7 @@ Rollback: the database changes are additive (new columns, a side table for bot-m
 
 Each stop leaves a chat line that says why. A stopped assignment shows in Needs you as "paused, not blocked: ...", and your reply resumes it. Each finished turn is decided once.
 
-- **Caps.** Automatic turns are chat continuations, assignment steps and checks, and wake-ups. Your messages, Start, Reply and routines are not counted. A bot may take 20 automatic turns a day, and all bots together 20 an hour. A turn over a cap is not dropped: it waits until the window slides, and the bot's chat and Needs you name the cap and say you can raise it in Settings → Bot behavior. Saving a cap releases waiting turns at once.
+- **Caps.** Automatic turns are chat continuations, assignment steps and checks, and wake-ups. Your messages, Start, Reply and routines are not counted. A bot may take 20 automatic turns a day, and all bots together 20 an hour. A turn over a cap is not dropped: it waits until the window slides, and the bot's chat and Needs you name the cap and say you can raise it in Settings → Bot behavior. Saving a cap releases waiting turns at once. A turn that waited longer than `hold_hours` (12), or whose task, bot or setting changed meanwhile, is not run late: the chat says so and the assignment waits for you.
 - **Done needs evidence.** An assignment counts as done only when the bot says how it verified the work: `bot-task done current --evidence "pytest: 14 passed"`. A done without evidence gets one more turn to say so. The second time, the assignment waits for you ("says it is done; no evidence"). Only evidence given since the assignment last started or resumed counts, and it must be at least 12 characters (a setting). The done line shows the evidence, and Needs you shows the last evidence given. Marking it done yourself needs no evidence. Peer review stays opt-in per task.
 - **Chat-only bots.** A checkbox in the bot's dialog (`chat_only` on `POST`/`PATCH /v1/bots`). Such a bot is never continued automatically and gets no assignment steps, checks or wake-ups of its own. Your Start or Reply gives it one turn.
 
@@ -210,6 +210,7 @@ Settings (Settings → Bot behavior, or `PUT /v1/settings` with `{"auto_continue
 | `per_hour` | 20 (all bots), or `"unlimited"` | `BOT_OFFICE_AUTO_TURNS_PER_HOUR` |
 | `evidence` | true | `BOT_OFFICE_DONE_NEEDS_EVIDENCE` = on/off |
 | `evidence_min` | 12 characters | `BOT_OFFICE_DONE_EVIDENCE_MIN_CHARS` |
+| `hold_hours` | 12 | `BOT_OFFICE_AUTO_HOLD_HOURS` |
 
 `max` cannot be saved above `consecutive`, since the chat stops at whichever comes first; Settings shows the limit that applies.
 

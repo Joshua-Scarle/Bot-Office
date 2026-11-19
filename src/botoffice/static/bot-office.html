@@ -410,6 +410,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <label class="check"><input id="auto-per-bot-day-unlimited" type="checkbox"> No cap per bot (unlimited)</label>
       <label class="inline">All bots together: at most <input id="auto-per-hour" type="number" min="1" max="100000" aria-label="Automatic turns per hour, all bots"> automatic turns an hour</label>
       <label class="check"><input id="auto-per-hour-unlimited" type="checkbox"> No cap for all bots (unlimited)</label>
+      <label class="inline">A turn held by a cap for more than <input id="auto-hold-hours" type="number" min="1" max="720" aria-label="Hours a held turn may wait"> hours is not run late</label>
       <label class="check"><input id="auto-evidence" type="checkbox"> An assignment counts as done only with evidence of how it was checked (tests, a check, a command's result, a file)</label>
       <label class="inline">Evidence counts only if given since the task last started, and at least <input id="auto-evidence-min" type="number" min="1" max="1000" aria-label="Shortest evidence in characters"> characters long</label>
       <p class="muted">A message from you or Stop ends the run, and a bot also stops when it says it is blocked or needs you. Continuations run quietly: the bot stays "Working" in the chat. Automatic turns are chat continuations, assignment steps and checks, and wake-ups; your own messages, Start and Reply, and routines are not counted. A bot over a cap waits instead of dropping work, and its chat and Needs you say which cap. Assignments also keep their own turn budget (20 turns by default). Chat-only bots (set in a bot's dialog) never continue.</p>
@@ -2730,6 +2731,7 @@ function showBehavior(data) {
   }
   $("auto-evidence").checked = !!auto.evidence;
   $("auto-evidence-min").value = auto.evidence_min;
+  $("auto-hold-hours").value = auto.hold_hours;
 }
 for (const key of ["per-bot-day", "per-hour"]) {
   $("auto-" + key + "-unlimited").onchange = () => {
@@ -2812,7 +2814,7 @@ $("behavior-save").onclick = async () => {
   const auto_continue = {enabled: $("auto-continue").checked, max: Number($("auto-continue-max").value),
     no_progress: Number($("auto-no-progress").value), consecutive: Number($("auto-consecutive").value),
     per_bot_day: cap("per-bot-day"), per_hour: cap("per-hour"), evidence: $("auto-evidence").checked,
-    evidence_min: Number($("auto-evidence-min").value)};
+    evidence_min: Number($("auto-evidence-min").value), hold_hours: Number($("auto-hold-hours").value)};
   try {
     showBehavior(await api("/v1/settings", {method: "PUT", body: JSON.stringify({auto_continue})}));
     $("behavior-state").textContent = "Saved.";
