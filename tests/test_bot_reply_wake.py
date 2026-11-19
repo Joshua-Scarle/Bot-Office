@@ -163,6 +163,7 @@ def test_the_consecutive_limit_stops_a_reply_wake(settings):
     "Which size do you want, large or small?\nBOT-OFFICE-STATUS: waiting_on_user — need your decision on the size",
     "Asked the peer too.\nBOT-OFFICE-STATUS: waiting_on_user — need your photo of the holder, and the peer's reply",
     "Asked the peer.\nPlease send a photo of the bed.\nBOT-OFFICE-STATUS: waiting_on_user — see above",
+    "Asked the peer.\nBOT-OFFICE-STATUS: waiting_on_user — owner to pick prod or staging; answer needed before the message goes out",
 ])
 def test_a_real_owner_question_still_waits_on_the_owner(settings, status_text):
     desk = Desk(settings, lambda job: (desk.ask(job), status_text)[1])
