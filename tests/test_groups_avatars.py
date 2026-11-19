@@ -77,7 +77,7 @@ def test_move_bots_between_sections_and_reorder(client):
     a, b, c = (mk(client, n)["id"] for n in ("A", "B", "C"))
     s1 = client.post("/v1/sections", headers=H, json={"name": "One"}).json()["id"]
     s2 = client.post("/v1/sections", headers=H, json={"name": "Two"}).json()["id"]
-    move = lambda bot, sec, i: client.put(f"/v1/bots/{bot}/section", headers=H, json={"section_id": sec, "index": i})  # noqa: E731
+    move = lambda bot, sec, i: client.put(f"/v1/bots/{bot}/section", headers=H, json={"section_id": sec, "index": i})
     assert move(a, s1, 0).status_code == 200
     assert move(b, s1, 1).status_code == 200
     assert move(c, s1, 0).status_code == 200          # insert at the top
