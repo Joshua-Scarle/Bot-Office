@@ -231,7 +231,7 @@ def test_unlimited_caps_through_the_settings_api(settings):
     with TestClient(app) as client:
         got = client.get("/v1/settings", headers=OWNER).json()["auto_continue"]
         assert got["per_bot_day"] == 20 and got["per_hour"] == 20 and got["evidence"] is True
-        assert got["no_progress"] == 3 and got["consecutive"] == 10
+        assert got["no_progress"] == 3 and got["consecutive"] == 30
         put = client.put("/v1/settings", headers=OWNER, json={"auto_continue": {"per_bot_day": "unlimited",
                                                                                 "per_hour": None}}).json()
         assert put["auto_continue"]["per_bot_day"] is None and put["auto_continue"]["per_hour"] is None

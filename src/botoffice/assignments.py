@@ -1354,7 +1354,8 @@ class Assignments:
         run: list[tuple[str, str]] = []  # newest first while collecting
         automatic, collecting = 0, True
         limit = int(settings["consecutive"]) + int(settings["no_progress"]) + 2
-        for turn in db.execute("SELECT id,priority,outcome,reply_text,COALESCE(started_at,created_at) AS began "
+        for turn in db.execute("SELECT id,priority,status,outcome,reply_text,started_at,"
+                               "COALESCE(started_at,created_at) AS began "
                                "FROM jobs WHERE assignment_id=? AND "
                                "assignment_turn IS NOT NULL AND status NOT IN ('queued','running') "
                                "ORDER BY assignment_turn DESC LIMIT ?", (row["id"], limit)):
@@ -1362,9 +1363,13 @@ class Assignments:
                                  "source!='inbox' LIMIT 1", (turn["id"],)).fetchone()
             if spoke and turn["began"] < spoke and not steered:
                 break  # the owner spoke after this turn began
+            if turn["started_at"] is None and turn["outcome"] is None:
+                continue  # cancelled or refused before it ran: not a turn of the run
+            if turn["status"] in ("failed", "cancelled", "needs_login"):
+                break  # a turn that failed or was cancelled: the run starts after it
             state, _, reason = (turn["outcome"] or "unverified").partition(": ")
-            if settled and turn["id"] == job["id"] and settled[1]:
-                reason = settled[1]  # a status line or report the settlement read (and cleared)
+            if settled and turn["id"] == job["id"]:
+                state, reason = settled[0], settled[1] or reason  # what the settlement read (and cleared)
             if state not in ("continue", "not_done", "unverified"):
                 collecting = False
                 if state != "done":
@@ -1378,8 +1383,8 @@ class Assignments:
         return continuation.Turn(
             path="task", kind=kind, state="continue" if kind == "continue" else "done",
             run=run[::-1], automatic=automatic, chat_only=bool(bot and bot["chat_only"]),
-            question_open=bool(db.execute("SELECT 1 FROM questions WHERE bot_id=? AND status='open' AND blocking=1 "
-                                          "LIMIT 1", (row["bot_id"],)).fetchone()),
+            question_open=bool(db.execute("SELECT 1 FROM questions WHERE assignment_id=? AND status='open' "
+                                          "AND blocking=1 LIMIT 1", (row["id"],)).fetchone()),
             approval_pending=bool(db.execute("SELECT 1 FROM approvals WHERE job_id=? AND status='pending' LIMIT 1",
                                              (job["id"],)).fetchone()),
             owner_waiting=bool(db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status='queued' AND source IN "

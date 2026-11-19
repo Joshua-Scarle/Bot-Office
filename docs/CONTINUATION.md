@@ -17,7 +17,7 @@ Both paths ask one function, `continuation.decide(settings, turn)`. `scheduler._
 6. An **owner message is waiting**. Chat: the owner's turn is the continuation. Task loop: the next step queues behind the owner's turn (claim order), so the owner always goes first.
 7. The reply or its status reason **says it is blocked or needs the owner** (`needs_user_phrase`).
 8. **No progress** in `no_progress` turns in a row (default 3, `made_progress`).
-9. **Consecutive automatic turns** since the owner last spoke exceed `consecutive` (default 10). The owner speaking means a chat message, an assignment reply/start, or a message steered into the running turn.
+9. **Consecutive automatic turns** since the owner last spoke exceed `consecutive` (default 30). The owner speaking means a chat message, an assignment reply/start, or a message steered into the running turn.
 10. Chat only: the chain exceeds `max` (default 10, 1..50; the 0.11.10 setting).
 
 A stop always leaves a visible line:
@@ -70,7 +70,7 @@ All of these are in `GET/PUT /v1/settings` under `auto_continue`. A value saved 
 | enabled | true | - |
 | max | 10 (1..50) | - |
 | no_progress | 3 | BOT_OFFICE_AUTO_NO_PROGRESS |
-| consecutive | 10 | BOT_OFFICE_AUTO_CONSECUTIVE |
+| consecutive | 30 | BOT_OFFICE_AUTO_CONSECUTIVE |
 | per_bot_day | 20 (or null = unlimited) | BOT_OFFICE_AUTO_TURNS_PER_BOT_DAY |
 | per_hour | 20 (or null = unlimited) | BOT_OFFICE_AUTO_TURNS_PER_HOUR |
 | evidence | true | BOT_OFFICE_DONE_NEEDS_EVIDENCE (on/off) |

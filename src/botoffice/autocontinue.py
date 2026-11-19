@@ -11,8 +11,9 @@ The text lists are deliberately short and conservative; a hit pauses the assignm
 """
 import re
 
-# Consecutive "continue" turns with no user message in between, whatever they say.
-MAX_CONSECUTIVE_CONTINUES = 10
+# Consecutive "continue" turns with no user message in between, whatever they say. A backstop: stalled
+# work is stopped sooner by NO_PROGRESS_LIMIT, so productive work is not paused at ten.
+MAX_CONSECUTIVE_CONTINUES = 30
 # Consecutive "continue" turns that made no progress (see ``made_progress``).
 NO_PROGRESS_LIMIT = 3
 
@@ -93,13 +94,23 @@ def needs_user_phrase(reply: str, reason: str = "") -> str | None:
     return None
 
 
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+
+
 def _tokens(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9]+", _clean(text).lower()) if len(w) > 2 and w not in _STOP}
+    """Words of any script (3+ characters, no filler); CJK runs, which have no spaces, as character bigrams."""
+    out: set[str] = set()
+    for word in re.findall(r"\w+", _clean(text).lower()):
+        if _CJK.search(word):
+            out.update(word[i:i + 2] for i in range(max(1, len(word) - 1)))
+        elif len(word) > 2 and word not in _STOP:
+            out.add(word)
+    return out
 
 
 def similarity(a: str, b: str) -> float:
     ta, tb = _tokens(a), _tokens(b)
-    return len(ta & tb) / len(ta | tb) if ta or tb else 1.0
+    return len(ta & tb) / len(ta | tb) if ta and tb else 0.0  # nothing to compare is not a repeat
 
 
 def made_progress(reply: str, earlier: list[str]) -> bool:
@@ -121,19 +132,3 @@ def no_progress_run(replies: list[tuple[str, str]]) -> int:
         stalled += 1
     return stalled
 
-
-def stop_reason(replies: list[tuple[str, str]]) -> str | None:
-    """Why the loop should pause, from the run of "continue" turns since the user last spoke.
-
-    *replies* is [(reply text, status reason)] oldest first, the turn that just ended last."""
-    if not replies:
-        return None
-    reply, reason = replies[-1]
-    if phrase := needs_user_phrase(reply, reason):
-        return f"the reply says it is blocked or needs you (\"{phrase}\")"
-    if len(replies) >= MAX_CONSECUTIVE_CONTINUES:
-        return f"{len(replies)} continues in a row without a reply from you"
-    stalled = no_progress_run(replies)
-    if stalled >= NO_PROGRESS_LIMIT:
-        return f"{stalled} continues in a row with no progress"
-    return None

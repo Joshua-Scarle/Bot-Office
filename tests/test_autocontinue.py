@@ -4,6 +4,7 @@ import pytest
 from test_loop import queued, run_all, setup
 
 from botoffice import autocontinue as ac
+from botoffice import continuation
 
 CONT = "\nBOT-OFFICE-STATUS: continue — "
 
@@ -98,10 +99,11 @@ def test_productive_continues_are_not_capped_early(settings):
 
 
 def test_consecutive_continue_ceiling_even_when_every_reply_is_fresh(settings):
-    fresh = [f"Completed unit {n}: wrote module{n} covering topic{n}{CONT}next" for n in range(30)]
-    store, scheduler, _, _, item = setup(settings, *fresh, budget_turns=30)
+    fresh = [f"Completed unit {n}: wrote module{n} covering topic{n}{CONT}next" for n in range(40)]
+    store, scheduler, _, _, item = setup(settings, *fresh, budget_turns=40)
+    continuation.update(store, {"per_bot_day": None, "per_hour": None})  # the ceiling, not the 20/hour cap
     jobs = run_all(store, scheduler)
-    # 0.11.10 one continuation system: the owner's Start plus 10 automatic turns (the limit counts automatic ones)
+    # 0.11.10 one continuation system: the owner's Start plus 30 automatic turns (the limit counts automatic ones)
     assert len(jobs) == ac.MAX_CONSECUTIVE_CONTINUES + 1
     after = scheduler.assignments.get(item.id)
     assert after.status == "waiting_on_user" and "in a row without a reply" in after.status_note
@@ -127,4 +129,4 @@ def test_repeating_the_same_reply_is_no_progress():
     same = "Reviewed the module layout and renamed three helpers in the config loader."
     assert ac.made_progress(same, []) is True
     assert ac.made_progress(same.upper() + "!!", [same]) is False
-    assert ac.stop_reason([(same, "")] * 4) == "3 continues in a row with no progress"
+    assert ac.no_progress_run([(same, "")] * 4) == 3
