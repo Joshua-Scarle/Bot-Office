@@ -1227,7 +1227,7 @@ def create_app(
         _bot(bot_id)
         seed = (body.seed if body else None) or secrets.token_hex(6)
         if not avatars.valid_seed(seed):
-            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : - ")
+            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : -")
         await avatars.run(avatars.render_png, seed)
         safefs.unlink(_icon_path(bot_id))
         updated = store.update_bot(bot_id, icon_image=None, avatar_seed=seed)
@@ -1261,7 +1261,7 @@ def create_app(
     @app.get("/v1/avatar-preview", dependencies=[Depends(auth)])
     async def avatar_preview(request: Request, seed: str) -> Response:
         if not avatars.valid_seed(seed):
-            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : - ")
+            raise HTTPException(status_code=400, detail="seed must be 1-64 letters, digits or . _ : -")
         data = await avatars.run(avatars.render_png, seed)
         return _png_response(request, data, "image/png", True)
 

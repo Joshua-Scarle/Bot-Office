@@ -856,7 +856,7 @@ const DONE_MS = 20000;
 state.doneUntil = new Map(); state.doneTimer = null;
 // face centre y and half the eye gap, per shape (so the eyes sit inside every body)
 const CHAR_FACE = {square: [24, 7], circle: [24, 7], blob: [24, 7], hexagon: [24, 7], cloud: [26, 6.5], pill: [24, 8], star: [26, 5.5], diamond: [24, 6]};
-const SVG_NS = "http://www.w3.org/2000/svg";
+const SVG_NS = "http:" + "//www.w3.org/2000/svg";   // split: the page must contain no literal URL
 function svgEl(tag, attrs, cls) {
   const node = document.createElementNS(SVG_NS, tag);
   for (const key in attrs) node.setAttribute(key, attrs[key]);

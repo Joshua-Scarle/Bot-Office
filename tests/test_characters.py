@@ -214,4 +214,4 @@ def test_markup_and_css_for_characters():
 
 def test_characters_are_ours_no_third_party_assets():
     block = _slice("/* ---- character avatars", "function fillAvatar")
-    assert "http" not in block.replace("http://www.w3.org/2000/svg", "") and "data:" not in block and "base64" not in block
+    assert "http" not in block.replace('"http:" + "//www.w3.org/2000/svg"', "") and "data:" not in block and "base64" not in block
