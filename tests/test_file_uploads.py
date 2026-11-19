@@ -194,3 +194,39 @@ def test_claude_is_granted_the_uploads_folder():
     import inspect
     from botoffice.providers import claude
     assert '"uploads"' in inspect.getsource(claude) and '"--add-dir"' in inspect.getsource(claude)
+
+
+class ReadsUploads(FakeAdapter):
+    """Stands in for a CLI that opens the file path the prompt names, as the real ones do (0.11.15 live check)."""
+
+    def __init__(self):
+        super().__init__()
+        self.paths: list[str] = []
+
+    async def run(self, job, workspace, log_path, timeout):
+        import re
+        from botoffice.providers.base import RunResult
+        found = re.findall(r"^- (/\S+/uploads/\S+)$", (workspace / "prompt.txt").read_text(), re.M)
+        self.paths += found
+        text = " ".join(open(p).read().strip() for p in found) if found else "no file named"
+        log_path.write_text("ran\n", encoding="utf-8")
+        return RunResult("succeeded", exit_code=0, final_text=f"The file says: {text}")
+
+
+def test_a_turn_can_read_an_uploaded_file_and_quotes_its_token(settings):
+    """Upload through the API, send, and the CLI-side reply quotes the unique token from the named path."""
+    import time
+    token = "UPLOADTOKEN-8f3a91c2"
+    reader = ReadsUploads()
+    with TestClient(create_app(settings, {"codex": reader})) as client:
+        bot = client.post("/v1/bots", headers=H, json={"name": "reader"}).json()["id"]
+        info = up(client, bot, "note.txt", f"The secret code is {token}.\n".encode()).json()
+        sent = client.post(f"/v1/bots/{bot}/messages", headers=H, json={"text": "quote the code in the file", "attachments": [info["id"]]})
+        assert sent.status_code == 201
+        end = time.monotonic() + 10
+        reply = ""
+        while time.monotonic() < end and token not in reply:
+            time.sleep(0.05)
+            reply = " ".join(m["text"] for m in client.get(f"/v1/bots/{bot}/messages", headers=H).json() if m["role"] != "user")
+        assert token in reply, reply
+        assert reader.paths and reader.paths[0].endswith(info["id"])

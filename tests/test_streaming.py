@@ -578,3 +578,22 @@ def test_page_has_live_stream_effort_and_tier_hooks_without_token_in_urls():
     assert "EventSource" not in html
     assert "?token" not in html and "access_token" not in html
     assert os.path.exists(CHAT_PAGE)
+
+
+def test_claude_compact_shows_a_status_line_not_the_raw_result():
+    """0.11.15: a finished /compact has an empty `result`; the chat said nothing useful (it fell back to the raw stream)."""
+    boundary = {"type": "system", "subtype": "compact_boundary", "session_id": "aa7f34af-aabd-49e6-ae60-1a69189e14d8",
+                "compact_metadata": {"trigger": "manual", "pre_tokens": 39951, "post_tokens": 10491, "duration_ms": 4686}}
+    done = {"type": "result", "subtype": "success", "is_error": False, "result": "", "local_command": "compact", "num_turns": 0}
+    parser = ClaudeParser()
+    assert parser.feed(boundary) == []
+    assert parser.feed(done) == [("final", {"text": "Conversation compacted (40k → 10.5k tokens, 4.7s)"})]
+    assert parser.final_text == "Conversation compacted (40k → 10.5k tokens, 4.7s)"
+    bare = ClaudeParser()  # no boundary line seen: still a short status
+    assert bare.feed(done) == [("final", {"text": "Conversation compacted"})]
+    # the CLI's own message (nothing to compact, not logged in) is kept as it is
+    failed = ClaudeParser()
+    assert failed.feed({**done, "result": "Not enough messages to compact."}) == [("final", {"text": "Not enough messages to compact."})]
+    # an ordinary empty result is not turned into a compact status
+    plain = ClaudeParser()
+    assert plain.feed({"type": "result", "is_error": False, "result": ""}) == [("final", {"text": ""})]

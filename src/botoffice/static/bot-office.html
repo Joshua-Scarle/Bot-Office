@@ -601,6 +601,8 @@ const FALLBACK_EFFORTS = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   antigravity: ["low", "medium", "high", "xhigh", "max"],
 };
+// mirrors catalog.model_carries_effort: an Antigravity id such as gemini-3.8-flash-high names its own effort
+function modelCarriesEffort(engine, model) { return engine === "antigravity" && /-(?:low|medium|high|xhigh|max)$/i.test(model || ""); }
 const FALLBACK_DEFAULT_EFFORT = { codex: "high", claude: "medium", antigravity: "medium" };
 
 function getToken() {
@@ -974,8 +976,9 @@ function renderHeader() {
   $("head-name").textContent = bot.name;
   $("head-desc").textContent = bot.description || "";
   $("head-model").textContent = modelLabel(bot.engine, bot.model);
-  $("head-effort").hidden = !bot.effort;
-  $("head-effort").textContent = bot.effort ? "effort: " + bot.effort : "";
+  const shownEffort = modelCarriesEffort(bot.engine, bot.model) ? "" : bot.effort;
+  $("head-effort").hidden = !shownEffort;
+  $("head-effort").textContent = shownEffort ? "effort: " + shownEffort : "";
   $("head-tier").textContent = bot.capability_tier || "";
   const busy = bot.activity === "running" || bot.activity === "queued";
   // a running turn on an engine that cannot take input mid-run: said up front, not found out later
@@ -1461,7 +1464,7 @@ function jobRow(job, view, current) {
     stop.onclick = () => stopJob(job.id, stop);
     head.append(stop);
   }
-  const meta = [modelLabel(job.provider, job.model), job.effort ? "effort " + job.effort : "",
+  const meta = [modelLabel(job.provider, job.model), job.effort && !modelCarriesEffort(job.provider, job.model) ? "effort " + job.effort : "",
                 job.attempts > 1 ? "attempt " + job.attempts : "",
                 job.started_at ? "started " + new Date(job.started_at).toLocaleTimeString([], { timeStyle: "short" })
                   : "created " + new Date(job.created_at).toLocaleTimeString([], { timeStyle: "short" })].filter(Boolean);
@@ -2944,7 +2947,9 @@ function defaultEffortFor(engine) { const c = choiceFor(engine); return (c && c.
 
 function fillEffortSelect() {
   const engine = selectedEngine();
-  const levels = effortsFor(engine);
+  const model = (modelPicker.value || "").split("|").slice(1).join("|");
+  const fixed = modelCarriesEffort(engine, model);  // the model name already carries its effort: offer no second one
+  const levels = fixed ? [] : effortsFor(engine);
   const bot = state.editing;
   const select = $("f-effort");
   const keep = select.dataset.engine === engine ? select.value : null;

@@ -216,3 +216,42 @@ def test_end_to_end_status_only_reply_shows_a_short_line_not_the_stream(settings
     _, _, jobs, chat = run_turns(settings, tmp_path, monkeypatch, "BOT-OFFICE-STATUS: done — step2 written")
     assert jobs[0].status == JobStatus.SUCCEEDED and chat == [("assistant", "Done — step2 written")]
     assert not any('"event"' in text for _, text in chat)
+
+
+def test_a_model_that_names_its_effort_gets_no_effort_flag(tmp_path):
+    """0.11.15: `agy --model gemini-3.8-flash-high --effort medium` fails ("model conflicts with --effort")."""
+    from botoffice.catalog import default_model, effective_effort, model_carries_effort
+    ws = workspace_of(tmp_path)
+    adapter = AntigravityAdapter(executable="agy")
+    default = default_model("antigravity")
+    assert model_carries_effort("antigravity", default) and default.endswith("-high")
+    for model, effort in ((default, "medium"), ("gemini-3.8-flash-low", "max"), (default, None)):
+        args = adapter._exec_args(ws, make_job(ws).model_copy(update={"model": model, "effort": effort}), None)
+        assert "--effort" not in args and args[args.index("--model") + 1] == model
+    # a model without an effort suffix still takes the bot's effort (or the engine default)
+    args = adapter._exec_args(ws, make_job(ws).model_copy(update={"model": "gemini-3.8-pro", "effort": "high"}), None)
+    assert args[args.index("--effort") + 1] == "high"
+    assert effective_effort("antigravity", "gemini-3.8-pro", "high") == "high"
+    assert effective_effort("antigravity", default, "high") is None
+    assert not model_carries_effort("claude", "claude-opus-5-high")  # only Antigravity ids name an effort
+
+
+
+def test_a_new_antigravity_bot_and_its_jobs_carry_no_conflicting_effort(settings):
+    """The default pair of a fresh bot queues a job without an effort; a plain model keeps the default."""
+    from fastapi.testclient import TestClient
+
+    from botoffice.api import create_app
+    from botoffice.catalog import default_model
+    from botoffice.providers.fake import FakeAdapter
+    H = {"Authorization": "Bearer test-token"}
+    adapter = FakeAdapter()
+    adapter.name = "antigravity"
+    app = create_app(settings, {"codex": FakeAdapter(), "antigravity": adapter})
+    with TestClient(app) as client:
+        bot = client.post("/v1/bots", json={"name": "ag", "instructions": "x", "default_provider": "antigravity"}, headers=H).json()
+        assert bot["model"] == default_model("antigravity")
+        job = client.post("/v1/jobs", json={"prompt": "hi", "provider": "antigravity", "bot_id": bot["id"]}, headers=H).json()
+        assert job["model"] == bot["model"] and job["effort"] is None
+        plain = client.post("/v1/jobs", json={"prompt": "hi", "provider": "antigravity", "model": "gemini-3.8-pro"}, headers=H).json()
+        assert plain["effort"] == "medium"

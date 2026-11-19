@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from .catalog import default_effort, valid_effort
+from .catalog import default_effort, effective_effort, valid_effort
 from .config import Settings
 from .domain import Bot, Job, Message, Routine
 from .providers.base import ProviderAdapter
@@ -72,7 +72,7 @@ class Turns:
             effort = bot.effort
         if effort is not None and not valid_effort(provider, effort):
             effort = None
-        effort = effort or default_effort(provider)
+        effort = effective_effort(provider, model, effort or default_effort(provider))
         job = self.store.create(
             prompt,
             provider,
