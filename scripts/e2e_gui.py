@@ -623,6 +623,7 @@ def slash_commands(page, out: Path, base: str, token: str) -> None:
     page.wait_for_function("() => document.getElementById('status').classList.contains('bad')", timeout=10000)
     check("unavailable" in page.locator("#status").inner_text() and messages() == before, "running a greyed command says why and sends nothing")
     # confirm-gated
+    page.wait_for_function("() => { const b = currentBot(); return b && !['running', 'queued'].includes(b.activity); }", timeout=20000)
     box.fill("")
     box.type("/new")
     page.wait_for_selector("#slash-list li[role=option]")
