@@ -10,6 +10,12 @@ import urllib.request
 
 HELP = """bot-task: your assignments, wake-ups and routines (works only inside a Bot-Office turn)
 
+  bot-task tasks [--bot NAME|--all] [--closed]    task lists by stage
+  bot-task board                                  all bots’ open tasks
+  bot-task add TITLE [--goal G] [--done-when D] [--for BOT] [--parent ID|current] [--first]
+  bot-task start ID|current | block ID --note TEXT | wait ID --on user|BOT --note TEXT
+  bot-task drop ID --note TEXT | edit ID --version N [--title T] [--goal G] [--done-when D] [--due DATE] [--position N]
+  bot-task changes [--since EVENT_ID]
   bot-task list                                   your open assignments and the children you created
   bot-task show [<id>|current]                    one assignment with its recent events
   bot-task status <id>|current <state> [--note TEXT]
@@ -40,10 +46,22 @@ def call(method, path, body=None):
             raw = response.read()
     except urllib.error.HTTPError as exc:
         try:
-            detail = json.loads(exc.read()).get("detail")
+            error = json.loads(exc.read())
+            detail = error.get("detail")
         except ValueError:
+            error = {}
             detail = exc.reason
-        raise SystemExit(f"bot-task: {exc.code} {detail}") from None
+        if not path.startswith("/v1/agent/tasks"):
+            raise SystemExit(f"bot-task: {exc.code} {detail}") from None
+        print(f"bot-task: {exc.code} {detail}", file=sys.stderr)
+        if exc.code == 409 and error.get("current"):
+            print("Current task:", file=sys.stderr)
+            print(json.dumps(error["current"], ensure_ascii=False, indent=2), file=sys.stderr)
+            print("Changes:", file=sys.stderr)
+            print(json.dumps(error.get("changes", []), ensure_ascii=False, indent=2), file=sys.stderr)
+            print("Retry with the current version.", file=sys.stderr)
+        raise SystemExit(3 if exc.code == 409 and error.get("current") else
+                         {403: 4, 429: 5}.get(exc.code, 2 if exc.code in (400, 422) else 1)) from None
     return json.loads(raw) if raw else None
 
 
@@ -60,13 +78,86 @@ def show(item):
         print(f"  {event['created_at'][:16]} {event['kind']}: {event['note']}")
 
 
+def show_task(item):
+    show({**item, "id": item["id"][:8]})
+
+
 def main(argv):
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(HELP)
         return 0
     command, rest = argv[0], argv[1:]
     parser = argparse.ArgumentParser(prog=f"bot-task {command}")
-    if command == "list":
+    if command in ("tasks", "board"):
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument("--bot")
+        group.add_argument("--all", action="store_true")
+        parser.add_argument("--closed", action="store_true")
+        args = parser.parse_args(rest)
+        params = {}
+        if args.bot: params["bot"] = args.bot
+        if args.all or command == "board": params["bot"] = "all"
+        if args.closed: params["closed"] = "1"
+        items = call("GET", "/v1/agent/tasks?" + urllib.parse.urlencode(params))
+        for stage, label in (("not_started", "Not started"), ("in_progress", "In progress"), ("completed", "Completed")):
+            print(label + ":")
+            for item in items:
+                if item["stage"] != stage and not (stage == "completed" and item["stage"] == "dropped"): continue
+                flags = [item["status"]] if item.get("waiting") or item.get("blocked") or item["stage"] == "dropped" else []
+                print(f"  {item['id'][:8]}  [{label}" + (" · " + ", ".join(flags) if flags else "") + f"]  {item['title']}  ({item['turns_used']}/{item['budget_turns']} turns, {round(item['minutes_used'])}/{item['budget_minutes']} min)  {item['created_by']} / {item['origin']}")
+    elif command == "add":
+        parser.add_argument("title")
+        parser.add_argument("--goal")
+        parser.add_argument("--done-when")
+        parser.add_argument("--for", dest="for_bot")
+        parser.add_argument("--parent", dest="parent_id")
+        parser.add_argument("--first", action="store_true")
+        args = parser.parse_args(rest)
+        body = {k: v for k, v in vars(args).items() if v is not None and k != "first"}
+        if args.first:
+            params = {"closed": 1}
+            if args.for_bot: params["bot"] = args.for_bot
+            items = call("GET", "/v1/agent/tasks?" + urllib.parse.urlencode(params))
+            body["position"] = min((i["position"] for i in items if i.get("position") is not None), default=0) - 1
+        created = call("POST", "/v1/agent/tasks", body)
+        if args.first and not args.for_bot and any(i.get("position") is None for i in items):
+            call("POST", "/v1/agent/tasks/reorder", {"order": [created["id"]] + [i["id"] for i in items]})
+        elif args.first and args.for_bot and any(i.get("position") is None for i in items):
+            print("bot-task: older tasks without positions may still appear first; the list owner can reorder them", file=sys.stderr)
+        show_task(created)
+    elif command == "edit":
+        parser.add_argument("id")
+        parser.add_argument("--version", type=int, required=True)
+        parser.add_argument("--title")
+        parser.add_argument("--goal")
+        parser.add_argument("--done-when")
+        parser.add_argument("--due", dest="due_at")
+        parser.add_argument("--position", type=float)
+        args = parser.parse_args(rest)
+        body = {k: v for k, v in vars(args).items() if k != "id" and v is not None}
+        if len(body) == 1: parser.error("at least one field is required")
+        show_task(call("PATCH", "/v1/agent/tasks/" + quote(args.id), body))
+    elif command in ("start", "block", "wait", "drop"):
+        parser.add_argument("id")
+        if command in ("block", "wait", "drop"): parser.add_argument("--note", required=True)
+        if command == "wait": parser.add_argument("--on", required=True)
+        args = parser.parse_args(rest)
+        path = "/v1/agent/tasks/" + quote(args.id)
+        if command == "drop": body, path = {"note": args.note}, path + "/drop"
+        else:
+            state = {"start": "continue", "block": "blocked", "wait": "waiting_on_user" if command == "wait" and args.on == "user" else "waiting_on_bot"}[command]
+            note = getattr(args, "note", "")
+            if command == "wait" and args.on != "user": note = args.on + ": " + note
+            body, path = {"state": state, "note": note}, path + "/status"
+        show_task(call("POST", path, body))
+    elif command == "changes":
+        parser.add_argument("--since", type=int)
+        args = parser.parse_args(rest)
+        result = call("GET", "/v1/agent/tasks/changes" + ("?since=" + str(args.since) if args.since is not None else ""))
+        for event in result["changes"]:
+            print(f"{event['id']}  {event['assignment_id'][:8]}  {event['kind']}  {event['actor']}  {event.get('title', '')}  {event.get('note', '')}")
+        print(f"Last event: {result['last_event']}")
+    elif command == "list":
         for item in call("GET", "/v1/agent/assignments"):
             show(item)
     elif command == "show":

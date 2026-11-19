@@ -180,3 +180,48 @@ def test_bot_task_cli_uses_only_the_job_token(tmp_path):
     assert "[blocked]" in result.stdout
     usage = subprocess.run([sys.executable, "-I", str(helper), "help"], capture_output=True, text=True, check=True)
     assert "bot-task status" in usage.stdout
+
+
+def test_task_cli_against_task_api(settings):
+    client, store, (ada, bea, _) = setup(settings)
+    _, token = running_token(store, ada)
+    class Handler(BaseHTTPRequestHandler):
+        def forward(self):
+            assert self.path.startswith('/v1/agent/')
+            size = int(self.headers.get('Content-Length', '0'))
+            response = client.request(self.command, self.path, content=self.rfile.read(size),
+                                      headers={'Authorization': self.headers['Authorization'], 'Content-Type': 'application/json'})
+            self.send_response(response.status_code)
+            self.end_headers()
+            self.wfile.write(response.content)
+        do_GET = do_POST = do_PATCH = forward
+        def log_message(self, *args):
+            pass
+    server = HTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    helper = Path(__file__).resolve().parents[1] / 'bin' / 'bot-task'
+    env = {'BOT_OFFICE_API_URL': f'http://127.0.0.1:{server.server_port}',
+           'BOT_OFFICE_AGENT_TOKEN': token['Authorization'].split(' ', 1)[1]}
+    def run(*args):
+        return subprocess.run([sys.executable, '-I', str(helper), *args], env=env, capture_output=True, text=True, timeout=10)
+    try:
+        assert run('add', 'First').returncode == 0
+        tasks = client.get('/v1/agent/tasks', headers=token).json()
+        task = tasks[0]
+        ref = task['id'][:8]
+        assert 'First' in run('tasks').stdout
+        assert run('edit', ref, '--version', '1', '--title', 'Revised').returncode == 0
+        conflict = run('edit', ref, '--version', '1', '--title', 'Stale')
+        assert conflict.returncode == 3 and 'Revised' in conflict.stderr and 'edited' in conflict.stderr
+        other = Assignments(store).create(bea.id, {'title': 'Other'})
+        assert run('edit', str(other.id)[:8], '--version', '1', '--title', 'No').returncode == 4
+        assert run('start', ref).returncode == 0
+        assert run('drop', ref, '--note', 'obsolete').returncode == 0
+        changes = run('changes', '--since', '0')
+        assert changes.returncode == 0 and 'Last event:' in changes.stdout
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+        client.__exit__(None, None, None)
