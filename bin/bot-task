@@ -15,7 +15,8 @@ HELP = """bot-task: your assignments, wake-ups and routines (works only inside a
   bot-task add TITLE [--goal G] [--done-when D] [--for BOT] [--parent ID|current] [--first] [--priority P]
         P: urgent | high | normal | low (default normal); a task for another bot waits for that bot to start it,
         at most normal priority and at the end of its list (--first applies to your own list only)
-  bot-task start ID|current | block ID --note TEXT | wait ID --on user|BOT --note TEXT
+  bot-task start current | block ID --note TEXT | wait ID --on user|BOT --note TEXT
+        start/continue counts only in the task's own turn; other tasks are started by the owner
   bot-task done ID|current --evidence "how you verified it" [--note TEXT]
         a task counts as done only with evidence: tests run, a check, a command's result, a file
   bot-task drop ID --note TEXT | edit ID --version N [--title T] [--goal G] [--done-when D] [--due DATE] [--position N] [--priority P]

@@ -250,21 +250,37 @@ def cap_line(why: str, until: datetime) -> str:
 
 
 def hold(db: sqlite3.Connection, job_id: str, why: str, until: datetime, stamp: datetime) -> None:
-    """Defer the job to *until* (claim skips it till then) with one chat line per held job."""
+    """Defer the job to *until* (claim skips it till then) with one chat line per held job. The job's
+    own failure_kind is kept in ``held_kind`` (``unhold`` puts it back) and no attempt or retry is
+    counted: a hold is not a run."""
     row = db.execute("SELECT bot_id, source, failure_kind FROM jobs WHERE id=?", (job_id,)).fetchone()
-    db.execute("UPDATE jobs SET not_before=?, failure_kind=?, error=?, held_at=COALESCE(held_at, ?) WHERE id=?",
-               (until.isoformat(), HELD, f"held: {why}", stamp.isoformat(), job_id))
+    db.execute("UPDATE jobs SET not_before=?, held_kind=CASE WHEN failure_kind=? THEN held_kind ELSE failure_kind END, "
+               "failure_kind=?, error=?, held_at=COALESCE(held_at, ?) WHERE id=?",
+               (until.isoformat(), HELD, HELD, f"held: {why}", stamp.isoformat(), job_id))
     if row["failure_kind"] != HELD and db.execute("SELECT 1 FROM bots WHERE id=?", (row["bot_id"],)).fetchone():
         db.execute("INSERT INTO messages (bot_id,role,source,text,job_id,created_at,attachments) VALUES (?,?,?,?,?,?,'[]')",
                    (row["bot_id"], "system", row["source"], cap_line(why, until), job_id, stamp.isoformat()))
 
 
+def unhold(db: sqlite3.Connection, job_id: str) -> None:
+    """A held job is claimed: its own failure_kind (if any) is back."""
+    db.execute("UPDATE jobs SET failure_kind=held_kind, held_kind=NULL WHERE id=? AND failure_kind=?", (job_id, HELD))
+
+
+def owner_spoke_since(db: sqlite3.Connection, bot_id: str | None, since: str | None) -> bool:
+    """The owner wrote to *bot_id* (a chat or API message of theirs) after *since*."""
+    if not bot_id or not since:
+        return False
+    return db.execute("SELECT 1 FROM messages WHERE bot_id=? AND role='user' AND sender IS NULL AND "
+                      "source IN ('chat','api') AND created_at>? LIMIT 1", (bot_id, since)).fetchone() is not None
+
+
 def stale_hold(db: sqlite3.Connection, job_id: str, stamp: datetime) -> str | None:
     """Why a queued automatic turn should not run now, else None. No automatic turn runs while
     auto-continue is off or its bot is chat-only (switched since it was queued). A turn a cap held was
-    decided before it waited: what else changed meanwhile is checked again (its task no longer
-    active) and a turn held over ``hold_hours`` is not run late."""
-    job = db.execute("SELECT j.held_at, j.assignment_id, j.auto_kind, j.failure_kind, b.chat_only FROM jobs j "
+    decided before it waited: what else changed meanwhile is checked again (the owner wrote to the
+    bot since, its task is no longer active) and a turn held over ``hold_hours`` is not run late."""
+    job = db.execute("SELECT j.held_at, j.bot_id, j.assignment_id, j.auto_kind, j.failure_kind, b.chat_only FROM jobs j "
                      "LEFT JOIN bots b ON b.id=j.bot_id WHERE j.id=?", (job_id,)).fetchone()
     if job is None or not job["auto_kind"]:
         return None
@@ -275,6 +291,10 @@ def stale_hold(db: sqlite3.Connection, job_id: str, stamp: datetime) -> str | No
         return "the bot is now chat-only"
     if job["failure_kind"] != HELD:
         return None
+    # decided before the owner's newer message: that message comes first (a chat continuation is
+    # superseded when it is posted; this covers the task loop and anything that slipped past)
+    if owner_spoke_since(db, job["bot_id"], job["held_at"]):
+        return "you wrote since it was held, and your message comes first"
     if job["assignment_id"]:
         task = db.execute("SELECT status FROM assignments WHERE id=?", (job["assignment_id"],)).fetchone()
         if task is None or task["status"] != "active":

@@ -301,34 +301,35 @@ def test_chat_only_on_the_bot_api(settings):
 
 # --- evidence before done ---
 
-def test_out_of_turn_start_asks_the_one_decide_function(settings, monkeypatch):
-    """bot-task start / status continue from another turn (chat, routine, wake-up) is a continuation
-    too: it goes through continuation.decide and a stop refuses it (409), the task as it was."""
+def test_a_continue_counts_only_from_the_tasks_current_turn(settings):
+    """bot-task start / status continue: accepted only from the task's own running turn while the task
+    is active; from a chat or routine turn, from an old turn, or on a task that is open, paused or
+    blocked it is refused (409) and the task stays as it was (no revival the owner did not ask for)."""
     store, scheduler, _, bot, item = task_setup(settings, *fresh(20))
+    book = scheduler.assignments
     save(store, consecutive=2)
-    run_all(store, scheduler)
-    paused = scheduler.assignments.get(item.id)
-    assert paused.status == "waiting_on_user" and "paused" in paused.status_note
-    chat = store.create("routine: check in", "codex", bot_id=bot.id, source="routine")  # not the owner speaking
-    seen = []
-    real = continuation.decide
-    monkeypatch.setattr(continuation, "decide", lambda s, turn: seen.append(turn) or real(s, turn))
+    first = run_all(store, scheduler)[0]
+    assert book.get(item.id).status == "waiting_on_user"
+    routine = store.create("routine: check in", "codex", bot_id=bot.id, source="routine")
+    for state, asking in (("continue", routine.id), ("not_done", routine.id), ("continue", first.id)):
+        with pytest.raises(AssignmentError) as refused:
+            book.report(item.id, bot.id, asking, state)
+        assert refused.value.status == 409
+    assert book.get(item.id).status == "waiting_on_user" and not task_queued(store, item)
+    # an open task (never started) is not started by the bot from its chat either
+    other = book.create(bot.id, {"title": "later", "start": False})
     with pytest.raises(AssignmentError) as refused:
-        scheduler.assignments.report(item.id, bot.id, chat.id, "continue")
-    assert refused.value.status == 409 and "automatic turns in a row" in refused.value.detail
-    assert seen and seen[-1].path == "task" and seen[-1].kind == "continue"
-    assert scheduler.assignments.get(item.id).status == "waiting_on_user" and not task_queued(store, item)
-    # the decision is not stamped on the asking job (a chat turn's own continuation is decided separately)
+        book.report(other.id, bot.id, routine.id, "continue")
+    assert refused.value.status == 409 and "task's own turn" in refused.value.detail
+    assert book.get(other.id).status == "open" and not task_queued(store, other)
+    # the task's current turn, while it is active: kept for the loop
+    book.start(other.id)
+    running = store.claim(["desktop-1"], {"codex"})
+    assert running.assignment_id == other.id
+    book.report(other.id, bot.id, running.id, "continue", "half")
     with closing(store._connect()) as db:
-        assert db.execute("SELECT auto_decision FROM jobs WHERE id=?", (str(chat.id),)).fetchone()[0] is None
-    # auto-continue off: an open task is not started by the bot out of its turn either
-    other = scheduler.assignments.create(bot.id, {"title": "later", "start": False})
-    save(store, enabled=False)
-    with pytest.raises(AssignmentError):
-        scheduler.assignments.report(other.id, bot.id, chat.id, "continue")
-    save(store, enabled=True)
-    started = scheduler.assignments.report(other.id, bot.id, chat.id, "continue")
-    assert started.status == "active" and task_queued(store, other)
+        row = db.execute("SELECT reported_status, reported_job FROM assignments WHERE id=?", (str(other.id),)).fetchone()
+    assert (row["reported_status"], row["reported_job"]) == ("continue", str(running.id))
 
 
 def test_done_without_evidence_continues_once_then_waits(settings):
@@ -555,19 +556,54 @@ def due_now(store, wake):
 
 @pytest.mark.parametrize("state", ["blocked", "waiting_on_user"])
 def test_a_wakeup_does_not_revive_a_paused_task(settings, state):
-    """The bot reports blocked / waiting and schedules a wake-up in the same turn: the wake-up is
-    skipped with a line and the task stays paused (in Needs you) until the owner replies."""
-    store, scheduler, _, bot, item = task_setup(settings, f"Need your photo.\nBOT-OFFICE-STATUS: {state} — the photo")
-    book = scheduler.assignments
-    [start] = run_all(store, scheduler)
-    wake = book.add_wakeup(bot.id, start.id, assignment_id=item.id, due_at=now() + timedelta(hours=1), note="retry")
+    """The bot schedules a wake-up and reports blocked / waiting in the same turn: the wake-up is
+    skipped with a line and the task stays paused (in Needs you) until the owner replies. Once the
+    task is paused, a new wake-up on it is refused (409)."""
+    holder = {}
+
+    def reply(job):
+        holder["wake"] = holder["book"].add_wakeup(job.bot_id, job.id, assignment_id=job.assignment_id,
+                                                   due_at=now() + timedelta(hours=1), note="retry")
+        return f"Need your photo.\nBOT-OFFICE-STATUS: {state} — the photo"
+
+    store, scheduler, _, bot, item = task_setup(settings, reply)
+    book = holder["book"] = scheduler.assignments
+    run_all(store, scheduler)
+    wake = holder["wake"]
     due_now(store, wake)
     assert book.fire_due() == 0
     assert book._wakeup(wake.id).status == "cancelled"
     assert book.get(item.id).status == state and not task_queued(store, item)
     line = system_lines(store, bot)[-1]
-    assert line.startswith("Wake-up skipped: its task is ") and "your reply resumes it" in line
+    assert line.startswith('Wake-up ("retry") skipped: its task is ') and "your reply resumes it" in line
     assert any(i["kind"] == "assignment" for i in needs_you(store))
+    with pytest.raises(AssignmentError) as refused:
+        book.add_wakeup(bot.id, None, assignment_id=item.id, due_at=now() + timedelta(hours=1), note="again")
+    assert refused.value.status == 409 and "would not resume it" in refused.value.detail
+
+
+def test_a_wakeup_never_starts_a_task_the_owner_stopped(settings):
+    store, scheduler, _, bot, item = task_setup(settings, *fresh(20))
+    book = scheduler.assignments
+    wake = book.add_wakeup(bot.id, None, assignment_id=item.id, due_at=now() + timedelta(hours=1), note="check")
+    book.stop(item.id)  # cancels the task's pending wake-ups
+    assert book._wakeup(wake.id).status == "cancelled"
+    with pytest.raises(AssignmentError) as refused:
+        book.add_wakeup(bot.id, None, assignment_id=item.id, due_at=now() + timedelta(hours=1), note="later")
+    assert refused.value.status == 409 and "owner stopped it" in refused.value.detail
+    # one that slipped in (written before the stop) is skipped at fire, with a line, not run
+    with closing(store._connect()) as db:
+        db.execute("INSERT INTO wakeups (id,bot_id,assignment_id,due_at,note,status,created_at) "
+                   "VALUES ('w1',?,?,?,'later','pending',?)", (str(bot.id), str(item.id),
+                   (now() - timedelta(minutes=1)).isoformat(), now().isoformat()))
+    assert book.fire_due() == 0
+    assert book.get(item.id).status == "open" and not task_queued(store, item)
+    assert system_lines(store, bot)[-1] == 'Wake-up ("later") skipped: its task was stopped by you; Start it to resume.'
+    # a task the bot has not started yet (never stopped) may still be woken
+    fresh_task = book.create(bot.id, {"title": "next", "start": False})
+    ok = book.add_wakeup(bot.id, None, assignment_id=fresh_task.id, due_at=now() + timedelta(hours=1), note="go")
+    due_now(store, ok)
+    assert book.fire_due() == 1 and book.get(fresh_task.id).status == "active"
 
 
 def test_a_wakeup_honours_auto_continue_off(settings):
