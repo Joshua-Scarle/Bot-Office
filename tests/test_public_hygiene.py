@@ -2,6 +2,7 @@
 the e2e script takes its live token from a file or the environment rather than the command line."""
 import argparse
 import importlib.util
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -10,16 +11,23 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d1d2192"  # 0.11.9
-INTERNAL = re.compile(r"Joshua|printpilot-agentdesk|/home/\w|Engineer \d|\bG\d{1,2}\b|\bplan (?:\d|G\d|P\d)|\bP\d Q\d|review fix \d|\bfix \d+\b")
+# owner-specific names (the owner, the deploy path, the owner's own bots) and internal plan references
+INTERNAL = re.compile(r"Joshua|printpilot-agentdesk|/home/\w|Printer Writing Bot|Bot-Office Lead|"
+                      r"Engineer \d|\bG\d{1,2}\b|\bplan (?:\d|G\d|P\d)|\bP\d Q\d|review fix \d|\bfix \d+\b")
+# set to 1 only where the source has no git history (a tarball build); CI and a checkout must scan
+NO_GIT_OPT_OUT = "BOT_OFFICE_HYGIENE_WITHOUT_GIT"
 
 
 def _added_lines() -> list[str]:
     try:
-        diff = subprocess.run(["git", "diff", "-U0", BASE, "--", "src", "bin", "scripts", "README.md", "docs",
-                               ":(exclude)docs/archive", ":(exclude)docs/plans"],
+        diff = subprocess.run(["git", "diff", "-U0", BASE, "--", "src", "bin", "scripts", "README.md", "docs", "tests",
+                               ":(exclude)docs/archive", ":(exclude)docs/plans",
+                               ":(exclude)tests/test_public_hygiene.py"],  # this file names what it looks for
                               cwd=ROOT, capture_output=True, text=True, check=True).stdout
-    except (OSError, subprocess.CalledProcessError):
-        pytest.skip("no git history for the 0.11.9 base")
+    except (OSError, subprocess.CalledProcessError) as exc:
+        if os.environ.get(NO_GIT_OPT_OUT) == "1":
+            pytest.skip(f"no git history for the 0.11.9 base ({NO_GIT_OPT_OUT}=1)")
+        pytest.fail(f"cannot diff against the 0.11.9 base ({exc}); set {NO_GIT_OPT_OUT}=1 only for a build without git")
     lines, name = [], ""
     for line in diff.splitlines():
         if line.startswith("+++ "):

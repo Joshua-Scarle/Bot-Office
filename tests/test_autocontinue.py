@@ -1,5 +1,5 @@
 """Run-until-done loop guards: no auto-continue on a blocked / needs-user reply, and a cap on
-continues that make no progress (Printer Writing Bot loop, 2026-11-18)."""
+continues that make no progress (a real loop seen in testing)."""
 import pytest
 from test_loop import queued, run_all, setup
 

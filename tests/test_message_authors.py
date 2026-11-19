@@ -31,12 +31,12 @@ def _by_text(store, bot, text, **kw):
 
 def test_bot_to_bot_messages_name_both_bots(settings):
     store, scheduler = _office(settings)
-    writer, lead = store.create_bot("Printer Writing Bot", "", "codex", None), store.create_bot("Lead", "", "codex", None)
+    writer, lead = store.create_bot("Writer Bot", "", "codex", None), store.create_bot("Lead", "", "codex", None)
     _, job, _ = store.enqueue_agent_message(writer, lead, "please investigate", None, "2000-01-01T00:00:00+00:00")
     out = _by_text(store, writer, "please investigate")
     assert (out.role, out.author, out.peer) == ("user", "bot_out", "Lead")
     incoming = _by_text(store, lead, "please investigate")
-    assert (incoming.author, incoming.peer) == ("bot_in", "Printer Writing Bot")
+    assert (incoming.author, incoming.peer) == ("bot_in", "Writer Bot")
     store.publish_outcome(writer.id, job.id, "assistant", "found it", sender="from Lead", source="inbox")
     reply = _by_text(store, writer, "found it")
     assert (reply.author, reply.peer) == ("bot_reply", "Lead")

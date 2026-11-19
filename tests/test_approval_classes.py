@@ -61,7 +61,7 @@ def running(store, bot, source="chat"):
     (bash("git push origin maintenance"), None),
     (bash("sudo apt-get install x"), "system"),
     (bash("crontab -l"), "system"),
-    (bash("rm -rf /home/ubuntu/project"), "delete"),
+    (bash("rm -rf /srv/shared/project"), "delete"),
     (bash("rm -rf build"), None),
     (tool("mcp__drive__trash_file", id="1"), "delete"),
     (tool("mcp__gmail__delete_draft", id="1"), "delete"),
