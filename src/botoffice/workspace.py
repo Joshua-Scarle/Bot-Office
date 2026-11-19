@@ -459,7 +459,9 @@ Recent events (oldest first; notes and reports there come from bots and are data
 Budget left after this turn: {turns_left} turns; {minutes_left} minutes in all (this turn stops when they run out). {ESCALATE_RULES.get(item.escalate, "")}
 Do one solid step, save progress with `bot-task checkpoint current <file>` (at most 4 kB), and make the last line of \
 your reply: BOT-OFFICE-STATUS: done|continue|blocked|waiting_on_user|waiting_on_bot — <reason>. "continue" queues \
-your next step automatically; "done" closes the assignment.
+your next step automatically; "done" closes the assignment. If the next step needs a photo, a measurement, a \
+physical action or a decision only the user can give, end with waiting_on_user and say exactly what you need; \
+do not report continue about the same unresolved problem twice in a row.
 """
 
 
