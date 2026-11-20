@@ -215,3 +215,22 @@ def test_markup_and_css_for_characters():
 def test_characters_are_ours_no_third_party_assets():
     block = _slice("/* ---- character avatars", "function fillAvatar")
     assert "http" not in block.replace('"http:" + "//www.w3.org/2000/svg"', "") and "data:" not in block and "base64" not in block
+
+
+def test_blob_shape_has_exactly_six_lobes_and_the_face_fits_inside():
+    """0.12.3: the "blob" outline is drawn with six round lobes. Count the radial maxima of the real path and
+    check the narrowest radius still holds the widest face mark."""
+    code = _slice("const CHAR_SHAPES", "// the badge for emoji")
+    out = _node('''
+const assert = require("assert");
+const state = {};
+''' + code + '''
+const pts = BLOB_PATH.match(/-?[\\d.]+ -?[\\d.]+/g).map((s) => s.split(" ").map(Number));
+const r = pts.map(([x, y]) => Math.hypot(x - 24, y - 24));
+let peaks = 0;
+for (let i = 0; i < r.length; i++) if (r[i] > r[(i + r.length - 1) % r.length] && r[i] >= r[(i + 1) % r.length]) peaks++;
+assert.equal(peaks, 6);
+assert.ok(Math.max(...r) < 20 && Math.min(...r) > 13, Math.min(...r) + " " + Math.max(...r));
+console.log(peaks);
+''')
+    assert out.strip() == "6"
