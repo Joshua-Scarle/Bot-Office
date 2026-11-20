@@ -1647,6 +1647,7 @@ function renderHeader() {
     const box = el("div", "empty");
     box.append(el("p", "", state.bots.length ? "Select a bot." : "Create your first bot with + New bot."));
     $("thread").replaceChildren(box);
+    $("jump-latest").hidden = true;
     state.msgSig = "";
     return;
   }
@@ -2672,7 +2673,8 @@ async function loadMessages() {
   const bot = currentBot();
   if (!bot) return;
   const id = bot.id;
-  if (!state.hist) state.hist = newHist(null);
+  if (!state.hist || (state.hist.bot && state.hist.bot !== id)) state.hist = newHist(null);
+  state.hist.bot = id;
   const hist = state.hist, epoch = hist.epoch;
   const page = await fetchHistory(id, hist);
   if (state.selected !== id || state.hist !== hist || hist.epoch !== epoch) return;
@@ -2843,7 +2845,9 @@ async function fetchHistory(id, hist) {
   if (!hist.pinned) return api(base + "limit=" + HISTORY_PAGE + "&pending=true" + tail);
   // the user went back in time: keep the same start, whatever has arrived since
   const size = Math.min(500, Math.max(hist.count, HISTORY_PAGE));
-  const page = await api(base + "after=" + Math.max(0, hist.low - 1) + "&limit=" + Math.min(500, size + 100) + "&pending=true" + tail);
+  // attached: room for what arrived since (more than that re-reads the newest); detached: the same size, no growth
+  const room = hist.detached ? size : Math.min(500, size + 100);
+  const page = await api(base + "after=" + Math.max(0, hist.low - 1) + "&limit=" + room + "&pending=true" + tail);
   if (page.has_newer && !hist.detached) return api(base + "limit=" + size + "&pending=true" + tail);
   return page;
 }
