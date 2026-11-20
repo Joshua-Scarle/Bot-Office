@@ -160,6 +160,12 @@ class Scheduler:
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
+    def liveness(self) -> dict:
+        """For /healthz: is the run loop alive, and how long since its last tick (None: never)."""
+        task = self._loop_task
+        age = round(time.monotonic() - self._last_tick, 1) if self._last_tick else None
+        return {"alive": bool(task and not task.done()), "last_tick_age_seconds": age}
+
     async def _run_loop(self) -> None:
         while not self._stopping:
             self._reap_tasks()

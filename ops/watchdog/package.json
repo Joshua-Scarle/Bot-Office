@@ -1,0 +1,7 @@
+{
+  "name": "bot-office-watchdog",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": { "test": "node --test test/logic.test.js" }
+}

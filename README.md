@@ -251,6 +251,39 @@ Deployed 2026-11-20 20:44 UTC (code at ed387f8; no jobs running or queued at the
 
 Deployed 2026-11-20 17:48 UTC (code at 15795a0; no jobs running or queued at the restart). Live check on a throwaway bot ("ZZ files-test (safe to delete)", deleted afterwards): a real Claude turn and a real Codex turn each created a .pdf, a .csv, a .zip and a .html file and sent them with `bot-office-attach`; all four arrived as chips on both turns, the PDF and CSV were served inline (`application/pdf`, `text/plain`) and the zip and HTML as `application/octet-stream` attachments, and in the live page the HTML chip downloaded as page.html (title unchanged, no preview button) with no JavaScript errors. The other 27 real bots were untouched. Rollback: on the server `git reset --hard backup/pre-0.12.4-20261120-174812` and `systemctl --user restart bot-office`; DB copy `~/backups/agentdesk.sqlite3.pre-0.12.4-20261120-174812` (no schema change, so no DB restore is needed). Full pytest on the server: 1376 passed, 3 failed (the two `test_isolation` sudo tests and the usage-digest date test, which fail on an untouched master too); local browser e2e 157 passed.
 
+## Health check and alerts (0.12.4)
+
+`GET /healthz` (no auth, loopback like the rest of the API) returns only non-sensitive status: `ok`, `version`, `uptime_seconds`, `scheduler` (alive, last tick age), `db_reachable`, `running_jobs`, `backup` (state, age in hours, bytes, stale) read from `~/contabo-backup/status.json` (override with `BOT_OFFICE_BACKUP_STATUS`), and `disk_free_pct`. `ok` is false when the scheduler loop is stalled, the DB cannot be queried, or the data disk has under 5% free. It never returns tokens, paths, message content or the backup error text.
+
+Because the API listens on loopback only, a **heartbeat pusher** on the VPS (`scripts/healthz_push.py`, systemd user timer every 5 minutes) POSTs that JSON to an external **watchdog** (`ops/watchdog/`, a Cloudflare Worker). The VPS opens no inbound port. The Worker stores the last heartbeat in KV and, on a 5-minute cron, emails you a plain system notice (no draft, no approval card) when: no heartbeat for 15 min (VPS or controller down), the controller does not answer, `ok` is false, or the backup state is not `ok` or its last finish is over 30 h old. One mail per incident and one when it recovers; at least 10 min between mails and at most 6 mails a day.
+
+### Setup
+
+1. **Create the KV namespace** (needs Node and a Cloudflare account):
+   `cd ops/watchdog && npx wrangler kv namespace create WATCHDOG_KV`, then `cp wrangler.toml.template wrangler.toml` and fill in the namespace id.
+2. **Verify the destination address.** In the Cloudflare dashboard, enable Email Routing on a domain you own, add your address under Destination addresses and click the verification link it mails you. Put that address in `destination_address` and `ALERT_TO`, and set `ALERT_FROM` to any address at that domain.
+3. **Set the shared secret.** Generate one value, store it on the VPS, and give the same value to the Worker without printing it:
+   ```sh
+   umask 077; mkdir -p ~/.config/bot-office
+   head -c 32 /dev/urandom | base64 > ~/.config/bot-office/watchdog-secret   # on the VPS, mode 0600
+   # on a machine with wrangler, paste the same value when prompted:
+   npx wrangler secret put HEARTBEAT_SECRET
+   ```
+4. **Deploy the Worker:** `npx wrangler deploy` (tests: `npm test` in `ops/watchdog`). Note the `https://...workers.dev` URL.
+5. **Install the timer on the VPS:**
+   ```sh
+   echo 'WATCHDOG_URL=https://<worker-host>/heartbeat' > ~/.config/bot-office/heartbeat.env
+   cp deploy/bot-office-heartbeat.{service,timer} ~/.config/systemd/user/
+   systemctl --user daemon-reload && systemctl --user enable --now bot-office-heartbeat.timer
+   systemctl --user start bot-office-heartbeat.service   # one push now; check: systemctl --user status bot-office-heartbeat
+   ```
+   The service runs `scripts/healthz_push.py` from `~/printpilot-agentdesk/`; the pusher refuses a secret file that is not mode 0600.
+6. **Test the alert:** `systemctl --user stop bot-office-heartbeat.timer`, wait about 20 minutes for the mail, then start the timer again and wait for the recovery mail.
+
+### Rollback
+
+`systemctl --user disable --now bot-office-heartbeat.timer` stops the pushes (the Worker will then alert once; delete it too to stop that: `npx wrangler delete`). `/healthz` is read-only and harmless to leave; to remove it, revert the commit. Nothing else in the controller depends on it. Rotate the secret by writing a new value to both places.
+
 ## What changed in 0.12.3
 
 One drawing fix. The flower/burst character (the `blob` shape) had eight prongs, which was too many; it is now redrawn with **exactly six round lobes**, one pointing up. It is our own outline. The shape id and the stored value (`char|blob|<color>`) are unchanged, so bots already using it simply get the new outline; nothing in the API, the database or the other seven shapes changed. The face placement was kept and checked: all six faces (idle, working, waiting, done, error, sleeping) in all 10 colors, at 36 px and at the sidebar size, stay inside the body with a margin (checked by a geometry script at build time, not part of the test suite; the test suite counts the lobes and bounds the outline's radius).

@@ -1,0 +1,20 @@
+# Copy to wrangler.toml and fill in the placeholders. Do not commit the filled-in file.
+name = "bot-office-watchdog"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "WATCHDOG_KV"
+id = "<KV_NAMESPACE_ID>"          # from: wrangler kv namespace create WATCHDOG_KV
+
+[[send_email]]
+name = "ALERT_EMAIL"
+destination_address = "<VERIFIED_DESTINATION_ADDRESS>"   # only this address can ever be mailed
+
+[vars]
+ALERT_TO = "<VERIFIED_DESTINATION_ADDRESS>"
+ALERT_FROM = "watchdog@<YOUR_DOMAIN_WITH_EMAIL_ROUTING>"
+# HEARTBEAT_SECRET is a Worker secret: wrangler secret put HEARTBEAT_SECRET

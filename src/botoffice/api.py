@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import approval_classes, attachments, avatars, baseline, continuation, grok_bridge, isolation, needs_you, safefs, vnc
+from . import approval_classes, attachments, avatars, baseline, continuation, grok_bridge, health, isolation, needs_you, safefs, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -549,6 +549,13 @@ def create_app(
     def attachment_lock(bot_id: UUID) -> asyncio.Lock:
         return attachment_locks.setdefault(bot_id, asyncio.Lock())
     auth = auth_dependency(settings)
+
+    @app.get("/healthz")
+    async def healthz() -> JSONResponse:
+        # no auth on purpose (the loopback watchdog pusher calls it); health.build returns
+        # only booleans, numbers and short enums. Cheap: one tiny indexed query, one stat, one small file.
+        return JSONResponse(health.build(app.state), headers={"Cache-Control": "no-store"})
+
     memory = scheduler.memory
     assignments = scheduler.assignments
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Bot-Office heartbeat push to the external watchdog
+
+[Service]
+Type=oneshot
+# WATCHDOG_URL=https://... goes in this file (the secret itself lives in WATCHDOG_SECRET_FILE, mode 0600)
+EnvironmentFile=%h/.config/bot-office/heartbeat.env
+Environment=WATCHDOG_SECRET_FILE=%h/.config/bot-office/watchdog-secret
+ExecStart=/usr/bin/python3 %h/printpilot-agentdesk/scripts/healthz_push.py
+TimeoutStartSec=30
