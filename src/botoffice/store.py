@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 from . import attachments as attachment_files
 from . import avatars, continuation, failures, sections
+from . import history as chat_history
 from . import usage as budgets
 from .catalog import DEFAULT_ICON, DEFAULT_ICONS, default_effort, default_model
 from .domain import Bot, Job, JobStatus, Message, Routine
@@ -789,6 +790,8 @@ class JobStore:
             self._migrate_reads(db)
             sections.ensure_schema(db)
             self._migrate_avatars(db)
+            chat_history.ensure_fts(db, lambda d, key: d.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?,?)", (key, now().isoformat())))
 
             # Grok bridge state: one row per send (reserved before the webhook call, then sent
             # or failed) and the last hop per bridge thread.
@@ -2338,41 +2341,34 @@ class JobStore:
             row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
         return _model(Message, row, ("created_at",))
 
-    def list_messages(
-        self, bot_id: UUID | str, limit: int | None = None, *, include_archived: bool = False,
-        up_to: int | None = None, include_progress: bool = True, include_hidden: bool | None = None,
-    ) -> list[Message]:
-        """*include_hidden* (default: same as *include_archived*) also returns Bot-Office machinery rows."""
-        where = "bot_id=?" + ("" if include_archived else " AND archived_at IS NULL")
-        if not (include_archived if include_hidden is None else include_hidden):
-            where += " AND hidden=0"
-        if not include_progress:
-            where += " AND kind!='say'"
-        args: tuple = (str(bot_id),)
-        if up_to is not None:
-            where, args = where + " AND id<=?", (*args, up_to)
-        with closing(self._connect()) as db:
-            # a succeeded reply without a BOT-OFFICE-STATUS line is marked "unverified" (subtle label)
-            rows = db.execute(
-                f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified,"
-                " COALESCE((SELECT a.from_bot FROM agent_messages a WHERE a.job_id=m.job_id LIMIT 1),"
-                " (SELECT a.from_bot FROM agent_messages_x a WHERE a.sender_message_id=m.id OR a.target_message_id=m.id"
-                " LIMIT 1)) AS agent_from"
-                f" FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) AS m"
-                " LEFT JOIN jobs AS j ON j.id=m.job_id ORDER BY m.id",
-                (*args, limit if limit is not None else -1),
-            ).fetchall()
-            from .questions import unpack
-            cards = {row["message_id"]: unpack(row) for row in db.execute(
-                "SELECT * FROM questions WHERE bot_id=?", (str(bot_id),))}
-            notices = {row["message_id"]: row for row in db.execute(
-                f"SELECT n.*, ({PARKED_SQL} AND n.attempt=j.attempts) AS parked FROM usage_notices n "
-                "JOIN jobs j ON j.id=n.job_id "
-                "WHERE n.bot_id=? AND n.message_id IS NOT NULL", (str(bot_id),))}
-            approval_ids = [row["approval_id"] for row in rows if row["approval_id"]]
-            approvals = {row["id"]: dict(row) for row in db.execute(
-                f"SELECT * FROM approvals WHERE id IN ({','.join('?' * len(approval_ids))})",
-                approval_ids)} if approval_ids else {}
+    @staticmethod
+    def _message_rows(db: sqlite3.Connection, where: str, args: tuple, limit: int) -> list[sqlite3.Row]:
+        """The newest *limit* (-1: all) rows matching *where*, oldest first, with the reply-verified and
+        agent-sender columns."""
+        # a succeeded reply without a BOT-OFFICE-STATUS line is marked "unverified" (subtle label)
+        return db.execute(
+            f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified,"
+            " COALESCE((SELECT a.from_bot FROM agent_messages a WHERE a.job_id=m.job_id LIMIT 1),"
+            " (SELECT a.from_bot FROM agent_messages_x a WHERE a.sender_message_id=m.id OR a.target_message_id=m.id"
+            " LIMIT 1)) AS agent_from"
+            f" FROM (SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?) AS m"
+            " LEFT JOIN jobs AS j ON j.id=m.job_id ORDER BY m.id",
+            (*args, limit),
+        ).fetchall()
+
+    def _hydrate(self, db: sqlite3.Connection, bot_id: UUID | str, rows: list[sqlite3.Row]) -> list[Message]:
+        """Rows to Messages with their question, usage notice and approval cards."""
+        from .questions import unpack
+        cards = {row["message_id"]: unpack(row) for row in db.execute(
+            "SELECT * FROM questions WHERE bot_id=?", (str(bot_id),))}
+        notices = {row["message_id"]: row for row in db.execute(
+            f"SELECT n.*, ({PARKED_SQL} AND n.attempt=j.attempts) AS parked FROM usage_notices n "
+            "JOIN jobs j ON j.id=n.job_id "
+            "WHERE n.bot_id=? AND n.message_id IS NOT NULL", (str(bot_id),))}
+        approval_ids = [row["approval_id"] for row in rows if row["approval_id"]]
+        approvals = {row["id"]: dict(row) for row in db.execute(
+            f"SELECT * FROM approvals WHERE id IN ({','.join('?' * len(approval_ids))})",
+            approval_ids)} if approval_ids else {}
         out = []
         for row in rows:
             approval = approvals.get(row["approval_id"]) if row["approval_id"] else None
@@ -2388,6 +2384,61 @@ class JobStore:
             out.append(_model(Message, row, ("created_at", "archived_at")).model_copy(
                 update={"question": cards.get(row["id"]), "notice": card}))
         return out
+
+    def list_messages(
+        self, bot_id: UUID | str, limit: int | None = None, *, include_archived: bool = False,
+        up_to: int | None = None, include_progress: bool = True, include_hidden: bool | None = None,
+    ) -> list[Message]:
+        """*include_hidden* (default: same as *include_archived*) also returns Bot-Office machinery rows."""
+        where = "bot_id=?" + ("" if include_archived else " AND archived_at IS NULL")
+        if not (include_archived if include_hidden is None else include_hidden):
+            where += " AND hidden=0"
+        if not include_progress:
+            where += " AND kind!='say'"
+        args: tuple = (str(bot_id),)
+        if up_to is not None:
+            where, args = where + " AND id<=?", (*args, up_to)
+        with closing(self._connect()) as db:
+            rows = self._message_rows(db, where, args, limit if limit is not None else -1)
+            return self._hydrate(db, bot_id, rows)
+
+    def history_page(
+        self, bot_id: UUID | str, limit: int = 50, *, before: int | None = None, after: int | None = None,
+        around: int | None = None, include_archived: bool = False,
+    ) -> tuple[list[Message], bool, bool]:
+        """One contiguous page of a chat (oldest first) by message id: the newest *limit*, the *limit* just
+        older than *before*, just newer than *after*, or centred on *around*. Returns (messages, has_older,
+        has_newer). Keyset by id, so messages arriving meanwhile can neither duplicate nor skip a row."""
+        limit = max(1, min(int(limit), 500))
+        where = "bot_id=?" + ("" if include_archived else " AND archived_at IS NULL AND hidden=0")
+        base: tuple = (str(bot_id),)
+        with closing(self._connect()) as db:
+            def ids(extra: str, arg: tuple, order: str, count: int) -> list[int]:
+                return [r[0] for r in db.execute(
+                    f"SELECT id FROM messages WHERE {where}{extra} ORDER BY id {order} LIMIT ?", (*base, *arg, count))]
+            if around is not None:
+                half = limit // 2
+                picked = ids(" AND id<=?", (around,), "DESC", half + 1) + ids(" AND id>?", (around,), "ASC", limit - half - 1)
+            elif before is not None:
+                picked = ids(" AND id<?", (before,), "DESC", limit)
+            elif after is not None:
+                picked = ids(" AND id>?", (after,), "ASC", limit)
+            else:
+                picked = ids("", (), "DESC", limit)
+            if not picked:
+                return [], False, False
+            low, high = min(picked), max(picked)
+            rows = self._message_rows(db, where + " AND id BETWEEN ? AND ?", (*base, low, high), -1)
+            older = bool(ids(" AND id<?", (low,), "DESC", 1))
+            newer = bool(ids(" AND id>?", (high,), "ASC", 1))
+            return self._hydrate(db, bot_id, rows), older, newer
+
+    def search_messages(self, query: str, *, bot_id: UUID | str | None = None, limit: int = 30,
+                        before: int | None = None) -> tuple[list[dict], bool]:
+        """Newest-first search of visible chat messages, one bot or all (FTS5, LIKE where it is missing)."""
+        with closing(self._connect()) as db:
+            return chat_history.search(db, query, bot_id=str(bot_id) if bot_id else None,
+                                       limit=max(1, min(int(limit), 100)), before=before)
 
     def get_message(self, message_id: int) -> Message | None:
         with closing(self._connect()) as db:

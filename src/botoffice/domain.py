@@ -375,6 +375,28 @@ class Message(BaseModel):
     approval: dict | None = None
 
 
+class MessagePage(BaseModel):
+    """A contiguous page of a chat, oldest first."""
+    messages: list[Message]
+    has_older: bool
+    has_newer: bool
+
+
+class SearchHit(BaseModel):
+    id: int
+    bot_id: UUID
+    bot_name: str
+    role: Literal["user", "assistant", "system"]
+    sender: str | None = None
+    created_at: datetime
+    snippet: str
+
+
+class MessageSearch(BaseModel):
+    hits: list[SearchHit]
+    has_more: bool
+
+
 class MessagePosted(BaseModel):
     message: Message
     job: Job
