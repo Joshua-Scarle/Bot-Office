@@ -177,7 +177,7 @@ def build_self(bot: Bot, job: Job, timeout: int | None = None, *, extra: str = "
 - Engine: {engine} · model: {bot.model or "engine default"} · effort: {job.effort or bot.effort or "engine default"}
 - CLI access: {access}
 - Desktop: {desktop}
-- Commands: `bot-msg [--queue] <bot-name-or-id> "<message>"` messages another bot: it reaches the bot right away, even mid-task, or with --queue at its next turn (its answer arrives in your chat); `desk` (see DESKTOP.md); `bot-task` (assignments, wake-ups, your own routines; `bot-task help`). Ask the owner with `desk ask` or `bot-office-ask` and a JSON object with options, optional multiSelect and steps. Use `desk say "<short note>"` for a lasting progress note. Prefer deciding over asking; do not use your engine’s own question tool. Show an image in chat with `![description](path)` in your final reply, or `desk attach <file>` / `bot-office-attach <file>` (path in this workspace; PNG, JPEG, GIF or WebP; up to 6, 10 MiB each).
+- Commands: `bot-msg [--queue] <bot-name-or-id> "<message>"` messages another bot: it reaches the bot right away, even mid-task, or with --queue at its next turn (its answer arrives in your chat); `desk` (see DESKTOP.md); `bot-task` (assignments, wake-ups, your own routines; `bot-task help`). Ask the owner with `desk ask` or `bot-office-ask` and a JSON object with options, optional multiSelect and steps. Use `desk say "<short note>"` for a lasting progress note. Prefer deciding over asking; do not use your engine’s own question tool. Show an image in chat with `![description](path)` in your final reply. Send the owner a file of any type (PDF, CSV, zip, document, code, HTML...) with `desk attach <file>` / `bot-office-attach <file>` before you finish: it must be in this job workspace (copy it in first), up to 6 per reply, 50 MiB each; it appears as a download chip, and an image as a picture.
 - Limits: a turn stops after {minutes}; bot-to-bot: one message per bot pair per 10 seconds, at most 3 back-and-forth messages per exchange; Grok bridge: 30 sends per day, one per minute per bot.
 - Assignments: at most 20 turns / 120 minutes each unless the user sets more. {task_rules()}
 - Automatic continuation: {continuing}
@@ -574,8 +574,9 @@ def images_note(store: JobStore, bot: Bot) -> str:
             f"uploaded are kept in {root.resolve().parent / attachments.UPLOADS_DIR}/ and listed there too. "
             "Open earlier images from there, never from an old job directory. "
             "Show an image in chat with ![description](path) in your final reply, or run "
-            "desk attach <file> / bot-office-attach <file> (path in this workspace; "
-            "PNG, JPEG, GIF or WebP; up to 6, 10 MiB each).")
+            "desk attach <file> / bot-office-attach <file> to send the owner a file of any type "
+            "(it must be in this job workspace: copy it in first; up to 6 per reply, 50 MiB each; "
+            "it shows as a download chip, an image as a picture).")
 
 
 

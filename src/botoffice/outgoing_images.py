@@ -1,4 +1,6 @@
-"""Record images for the controller to attach when the current turn finishes."""
+"""Record files (images or any other type) for the controller to attach when the current turn finishes.
+
+The sidecar keeps its 0.12 name so turns and bots already running keep working."""
 from __future__ import annotations
 
 import os

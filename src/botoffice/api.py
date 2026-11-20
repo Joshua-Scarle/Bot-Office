@@ -1118,26 +1118,31 @@ def create_app(
             raise HTTPException(status_code=404, detail="attachment not found") from exc
         is_file = attachments.is_file_id(attachment_id)
         return {"id": attachment_id, "kind": "file" if is_file else "image", "size": size,
-                "name": attachments.display_name(attachment_id)}
+                "name": attachments.display_name(attachment_id),
+                "preview": attachments.serve_type(attachment_id)[1] if is_file else None}
 
     @app.get("/v1/bots/{bot_id}/attachments/{attachment_id}", dependencies=[Depends(auth)])
-    async def get_attachment(bot_id: UUID, attachment_id: str) -> Response:
+    async def get_attachment(bot_id: UUID, attachment_id: str, download: bool = False) -> Response:
         _bot(bot_id)
         try:
             data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
             mime = _sniff_image(data)
             if attachments.is_file_id(attachment_id):
-                mime = None  # a file is data: only ever served as a download, whatever it contains
+                mime = None  # a file is data: its type comes from an allow-list by extension, never from its bytes
             elif not mime or attachments.EXTENSIONS[mime] != attachment_id.rsplit(".", 1)[-1]:
                 raise ValueError("invalid image")
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=404, detail="attachment not found") from exc
+        headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
+                   "Content-Security-Policy": "default-src 'none'; sandbox"}
         if mime is None:
             label = attachments.display_name(attachment_id)
-            return Response(data, media_type="application/octet-stream", headers={
-                "X-Content-Type-Options": "nosniff", "Content-Disposition": f'attachment; filename="{label}"',
-                "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})
-        return Response(data, media_type=mime, headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": "inline", "Cache-Control": "private, no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})
+            served, preview = attachments.serve_type(attachment_id)
+            inline = preview is not None and not download  # only a PDF or plain text; never html or svg
+            headers["Content-Disposition"] = f'{"inline" if inline else "attachment"}; filename="{label}"'
+            return Response(data, media_type=served if inline else "application/octet-stream", headers=headers)
+        headers["Content-Disposition"] = "inline"
+        return Response(data, media_type=mime, headers=headers)
 
     def _png_response(request: Request, data: bytes, mime: str, versioned: bool) -> Response:
         tag = avatars.etag(data)
