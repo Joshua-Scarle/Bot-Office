@@ -143,7 +143,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 
 One drawing fix. The flower/burst character (the `blob` shape) had eight prongs, which was too many; it is now redrawn with **exactly six round lobes**, one pointing up. It is our own outline. The shape id and the stored value (`char|blob|<color>`) are unchanged, so bots already using it simply get the new outline; nothing in the API, the database or the other seven shapes changed. The face placement was kept and checked: all six faces (idle, working, waiting, done, error, sleeping) in all 10 colors, at 36 px and at the sidebar size, stay inside the body with a margin (checked by a geometry script at build time, not part of the test suite; the test suite counts the lobes and bounds the outline's radius).
 
-Deployed 2026-11-20 11:50 AM ET (code at 6ca773b; no jobs running or queued at the restart). Live check on a throwaway bot ("ZZ gear-test (safe to delete)", deleted afterwards): the live sidebar row drew the six-lobed shape with the idle face and all six faces were rendered on it, no JavaScript errors, all 27 real bots unchanged.
+Deployed 2026-11-20 16:50 UTC (code at 6ca773b; no jobs running or queued at the restart). Live check on a throwaway bot ("ZZ gear-test (safe to delete)", deleted afterwards): the live sidebar row drew the six-lobed shape with the idle face and all six faces were rendered on it, no JavaScript errors, all 27 real bots unchanged.
 
 ## What changed in 0.12.2
 
