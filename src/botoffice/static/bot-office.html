@@ -224,6 +224,13 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 button.file-chip { cursor: pointer; }
 button.file-chip:hover { border-color: var(--accent, #6385ad); }
 .file-chip .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.file-group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.file-preview-btn { font-size: 12px; padding: 4px 10px; }
+#file-preview { width: min(900px, calc(100vw - 24px)); }
+.file-preview-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+#file-preview-body { padding: 12px 16px; }
+.file-preview-text { margin: 0; max-height: 68vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.file-preview-pdf { width: 100%; height: 70vh; border: 0; background: #fff; }
 .file-chip .file-size { color: var(--muted); white-space: nowrap; flex: none; }
 .attachment-item.is-file { padding-right: 18px; }
 .attachment-item img, .chat-image { max-width: 120px; max-height: 90px; border-radius: 8px; object-fit: contain; cursor: pointer; }
@@ -676,6 +683,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <menu><button value="cancel" id="slash-confirm-cancel">Cancel</button><button value="ok" id="slash-confirm-ok" class="primary">Confirm</button></menu>
   </form>
 </dialog>
+<dialog id="file-preview"><div class="file-preview-head"><strong id="file-preview-title"></strong><button type="button" id="file-preview-close">Close</button></div><div id="file-preview-body"></div></dialog>
 <dialog id="image-view"><button type="button" id="image-close">Close</button><div><img id="image-full" alt="Attached image"></div></dialog>
 <script>
 "use strict";
@@ -2132,7 +2140,7 @@ const FILE_ID = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{32}-(.+)$/;
 function fileChip(name, size) {
   const chip = el("span", "file-chip");
   chip.title = name;
-  chip.append(el("span", "file-icon", "📄"), el("span", "file-name", name), el("span", "file-size", size === undefined ? "" : formatBytes(size)));
+  chip.append(el("span", "file-icon", fileIconFor(name)), el("span", "file-name", name), el("span", "file-size", size === undefined ? "" : formatBytes(size)));
   return chip;
 }
 function updateImages() {
@@ -2307,30 +2315,77 @@ for (const zone of [$("composer"), $("messages")]) {
   zone.addEventListener("drop", (event) => { if (event.dataTransfer.files.length) { event.preventDefault(); addImages(event.dataTransfer.files); } });
 }
 $("image-close").onclick = () => $("image-view").close();
+$("file-preview-close").onclick = () => $("file-preview").close();
 $("agent-chat-close").onclick = () => $("agent-chat").close();
 // a click on the backdrop (outside the panel) closes it too; Esc is the dialog's own
 $("agent-chat").addEventListener("click", (e) => { if (e.target === $("agent-chat")) $("agent-chat").close(); });
 const fileInfoCache = new Map();
-// a file in the chat: a chip with its name and size; clicking downloads it (never opened in the page)
+const FILE_ICONS = [
+  ["📕", "pdf"], ["📊", "csv tsv xls xlsx ods"], ["🗜️", "zip tar gz tgz bz2 xz 7z rar"], ["🌐", "html htm xhtml svg xml"],
+  ["📝", "doc docx odt rtf"], ["📽️", "ppt pptx odp key"], ["🧾", "json jsonl yaml yml toml ini cfg"],
+  ["💻", "py js ts sh sql c cpp h java go rs rb php css"], ["🎵", "mp3 wav ogg flac m4a"], ["🎞️", "mp4 mov mkv webm avi"],
+];
+// an icon by file extension (display only; what a file may do is decided by the server)
+function fileIconFor(name) {
+  const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
+  const hit = ext && FILE_ICONS.find((row) => row[1].split(" ").includes(ext));
+  return hit ? hit[0] : "📄";
+}
+const FILE_PREVIEW_BYTES = 256 * 1024;
+async function previewFile(botId, id, name, kind) {
+  const dialog = $("file-preview"), body = $("file-preview-body");
+  $("file-preview-title").textContent = name;
+  body.replaceChildren();
+  const blob = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id), {timeoutMs: 0});
+  let revoke = null;
+  if (kind === "text") {
+    // plain text only: shown with textContent, never parsed as markup
+    const pre = el("pre", "file-preview-text");
+    pre.textContent = await blob.slice(0, FILE_PREVIEW_BYTES).text();
+    body.append(pre);
+    if (blob.size > FILE_PREVIEW_BYTES) body.append(el("p", "hint", "Showing the first " + formatBytes(FILE_PREVIEW_BYTES) + " of " + formatBytes(blob.size) + ". Download the file for the rest."));
+  } else if (kind === "pdf" && (await blob.slice(0, 5).text()) === "%PDF-") {
+    const url = URL.createObjectURL(new Blob([blob], {type: "application/pdf"}));
+    revoke = url;
+    const frame = el("iframe", "file-preview-pdf"); frame.title = name; frame.src = url;
+    body.append(frame);
+  } else {
+    body.append(el("p", "hint", "This file cannot be previewed. Download it instead."));
+  }
+  dialog.onclose = () => { if (revoke) URL.revokeObjectURL(revoke); body.replaceChildren(); };
+  dialog.showModal();
+}
+// a file in the chat: a chip with icon, name and size; clicking downloads it (never opened in the page).
+// A PDF or plain-text file also gets a Preview button; html, svg and everything else are download only.
 function chatFileChip(botId, id) {
   const name = FILE_ID.exec(id)[1];
+  const group = el("span", "file-group");
   const chip = el("button", "file-chip");
   chip.type = "button"; chip.title = "Download " + name; chip.setAttribute("aria-label", "Download file " + name);
   const size = el("span", "file-size", "");
-  chip.append(el("span", "file-icon", "📄"), el("span", "file-name", name), size);
+  chip.append(el("span", "file-icon", fileIconFor(name)), el("span", "file-name", name), size);
+  group.append(chip);
   const key = botId + "/" + id;
+  const addPreview = (info) => {
+    size.textContent = formatBytes(info.size);
+    if (!info.preview || group.querySelector(".file-preview-btn")) return;
+    const view = el("button", "ghost file-preview-btn", "Preview");
+    view.type = "button"; view.setAttribute("aria-label", "Preview file " + name);
+    view.onclick = () => previewFile(botId, id, name, info.preview).catch((error) => setStatus("Could not preview " + name + ": " + error.message, true));
+    group.append(view);
+  };
   const known = fileInfoCache.get(key);
-  if (known !== undefined) size.textContent = formatBytes(known);
-  else api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "/info").then((info) => { fileInfoCache.set(key, info.size); size.textContent = formatBytes(info.size); }).catch(() => {});
+  if (known !== undefined) addPreview(known);
+  else api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "/info").then((info) => { fileInfoCache.set(key, info); addPreview(info); }).catch(() => {});
   chip.onclick = async () => {
     try {
-      const blob = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id), {timeoutMs: 0});
+      const blob = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "?download=1", {timeoutMs: 0});
       const url = URL.createObjectURL(new Blob([blob], {type: "application/octet-stream"}));
       const link = document.createElement("a"); link.href = url; link.download = name; document.body.append(link); link.click(); link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     } catch (error) { setStatus("Could not download " + name + ": " + error.message, true); }
   };
-  return chip;
+  return group;
 }
 async function imageUrl(botId, id) {
   const key = botId + "/" + id;

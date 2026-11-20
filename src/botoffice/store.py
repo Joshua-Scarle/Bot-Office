@@ -2668,7 +2668,7 @@ class JobStore:
         archived by an edit (checked and inserted in one transaction). Returns None if
         dropped; the job record keeps the reply either way."""
         ids = attachments or []
-        if len(ids) > 6 or any(not attachment_files.ID_RE.fullmatch(name) for name in ids):
+        if len(ids) > 6 or any(not attachment_files.is_valid_id(name) for name in ids):
             raise ValueError("invalid attachment ids")
         key, job_key = str(bot_id), str(job_id)
         with closing(self._connect()) as db:

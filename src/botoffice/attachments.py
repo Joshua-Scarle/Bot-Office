@@ -34,6 +34,22 @@ DEFAULT_MAX_FILE_MB = 50
 FILE_MAX_COUNT = 1000
 FILE_MAX_TOTAL = 1024 * 1024 * 1024
 
+# 0.12.4: how a stored file is served. Chosen from the stored extension only, never from what the bytes claim:
+# a PDF and plain text may be previewed; everything else (html, svg, xml, scripts as pages, archives...) is a download.
+TEXT_EXTENSIONS = frozenset(
+    "txt md markdown csv tsv json jsonl log yaml yml toml ini cfg conf env diff patch py js ts sh sql rst tex".split())
+
+
+def serve_type(name: str) -> tuple[str, str | None]:
+    """(Content-Type, preview kind) for a stored file id: ``pdf`` or ``text`` may be shown inline, ``None`` never."""
+    label = display_name(name)
+    ext = label.rpartition(".")[2].lower() if "." in label else ""
+    if ext == "pdf":
+        return "application/pdf", "pdf"
+    if ext in TEXT_EXTENSIONS:
+        return "text/plain; charset=utf-8", "text"
+    return "application/octet-stream", None
+
 
 def max_file_bytes() -> int:
     """Per-file upload limit: BOT_OFFICE_MAX_UPLOAD_MB (default 50)."""
@@ -195,49 +211,67 @@ def _is_remote(path: str) -> bool:
     return bool(urlsplit(path).scheme) or path.startswith("//")
 
 
+def _inside(path: Path, roots: list[Path]) -> bool:
+    return any(root == path or root in path.parents for root in roots)
+
+
 def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: str,
                      referenced: dict[str, set[str]], source_bot_id=None) -> tuple[str, list[str]]:
-    """Copy valid final-reply and sidecar images and remove successfully attached markup.
+    """Copy valid final-reply and sidecar attachments and remove successfully attached image markup.
 
-    The copies go into *bot_id*'s store. *source_bot_id* is the bot that wrote the reply when that
-    is another bot (the bot-to-bot copy): its workspace and files are the readable roots."""
+    ``![](path)`` in the reply is image-only. A sidecar entry (``bot-office-attach``) may be any file: an image
+    goes to the image store, anything else to the file store (0.12.4). The copies go into *bot_id*'s store.
+    *source_bot_id* is the bot that wrote the reply when that is another bot (the bot-to-bot copy): its
+    workspace and files are the readable roots. A non-image file must lie in the job workspace or in the
+    bot's attachments/ or uploads/ folder, never elsewhere in the bot directory."""
     directory(data_dir, bot_id)  # validate the bot directory before trusting it as a root
     directory(data_dir, source_bot_id or bot_id)
-    roots = [workspace.resolve(), (data_dir / "bots" / str(source_bot_id or bot_id)).resolve()]
+    bot_root = data_dir / "bots" / str(source_bot_id or bot_id)
+    roots = [workspace.resolve(), bot_root.resolve()]
+    file_roots = [roots[0], (bot_root / "attachments").resolve(), (bot_root / UPLOADS_DIR).resolve()]
     matches = list(IMAGE_MARKDOWN.finditer(audit))
-    paths = [m.group(2).removeprefix("<").removesuffix(">") for m in matches]
+    # (path, from the sidecar): only a sidecar entry may be a non-image file
+    paths: list[tuple[str, bool]] = [(m.group(2).removeprefix("<").removesuffix(">"), False) for m in matches]
     try:
         _, sidecar = _read_local(SIDECAR, roots, MAX_SIDECAR_BYTES, truncate=True)
-        paths.extend(sidecar.decode("utf-8", errors="replace").splitlines())
+        paths.extend((line, True) for line in sidecar.decode("utf-8", errors="replace").splitlines() if line.strip())
     except (OSError, ValueError):
         pass
     saved: set[Path] = set()
     ids: list[str] = []
-    quota = False
-    skipped = 0
+    quota = {False: False, True: False}  # by origin: reply markup (images) / sidecar (files)
+    skipped = {False: 0, True: 0}
     # candidates past the cap are never opened; remote URLs stay as the bot wrote them
-    skipped += sum(1 for p in paths[MAX_CANDIDATES:] if not _is_remote(p))
+    for path, from_sidecar in paths[MAX_CANDIDATES:]:
+        skipped[from_sidecar] += not _is_remote(path)
     paths = paths[:MAX_CANDIDATES]
-    for position, path in enumerate(paths):
+    for position, (path, from_sidecar) in enumerate(paths):
         if len(ids) >= MAX_OUTGOING:
-            skipped += sum(1 for p in paths[position:] if not _is_remote(p))
+            for rest, rest_sidecar in paths[position:]:
+                skipped[rest_sidecar] += not _is_remote(rest)
             break
         try:
-            resolved, data = _read_local(path, roots, sniff=True)
+            if from_sidecar:
+                resolved, data = _read_local(path, roots, max_file_bytes())
+            else:
+                resolved, data = _read_local(path, roots, sniff=True)
             if resolved in saved:
                 continue
             mime = sniff_image(data)
-            if not mime:
+            if mime and len(data) <= MAX_BYTES:
+                name = save(data_dir, bot_id, data, mime, referenced)
+            elif from_sidecar and _inside(resolved, file_roots):
+                name = save_file(data_dir, bot_id, data, resolved.name, referenced)
+            else:
                 raise ValueError("not an image")
-            name = save(data_dir, bot_id, data, mime, referenced)
             ids.append(name)
             referenced.setdefault(str(bot_id), set()).add(name)
             saved.add(resolved)
         except OverflowError:
-            quota = True
+            quota[from_sidecar] = True
         except (OSError, ValueError):
             if not _is_remote(path):
-                skipped += 1
+                skipped[from_sidecar] += 1
 
     def replace(match: re.Match) -> str:
         path = match.group(2).removeprefix("<").removesuffix(">")
@@ -245,11 +279,14 @@ def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: 
         return match.group(1) if candidate in saved else match.group(0)
 
     text = IMAGE_MARKDOWN.sub(replace, text)
-    if quota:
+    if quota[False]:
         text += "\n\nAn image could not be attached because the image storage quota is full."
-    if skipped:
-        noun = "image" if skipped == 1 else "images"
-        text += f"\n\n{skipped} {noun} could not be attached."
+    if quota[True]:
+        text += "\n\nA file could not be attached because the storage quota is full."
+    for from_sidecar, kind in ((False, "image"), (True, "file")):
+        count = skipped[from_sidecar]
+        if count:
+            text += f"\n\n{count} {kind if count == 1 else kind + 's'} could not be attached."
     return text, ids
 
 

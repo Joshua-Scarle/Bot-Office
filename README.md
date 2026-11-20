@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.12.3. What changed is recorded below: [0.12.3](#what-changed-in-0123), [0.12.2](#what-changed-in-0122), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.12.4. What changed is recorded below: [0.12.4](#what-changed-in-0124), [0.12.3](#what-changed-in-0123), [0.12.2](#what-changed-in-0122), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,17 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.12.4
+
+**Bots can send you files of any type.** Until now a bot could only show images in its reply. Now `desk attach <file>` / `bot-office-attach <file>` (the same command as before, run from the job workspace) queues a PDF, CSV, zip, document, code file or anything else, and it appears under the reply as a download chip with an icon, the file name and its size. Images attached the same way still show as pictures. It works on all five engines and in chat, routine, wake-up, assignment and bot-to-bot replies, because every reply goes through the same collection step. The bots' workspace note tells them how.
+
+- **Where files may come from.** The job workspace only (a bot copies a file in first). Symlinks anywhere in the path are refused, only regular files are read, empty files are refused, and the bot's own `memory.md`, `AGENTS.md` and session files are not attachable (images can still be re-sent from the bot's `attachments/` folder, and any file from its `uploads/` folder).
+- **Limits.** 50 MiB per file (`BOT_OFFICE_MAX_UPLOAD_MB`, the same as uploads), 6 attachments per reply (images and files together), the existing per-bot and global storage quotas. Skipped files add a short note, "N files could not be attached." Names are reduced to plain characters; the stored copy is mode 0400 and never executable or extracted. An image over 10 MiB travels as a file.
+- **Markdown stays image-only.** `![](path)` in a reply still attaches images only; a non-image file needs `bot-office-attach`. The sidecar keeps its old name, `.bot-office-outgoing-images`, so turns already running are unaffected.
+- **Serving by an allow-list.** The server picks the type from the stored extension, never from the bytes. **PDF** (`application/pdf`) and **plain text** (txt, md, csv, tsv, json, log, yaml, toml, ini, py, js, ts, sh, sql and similar; `text/plain; charset=utf-8`) can be previewed inline. **HTML, SVG, XML, archives, Office files and everything else are sent as `application/octet-stream` with `Content-Disposition: attachment`** and never rendered. All responses keep `nosniff`, `no-store` and a sandboxing CSP. `?download=1` forces a download for any file. `GET .../attachments/{id}/info` now also returns `preview` (`pdf`, `text` or null).
+- **Chat.** Each file chip shows an icon by extension, the name and the size; clicking it downloads. A PDF or text file also gets a **Preview** button: text opens in a dialog as text (first 256 KiB), a PDF opens in the browser's PDF viewer inside the dialog (only if it starts with `%PDF-`). HTML and SVG get no preview button. The same chips now serve files you upload.
+- Design: `DESIGN-files.md`. Tests: `tests/test_outgoing_files.py` (routing, path and symlink safety, caps, names, serving, end to end) and the changed upload test.
 
 ## What changed in 0.12.3
 
@@ -483,7 +494,7 @@ sqlite3 ~/printpilot-agentdesk/data/agentdesk.sqlite3 "UPDATE jobs SET status='c
 
 ## What changed in 0.9.2
 
-Bots can show images inline in chat by writing `![description](path)` in their final reply or running `desk attach <file>` or `bot-office-attach <file>` from the workspace. PNG, JPEG, GIF and WebP images are supported, up to six per reply and 10 MiB each. Images are kept in the existing per-bot attachment store.
+Bots can show images inline in chat by writing `![description](path)` in their final reply or running `desk attach <file>` or `bot-office-attach <file>` from the workspace. PNG, JPEG, GIF and WebP images are supported, up to six per reply and 10 MiB each. Images are kept in the existing per-bot attachment store. (Since 0.12.4 `desk attach` accepts any file type; see [0.12.4](#what-changed-in-0124).)
 
 ## What changed in 0.9.3
 
