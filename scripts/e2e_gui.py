@@ -1175,7 +1175,7 @@ def main() -> int:
                 open_bot(page, args.send_to)
                 enter_to_send(page, out, "e2e check from Bot-Office: please reply with just OK.", "OK")
         else:
-            with tempfile.TemporaryDirectory(prefix="bot-office-e2e-") as tmp:
+            with tempfile.TemporaryDirectory(prefix="bot-office-e2e-", ignore_cleanup_errors=True) as tmp:
                 home = Path(tmp) / "home"  # slash commands read the CLI's custom command files from HOME
                 (home / ".codex" / "prompts").mkdir(parents=True)
                 (home / ".codex" / "prompts" / "e2e-ping.md").write_text("---\ndescription: Ping the bot (e2e)\nargument-hint: TEXT\n---\nPing the bot: $ARGUMENTS\n")
@@ -1211,6 +1211,10 @@ def main() -> int:
                 outgoing_files(page, out, base, TOKEN)
                 history_search(page, out, base, TOKEN, app)
                 server.should_exit = True
+                for _ in range(100):  # let the server stop writing before the data folder is removed
+                    if not server.started:
+                        break
+                    time.sleep(0.1)
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()
     print("\nResults:")

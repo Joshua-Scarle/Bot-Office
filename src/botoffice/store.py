@@ -792,7 +792,7 @@ class JobStore:
             self._migrate_reads(db)
             sections.ensure_schema(db)
             self._migrate_avatars(db)
-            self.fts = chat_history.ensure_fts(db, lambda d, key: d.execute(
+            chat_history.ensure_fts(db, lambda d, key: d.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES (?,?)", (key, now().isoformat())))
 
             # Grok bridge state: one row per send (reserved before the webhook call, then sent
@@ -2420,7 +2420,7 @@ class JobStore:
                     f"SELECT id FROM messages WHERE {where}{extra} ORDER BY id {order} LIMIT ?", (*base, *arg, count))]
             if around is not None:
                 half = limit // 2
-                picked = ids(" AND id<=?", (around,), "DESC", half + 1) + ids(" AND id>?", (around,), "ASC", limit - half)
+                picked = ids(" AND id<=?", (around,), "DESC", half + 1) + ids(" AND id>?", (around,), "ASC", limit - half - 1)
             elif before is not None:
                 picked = ids(" AND id<?", (before,), "DESC", limit)
             elif after is not None:

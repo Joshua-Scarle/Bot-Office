@@ -2880,12 +2880,12 @@ async function loadOlder() {
     state.anchor = captureAnchor($("messages"));
     state.msgSig = "";
     await loadMessages();
-  } catch (err) { handleError(err); }
-  finally { hist.loading = false; }
+  } catch (err) { hist.retryAt = Date.now() + 5000; handleError(err); }
+  finally { hist.loading = false; state.anchor = null; }
 }
 $("messages").addEventListener("scroll", () => {
   const hist = state.hist, box = $("messages");
-  if (hist && hist.hasOlder && !hist.loading && box.scrollTop < 120) loadOlder();
+  if (hist && hist.hasOlder && !hist.loading && Date.now() >= (hist.retryAt || 0) && box.scrollTop < 120) loadOlder();
 }, { passive: true });
 $("jump-latest-btn").onclick = async () => {
   state.hist = newHist(null); state.stickBottom = true; state.msgSig = "";
@@ -4798,7 +4798,7 @@ $("lock-btn").onclick = () => lock("");
 
 if (getToken()) start(); else lock("");
 /* ---- 0.12.5: message search (Ctrl/Cmd+Shift+F) ---- */
-const search = { scope: "bot", seq: 0, timer: null, last: 0 };
+const search = { scope: "bot", seq: 0, timer: null, last: 0, shown: null };
 function snippetNodes(text) {
   return text.split(/(\x02[^\x03]*\x03)/).map((part) => {
     if (part.charCodeAt(0) === 2) return el("mark", "", part.replace(/[\x02\x03]/g, ""));
@@ -4850,7 +4850,7 @@ function renderSearch(hits, more, note, append) {
 async function runSearch(more) {
   const q = $("search-input").value.trim();
   const seq = ++search.seq;
-  if (!q) { renderSearch([], false, "Type to search chat messages."); return; }
+  if (!q) { search.shown = null; renderSearch([], false, "Type to search chat messages."); return; }
   let url = "/v1/search/messages?q=" + encodeURIComponent(q) + (more ? "&before=" + search.last : "");
   const bot = currentBot();
   if (search.scope === "bot" && bot) url += "&bot=" + bot.id;
@@ -4858,6 +4858,7 @@ async function runSearch(more) {
     const res = await api(url);
     if (seq !== search.seq) return;  // a newer search superseded this one
     if (res.hits.length) search.last = res.hits[res.hits.length - 1].id;
+    if (!more) search.shown = q + "|" + search.scope;
     renderSearch(res.hits, res.has_more, !more && !res.hits.length ? "No messages match." : "", more);
   } catch (err) { if (seq === search.seq) renderSearch([], false, err.message); }
 }
@@ -4878,7 +4879,8 @@ $("search-input").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.isComposing) {
     event.preventDefault(); clearTimeout(search.timer);
     const first = $("search-results").querySelector(".search-hit");
-    if (first) first.click(); else runSearch(false);
+    // the list on screen must belong to what is typed now (a stale list would jump to the wrong message)
+    if (first && search.shown === $("search-input").value.trim() + "|" + search.scope) first.click(); else runSearch(false);
   } else if (event.key === "ArrowDown") {
     const first = $("search-results").querySelector(".search-hit");
     if (first) { event.preventDefault(); first.focus(); }

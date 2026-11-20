@@ -28,7 +28,7 @@ _TRIGGERS = (
 def ensure_fts(db: sqlite3.Connection, meta_set) -> bool:
     """Create and backfill the index once. Returns False (and leaves the database as it was) if FTS5 is missing."""
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone():
-        return True
+        return has_fts(db)
     db.execute("BEGIN IMMEDIATE")
     try:
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone():
@@ -44,8 +44,10 @@ def ensure_fts(db: sqlite3.Connection, meta_set) -> bool:
         meta_set(db, FTS_MIGRATION)
         db.commit()
         return True
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         db.rollback()
+        if "fts5" not in str(exc).lower():
+            raise  # a lock or disk error is not "no FTS5": let the start fail rather than hide it
         return False
     except BaseException:
         db.rollback()
@@ -53,7 +55,14 @@ def ensure_fts(db: sqlite3.Connection, meta_set) -> bool:
 
 
 def has_fts(db: sqlite3.Connection) -> bool:
-    return db.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone() is not None
+    """The index exists and this SQLite can read it (a file copied to a build without FTS5 reports False)."""
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone() is None:
+        return False
+    try:
+        db.execute("SELECT 1 FROM messages_fts LIMIT 0")
+    except sqlite3.OperationalError:
+        return False
+    return True
 
 
 def tokens(query: str) -> list[str]:

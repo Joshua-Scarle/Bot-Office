@@ -76,6 +76,24 @@ def test_after_and_around(desk):
     assert page(client, bot, limit=5, before=ids[0]) == {"messages": [], "has_older": False, "has_newer": False}
 
 
+def test_around_edges_and_other_bots_interleaving(desk):
+    client, store = desk
+    a, b = new_bot(client, "A"), new_bot(client, "B")
+    ids = []
+    for i in range(30):
+        ids.append(store.add_message(a, "user", f"a {i}").id)
+        store.add_message(b, "user", f"b {i}")  # ids of the other bot interleave: gaps in a's ids
+    got = page(client, a, limit=1, around=ids[10])
+    assert [m["id"] for m in got["messages"]] == [ids[10]] and got["has_older"] and got["has_newer"]
+    with closing(sqlite3.connect(store.path)) as db:
+        db.execute("UPDATE messages SET archived_at='2026-01-01T00:00:00+00:00' WHERE id=?", (ids[10],))
+        db.commit()
+    got = page(client, a, limit=6, around=ids[10])  # the target itself is not shown, its neighbours are
+    assert ids[10] not in [m["id"] for m in got["messages"]] and ids[9] in [m["id"] for m in got["messages"]]
+    assert page(client, a, limit=10, around=10**9)["messages"][-1]["id"] == ids[-1]  # past the end: the tail
+    assert page(client, a, limit=10, around=1)["has_older"] is False
+
+
 def test_cursors_are_exclusive_and_limits_validated(desk):
     client, _ = desk
     bot = new_bot(client)
@@ -98,16 +116,24 @@ def test_hidden_and_archived_rows_are_left_out_like_the_full_route(desk):
     assert ids[4] in [m["id"] for m in page(client, bot, archived="true")["messages"]]
 
 
-def test_pending_placeholder_only_with_the_newest_page(desk):
+def test_pending_placeholder_only_with_the_newest_page(desk, monkeypatch):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from uuid import uuid4
     client, store = desk
     bot = new_bot(client)
-    fill(store, bot, 5)
-    job = client.post(f"/v1/bots/{bot}/messages", headers=H, json={"text": "work", "queue": True}).json()["job"]
-    assert job
+    fill(store, bot, 8)
+    stamp = datetime.now(UTC)
+    job = SimpleNamespace(id=uuid4(), source="chat", draft_text="typing…", started_at=stamp, created_at=stamp,
+                          status=SimpleNamespace(value="running"), not_before=None, continue_count=0)
+    monkeypatch.setattr(store, "pending_jobs", lambda _bot: [job])
     newest = page(client, bot, limit=3, pending="true")
-    assert any(m["pending"] for m in newest["messages"]) or newest["messages"][-1]["role"] == "user"
+    assert [m["pending"] for m in newest["messages"]] == [False, False, False, True] and newest["messages"][-1]["id"] < 0
     older = page(client, bot, limit=3, before=newest["messages"][0]["id"], pending="true")
     assert not any(m["pending"] for m in older["messages"])
+    mid = page(client, bot, limit=3, around=newest["messages"][0]["id"], pending="true")
+    assert not any(m["pending"] for m in mid["messages"])  # a window that is not the end of the chat has none
+    assert not any(m["pending"] for m in page(client, bot, limit=3)["messages"])  # not asked for
 
 
 def test_unpaged_messages_route_is_unchanged(desk):
