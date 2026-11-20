@@ -1056,6 +1056,88 @@ def resolve_token(args, environ=None) -> str | None:
     return None
 
 
+def history_search(page, out: Path, base: str, token: str, app) -> None:
+    print("Chat history paging and message search (0.12.5)")
+    store = app.state.store
+    bots = {b["name"]: b["id"] for b in call(base, token, "GET", "/v1/bots")}
+    hist, other = bots["E2E test bot History"], bots[ADA]
+    ids = [store.add_message(hist, "user" if i % 2 else "assistant", f"history line {i} " + ("filler " * 12)).id for i in range(160)]
+    old = store.add_message(hist, "user", "the zebra crossing needle lives here").id
+    for i in range(80):
+        store.add_message(hist, "assistant", f"later line {i} " + ("filler " * 12))
+    store.add_message(other, "assistant", "another needle in the other bot")
+    page.reload()
+    open_bot(page, "E2E test bot History")
+    page.wait_for_function("() => document.querySelectorAll('#thread [data-mid]').length >= 50", timeout=15000)
+    mids = lambda: page.evaluate("() => [...document.querySelectorAll('#thread [data-mid]')].map((n) => Number(n.dataset.mid))")
+    first = mids()
+    check(len(first) == 50, f"a long chat opens with its newest 50 messages ({len(first)})")
+    check(page.locator(".load-older").count() == 1, "a Load older button sits at the top")
+    # scroll position survives loading older messages: remember the topmost visible message and its offset
+    page.locator("#messages").evaluate("(n) => { n.scrollTop = 600; }")
+    page.wait_for_timeout(300)
+    probe = page.evaluate("""() => { const box = document.getElementById('messages'), top = box.getBoundingClientRect().top;
+      for (const n of document.querySelectorAll('#thread [data-mid]')) { const r = n.getBoundingClientRect(); if (r.bottom > top + 1) return {mid: n.dataset.mid, off: r.top - top}; } }""")
+    page.locator("#messages").evaluate("(n) => { n.scrollTop = 0; }")
+    page.wait_for_function("(n) => document.querySelectorAll('#thread [data-mid]').length > n", arg=50, timeout=15000)
+    page.wait_for_timeout(300)
+    after = page.evaluate("""(mid) => { const box = document.getElementById('messages'), n = document.querySelector('#thread [data-mid="' + mid + '"]');
+      return n ? n.getBoundingClientRect().top - box.getBoundingClientRect().top : null; }""", probe["mid"]) if probe else None
+    moved = mids()
+    check(len(moved) == 100 and len(set(moved)) == 100 and moved == sorted(moved), f"scrolling to the top loads 50 older messages, no duplicates ({len(moved)})")
+    check(moved[-1] == first[-1], "the newest messages stay in place")
+    shot(page, out, "history-paging")
+    page.locator("#messages").evaluate("(n) => { n.scrollTop = 600; }")  # not at the bottom: keep reading here
+    # a message arriving while paged back in time: shown once, nothing skipped
+    new_id = store.add_message(hist, "assistant", "e2e arrived while paging").id
+    page.wait_for_function("(id) => document.querySelector('#thread [data-mid=\"' + id + '\"]')", arg=str(new_id), timeout=20000)
+    now = mids()
+    check(len(set(now)) == len(now) and now[0] == moved[0] and now[-1] == new_id and len(now) == 101, f"a new message joins the paged chat once, none lost ({len(now)})")
+    # search
+    page.keyboard.press("Control+k")
+    check(page.evaluate("() => document.activeElement.id") == "bot-search", "Ctrl+K still focuses the bot filter")
+    page.keyboard.press("Escape")
+    page.locator("#messages").click()
+    page.keyboard.press("Control+Shift+F")
+    page.wait_for_selector("#search-dialog[open]", timeout=5000)
+    check(page.evaluate("() => document.activeElement.id") == "search-input", "Ctrl+Shift+F opens search with the box focused")
+    page.click("#search-scope-all")
+    page.fill("#search-input", "needle")
+    page.locator(".search-hit").nth(1).wait_for(timeout=10000)
+    hits = page.locator(".search-hit")
+    check(hits.count() == 2 and page.locator(".search-hit mark").count() >= 2, f"all bots: two hits with highlights ({hits.count()})")
+    check("needle" in page.locator(".search-hit mark").first.inner_text().lower(), "the match is highlighted")
+    shot(page, out, "search-results")
+    page.click("#search-scope-bot")
+    page.wait_for_function("() => document.querySelectorAll('#search-results .search-hit').length === 1", timeout=10000)
+    check("zebra crossing" in page.locator(".search-hit").first.inner_text(), "this bot: only this bot's hit")
+    page.locator(".search-hit").first.click()
+    page.wait_for_function("(id) => { const n = document.querySelector('#thread [data-mid=\"' + id + '\"]'); if (!n) return false;"
+                           " const r = n.getBoundingClientRect(), b = document.getElementById('messages').getBoundingClientRect(); return r.top >= b.top && r.bottom <= b.bottom; }",
+                           arg=str(old), timeout=15000)
+    jump = mids()
+    check(old in jump and len(set(jump)) == len(jump) and jump == sorted(jump), f"a hit opens its message in place with the page around it ({len(jump)} messages)")
+    check(page.locator("#jump-latest").is_visible(), "a Jump to latest bar shows")
+    shot(page, out, "search-jump")
+    # reading an older part must not move around on its own, and Jump to latest returns
+    page.wait_for_timeout(3500)
+    check(old in mids(), "the older part stays put while the bot idles")
+    page.click("#jump-latest-btn")
+    page.wait_for_function("() => document.getElementById('jump-latest').hidden", timeout=10000)
+    page.wait_for_function("(id) => { const n = document.querySelector('#thread [data-mid=\"' + id + '\"]'); if (!n) return false;"
+                           " const r = n.getBoundingClientRect(), b = document.getElementById('messages').getBoundingClientRect(); return r.bottom <= b.bottom + 2 && r.bottom > b.top; }",
+                           arg=str(new_id), timeout=10000)
+    check(True, "Jump to latest returns to the newest message")
+    # a hit in another bot selects that bot
+    page.keyboard.press("Control+Shift+F")
+    page.click("#search-scope-all")
+    page.fill("#search-input", "another needle")
+    page.locator(".search-hit").first.wait_for(timeout=10000)
+    page.locator(".search-hit").first.click()
+    page.wait_for_function("(n) => document.getElementById('head-name').textContent === n", arg=ADA, timeout=10000)
+    check(page.locator("#head-name").inner_text() == ADA and wait_text(page, "another needle in the other bot", 10000), "a hit in another bot opens that bot at the message")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--url", help="a running Bot-Office (live mode, read-only unless --send-to)")
@@ -1123,9 +1205,11 @@ def main() -> int:
                 upload_read(page, out)
                 compact_status(page, out, base, TOKEN)
                 call(base, TOKEN, "POST", "/v1/bots", {"name": "E2E test bot Dee", "default_provider": "codex"})
+                call(base, TOKEN, "POST", "/v1/bots", {"name": "E2E test bot History", "default_provider": "codex"})
                 page.reload()
                 open_bot(page, "E2E test bot Dee")  # a fresh bot: no held continuation to answer instead
                 outgoing_files(page, out, base, TOKEN)
+                history_search(page, out, base, TOKEN, app)
                 server.should_exit = True
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()

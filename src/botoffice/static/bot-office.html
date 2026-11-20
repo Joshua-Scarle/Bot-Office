@@ -190,6 +190,29 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .agent-bubble .md pre { white-space: pre-wrap; background: rgba(0,0,0,.25); padding: 8px; border-radius: 8px; margin: 0 0 8px; }
 .agent-bubble .md .md-h { font-weight: 700; }
 .agent-chat-foot { display: flex; justify-content: center; padding: 10px; }
+.msg.flash .body { animation: msgflash 1.8s ease-out; }
+@keyframes msgflash { 0%, 40% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 0 0 3px transparent; } }
+.load-older { align-self: center; font-size: 13px; padding: 4px 14px; border-radius: 999px; background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.load-older:hover, .load-older:focus-visible { color: var(--text); }
+.jump-latest { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 6px 12px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); background: var(--panel); }
+.jump-latest[hidden] { display: none; }
+#search-dialog { width: min(760px, calc(100vw - 16px)); max-height: calc(100vh - 48px); margin-top: 8vh; }
+#search-dialog[open] { display: flex; flex-direction: column; }
+.search-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 0; }
+.search-bar { display: flex; gap: 10px; align-items: center; padding: 12px 16px; flex-wrap: wrap; }
+.search-bar input { flex: 1; min-width: 200px; font-size: 15px; }
+.search-scope { display: inline-flex; }
+.search-scope button { border-radius: 0; }
+.search-scope button:first-child { border-radius: 8px 0 0 8px; }
+.search-scope button:last-child { border-radius: 0 8px 8px 0; margin-left: -1px; }
+.search-scope button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.search-results { overflow-y: auto; padding: 0 16px 16px; display: flex; flex-direction: column; gap: 8px; min-height: 80px; }
+.search-note { color: var(--muted); font-size: 14px; padding: 8px 2px; }
+.search-hit { display: block; text-align: left; width: 100%; padding: 8px 12px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); color: var(--text); font: inherit; }
+.search-hit:hover, .search-hit:focus-visible { border-color: var(--accent); }
+.search-hit .hit-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.search-hit .hit-snippet { font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.search-hit mark { background: rgba(253, 214, 99, .35); color: inherit; border-radius: 3px; padding: 0 1px; }
 #agent-chat-close { border-radius: 999px; padding: 8px 18px; }
 .msg.system.office .body { text-align: left; }
 .msg .body.folded { max-height: 5.6em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
@@ -446,6 +469,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <button id="mark-unread" type="button" title="Mark as unread (Alt+U)">Unread</button>
       <button id="read-aloud" type="button" aria-pressed="false" title="Read new replies aloud" aria-label="Read new replies aloud" hidden>🔈</button>
       <button id="voice-open" type="button" title="Voice settings">Voice</button>
+      <button id="search-open" type="button" title="Search messages (Ctrl+Shift+F)">Search</button>
       <button id="show-archived" type="button" aria-pressed="false" title="Show messages archived by edits">Show archived</button>
       <button id="desktop-open" title="Live desktops">Desktop</button>
       <button id="agent-open" title="Agent messages">Agents</button>
@@ -458,6 +482,10 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </header>
     <div id="messages" class="messages" role="log" aria-live="polite">
       <div id="thread" class="thread"></div>
+    </div>
+    <div id="jump-latest" class="jump-latest" hidden>
+      <span>Viewing an older part of the chat.</span>
+      <button id="jump-latest-btn" type="button" class="primary">Jump to latest</button>
     </div>
     <form id="composer" class="composer" hidden>
       <div class="composer-inner">
@@ -677,6 +705,20 @@ dialog textarea { min-height: 90px; resize: vertical; }
   <div id="agent-chat-list" role="log"></div>
   <div class="agent-chat-foot"><button type="button" id="agent-chat-close">Close Chat</button></div>
 </dialog>
+<dialog id="search-dialog" aria-labelledby="search-title">
+  <div class="search-head">
+    <h2 id="search-title">Search messages</h2>
+    <button type="button" id="search-close">Close</button>
+  </div>
+  <div class="search-bar">
+    <input id="search-input" type="search" placeholder="Search messages" aria-label="Search messages" maxlength="200" autocomplete="off">
+    <span class="search-scope" role="group" aria-label="Where to search">
+      <button type="button" id="search-scope-bot" aria-pressed="true">This bot</button>
+      <button type="button" id="search-scope-all" aria-pressed="false">All bots</button>
+    </span>
+  </div>
+  <div id="search-results" class="search-results" role="list" aria-live="polite"></div>
+</dialog>
 <dialog id="slash-confirm" aria-labelledby="slash-confirm-title">
   <form method="dialog">
     <h2 id="slash-confirm-title">Confirm command</h2>
@@ -705,6 +747,8 @@ const state = {
   // 0.11.10: the selected bot's last message list (the bot-to-bot overlay reads it)
   lastMessages: [],
   showArchived: false, editingMsg: null,
+  // 0.12.5: the loaded part of the selected chat (see newHist), a scroll anchor to restore, a flag to stick to the bottom
+  hist: null, anchor: null, stickBottom: false,
   // details drawer (0.11.6) and the current queued/running placeholders of the selected bot
   drawerOpen: false, drawerOpener: null, drawerSteps: false, drawerLogs: new Set(), pendingJobs: [],
 };
@@ -1649,13 +1693,14 @@ $("stop").onclick = () => {
   if (job) stopJob(job.job_id, $("stop"));
 };
 
-async function selectBot(id) {
+async function selectBot(id, jump) {
   // the read revision this click saw, plus a fresh copy requested right now (see markRead)
   const clicked = state.bots.find((b) => b.id === id);
   const click = { revision: clicked ? clicked.read_revision || 0 : 0,
                   synced: api("/v1/bots/" + id).catch(() => null) };
   if (state.selected !== id) { closeSlash(); draftRevision++; clearImages(); clearImageCache(); state.editingMsg = null; $("queue-next").checked = false; stopDictation(); stopPlayback(); }
   state.selected = id;
+  state.hist = newHist(jump);
   rememberBot(id);
   state.msgSig = "";
   stopStreams();
@@ -2627,14 +2672,27 @@ async function loadMessages() {
   const bot = currentBot();
   if (!bot) return;
   const id = bot.id;
-  const messages = await api("/v1/bots/" + id + "/messages?pending=true" + (state.showArchived ? "&archived=true" : ""));
-  if (state.selected !== id) return;
+  if (!state.hist) state.hist = newHist(null);
+  const hist = state.hist, epoch = hist.epoch;
+  const page = await fetchHistory(id, hist);
+  if (state.selected !== id || state.hist !== hist || hist.epoch !== epoch) return;
+  const messages = page.messages;
+  const jumpTarget = hist.jump;
+  hist.jump = null;
+  const loaded = messages.filter((m) => !m.pending);
+  if (loaded.length) hist.low = loaded[0].id;
+  hist.count = loaded.length;
+  hist.hasOlder = page.has_older;
+  hist.hasNewer = page.has_newer;
+  if (hist.detached && !page.has_newer) hist.detached = false;
+  $("jump-latest").hidden = !hist.detached;
   state.pendingJobs = messages.filter((m) => m.pending && m.job_id);
   if (state.drawerOpen) scheduleDrawer();
   const done = messages.filter((m) => !m.pending && m.id > 0 && !m.archived_at);
-  state.shown = { bot: id, max: Math.max(0, ...done.map((m) => m.id)),
+  // a window that is not the end of the chat (after a search jump) never marks anything read
+  state.shown = hist.detached ? { bot: null, max: 0, counted: 0 } : { bot: id, max: Math.max(0, ...done.map((m) => m.id)),
     counted: Math.max(0, ...done.filter(countsUnread).map((m) => m.id)) };
-  const sig = messages.map((m) => m.id + (m.pending ? ":" + m.job_id + ":" + m.job_status : "") + (m.archived_at ? "a" : "") + (m.steer_status || "") + (m.steer_delivered_at || "") + (m.steer_note || "") + (m.question ? JSON.stringify(m.question) : "") + (m.notice ? JSON.stringify(m.notice) : "") + (m.approval ? JSON.stringify(m.approval) : "")).join(",") + "|" + (bot.activity || "") + "|" + (state.editingMsg ? state.editingMsg.id : "");
+  const sig = messages.map((m) => m.id + (m.pending ? ":" + m.job_id + ":" + m.job_status : "") + (m.archived_at ? "a" : "") + (m.steer_status || "") + (m.steer_delivered_at || "") + (m.steer_note || "") + (m.question ? JSON.stringify(m.question) : "") + (m.notice ? JSON.stringify(m.notice) : "") + (m.approval ? JSON.stringify(m.approval) : "")).join(",") + "|" + (bot.activity || "") + "|" + (state.editingMsg ? state.editingMsg.id : "") + "|" + (hist.hasOlder ? "o" : "") + (hist.detached ? "d" : "");
   if (sig === state.msgSig) return;
   state.msgSig = sig;
   const box = $("messages");
@@ -2648,7 +2706,7 @@ async function loadMessages() {
   }
   state.lastMessages = messages;
   const groups = agentGroups(messages);
-  const nodes = messages.map((m) => {
+  const nodes = messages.map((m) => tagged(m, (() => {
     let who = senderLabel(m, bot);
     if (m.source === "routine" || m.source === "assignment" || m.source === "wakeup" || (m.source === "inbox" && m.author === "bot")) who += " · " + (m.source === "wakeup" ? "wake-up" : m.source);
     who += " · " + new Date(m.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
@@ -2735,7 +2793,13 @@ async function loadMessages() {
     if (m.notice && m.notice.open) wrap.append(renderUsageNotice(m.notice));
     for (const id of (m.attachments || [])) showAttachment(wrap, bot.id, id);
     return wrap;
-  }).filter(Boolean);
+  })())).filter(Boolean);
+  if (hist.hasOlder) {
+    const older = el("button", "load-older", "Load older messages");
+    older.type = "button";
+    older.onclick = () => loadOlder();
+    nodes.unshift(older);
+  }
   const hasPending = messages.some((m) => m.pending);
   if (!messages.length) {
     const box2 = el("div", "empty");
@@ -2753,10 +2817,76 @@ async function loadMessages() {
   }
   $("thread").replaceChildren(...nodes);
   if (echoStillNeeded(state.echo, messages, id)) $("thread").append(...state.echo.nodes);  // sending, or stored but not listed yet
-  if (atBottom || messages.length < 3) box.scrollTop = box.scrollHeight;
-  markRead(id, false);
-  autoRead(id, messages);
+  const anchor = state.anchor, stick = state.stickBottom;
+  state.anchor = null; state.stickBottom = false;
+  const target = jumpTarget ? $("thread").querySelector('[data-mid="' + jumpTarget + '"]') : null;
+  if (target) {
+    const at = target.getBoundingClientRect(), view = box.getBoundingClientRect();
+    box.scrollTop += at.top - view.top - Math.max(0, (box.clientHeight - at.height) / 2);
+    target.classList.add("flash");
+    setTimeout(() => target.classList.remove("flash"), 2000);
+  } else if (anchor && restoreAnchor(box, anchor)) { /* kept */ }
+  else if (stick || ((atBottom || messages.length < 3) && !hist.detached)) box.scrollTop = box.scrollHeight;
+  if (!hist.detached) { markRead(id, false); autoRead(id, messages); }
 }
+
+/* ---- 0.12.5: paged history. The window is one contiguous id range of the chat; each poll re-reads it
+   (nothing to merge, so nothing duplicates or goes missing while messages stream in). ---- */
+const HISTORY_PAGE = 50;
+function newHist(jump) {
+  return { low: 0, count: 0, hasOlder: false, hasNewer: false, pinned: Boolean(jump), detached: Boolean(jump),
+           jump: jump || null, loading: false, epoch: 0 };
+}
+async function fetchHistory(id, hist) {
+  const base = "/v1/bots/" + id + "/history?", tail = state.showArchived ? "&archived=true" : "";
+  if (hist.jump) return api(base + "around=" + hist.jump + "&limit=" + HISTORY_PAGE + tail);
+  if (!hist.pinned) return api(base + "limit=" + HISTORY_PAGE + "&pending=true" + tail);
+  // the user went back in time: keep the same start, whatever has arrived since
+  const size = Math.min(500, Math.max(hist.count, HISTORY_PAGE));
+  const page = await api(base + "after=" + Math.max(0, hist.low - 1) + "&limit=" + Math.min(500, size + 100) + "&pending=true" + tail);
+  if (page.has_newer && !hist.detached) return api(base + "limit=" + size + "&pending=true" + tail);
+  return page;
+}
+function tagged(m, node) { if (node && m.id > 0 && node.dataset) node.dataset.mid = String(m.id); return node; }
+function captureAnchor(box) {
+  const top = box.getBoundingClientRect().top;
+  for (const node of $("thread").children) {
+    if (!node.dataset || !node.dataset.mid) continue;
+    const r = node.getBoundingClientRect();
+    if (r.bottom > top + 1) return { mid: node.dataset.mid, off: r.top - top };
+  }
+  return null;
+}
+function restoreAnchor(box, anchor) {
+  const node = $("thread").querySelector('[data-mid="' + anchor.mid + '"]');
+  if (!node) return false;
+  box.scrollTop += node.getBoundingClientRect().top - box.getBoundingClientRect().top - anchor.off;
+  return true;
+}
+async function loadOlder() {
+  const bot = currentBot(), hist = state.hist;
+  if (!bot || !hist || hist.loading || !hist.hasOlder || !hist.low) return;
+  hist.loading = true;
+  try {
+    const res = await api("/v1/bots/" + bot.id + "/history?before=" + hist.low + "&limit=" + HISTORY_PAGE + (state.showArchived ? "&archived=true" : ""));
+    if (state.selected !== bot.id || state.hist !== hist) return;
+    hist.epoch++;  // a poll already in flight was asked for the old window: its answer is dropped
+    if (res.messages.length) { hist.low = res.messages[0].id; hist.count += res.messages.length; hist.pinned = true; }
+    hist.hasOlder = res.has_older;
+    state.anchor = captureAnchor($("messages"));
+    state.msgSig = "";
+    await loadMessages();
+  } catch (err) { handleError(err); }
+  finally { hist.loading = false; }
+}
+$("messages").addEventListener("scroll", () => {
+  const hist = state.hist, box = $("messages");
+  if (hist && hist.hasOlder && !hist.loading && box.scrollTop < 120) loadOlder();
+}, { passive: true });
+$("jump-latest-btn").onclick = async () => {
+  state.hist = newHist(null); state.stickBottom = true; state.msgSig = "";
+  await loadMessages().catch(handleError);
+};
 
 /* the last failure line of a job that is no longer queued or running */
 function canRetry(m, messages) {
@@ -2899,6 +3029,7 @@ $("composer").onsubmit = async (event) => {
   const body = { text: text || (sentImages.every((item) => item.file) ? "Please see the attached files." : sentImages.some((item) => item.file) ? "Please see the attachments." : "Please see attached images."), attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
   sendingImages = true; for (const item of sentImages) item.sending = true; updateImages();
+  if (state.hist && state.hist.detached) { state.hist = newHist(null); state.stickBottom = true; state.msgSig = ""; loadMessages().catch(() => {}); }
   const echo = showEcho(bot, text, sentImages.length);
   if (!sentImages.length) { $("text").value = ""; autoGrow(); }  // a failed send puts the draft back (below)
   try {
@@ -4662,6 +4793,106 @@ $("lock-form").onsubmit = (event) => {
 $("lock-btn").onclick = () => lock("");
 
 if (getToken()) start(); else lock("");
+/* ---- 0.12.5: message search (Ctrl/Cmd+Shift+F) ---- */
+const search = { scope: "bot", seq: 0, timer: null, last: 0 };
+function snippetNodes(text) {
+  return text.split(/(\x02[^\x03]*\x03)/).map((part) => {
+    if (part.charCodeAt(0) === 2) return el("mark", "", part.replace(/[\x02\x03]/g, ""));
+    return document.createTextNode(part.replace(/[\x02\x03]/g, ""));
+  });
+}
+function setSearchScope(scope) {
+  search.scope = scope;
+  $("search-scope-bot").setAttribute("aria-pressed", String(scope === "bot"));
+  $("search-scope-all").setAttribute("aria-pressed", String(scope === "all"));
+}
+function openSearch() {
+  const dlg = $("search-dialog");
+  if (dlg.open) { $("search-input").focus(); $("search-input").select(); return; }
+  if (document.querySelector("dialog[open]") || $("app").hidden) return;
+  const bot = currentBot();
+  $("search-scope-bot").disabled = !bot;
+  setSearchScope(bot ? "bot" : "all");
+  dlg.showModal();
+  $("search-input").focus(); $("search-input").select();
+  if ($("search-input").value.trim()) runSearch(false); else renderSearch([], false, "");
+}
+function renderSearch(hits, more, note, append) {
+  const box = $("search-results");
+  if (!append) box.replaceChildren();
+  else box.querySelectorAll(".search-more, .search-note").forEach((n) => n.remove());
+  if (note) box.append(el("div", "search-note", note));
+  for (const hit of hits) {
+    const row = el("button", "search-hit");
+    row.type = "button"; row.setAttribute("role", "listitem");
+    const bot = state.bots.find((b) => b.id === hit.bot_id);
+    const meta = el("div", "hit-meta");
+    if (bot) meta.append(smallAvatar(bot));
+    meta.append(el("strong", "", hit.bot_name), el("span", "", hit.role === "user" ? (hit.sender || "You") : hit.role === "assistant" ? "Bot" : "System"),
+      el("span", "", new Date(hit.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })));
+    const snip = el("div", "hit-snippet");
+    snip.append(...snippetNodes(hit.snippet));
+    row.append(meta, snip);
+    row.onclick = () => jumpToMessage(hit.bot_id, hit.id);
+    box.append(row);
+  }
+  if (more) {
+    const btn = el("button", "search-more", "Load more");
+    btn.type = "button";
+    btn.onclick = () => runSearch(true);
+    box.append(btn);
+  }
+}
+async function runSearch(more) {
+  const q = $("search-input").value.trim();
+  const seq = ++search.seq;
+  if (!q) { renderSearch([], false, "Type to search chat messages."); return; }
+  let url = "/v1/search/messages?q=" + encodeURIComponent(q) + (more ? "&before=" + search.last : "");
+  const bot = currentBot();
+  if (search.scope === "bot" && bot) url += "&bot=" + bot.id;
+  try {
+    const res = await api(url);
+    if (seq !== search.seq) return;  // a newer search superseded this one
+    if (res.hits.length) search.last = res.hits[res.hits.length - 1].id;
+    renderSearch(res.hits, res.has_more, !more && !res.hits.length ? "No messages match." : "", more);
+  } catch (err) { if (seq === search.seq) renderSearch([], false, err.message); }
+}
+function closeSearch() { if ($("search-dialog").open) $("search-dialog").close(); }
+async function jumpToMessage(botId, mid) {
+  closeSearch();
+  if (state.selected !== botId) { await selectBot(botId, mid); return; }
+  state.hist = newHist(mid); state.msgSig = "";
+  await loadMessages().catch(handleError);
+}
+$("search-open").onclick = openSearch;
+$("search-close").onclick = closeSearch;
+$("search-dialog").addEventListener("click", (e) => { if (e.target === $("search-dialog")) closeSearch(); });
+$("search-scope-bot").onclick = () => { setSearchScope("bot"); runSearch(false); };
+$("search-scope-all").onclick = () => { setSearchScope("all"); runSearch(false); };
+$("search-input").addEventListener("input", () => { clearTimeout(search.timer); search.timer = setTimeout(() => runSearch(false), 200); });
+$("search-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault(); clearTimeout(search.timer);
+    const first = $("search-results").querySelector(".search-hit");
+    if (first) first.click(); else runSearch(false);
+  } else if (event.key === "ArrowDown") {
+    const first = $("search-results").querySelector(".search-hit");
+    if (first) { event.preventDefault(); first.focus(); }
+  }
+});
+$("search-results").addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const rows = [...$("search-results").querySelectorAll(".search-hit")], at = rows.indexOf(document.activeElement);
+  if (at < 0) return;
+  event.preventDefault();
+  if (event.key === "ArrowUp" && at === 0) $("search-input").focus(); else (rows[at + (event.key === "ArrowDown" ? 1 : -1)] || rows[at]).focus();
+});
+// Ctrl/Cmd+Shift+F anywhere; Ctrl/Cmd-K and "/" still focus the bot filter, Ctrl-F stays the browser's find
+document.addEventListener("keydown", (event) => {
+  if ((event.key === "f" || event.key === "F") && event.shiftKey && (event.ctrlKey || event.metaKey) && !event.altKey) {
+    event.preventDefault(); openSearch();
+  }
+});
 </script>
 </body>
 </html>

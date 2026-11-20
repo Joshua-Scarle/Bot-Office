@@ -66,6 +66,8 @@ from .assignments import (
     tasks_label,
 )
 from .domain import (
+    MessagePage,
+    MessageSearch,
     _check_cron,
     POSITION_LIMIT,
     Assignment,
@@ -1957,8 +1959,13 @@ def create_app(
         """
         _bot(bot_id)
         messages = store.list_messages(bot_id, include_archived=archived)
+        messages.extend(_placeholders(bot_id, pending))
+        return messages
+
+    def _placeholders(bot_id: UUID, pending: bool) -> list[Message]:
+        out: list[Message] = []
         for index, job in enumerate(store.pending_jobs(bot_id) if pending else (), start=1):
-            messages.append(
+            out.append(
                 Message(
                     id=-index,
                     bot_id=bot_id,
@@ -1975,7 +1982,38 @@ def create_app(
                                 if job.continue_count else None),
                 )
             )
-        return messages
+        return out
+
+    @app.get("/v1/bots/{bot_id}/history", response_model=MessagePage, dependencies=[Depends(auth)])
+    async def history(
+        bot_id: UUID, limit: int = Query(50, ge=1, le=500), before: int | None = Query(None, ge=1),
+        after: int | None = Query(None, ge=0), around: int | None = Query(None, ge=1),
+        pending: bool = False, archived: bool = False,
+    ) -> MessagePage:
+        """One page of the chat, oldest first, by message id (keyset: nothing duplicates or skips while new
+        messages arrive). No cursor: the newest *limit*. ``before``: just older than that id. ``after``: just
+        newer. ``around``: centred on it. In-flight placeholders (``pending=true``) come only with a page that
+        reaches the newest message. The unpaged ``/messages`` route is unchanged."""
+        _bot(bot_id)
+        if sum(x is not None for x in (before, after, around)) > 1:
+            raise HTTPException(422, "use only one of before, after, around")
+        messages, has_older, has_newer = store.history_page(
+            bot_id, limit, before=before, after=after, around=around, include_archived=archived)
+        if not has_newer and before is None:
+            messages.extend(_placeholders(bot_id, pending))
+        return MessagePage(messages=messages, has_older=has_older, has_newer=has_newer)
+
+    @app.get("/v1/search/messages", response_model=MessageSearch, dependencies=[Depends(auth)])
+    async def search_messages(
+        q: str = Query(..., min_length=1, max_length=200), bot: UUID | None = None,
+        limit: int = Query(30, ge=1, le=100), before: int | None = Query(None, ge=1),
+    ) -> MessageSearch:
+        """Search chat messages, newest first: one bot (``bot=``) or all. ``snippet`` wraps each match in
+        U+0002 ... U+0003. Archived messages and Bot-Office machinery lines are not searched."""
+        if bot is not None:
+            _bot(bot)
+        hits, more = store.search_messages(q, bot_id=bot, limit=limit, before=before)
+        return MessageSearch(hits=hits, has_more=more)
 
     @app.post(
         "/v1/bots/{bot_id}/inbox",
