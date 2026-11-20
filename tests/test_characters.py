@@ -218,7 +218,7 @@ def test_characters_are_ours_no_third_party_assets():
 
 
 def test_blob_shape_has_exactly_six_lobes_and_the_face_fits_inside():
-    """0.12.3: the "blob" (gear) outline is drawn with six round lobes. Count the radial maxima of the real path and
+    """0.12.3: the "blob" outline is drawn with six round lobes. Count the radial maxima of the real path and
     check the narrowest radius still holds the widest face mark."""
     code = _slice("const CHAR_SHAPES", "// the badge for emoji")
     out = _node('''
@@ -230,7 +230,7 @@ const r = pts.map(([x, y]) => Math.hypot(x - 24, y - 24));
 let peaks = 0;
 for (let i = 0; i < r.length; i++) if (r[i] > r[(i + r.length - 1) % r.length] && r[i] >= r[(i + 1) % r.length]) peaks++;
 assert.equal(peaks, 6);
-assert.ok(Math.max(...r) < 20 && Math.min(...r) > 12, Math.min(...r) + " " + Math.max(...r));
+assert.ok(Math.max(...r) < 20 && Math.min(...r) > 13, Math.min(...r) + " " + Math.max(...r));
 console.log(peaks);
 ''')
     assert out.strip() == "6"
