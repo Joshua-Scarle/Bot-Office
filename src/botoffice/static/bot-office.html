@@ -849,7 +849,7 @@ function svgEl(tag, attrs, cls) {
 function polar(n, r0, amp, lobes, rot) {
   let d = "";
   for (let i = 0; i < n; i++) {
-    const t = (i / n) * Math.PI * 2 + rot, r = r0 + amp * Math.cos(lobes * t);
+    const t = (i / n) * Math.PI * 2, r = r0 + amp * Math.cos(lobes * (t - rot));
     d += (i ? "L" : "M") + (24 + r * Math.cos(t)).toFixed(2) + " " + (24 + r * Math.sin(t)).toFixed(2);
   }
   return d + "Z";
@@ -864,7 +864,7 @@ function starPoints() {
   for (let i = 0; i < 10; i++) { const t = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 9.5 : 18.5; pts.push((24 + r * Math.cos(t)).toFixed(2) + "," + (25.5 + r * Math.sin(t)).toFixed(2)); }
   return pts.join(" ");
 }
-const BLOB_PATH = polar(120, 16.4, 3.1, 8, 0);
+const BLOB_PATH = polar(180, 16.6, 3.0, 6, -Math.PI / 2);   // the "blob" shape: exactly 6 round lobes, one pointing up
 function charBody(shape, fill) {
   const g = svgEl("g", {fill}, "body");
   const round = {stroke: fill, "stroke-linejoin": "round", "stroke-width": 6};
