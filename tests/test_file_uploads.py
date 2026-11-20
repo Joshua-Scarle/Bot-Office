@@ -38,7 +38,7 @@ def test_any_file_is_stored_safely_and_served_as_a_download(client_bot, name, da
     assert path.read_bytes() == data
     assert path.stat().st_mode & 0o777 == 0o400          # no exec bit, no write
     assert path.parent.stat().st_mode & 0o777 == 0o700
-    got = client.get(info["url"], headers=H)
+    got = client.get(info["url"], headers=H, params={"download": 1})  # 0.12.4: a PDF or text may preview inline otherwise
     assert got.content == data
     assert got.headers["content-type"] == "application/octet-stream"
     assert got.headers["content-disposition"].startswith("attachment;")

@@ -168,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
                 path = attach_file(rest[0])
             except ValueError as exc:
                 raise DeskError(str(exc)) from exc
-            print(f"Image queued for reply: {path}")
+            print(f"File queued for reply: {path}")
             return 0
         if command == "message":
             if os.environ.get("BOT_OFFICE_AGENT_TOKEN") and os.environ.get("BOT_OFFICE_BOT_ID"):

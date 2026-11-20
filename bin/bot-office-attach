@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mark an image for the current bot's final reply."""
+"""Mark a file (any type; an image shows in the chat) for the current bot's final reply."""
 import os
 import sys
 from pathlib import Path
@@ -35,7 +35,7 @@ def main() -> int:
     except (OSError, ValueError) as exc:
         print(f"bot-office-attach: {exc}", file=sys.stderr)
         return 1
-    print(f"Image queued for reply: {path}")
+    print(f"File queued for reply: {path}")
     return 0
 
 
