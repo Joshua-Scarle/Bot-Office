@@ -236,6 +236,11 @@ class CliAdapter:
         """Bots default to full CLI access; a bot set to "restricted" keeps the old limits."""
         return job is None or job.cli_access != "restricted"
 
+    def _hooked(self, job: Job | None) -> bool:
+        """Whether the CLI runs bin/bot-office-gate before every tool (claude, cursor, antigravity, and
+        Codex with full access do; opencode and restricted Codex have no hook)."""
+        return True
+
     def _env(self, workspace: Path | None = None, job: Job | None = None) -> dict[str, str]:
         real_home = isolation.bots_home()
         if self._full_access(job):
@@ -279,6 +284,10 @@ class CliAdapter:
                 if job.gate_command:
                     # attended/unattended for bin/bot-office-gate, written by the controller
                     env["BOT_OFFICE_GATE_FILE"] = str(workspace / ".bot-office-gate.json")
+                    if not self._hooked(job):
+                        # 0.12.4: no hook to stop a push or a merge, so bin/git, bin/gh, bin/curl and
+                        # bin/wget (first on PATH) ask the controller themselves
+                        env["BOT_OFFICE_GUARD_SHIM"] = "1"
         return env
 
     @staticmethod

@@ -72,6 +72,9 @@ class OpenCodeAdapter(CliAdapter):
     def _stdin(self, job: Job) -> None:
         return None
 
+    def _hooked(self, job) -> bool:
+        return False  # no hook mechanism: the PATH shims in bin/ guard git, gh, curl and wget
+
     def _failed(self, code, stderr, parser, error=None):
         if code == EXIT_IDLE:
             return super()._failed(code, stderr, parser, self._idle_message())

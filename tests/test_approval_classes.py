@@ -53,15 +53,15 @@ def running(store, bot, source="chat"):
     (tool("mcp__shop__checkout", cart="1"), "purchase"),
     (tool("mcp__stripe__create_payment", amount=5), "purchase"),
     (tool("mcp__stripe__get_payment_details"), None),
-    (bash("gh pr merge 12 --squash"), "release"),
+    (bash("gh pr merge 12 --squash"), "git-guard"),  # 0.12.4: the guard asks first
     (bash("npm publish"), "release"),
-    (bash("git push origin main"), "release"),
-    (bash("git push --force origin feature"), "release"),
+    (bash("git push origin main"), "git-guard"),
+    (bash("git push --force origin feature"), "git-guard"),
     (bash("git push origin feature"), None),
     (bash("git push origin maintenance"), None),
     (bash("sudo apt-get install x"), "system"),
     (bash("crontab -l"), "system"),
-    (bash("rm -rf /srv/shared/project"), "delete"),
+    (bash("rm -rf /srv/shared/project"), "git-guard"),
     (bash("rm -rf build"), None),
     (tool("mcp__drive__trash_file", id="1"), "delete"),
     (tool("mcp__gmail__delete_draft", id="1"), "delete"),
@@ -88,7 +88,9 @@ def test_settings_lists_defaults_and_switches_classes(tmp_path):
     assert current["timeout_min"] == approval_classes.TIMEOUT_DEFAULT
     approval_classes.update(store, enabled={"release": False, "remote": True})
     job = running(store, bot)
-    assert rules.decide(job, bash("git push origin main")).decision == "allow"
+    # the release class is off, but the git guard is not a class: it cannot be switched off
+    assert rules.decide(job, bash("git push origin main")).preset == "git-guard"
+    assert rules.decide(job, bash("npm publish")).decision == "allow"
     assert rules.decide(job, bash("ssh host uptime")).preset == "remote"
     with pytest.raises(approval_classes.ApprovalClassError):
         approval_classes.update(store, remove=["send"])
@@ -120,8 +122,11 @@ def test_custom_classes(tmp_path):
 
 def test_an_owner_allow_rule_beats_a_class(tmp_path):
     store, bot, rules = setup(tmp_path)
+    rules.add_rule(bot_id=bot.id, effect="allow", kind="shell", pattern=r"\bnpm\s+publish\b")
     rules.add_rule(bot_id=bot.id, effect="allow", kind="shell", pattern=r"\bgh\s+pr\s+merge\b")
-    assert rules.decide(running(store, bot), bash("gh pr merge 3")).decision == "allow"
+    assert rules.decide(running(store, bot), bash("npm publish")).decision == "allow"
+    # 0.12.4: but no allow rule opens the git guard
+    assert rules.decide(running(store, bot), bash("gh pr merge 3")).effect == "ask"
 
 
 def test_chat_card_approve_hides_the_resume_prompt(tmp_path):
@@ -264,7 +269,8 @@ def test_engines_that_cannot_pause_are_named_and_told_not_to_act(tmp_path):
         assert expect in extra and "Sending email or messages" in extra and "Sending email" in stable
     for item in approval_classes.BUILTIN:
         approval_classes.update(store, enabled={item.key: False})
-    assert approval_classes.self_note(store, "opencode", "full") == ""
+    note = approval_classes.self_note(store, "opencode", "full")  # only the always-on git guard is left
+    assert "Protected action" in note and "Sending email" not in note
 
 
 def test_settings_show_unpausable_bots_by_each_class_and_docs_say_checkpoint():

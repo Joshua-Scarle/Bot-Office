@@ -109,8 +109,8 @@ def test_attended_allows_unattended_asks_and_secrets_never(tmp_path):
     store, bot = make_store(tmp_path)
     rules = Rules(store)
     chat, routine, trigger = (running(store, bot, s) for s in ("chat", "routine", "trigger"))
-    assert rules.decide(chat, bash("git push")).decision == "allow"
-    asked = rules.decide(routine, bash("git push"))
+    assert rules.decide(chat, bash("git push origin feature")).decision == "allow"
+    asked = rules.decide(routine, bash("git push origin feature"))
     assert asked.decision == "deny" and asked.effect == "ask" and asked.approval_id
     assert "waiting_on_user" in asked.reason
     for job in (chat, routine):
@@ -119,10 +119,10 @@ def test_attended_allows_unattended_asks_and_secrets_never(tmp_path):
     assert rules.decide(routine, bash("bot-msg Bea 'status?'")).decision == "allow"
     # user rules: never beats everything; allow opens a preset except for trigger runs
     rules.add_rule(bot_id=bot.id, effect="allow", kind="preset", pattern="outbound", scope="unattended")
-    assert rules.decide(routine, bash("git push")).decision == "allow"
-    assert rules.decide(trigger, bash("git push")).effect == "ask"
+    assert rules.decide(routine, bash("git push origin feature")).decision == "allow"
+    assert rules.decide(trigger, bash("git push origin feature")).effect == "ask"
     rules.add_rule(bot_id=None, effect="never", kind="shell", pattern=r"\bgit\s+push\b")
-    assert rules.decide(chat, bash("git push")).effect == "never"
+    assert rules.decide(chat, bash("git push origin feature")).effect == "never"
     with pytest.raises(rules_mod.RuleError):
         rules.add_rule(bot_id=None, effect="allow", kind="preset", pattern="secrets")
     with pytest.raises(rules_mod.RuleError):
@@ -143,12 +143,12 @@ def test_scheduled_runs_full_keeps_0_10_behaviour_and_triggers_stay_strict(tmp_p
         assert rules.decide(job, bash("git push origin feature")).decision == "allow"
         assert rules.decide(job, bash("rm -rf build")).decision == "allow"
         # 0.11.10: the owner's approval classes (on by default: release, system...) ask in every run
-        assert rules.decide(job, bash("git push origin main")).preset == "release"
+        assert rules.decide(job, bash("git push origin main")).preset == "git-guard"
         assert rules.decide(job, bash("sudo systemctl restart x")).preset == "system"
         assert rules.decide(job, bash("cat /srv/bo/data/token")).effect == "never"
         assert rules_mod.is_unattended(job, "gated") == (source != "chat")
     trigger = running(store, bot, "trigger")
-    assert rules_mod.is_unattended(trigger, "full") and rules.decide(trigger, bash("git push")).effect == "ask"
+    assert rules_mod.is_unattended(trigger, "full") and rules.decide(trigger, bash("git push origin feature")).effect == "ask"
 
 
 def test_scheduled_runs_setting_is_master_only_and_validated(settings):

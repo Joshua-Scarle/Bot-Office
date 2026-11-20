@@ -609,7 +609,8 @@ def message_author(values: dict) -> tuple[str, str | None]:
 
 
 PRESET_LABELS = {"outbound": "Outbound action in an unattended run", "destructive":
-                 "Destructive action in an unattended run", None: "An action rule you set"}
+                 "Destructive action in an unattended run", None: "An action rule you set",
+                 "git-guard": "Protected action: default branch, merge, force-push, delete or repo settings"}
 
 
 def approval_card(store: JobStore, item: dict) -> dict:

@@ -18,6 +18,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from . import git_guard
 from .store import JobStore
 
 KEY = "approval_classes"
@@ -215,7 +216,11 @@ def settings(store: JobStore) -> dict:
     timeout = saved.get("timeout_min", TIMEOUT_DEFAULT)
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 0 <= timeout <= TIMEOUT_MAX:
         timeout = TIMEOUT_DEFAULT
-    return {"classes": classes, "timeout_min": timeout}
+    return {"classes": classes, "timeout_min": timeout, "locked": {
+        "key": git_guard.PRESET, "label": git_guard.LABEL, "enabled": True,
+        "description": "Pushing to the default branch, merging a PR, force-pushing, deleting a branch, tag, repo or "
+                       "files outside the workspace, and changing repo settings always wait for your approval, in "
+                       "every run, whatever the rules, classes or bot access. Not switchable."}}
 
 
 def update(store: JobStore, *, enabled: dict[str, bool] | None = None, add: list[dict] | None = None,
@@ -314,8 +319,7 @@ def can_pause(provider: str, cli_access: str) -> bool:
 def self_note(store: JobStore, provider: str, cli_access: str) -> str:
     """The SELF.md line telling a bot which actions wait for the owner's yes, and how."""
     labels = [item["label"] for item in settings(store)["classes"] if item["enabled"]]
-    if not labels:
-        return ""
+    labels.append(git_guard.LABEL)  # always on (git_guard): never switched off
     kinds = "; ".join(labels)
     if can_pause(provider, cli_access):
         return (f"- Approvals: the user wants these done only with their yes: {kinds}. Don't ask first: go ahead, "

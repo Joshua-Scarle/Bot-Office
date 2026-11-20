@@ -2552,7 +2552,9 @@ def create_app(
                         "turns only for bots with scheduled_runs 'gated'): outbound and destructive ask; "
                         "everything else, incl. your own chat: allow; bot-msg: allow; secrets: never everywhere. "
                         "0.11.10: the approval classes switched on in Settings ask in every run, after your own "
-                        "rules (GET /v1/settings, approvals)"}
+                        "rules (GET /v1/settings, approvals). 0.12.4: pushes to the default branch, merges, "
+                        "force-pushes, deletes (branch, tag, repo, files outside the workspace) and repo "
+                        "settings changes ask in every run before any rule: an allow rule cannot open them"}
 
     @app.post("/v1/rules", status_code=201, dependencies=[Depends(auth)])
     async def add_rule(body: RuleCreate) -> dict:

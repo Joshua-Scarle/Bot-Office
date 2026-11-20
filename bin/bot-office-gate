@@ -109,6 +109,27 @@ def _mode(argv):
     return None
 
 
+def _local_guard(event):
+    """The git guard without the controller (src/botoffice/git_guard.py): a reason to refuse, or None.
+    A guarded action is never allowed just because the controller cannot be asked."""
+    if not isinstance(event, dict):
+        return None
+    data = event.get("tool_input") or event.get("input") or event.get("toolInput") or {}
+    if not isinstance(data, dict):
+        data = {}
+    command = data.get("command") if "command" in data else event.get("command")
+    if isinstance(command, list):
+        command = " ".join(str(part) for part in command)
+    tool = str(event.get("tool_name") or event.get("tool") or event.get("toolName") or "")
+    cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else None
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "src"))
+        from botoffice import git_guard
+    except ImportError:
+        return "the guard module is missing" if command else None
+    return git_guard.classify(tool, str(command or ""), data, cwd)
+
+
 def main(argv):
     provider = argv[1] if len(argv) > 1 and argv[1] in PROVIDERS else "claude"
     mode = _mode(argv)
@@ -127,6 +148,10 @@ def main(argv):
             return _answer(provider, False, "Bot-Office gate: no job token in an unattended run; action refused.")
         if marker:
             return _answer(provider, False, f"Bot-Office gate: protected path ({marker}); action refused.")
+        guarded = _local_guard(event)
+        if guarded:
+            return _answer(provider, False, f"Bot-Office gate: {guarded} needs the owner's approval and the "
+                                            "controller cannot be asked; action refused.")
         return _answer(provider, True)
     if not _loopback(url):
         return _answer(provider, False, "Bot-Office gate: the controller URL is not loopback; action refused.")
@@ -141,6 +166,10 @@ def main(argv):
         if mode != "attended" or marker:
             why = f"protected path ({marker})" if marker else f"controller unreachable ({type(exc).__name__})"
             return _answer(provider, False, f"Bot-Office gate: {why}; action refused.")
+        guarded = _local_guard(event)
+        if guarded:
+            return _answer(provider, False, f"Bot-Office gate: controller unreachable and {guarded} needs the "
+                                            "owner's approval; action refused.")
         return _answer(provider, True)
     if answer.get("decision") == "allow":
         return _answer(provider, True)

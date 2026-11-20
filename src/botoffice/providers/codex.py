@@ -18,6 +18,16 @@ REJECTED_FLAG_PHRASES = (
 )
 
 
+def hook_overrides(job) -> list[str]:
+    """Only the PreToolUse hook to bin/bot-office-gate (no sandbox or approval change): attended
+    full-access Codex keeps its bypass flag and still stops on the git guard (0.12.4)."""
+    if not job.gate_command:
+        return []
+    hook = json.dumps(job.gate_command)
+    return ["-c", "features.codex_hooks=true",
+            "-c", f'hooks.PreToolUse=[{{matcher="*",hooks=[{{type="command",command={hook},timeout=30}}]}}]']
+
+
 def gate_overrides(job) -> list[str]:
     """0.11.0 per-invocation profile for an unattended full-access run (never ~/.codex/config.toml):
     Codex's own workspace-write sandbox with no approvals, network only if a rule allows it, and a
@@ -68,7 +78,10 @@ class CodexAdapter(CliAdapter):
             return ["--approve-for-me"]
         if job is not None and job.unattended:
             return gate_overrides(job)
-        return ["--dangerously-bypass-approvals-and-sandbox"]
+        return ["--dangerously-bypass-approvals-and-sandbox", *(hook_overrides(job) if job is not None else [])]
+
+    def _hooked(self, job) -> bool:
+        return self._full_access(job)
 
     def _exec_args(self, workspace: Path, job=None, session: str | None = None) -> list[str]:
         images = [f"--image={path}" for path in (job.attachment_paths if job else [])]

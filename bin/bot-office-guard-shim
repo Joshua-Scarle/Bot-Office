@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""PATH shim for git, gh, curl and wget (bin/git etc. are stubs that run this file): the git guard for engines that have no hook.
+
+Bot-Office puts bin/ first on a bot's PATH. For an engine that bin/bot-office-gate cannot hook
+(opencode, restricted Codex) the run's env has BOT_OFFICE_GUARD_SHIM=1: a push to the default branch, a
+merge, a force-push, a deletion or a repo-settings change is then sent to the controller as the same
+gate event a hook would send, and runs only when the owner has approved that card. Everything else
+runs the real program at once. Without BOT_OFFICE_GUARD_SHIM (hooked engines, the owner's own shell)
+this is a plain pass-through. Stdlib only; never prints the token.
+"""
+import json
+import os
+import shlex
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+TIMEOUT = 20
+
+
+def real_program(name):
+    own = {os.path.realpath(str(HERE)), os.path.realpath(os.path.dirname(os.path.abspath(sys.argv[0])))}
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory or os.path.realpath(directory) in own:
+            continue
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def run(name, program, args):
+    # children of a command that is allowed to run (git hooks, an alias) are not asked again
+    os.environ.pop("BOT_OFFICE_GUARD_SHIM", None)
+    os.execv(program, [name, *args])
+
+
+def refuse(text):
+    sys.stderr.write("Bot-Office guard: " + text + "\n")
+    return 126
+
+
+def loopback(url):
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        return (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost")
+                and parsed.port is not None and not parsed.username and not parsed.password)
+    except ValueError:
+        return False
+
+
+def ask(command, cwd):
+    token = os.environ.get("BOT_OFFICE_AGENT_TOKEN", "")
+    url = os.environ.get("BOT_OFFICE_API_URL", "")
+    if not token or not url or not loopback(url):
+        return False, "no way to ask the owner from here; action refused."
+    event = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd}
+    body = json.dumps({"provider": "shim", "event": event}).encode()
+    request = urllib.request.Request(url.rstrip("/") + "/v1/agent/gate", data=body, method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=TIMEOUT) as response:
+            answer = json.loads(response.read(65536).decode() or "{}")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return False, f"controller unreachable ({type(exc).__name__}); action refused."
+    if answer.get("decision") == "allow":
+        return True, ""
+    return False, str(answer.get("reason") or "action refused.")
+
+
+def main():
+    # bin/git, bin/gh, bin/curl, bin/wget are two-line stubs: `exec bot-office-guard-shim --as <name> "$@"`
+    if len(sys.argv) > 2 and sys.argv[1] == "--as":
+        name, args = os.path.basename(sys.argv[2]), sys.argv[3:]
+    else:
+        name, args = os.path.basename(sys.argv[0]), sys.argv[1:]
+    program = real_program(name)
+    if program is None:
+        return refuse(f"{name}: command not found")
+    if os.environ.get("BOT_OFFICE_GUARD_SHIM") != "1":
+        run(name, program, args)
+    sys.path.insert(0, str(HERE.parent / "src"))
+    try:
+        from botoffice import git_guard
+    except ImportError:
+        return refuse("the guard module is missing; action refused.")
+    command = shlex.join([name, *args])
+    cwd = os.getcwd()
+    if git_guard.classify("Bash", command, None, cwd) is None:
+        run(name, program, args)
+    allowed, why = ask(command, cwd)
+    if allowed:
+        run(name, program, args)
+    return refuse(why)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

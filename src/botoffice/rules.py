@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from . import git_guard
 from .domain import Job
 from .store import JobStore, now
 
@@ -137,6 +138,8 @@ class Action:
     paths: list[str] = field(default_factory=list)
     urls: list[str] = field(default_factory=list)
     text: str = ""  # the input's location strings (no content fields), for the secrets tripwire
+    data: dict = field(default_factory=dict)  # the tool's input, for the git guard (connector tools)
+    cwd: str | None = None  # the CLI's working directory (the bot's workspace), when the hook says
 
     @property
     def detail(self) -> str:
@@ -196,7 +199,12 @@ def parse_event(event: dict) -> Action:
     _strings({k: v for k, v in event.items() if k in ("command", "file_path", "url")}, strings)
     if not tool:
         tool = "Bash" if command else "unknown"
-    return Action(tool=tool, command=command, paths=paths, urls=urls, text="\n".join(strings)[:200_000])
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str):
+        roots = event.get("workspace_roots")
+        cwd = roots[0] if isinstance(roots, list) and roots and isinstance(roots[0], str) else None
+    return Action(tool=tool, command=command, paths=paths, urls=urls, text="\n".join(strings)[:200_000],
+                  data=data, cwd=cwd)
 
 
 def _is_shell(action: Action) -> bool:
@@ -405,6 +413,11 @@ class Rules:
         preset = hits[0] if hits else None
         if "never" in effects:
             return "never", preset, "a rule forbids it"
+        # 0.12.4: the git guard sits above every rule, class, bot setting, run kind and CLI access
+        # level: no "allow" (a rule, a class switched off) reaches past it
+        guarded = git_guard.classify(action.tool, action.command, action.data, action.cwd)
+        if guarded:
+            return "ask", git_guard.PRESET, f"{guarded} always waits for your approval"
         if "ask" in effects:
             return "ask", preset, "a rule asks first"
         if "allow" in effects and not (job.source in STRICT_SOURCES and hits):
