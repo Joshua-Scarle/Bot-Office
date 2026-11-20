@@ -247,3 +247,19 @@ def test_migration_backfills_existing_messages_once_and_is_idempotent(tmp_path):
         assert db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'walrus'").fetchone()[0] == 2000
         db.execute("INSERT INTO messages (bot_id,role,source,text,created_at) VALUES ('b','user','chat','new walrus','2026-01-01T00:00:00+00:00')")
         assert db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'walrus'").fetchone()[0] == 2001
+
+
+def test_triggers_are_dropped_when_fts5_cannot_be_read_and_restored_after(tmp_path, monkeypatch):
+    path = tmp_path / "x.sqlite3"
+    JobStore(path).initialize()
+    monkeypatch.setattr(history, "has_fts", lambda db: False)  # a SQLite build without FTS5 opening the same file
+    JobStore(path).initialize()
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'messages_fts_%'").fetchone()[0] == 0
+        db.execute("INSERT INTO messages (bot_id,role,source,text,created_at) VALUES ('b','user','chat','written meanwhile','2026-01-01T00:00:00+00:00')")
+        db.commit()
+    monkeypatch.undo()
+    JobStore(path).initialize()
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'messages_fts_%'").fetchone()[0] == 3
+        assert db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'meanwhile'").fetchone()[0] == 1

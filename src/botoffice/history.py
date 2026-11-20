@@ -28,7 +28,7 @@ _TRIGGERS = (
 def ensure_fts(db: sqlite3.Connection, meta_set) -> bool:
     """Create and backfill the index once. Returns False (and leaves the database as it was) if FTS5 is missing."""
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone():
-        return has_fts(db)
+        return _sync_triggers(db)
     db.execute("BEGIN IMMEDIATE")
     try:
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='messages_fts'").fetchone():
@@ -52,6 +52,32 @@ def ensure_fts(db: sqlite3.Connection, meta_set) -> bool:
     except BaseException:
         db.rollback()
         raise
+
+
+def _sync_triggers(db: sqlite3.Connection) -> bool:
+    """The index exists. If this SQLite cannot read it (a file copied to a build without FTS5) drop the triggers,
+    so chat writes keep working and search falls back to LIKE; once it can read it again, bring the index up to
+    date and restore the triggers."""
+    usable = has_fts(db)
+    have = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'messages_fts_%'")}
+    if usable and len(have) == len(_TRIGGERS):
+        return True
+    if not usable and not have:
+        return False
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if usable:
+            for ddl in _TRIGGERS:
+                db.execute(ddl)
+            db.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+        else:
+            for name in ("messages_fts_ai", "messages_fts_ad", "messages_fts_au"):
+                db.execute(f"DROP TRIGGER IF EXISTS {name}")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+    return usable
 
 
 def has_fts(db: sqlite3.Connection) -> bool:

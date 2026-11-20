@@ -960,7 +960,9 @@ def slash_commands(page, out: Path, base: str, token: str) -> None:
     box.press("Tab")
     box.press("Enter")
     page.wait_for_function("() => document.getElementById('status').classList.contains('bad')", timeout=10000)
-    check("unavailable" in page.locator("#status").inner_text() and messages() == before, "running a greyed command says why and sends nothing")
+    status_text, after_count = page.locator("#status").inner_text(), messages()
+    check("unavailable" in status_text and after_count == before,
+          f"running a greyed command says why and sends nothing (status {status_text!r}, messages {before} -> {after_count})")
     # confirm-gated
     page.wait_for_function("() => { const b = currentBot(); return b && !['running', 'queued'].includes(b.activity); }", timeout=20000)
     box.fill("")
@@ -1128,12 +1130,24 @@ def history_search(page, out: Path, base: str, token: str, app) -> None:
                            " const r = n.getBoundingClientRect(), b = document.getElementById('messages').getBoundingClientRect(); return r.bottom <= b.bottom + 2 && r.bottom > b.top; }",
                            arg=str(new_id), timeout=10000)
     check(True, "Jump to latest returns to the newest message")
+    # Enter opens the first hit; sending from an older part returns to the newest messages and keeps the echo
+    page.keyboard.press("Control+Shift+F")
+    page.click("#search-scope-bot")
+    page.fill("#search-input", "zebra")
+    page.wait_for_function("() => [...document.querySelectorAll('.search-hit mark')].some((m) => m.textContent.toLowerCase() === 'zebra')", timeout=10000)
+    page.locator("#search-input").press("Enter")
+    page.wait_for_selector("#jump-latest:not([hidden])", timeout=10000)
+    send_with_enter(page, "sent from an older part")
+    page.wait_for_function("() => document.getElementById('jump-latest').hidden", timeout=15000)
+    check(wait_text(page, "sent from an older part", 10000) and page.locator("#thread").get_by_text("sent from an older part", exact=True).count() == 1,
+          "sending from an older part returns to the newest messages; the message shows once")
     # a hit in another bot selects that bot
     page.keyboard.press("Control+Shift+F")
     page.click("#search-scope-all")
     page.fill("#search-input", "another needle")
-    page.locator(".search-hit").first.wait_for(timeout=10000)
-    page.locator(".search-hit").first.click()
+    hit = page.locator(".search-hit", has_text="another needle in the other bot")
+    hit.first.wait_for(timeout=10000)
+    hit.first.click()
     page.wait_for_function("(n) => document.getElementById('head-name').textContent === n", arg=ADA, timeout=10000)
     check(page.locator("#head-name").inner_text() == ADA and wait_text(page, "another needle in the other bot", 10000), "a hit in another bot opens that bot at the message")
 

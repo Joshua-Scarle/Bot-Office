@@ -3033,7 +3033,7 @@ $("composer").onsubmit = async (event) => {
   const body = { text: text || (sentImages.every((item) => item.file) ? "Please see the attached files." : sentImages.some((item) => item.file) ? "Please see the attachments." : "Please see attached images."), attachments: sentImages.map((item) => item.id) };
   if (bot.activity === "running" || bot.activity === "queued") body.mode = $("queue-next").checked ? "queue" : "steer";
   sendingImages = true; for (const item of sentImages) item.sending = true; updateImages();
-  if (state.hist && state.hist.detached) { state.hist = newHist(null); state.stickBottom = true; state.msgSig = ""; loadMessages().catch(() => {}); }
+  if (state.hist && state.hist.detached) { state.hist = newHist(null); state.stickBottom = true; state.msgSig = ""; await loadMessages().catch(() => {}); }  // the echo needs the newest id (shown.max)
   const echo = showEcho(bot, text, sentImages.length);
   if (!sentImages.length) { $("text").value = ""; autoGrow(); }  // a failed send puts the draft back (below)
   try {
