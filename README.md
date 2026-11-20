@@ -277,7 +277,7 @@ Because the API listens on loopback only, a **heartbeat pusher** on the VPS (`sc
    systemctl --user daemon-reload && systemctl --user enable --now bot-office-heartbeat.timer
    systemctl --user start bot-office-heartbeat.service   # one push now; check: systemctl --user status bot-office-heartbeat
    ```
-   The service runs `scripts/healthz_push.py` from `~/printpilot-agentdesk/`; the pusher refuses a secret file that is not mode 0600.
+   The service runs `scripts/healthz_push.py` from the install directory; the pusher refuses a secret file that is not mode 0600.
 6. **Test the alert:** `systemctl --user stop bot-office-heartbeat.timer`, wait about 20 minutes for the mail, then start the timer again and wait for the recovery mail.
 
 ### Rollback

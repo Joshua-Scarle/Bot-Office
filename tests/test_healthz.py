@@ -25,7 +25,7 @@ def _iso(hours_ago):
 
 def test_healthz_shape_no_auth_and_no_secrets(settings, tmp_path, monkeypatch):
     status = _status(tmp_path, state="ok", started=_iso(3), finished=_iso(2), bytes=123,
-                     error="boom /home/ubuntu/.secret-path token=abc")
+                     error="boom /srv/x/.secret-path token=abc")
     monkeypatch.setenv(health.BACKUP_STATUS_ENV, str(status))
     with TestClient(create_app(settings)) as client:
         resp = client.get("/healthz")  # no Authorization header
