@@ -112,6 +112,15 @@ class E2EEngine:
                         f"BOT-OFFICE-STATUS: waiting_on_user — approval #{decision.approval_id}")
             else:
                 text = f"I couldn't send it: {decision.reason}\n\nBOT-OFFICE-STATUS: blocked — refused"
+        elif "e2e-send-files" in prompt:  # 0.12.4: a bot sends files of several types, as bot-office-attach would
+            from botoffice.outgoing_images import SIDECAR
+            names = {"report.pdf": b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n",
+                     "numbers.csv": b"item,qty\nbolt,12\nnut,30\n", "bundle.zip": b"PK\x03\x04e2e",
+                     "page.html": b"<h1>HTML-SHOULD-NOT-RENDER</h1><script>document.title='pwned'</script>"}
+            for name, data in names.items():
+                (workspace / name).write_bytes(data)
+            (workspace / SIDECAR).write_text("".join(f"{workspace / n}\n" for n in names))
+            text = "Four files attached.\n\nBOT-OFFICE-STATUS: done"
         else:
             text = f"{REPLY}\n\nBOT-OFFICE-STATUS: done"
         return RunResult("succeeded", exit_code=0, final_text=text)
@@ -848,6 +857,48 @@ def file_uploads(page, out: Path, base: str, token: str) -> None:
     check(status == 413, f"an oversize file is refused with 413 ({detail[:80]})")
 
 
+def outgoing_files(page, out: Path, base: str, token: str) -> None:
+    print("Files from a bot to the owner (0.12.4)")
+    send_with_enter(page, "e2e-send-files please")
+    try:
+        page.wait_for_function("() => document.querySelectorAll('#thread .file-chip').length >= 4", timeout=60000)
+    except Exception:  # noqa: BLE001
+        shot(page, out, "files-missing")
+        print("  thread text:", page.locator("#thread").inner_text()[-600:])
+        check(False, "the bot's four files arrive as chips")
+        return
+    page.wait_for_function("() => [...document.querySelectorAll('#thread .file-chip .file-size')].every((s) => s.textContent !== '')", timeout=10000)
+    chips = page.locator("#thread .file-chip").all_inner_texts()
+    check(all(any(n in c for c in chips) for n in ("report.pdf", "numbers.csv", "bundle.zip", "page.html")), f"four file chips with names ({chips})")
+    check(all(("B" in c) for c in chips), "every chip shows a size")
+    check(any("📕" in c and "report.pdf" in c for c in chips) and any("🗜" in c for c in chips), "icons follow the file type")
+    previews = page.locator("#thread .file-preview-btn")
+    previews.first.wait_for(timeout=10000)
+    page.wait_for_timeout(500)
+    check(previews.count() == 2, f"only the PDF and the CSV have a Preview button ({previews.count()})")
+    page.locator("#thread").evaluate("(node) => node.scrollTo(0, node.scrollHeight)")
+    shot(page, out, "files-chat")
+    csv_group = page.locator("#thread .file-group", has_text="numbers.csv")
+    csv_group.locator(".file-preview-btn").click()
+    page.wait_for_selector("#file-preview[open] .file-preview-text", timeout=10000)
+    check("bolt,12" in page.locator("#file-preview-body").inner_text(), "the CSV previews as text")
+    shot(page, out, "files-preview")
+    page.locator("#file-preview-close").click()
+    page.locator("#thread .file-group", has_text="report.pdf").locator(".file-preview-btn").click()
+    page.wait_for_selector("#file-preview[open] iframe.file-preview-pdf", timeout=10000)
+    check(True, "the PDF opens in the preview dialog")
+    page.locator("#file-preview-close").click()
+    html_group = page.locator("#thread .file-group", has_text="page.html")
+    check(html_group.locator(".file-preview-btn").count() == 0, "an HTML file has no preview")
+    with page.expect_download(timeout=10000) as info:
+        html_group.locator(".file-chip").click()
+    check(info.value.suggested_filename == "page.html", "the HTML file downloads, it does not open")
+    check("HTML-SHOULD-NOT-RENDER" not in page.locator("body").inner_text() and page.title() != "pwned", "HTML was not rendered in the page")
+    with page.expect_download(timeout=10000) as info:
+        page.locator("#thread .file-group", has_text="bundle.zip").locator(".file-chip").click()
+    check(info.value.suggested_filename == "bundle.zip", "the zip downloads")
+
+
 # --- 0.11.14: slash commands in the chat box ---
 
 def slash_commands(page, out: Path, base: str, token: str) -> None:
@@ -1071,6 +1122,10 @@ def main() -> int:
                 open_bot(page, ADA)
                 upload_read(page, out)
                 compact_status(page, out, base, TOKEN)
+                call(base, TOKEN, "POST", "/v1/bots", {"name": "E2E test bot Dee", "default_provider": "codex"})
+                page.reload()
+                open_bot(page, "E2E test bot Dee")  # a fresh bot: no held continuation to answer instead
+                outgoing_files(page, out, base, TOKEN)
                 server.should_exit = True
         check(not errors, "no JavaScript errors" + (f": {errors[:3]}" if errors else ""))
         browser.close()
