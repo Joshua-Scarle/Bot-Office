@@ -363,7 +363,7 @@ def test_hidden_section_always_exists_collapsed_and_is_not_a_regular_section(cli
 def test_hidden_cannot_be_renamed_deleted_or_reordered_and_its_name_is_reserved(client):
     assert client.patch("/v1/sections/hidden", headers=H, json={"name": "Nope"}).status_code == 409
     assert client.delete("/v1/sections/hidden", headers=H).status_code == 409
-    for name in ("Hidden", "hidden", "HIDDEN", " hidden ", "Ｈidden", "Hid​den", "hİdden".replace("İ", "i")):
+    for name in ("Hidden", "hidden", "HIDDEN", " hidden ", "\uff28idden", "Hid\u200bden", "Hidden\u034f", "Hidden\ufe0f", "Ungrouped\u034f"):
         assert client.post("/v1/sections", headers=H, json={"name": name}).status_code == 409, name
     other = client.post("/v1/sections", headers=H, json={"name": "Work"}).json()["id"]
     assert client.patch(f"/v1/sections/{other}", headers=H, json={"name": "HiDdEn"}).status_code == 409

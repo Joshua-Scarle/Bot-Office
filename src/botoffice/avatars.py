@@ -75,16 +75,10 @@ def is_character(seed) -> bool:
 
 
 def default_character(bot_id, used=()) -> str:
-    """A new bot's starting character: among the shape+color pairs *used* least by the other bots, the one the
-    bot's id hashes to (stable; a small office gets distinct faces)."""
-    counts = {character_seed(sh, co): 0 for sh in CHAR_SHAPES for co in CHAR_COLORS}
-    for seed in used:
-        if seed in counts:
-            counts[seed] += 1
-    least = min(counts.values())
-    pool = [seed for seed in counts if counts[seed] == least]
-    digest = hashlib.sha256(str(bot_id).encode()).digest()
-    return pool[int.from_bytes(digest[:4], "big") % len(pool)]
+    """A new bot's starting character: a pure function of its id (0.12.12; before, it was steered away from the
+    characters other bots already had). *used* is accepted for old callers and ignored: the same id always gets
+    the same character, whatever else exists."""
+    return derived_character(bot_id)
 
 
 def derived_character(key) -> str:

@@ -87,12 +87,12 @@ def test_character_catalog_and_page_lists_agree(client):
     assert json.loads(exprs) == cat["expressions"]
 
 
-def test_default_characters_are_distinct_and_stable():
-    used = []
-    for i in range(20):
-        used.append(avatars.default_character(f"bot-{i}", used))
-    assert len(set(used)) == 20 and all(avatars.is_character(s) for s in used)
-    assert avatars.default_character("x", used) == avatars.default_character("x", used)
+def test_default_characters_are_a_pure_function_of_the_id():
+    ids = [f"bot-{i}" for i in range(200)]
+    seeds = [avatars.default_character(i) for i in ids]
+    assert all(avatars.is_character(s) for s in seeds) and len(set(seeds)) > 60
+    assert seeds == [avatars.default_character(i, used=seeds) for i in ids]     # other bots do not change it
+    assert avatars.default_character("x") == avatars.default_character("x", ["char|star|red"]) == avatars.derived_character("x")
 
 
 def test_rollback_safe_marker_is_not_a_generator_seed(client):

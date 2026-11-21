@@ -1278,6 +1278,7 @@ async function toggleSection(sec) {
   if (!state.sections) return;
   if ($("bot-search").value.trim()) { setStatus("Clear the search to collapse or expand sections."); announce(""); requestAnimationFrame(() => announce("Clear the search to collapse or expand sections")); return; }   // a search shows every match
   const next = !sec.collapsed;
+  if (sec.id === "hidden" && !state.sections.hidden) state.sections.hidden = { id: "hidden", name: "Hidden", builtin: true, collapsed: true, bot_ids: [] };
   const target = sec.id === "ungrouped" ? state.sections.ungrouped : sec.id === "hidden" ? state.sections.hidden : state.sections.sections.find((s) => s.id === sec.id);
   if (target) target.collapsed = next;
   renderBots();
@@ -3996,6 +3997,7 @@ function buildCharPicker() {
   }));
 }
 document.querySelectorAll("#f-kind button").forEach((b) => { b.onclick = () => chooseKind(b.dataset.kind); });
+$("f-hidden").addEventListener("change", () => { state.hiddenTouched = true; });
 $("f-kind").addEventListener("keydown", (event) => {   // radio group: arrows move the choice, one tab stop
   const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
   if (!step) return;
@@ -4056,10 +4058,10 @@ async function openDialog(bot) {
   $("f-bot-steer").checked = !bot || bot.bot_steer !== false;
   $("f-chat-only").checked = Boolean(bot && bot.chat_only);
   state.hiddenAtOpen = Boolean(bot && state.sections && state.sections.hidden && state.sections.hidden.bot_ids.includes(bot.id));
-  $("f-hidden").checked = state.hiddenAtOpen;
+  $("f-hidden").checked = state.hiddenAtOpen; state.hiddenTouched = false;
   if (bot) loadSections().then(() => {   // the sidebar layout may be stale: take the bot's current membership, unless the box was already touched
     const now = Boolean(state.sections && state.sections.hidden && state.sections.hidden.bot_ids.includes(bot.id));
-    if (state.editing === bot && $("f-hidden").checked === state.hiddenAtOpen) { state.hiddenAtOpen = now; $("f-hidden").checked = now; }
+    if (state.editing === bot && !state.hiddenTouched && !$("dialog-save").disabled) { state.hiddenAtOpen = now; $("f-hidden").checked = now; }
   }).catch(() => {});
   $("f-allow-sudo").checked = Boolean(bot && bot.allow_sudo);
   $("f-scheduled-runs").value = bot && bot.scheduled_runs === "gated" ? "gated" : "full";
