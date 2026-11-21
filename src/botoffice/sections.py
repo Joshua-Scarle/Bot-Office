@@ -61,7 +61,10 @@ def _strip_marks(text: str) -> str:
 
 def reserved_key(name: str) -> str:
     """Case-, width-, invisible-character- and combining-mark-insensitive form used to compare against the reserved names.
-    Marks go before AND after casefolding: casefold turns U+0345 (a mark) into a letter and can add marks of its own."""
+    Marks go before AND after casefolding: casefold turns U+0345 (a mark) into a letter and can add marks of its own.
+    Deliberately NOT done: folding visually confusable letters (Cyrillic or Greek capitals, Latin small capitals such as U+026A).
+    The list is open-ended and a lookalike section is only a section: the built-in one is found by its fixed id, so a
+    lookalike name gains nothing (no membership, no collapse state, no deletion rights); it can only look similar."""
     text = _strip_marks(unicodedata.normalize("NFKD", name))
     return _strip_marks(unicodedata.normalize("NFKD", text.casefold())).strip()
 

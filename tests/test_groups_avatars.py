@@ -495,3 +495,11 @@ def test_migration_turns_patterns_into_derived_characters_once_and_keeps_a_backu
 
 def test_character_seed_is_not_a_usable_generator_seed_so_old_code_falls_back_to_the_emoji():
     assert not avatars.valid_seed(avatars.derived_character("x"))
+
+
+def test_reserved_name_comparison_does_not_fold_lookalike_letters_by_design():
+    """Documented limit: only case, width, invisible characters and combining marks are folded. A lookalike is a plain
+    user section; the built-in Hidden section is addressed by its fixed id, so it cannot be taken over or shadowed."""
+    from botoffice import sections
+    assert sections.reserved_key("H\u026aDDEN") != "hidden" and sections.reserved_key("\u041didden") != "hidden"
+    assert sections.reserved_key("\uff28\u1d35dden \u200f") == "hidden"
