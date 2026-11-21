@@ -234,3 +234,107 @@ assert.ok(Math.max(...r) < 20 && Math.min(...r) > 13, Math.min(...r) + " " + Mat
 console.log(peaks);
 ''')
     assert out.strip() == "6"
+
+
+# ---------------------------------------------------------------- eyes follow the pointer (0.12.20)
+_EYE_HARNESS = '''
+const assert = require("assert");
+const state = {};
+let reduce = false, frames = [], cancelled = 0, listeners = {};
+const matchMedia = (q) => ({matches: reduce && q.includes("reduce")});
+const requestAnimationFrame = (fn) => { frames.push(fn); return frames.length; };
+const cancelAnimationFrame = () => { cancelled++; frames = []; };
+const flush = (n = 400) => { for (let i = 0; i < n && frames.length; i++) { const f = frames; frames = []; f.forEach((fn) => fn()); } };
+const eyes = {style: {transform: "", removeProperty(k) { this.transform = ""; }}};
+const node = {dataset: {shape: "droplet"}, cls: new Set(), classList: {toggle(c, on) { on ? node.cls.add(c) : node.cls.delete(c); }},
+  getBoundingClientRect: () => ({left: 100, top: 100, width: 56, height: 56}), querySelector: () => eyes};
+const document = {querySelector: () => node, addEventListener: (t, f) => { listeners["doc:" + t] = f; }};
+const window = {addEventListener: (t, f) => { listeners[t] = f; }};
+const off = () => (eyes.style.transform.match(/-?[\\d.]+/g) || [0, 0]).map(Number);
+'''
+
+
+def test_eye_offset_is_clamped_to_a_small_radius_for_every_shape():
+    code = _slice("const CHAR_SHAPES", "// the badge for emoji")
+    _node(_EYE_HARNESS + code + '''
+for (const shape of CHAR_SHAPES) {
+  const max = eyeLimit(shape);
+  assert.ok(max > 0 && max <= 2.2, shape);
+  for (const [dx, dy] of [[1e6, 1e6], [-1e6, 3], [0, -9e9], [50, -20], [0.5, 0.5], [0, 0]]) {
+    const [x, y] = eyeOffset(dx, dy, max);
+    assert.ok(Math.hypot(x, y) <= max + 1e-9, shape + " " + dx + "," + dy);
+  }
+  const [x, y] = eyeOffset(1e6, 1e6, max);
+  assert.ok(x > 0 && y > 0 && Math.abs(Math.hypot(x, y) - max) < 1e-9);   // far away: full travel, towards the pointer
+}
+// the low droplet eyes (cy 30, gap 6.5) stay inside the round belly (centre 24,30, radius 15.5 with its stroke)
+const [cy, gap] = CHAR_FACE.droplet, m = eyeLimit("droplet");
+for (const a of [0, 1, 2, 3, 4, 5, 6, 7]) {
+  const [ox, oy] = [Math.cos(a * Math.PI / 4) * m, Math.sin(a * Math.PI / 4) * m];
+  assert.ok(Math.hypot(gap + 1.9 + ox, 4.2 + oy) < 15.5);
+}
+''')
+
+
+def test_tracking_uses_raf_eases_back_on_leave_and_stops_the_loop():
+    code = _slice("const CHAR_SHAPES", "// the badge for emoji")
+    _node(_EYE_HARNESS + code + '''
+eyeTrack();
+assert.ok(listeners.pointermove && listeners["doc:mouseleave"] && listeners["doc:mouseout"]);
+const installed = Object.keys(listeners).length;
+eyeTrack(); assert.equal(Object.keys(listeners).length, installed);          // installed once
+assert.equal(frames.length, 0);
+listeners.pointermove({clientX: 5000, clientY: 5000});                        // far down-right of the face
+assert.equal(frames.length, 1);                                               // the event only schedules a frame
+assert.equal(off()[0], 0 + off()[0]);
+flush();
+const [x, y] = off();
+assert.ok(x > 0 && y > 0 && Math.hypot(x, y) <= eyeLimit("droplet") + 0.01, String([x, y]));
+assert.ok(node.cls.has("tracking"));
+assert.equal(frames.length, 0);                                               // settled: the loop stopped itself
+listeners.pointermove({clientX: -5000, clientY: 0});
+flush(); assert.ok(off()[0] < 0);
+listeners["doc:mouseleave"]();                                                // pointer leaves the window
+assert.equal(frames.length, 1);
+flush();
+assert.equal(eyes.style.transform, "");                                       // back at centre, offset cleared
+assert.ok(!node.cls.has("tracking"));                                         // canned animation can resume
+assert.equal(frames.length, 0);
+listeners.pointermove({clientX: 0, clientY: 0}); flush();
+listeners["doc:mouseout"]({relatedTarget: null}); flush();
+assert.equal(eyes.style.transform, "");                                       // mouseout of the page works too
+listeners.pointermove({clientX: 0, clientY: 0});
+listeners["doc:mouseout"]({relatedTarget: {}}); assert.ok(EYE.ptr);           // moving between elements does not count
+eyeStop(); assert.equal(frames.length, 0); assert.ok(cancelled >= 1);
+''')
+
+
+def test_tracking_is_a_noop_under_reduced_motion():
+    code = _slice("const CHAR_SHAPES", "// the badge for emoji")
+    _node(_EYE_HARNESS + code + '''
+reduce = true;
+eyeTrack();
+listeners.pointermove({clientX: 5000, clientY: 5000});
+assert.equal(frames.length, 0); assert.equal(EYE.ptr, null);
+assert.equal(eyes.style.transform, ""); assert.ok(!node.cls.has("tracking"));
+reduce = false;                                                               // preference flips on mid-track: eyes recentre
+listeners.pointermove({clientX: 5000, clientY: 5000}); flush();
+assert.ok(node.cls.has("tracking"));
+reduce = true; listeners.pointermove({clientX: 1, clientY: 1});
+assert.equal(frames.length, 0); assert.equal(EYE.ptr, null);
+eyeKick(); flush();
+assert.equal(eyes.style.transform, ""); assert.ok(!node.cls.has("tracking"));
+''')
+
+
+def test_eyes_group_css_and_hello_hook():
+    for shape_expr in ("eyes look", '"eyes"'):
+        assert shape_expr in PAGE
+    css = PAGE[PAGE.index(".avatar.is-char"):PAGE.index(".avatar.lg {")]
+    gate = css.index("@media (prefers-reduced-motion: no-preference)")
+    assert ".char.tracking .look { animation-name: none; }" in css and css.index(".char.tracking") > gate
+    assert css.count("animation:") == 2                       # tracking added no new animation
+    hello = PAGE[PAGE.index('"Say hello to "'):]
+    assert "eyeTrack();" in hello[:200]
+    block = _slice("const CHAR_SHAPES", "// the badge for emoji")
+    assert "innerHTML" not in block and "requestAnimationFrame" in block and "cancelAnimationFrame" in block
