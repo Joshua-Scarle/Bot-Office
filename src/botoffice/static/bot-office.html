@@ -3954,7 +3954,7 @@ function updateIconPreview() {
   document.querySelectorAll(".kind-panel").forEach((p) => { p.hidden = p.dataset.panel !== state.kind; });
 }
 // which avatar type the saved bot has, as a picker choice
-function kindOf(bot) { return !bot ? "character" : bot.avatar === "upload" ? "upload" : bot.avatar === "character" ? "character" : "emoji"; }   // 0.12.11: no Pattern tab; an old pattern bot opens on Character
+function kindOf(bot) { return !bot ? "character" : bot.avatar === "upload" ? "upload" : bot.avatar === "character" || bot.avatar === "generated" ? "character" : "emoji"; }   // 0.12.11: no Pattern tab; an old pattern bot (API-only now) opens on Character and keeps its pattern until a shape is chosen
 // Each tab keeps its own pending choice, so moving between tabs never loses work and the saved result is always the open tab's
 function pendingSnapshot() { return { char: state.pendingChar, seed: state.pendingSeed, remove: state.removeImage, image: state.pendingImage }; }
 function chooseKind(kind) {
@@ -4057,6 +4057,10 @@ async function openDialog(bot) {
   $("f-chat-only").checked = Boolean(bot && bot.chat_only);
   state.hiddenAtOpen = Boolean(bot && state.sections && state.sections.hidden && state.sections.hidden.bot_ids.includes(bot.id));
   $("f-hidden").checked = state.hiddenAtOpen;
+  if (bot) loadSections().then(() => {   // the sidebar layout may be stale: take the bot's current membership, unless the box was already touched
+    const now = Boolean(state.sections && state.sections.hidden && state.sections.hidden.bot_ids.includes(bot.id));
+    if (state.editing === bot && $("f-hidden").checked === state.hiddenAtOpen) { state.hiddenAtOpen = now; $("f-hidden").checked = now; }
+  }).catch(() => {});
   $("f-allow-sudo").checked = Boolean(bot && bot.allow_sudo);
   $("f-scheduled-runs").value = bot && bot.scheduled_runs === "gated" ? "gated" : "full";
   $("f-digest").checked = Boolean(bot && bot.digest);
