@@ -5,17 +5,33 @@
     python3 scripts/survival_drill.py reset --engine codex                      # plant, probe A, reset, probe C on another engine
     python3 scripts/survival_drill.py restart cursor antigravity opencode       # mid-job restart, after-finish restart, follow-up
 
-Reads the master token from data/token itself (never printed). Bots are named "ZZ drill e5 <purpose> (safe to
-delete)" and deleted afterwards, also on failure. Raw events go to --out (JSONL, no secrets). `restart` restarts
-the service (systemctl --user restart bot-office) only after safety checks: no queued/running job on a bot that is
-not a drill bot, no routine firing within 3 minutes, service older than 3 minutes, no install/rebase/restart
-process of someone else; otherwise it waits (60 s polls, up to 20 min) and records the restart as UNVERIFIED.
-Never touches any bot it did not create.
+Reads the master token from data/token itself (never printed; every line the script prints or logs is redacted
+centrally). Bots are named "ZZ drill e5 <purpose> (safe to delete)" and deleted afterwards, also on failure. Raw
+events go to --out (JSONL, no secrets). `restart` restarts the service (systemctl --user restart bot-office) only
+through the guard below, and never touches a bot it did not create.
+
+Restart guard (fails CLOSED: anything it cannot read or parse is a blocker, never "fine"):
+- the bots list must be readable and contain "Printer Writing Bot" (looked up by name); no queued/running job on it,
+  on any other bot that is not a drill bot, or in a malformed jobs reply;
+- every other bot's routines must be readable and parseable; none may fire within 3 minutes;
+- the service must be older than 3 minutes; pgrep must work and show no other install.sh / deploy / git rebase|merge /
+  systemctl restart|stop of bot-office / survival_drill process (this process and its parents are ignored);
+- no maintenance PAUSE file of someone else.
+Then the scheduler's maintenance pause (touch <data>/PAUSE; no new claim, routine, wake-up or watcher starts) is
+held across the restart: pause, wait for /healthz to acknowledge it, run the whole blocker check again, restart,
+wait for the service to answer, remove the pause. systemctl's exit status and the service coming back are checked;
+a failed restart is a failure (exit code 1), not a success. A blocked restart is retried every 60 s for 20 min,
+then skipped and reported UNVERIFIED.
+Residual race: the pause stops a Printer Writing Bot job from being CLAIMED after the check, but the API can still
+queue one (it then waits for the pause to end, queued across the restart, and starts afterwards). The last check runs
+immediately before systemctl to keep that window to milliseconds. A service version without /healthz `paused`
+(before 0.12.13) has no pause: the script says so and relies on the last-moment recheck alone.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import subprocess
@@ -50,11 +66,15 @@ class Desk:
         self.base, self.token, self.log = base.rstrip("/"), token_file.read_text().strip(), log
         self.log.parent.mkdir(parents=True, exist_ok=True)
 
+    def redact(self, text: str) -> str:
+        """The one place the token is scrubbed: every printed or logged line, HTTP body and process line goes here."""
+        return text.replace(self.token, "[token]") if self.token else text
+
     def note(self, kind: str, **fields) -> None:
         line = {"t": datetime.now(UTC).isoformat(timespec="seconds"), "kind": kind, **fields}
         with self.log.open("a") as handle:
-            handle.write(json.dumps(line, ensure_ascii=False) + "\n")
-        print(kind, json.dumps(fields, ensure_ascii=False)[:300], flush=True)
+            handle.write(self.redact(json.dumps(line, ensure_ascii=False)) + "\n")
+        print(self.redact(kind + " " + json.dumps(fields, ensure_ascii=False)[:300]), flush=True)
 
     def call(self, method: str, path: str, body=None, raw: bytes | None = None):
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
@@ -66,9 +86,9 @@ class Desk:
                 payload = response.read()
                 return response.status, (json.loads(payload) if payload else None)
         except urllib.error.HTTPError as exc:
-            return exc.code, exc.read().decode(errors="replace")[:300]
+            return exc.code, self.redact(exc.read().decode(errors="replace"))[:300]
         except (urllib.error.URLError, OSError) as exc:
-            return 0, str(exc)[:200]
+            return 0, self.redact(str(exc))[:200]
 
     def job(self, job_id: str) -> dict:
         _, body = self.call("GET", f"/v1/jobs/{job_id}")
@@ -259,78 +279,203 @@ def mode_reset(desk: Desk, args, created: list[str]) -> dict:
 
 # ---------------------------------------------------------------- restart drill
 
-def service_age() -> float:
-    out = subprocess.run(["systemctl", "--user", "show", "bot-office", "-p", "ActiveEnterTimestampMonotonic"],
-                         capture_output=True, text=True, check=False).stdout.strip().split("=")[-1]
-    up = subprocess.run(["cat", "/proc/uptime"], capture_output=True, text=True, check=False).stdout.split()[0]
+PWB_NAME = "printer writing bot"  # compared case-insensitively against bot names; never touched, only looked at
+PAUSE_FILE = "PAUSE"
+BUSY = ("queued", "running")
+PROCESS_PATTERN = (r"install\.sh|first_deploy|deploy[\w.-]*\.sh|\bgit\b.* (?:rebase|merge|pull|checkout|reset)\b"
+                   r"|systemctl.*(?:restart|stop|kill).*bot-office|survival_drill")
+
+
+def run_cmd(argv: list[str], timeout: int = 60) -> tuple[int, str]:
+    """(exit status, stdout); a command that cannot run at all is (-1, reason). Tests replace this."""
     try:
-        return float(up) - int(out) / 1e6
-    except ValueError:
-        return 0.0
+        done = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return -1, str(exc)
+    return done.returncode, done.stdout
 
 
-def restart_blockers(desk: Desk, mine: set[str], mine_idle: bool = False) -> list[str]:
-    """*mine_idle*: a drill bot's own queued/running job also blocks (the after-finish restart must not hit it)."""
+def service_age(run=run_cmd) -> float | None:
+    """Seconds since the service became active, or None when it cannot be read."""
+    code, out = run(["systemctl", "--user", "show", "bot-office", "-p", "ActiveEnterTimestampMonotonic"])
+    code2, up = run(["cat", "/proc/uptime"])
+    try:
+        if code != 0 or code2 != 0:
+            return None
+        started = int(out.strip().split("=")[-1])
+        return float(up.split()[0]) - started / 1e6 if started else None
+    except (ValueError, IndexError):
+        return None
+
+
+def own_pids() -> set[str]:
+    """This process and its parents (the shell or ssh that started it): their command lines name this script."""
+    pids, pid = set(), os.getpid()
+    while pid > 1 and str(pid) not in pids:
+        pids.add(str(pid))
+        try:
+            pid = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return pids
+
+
+def process_blockers(desk: Desk, run=run_cmd, ignore: set[str] | None = None) -> list[str]:
+    code, out = run(["pgrep", "-af", PROCESS_PATTERN])
+    if code == 1:
+        return []  # pgrep's own "no match"
+    if code != 0:
+        return [f"pgrep failed (exit {code}): cannot tell whether a deploy or restart is running"]
+    ignore = own_pids() if ignore is None else ignore
+    found = []
+    for line in out.splitlines():
+        pid = line.split(None, 1)[0] if line.strip() else ""
+        if pid in ignore or os.path.basename((line.split() + ["", ""])[1]) == "pgrep":
+            continue
+        found.append("process: " + desk.redact(line)[:80])
+    return found
+
+
+def routine_blockers(desk: Desk, bots: list[dict], mine: set[str], now: datetime) -> list[str]:
+    # routines are scheduled in New York time, not UTC
+    from botoffice.cron import cron_matches, to_cron_time
+
     blockers = []
-    status, bots = desk.call("GET", "/v1/bots")
-    if status != 200 or not isinstance(bots, list):
-        return [f"bots api {status}"]
-    names = {b["id"]: b["name"] for b in bots}
-    status, jobs = desk.call("GET", "/v1/jobs")
-    if status != 200 or not isinstance(jobs, list):
-        return [f"jobs api {status}"]
-    for job in jobs:
-        if job.get("status") in ("queued", "running") and (job.get("bot_id") not in mine or mine_idle):
-            blockers.append(f"job {job['id'][:8]} {job['status']} on {names.get(job.get('bot_id'), '?')}")
-    from botoffice.cron import cron_matches
-    now = datetime.now(UTC)
     for bot in bots:
         if bot["id"] in mine:
             continue
         status, routines = desk.call("GET", f"/v1/bots/{bot['id']}/routines")
-        for routine in routines if status == 200 and isinstance(routines, list) else []:
+        if status != 200 or not isinstance(routines, list):
+            blockers.append(f"routines api {status} for {bot.get('name', '?')}: cannot tell what fires soon")
+            continue
+        for routine in routines:
+            if not isinstance(routine, dict):
+                blockers.append(f"malformed routine of {bot.get('name', '?')}")
+                continue
             if not routine.get("enabled", True):
                 continue
-            for minute in range(4):
-                try:
-                    if cron_matches(routine["cron"], now + timedelta(minutes=minute)):
-                        blockers.append(f"routine of {bot['name']} fires within {minute} min")
-                        break
-                except Exception:  # noqa: BLE001 - a routine we cannot parse is not our blocker
-                    break
-    age = service_age()
-    if age < 180:
-        blockers.append(f"service only {age:.0f}s old")
-    others = subprocess.run(["pgrep", "-af", r"install\.sh|git rebase|systemctl.*restart"], capture_output=True, text=True, check=False).stdout
-    mine_pid = str(subprocess.os.getpid())
-    for line in others.splitlines():
-        if mine_pid not in line.split()[0:1] and "pgrep" not in line and "survival_drill" not in line:
-            blockers.append("process: " + line[:80])
+            try:
+                firing = next((m for m in range(4) if cron_matches(routine["cron"], to_cron_time(now + timedelta(minutes=m)))), None)
+            except Exception:  # noqa: BLE001 - a schedule we cannot parse might fire at any moment
+                blockers.append(f"unparseable routine schedule of {bot.get('name', '?')}")
+                continue
+            if firing is not None:
+                blockers.append(f"routine of {bot.get('name', '?')} fires within {firing} min")
     return blockers
 
 
-def safe_restart(desk: Desk, mine: set[str], label: str, mine_idle: bool = False) -> bool:
-    end = time.monotonic() + 20 * 60
+def restart_blockers(desk: Desk, mine: set[str], mine_idle: bool = False, run=run_cmd, now: datetime | None = None,
+                     data: Path | None = None, own_pause: bool = False) -> list[str]:
+    """Everything that forbids a restart right now. Empty means the restart may go ahead.
+    *mine_idle*: a drill bot's own queued/running job also blocks (the after-finish restart must not hit it)."""
+    status, bots = desk.call("GET", "/v1/bots")
+    if status != 200 or not isinstance(bots, list) or not all(isinstance(b, dict) and "id" in b for b in bots):
+        return [f"bots api unreadable ({status}): cannot check the Printer Writing Bot"]
+    pwb = {b["id"] for b in bots if PWB_NAME in str(b.get("name", "")).strip().casefold()}
+    if not pwb:
+        return ["Printer Writing Bot not found in the bots list: cannot prove it is idle"]
+    names = {b["id"]: b.get("name", "?") for b in bots}
+    status, jobs = desk.call("GET", "/v1/jobs")
+    if status != 200 or not isinstance(jobs, list):
+        return [f"jobs api unreadable ({status})"]
+    blockers = []
+    for job in jobs:
+        if not isinstance(job, dict) or "status" not in job:
+            blockers.append("malformed job entry in the jobs list")
+            continue
+        if job["status"] not in BUSY:
+            continue
+        bot_id, label = job.get("bot_id"), f"job {str(job.get('id', '?'))[:8]} {job['status']}"
+        if bot_id in pwb:
+            blockers.append(f"PRINTER WRITING BOT {label}")
+        elif bot_id not in mine or mine_idle:
+            blockers.append(f"{label} on {names.get(bot_id, 'a job without a bot')}")
+    blockers += routine_blockers(desk, bots, mine, now or datetime.now(UTC))
+    age = service_age(run)
+    if age is None:
+        blockers.append("service age unreadable")
+    elif age < 180:
+        blockers.append(f"service only {age:.0f}s old")
+    blockers += process_blockers(desk, run)
+    if not own_pause and (data or DATA).joinpath(PAUSE_FILE).exists():
+        blockers.append("a maintenance PAUSE file already exists (someone else is quiescing the service)")
+    return blockers
+
+
+def pause_state(desk: Desk) -> dict | None:
+    """/healthz when it has the maintenance pause fields (0.12.13+), else None (no pause on this version)."""
+    status, body = desk.call("GET", "/healthz")
+    return body if status == 200 and isinstance(body, dict) and "pause_requested" in body else None
+
+
+def pause_scheduler(desk: Desk, data: Path, sleep=time.sleep, limit: int = 60) -> str:
+    """touch PAUSE and wait until the scheduler acknowledges it: "paused", "unsupported" (no pause on this
+    service version; nothing created) or "failed" (the file is removed again)."""
+    if pause_state(desk) is None:
+        return "unsupported"
+    path = data / PAUSE_FILE
+    try:
+        path.touch(exist_ok=False)
+    except OSError:
+        return "failed"
+    for _ in range(limit // 2):
+        state = pause_state(desk)
+        if state and state.get("paused") is True:
+            return "paused"
+        sleep(2)
+    resume_scheduler(data)
+    return "failed"
+
+
+def resume_scheduler(data: Path) -> None:
+    try:
+        (data / PAUSE_FILE).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def safe_restart(desk: Desk, mine: set[str], label: str, mine_idle: bool = False, run=run_cmd, sleep=time.sleep,
+                 data: Path | None = None, wait: int = 20 * 60, back_limit: int = 120) -> dict:
+    """The only way this script restarts the service. Returns {"ok": bool, "state": ...} with state one of
+    restarted, unverified-blocked (never restarted), restart-failed (systemctl failed) or service-not-back."""
+    data = data or DATA
+    end = time.monotonic() + wait
     while True:
-        blockers = restart_blockers(desk, mine, mine_idle)
+        blockers = restart_blockers(desk, mine, mine_idle, run, data=data)
+        paused = "unsupported"
+        if not blockers:
+            paused = pause_scheduler(desk, data, sleep)
+            if paused == "failed":
+                blockers = ["maintenance pause was not acknowledged"]
+            else:
+                # nothing new starts now; look at everything again, as late as possible before systemctl
+                blockers = restart_blockers(desk, mine, mine_idle, run, data=data, own_pause=paused == "paused")
         if not blockers:
             break
+        if paused == "paused":
+            resume_scheduler(data)
         desk.note("restart-blocked", label=label, blockers=blockers)
         if time.monotonic() > end:
             desk.note("restart-skipped", label=label, status="UNVERIFIED")
-            return False
-        time.sleep(60)
-    stamp = datetime.now(UTC)
-    desk.note("restart", label=label, utc=stamp.isoformat(timespec="seconds"))
-    subprocess.run(["systemctl", "--user", "restart", "bot-office"], check=False)
-    for _ in range(60):
-        time.sleep(2)
-        status, _ = desk.call("GET", "/v1/bots")
-        if status == 200:
-            desk.note("service-back", label=label)
-            return True
-    desk.note("service-not-back", label=label)
-    return True
+            return {"ok": False, "state": "unverified-blocked", "blockers": blockers}
+        sleep(60)
+    try:
+        desk.note("restart", label=label, utc=datetime.now(UTC).isoformat(timespec="seconds"), pause=paused)
+        code, out = run(["systemctl", "--user", "restart", "bot-office"], 120)
+        if code != 0:
+            desk.note("restart-failed", label=label, exit=code, output=desk.redact(out)[:200])
+            return {"ok": False, "state": "restart-failed"}
+        for _ in range(max(1, back_limit // 2)):
+            sleep(2)
+            status, _body = desk.call("GET", "/v1/bots")
+            if status == 200:
+                desk.note("service-back", label=label)
+                return {"ok": True, "state": "restarted", "pause": paused}
+        desk.note("service-not-back", label=label)
+        return {"ok": False, "state": "service-not-back"}
+    finally:
+        if paused == "paused":
+            resume_scheduler(data)  # the new process started paused (the file survives a restart); let it work
 
 
 def mode_restart(desk: Desk, args, created: list[str]) -> dict:
@@ -368,6 +513,8 @@ def mode_restart(desk: Desk, args, created: list[str]) -> dict:
         desk.note("pre-restart-job", engine=engine, status=desk.job(j).get("status"))
     mine = {b["id"] for b in bots.values()}
     results["restart1"] = safe_restart(desk, mine, "mid-job")
+    if not results["restart1"]["ok"]:
+        desk.note("RESTART-FAILED-OR-UNVERIFIED", label="mid-job", **results["restart1"])
     for engine, j in long_job.items():
         job = desk.finish(j, 900)
         results[engine]["long_job"] = {k: job.get(k) for k in ("status", "attempts", "error", "failure_kind")}
@@ -383,6 +530,8 @@ def mode_restart(desk: Desk, args, created: list[str]) -> dict:
             "stuck_jobs": sum(1 for x in jobs if x.get("bot_id") == bot["id"] and x.get("status") in ("queued", "running"))}
         desk.note("after-midjob", engine=engine, **results[engine]["after_midjob"])
     results["restart2"] = safe_restart(desk, mine, "after-finish", mine_idle=True)
+    if not results["restart2"]["ok"]:
+        desk.note("RESTART-FAILED-OR-UNVERIFIED", label="after-finish", **results["restart2"])
     for engine, bot in bots.items():
         job, reply = desk.turn(bot["id"], "What lucky word did I tell you earlier?", limit=420)
         results[engine]["followup"] = {"job": job.get("status"), "reply": reply, "remembered": word[engine] in reply}
@@ -420,7 +569,8 @@ def main() -> int:
             status, _ = desk.call("DELETE", f"/v1/bots/{bot_id}")
             desk.note("bot-deleted", id=bot_id, status=status)
         desk.note("results", results=results)
-    return 0
+    restarts = [results.get(k) for k in ("restart1", "restart2") if k in results]
+    return 1 if any(isinstance(r, dict) and not r.get("ok") for r in restarts) else 0
 
 
 if __name__ == "__main__":

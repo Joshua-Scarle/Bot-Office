@@ -12,7 +12,7 @@ from . import attachments, baseline as baseline_mod, continuation, failures, iso
 from .assignments import BOT_ASSIGNMENTS_PER_DAY, BOT_BUDGET_MINUTES, BOT_BUDGET_TURNS, Assignments, _limit, drop_rule
 from .cron import _matches, parse_cron, to_cron_time
 from .catalog import ENGINE_LABELS
-from .compaction import OWNER_NOTES_FILE, OWNER_NOTES_SCAN, RECENT_MESSAGES, WORKING_FILE, cap_working, owner_notes
+from .compaction import MEMORY_DIGEST_LIMIT, RECENT_MESSAGES, STATE_FILE, WORKING_FILE, cap_working, memory_block, state_file
 from .domain import Bot, Job
 from .memory import Memory, _atomic_write
 from .store import EditError, JobStore
@@ -108,7 +108,7 @@ def _source_label(job: Job) -> str:
 RULES = """Rules:
 1. {reply_rule}
 2. Tasks and commitments are tracked by Bot-Office (`bot-task`); WORKING.md is for notes about how, key decisions and open questions. Keep it under 6000 characters and prune finished or irrelevant notes. It survives context compaction and session resets; it is not a diary.
-3. If you learned something durable, update memory.md. Never put secrets in memory. It is re-read in full on a fresh session, so keep it to durable facts and fold in or replace notes that a later note supersedes. When the owner states a decision, a standing rule or an open task, record it in that same turn (decisions and standing rules in memory.md, open work as a `bot-task`) and do not ask whether to save it. OWNER-NOTES.md quotes the owner's own such statements; Bot-Office keeps it, you do not edit it.
+3. If you learned something durable, update memory.md. Never put secrets in memory. It is inlined in every fresh session, so keep it short: durable facts, the owner's decisions and standing rules; fold in or replace notes that a later note supersedes. When the owner states a decision or a standing rule, write it to memory.md in that same turn; when they give you open work, add a `bot-task` (title, due date) in that same turn. Do not ask whether to save it. When they revoke, change or finish one, update or remove that memory line, or complete or drop the task, in that turn.
 4. To message another Bot-Office bot, run: bot-msg [--queue] <bot-name-or-id> "<message>". It reaches the bot right away, even mid-task; --queue waits for its next turn (for anything that can wait). Its reply comes back later as a new message: waiting for a bot's reply is not a blocker, so do not report blocked or waiting_on_user for it. Send the message, finish what else you can, then end the turn with BOT-OFFICE-STATUS: done — asked <bot>, its reply will wake me (on a task: waiting_on_bot — <what you wait for>). Bot-Office wakes you when the reply arrives.
 5. To wake a Grok Bot, run: desk grok send --to <grok bot name> --kind question|result|blocker|fyi --text <message> [--thread <id>]. If this turn includes a bridge thread id, pass it back with --thread. Do not send kind=ack.
 6. To use your assigned desktop, use the desk commands described in DESKTOP.md.
@@ -352,8 +352,8 @@ def layers_block(layers: dict[str, str]) -> str:
 
 def build_prompt(bot: Bot, job: Job, working: str = "", recent: str = "", seed: str | None = None,
                  handoff: tuple[str, str] | None = None, layers: dict[str, str] | None = None,
-                 notes: str = "") -> str:
-    """Prompt for a fresh session: rules plus small context (WORKING.md and the last few messages).
+                 memory: str = "") -> str:
+    """Prompt for a fresh session: rules plus small context (memory.md, WORKING.md and the last few messages).
 
     *seed* (first fresh session after an edit) replaces the recent messages: the complete
     retained chat, or an empty string when it is too long to inline and only history.md has it.
@@ -377,7 +377,8 @@ def build_prompt(bot: Bot, job: Job, working: str = "", recent: str = "", seed: 
     else:
         intro = ("\nThe user edited an earlier message, so the conversation was rewound to that point and this "
                  "is a fresh session. Everything after the edit point was withdrawn: ignore anything you may "
-                 "remember from it. If your job has a persistent handoff, skill or instructions file outside "
+                 "remember from it, and remove anything you saved from it (memory.md, WORKING.md, a `bot-task`). If your "
+                 "job has a persistent handoff, skill or instructions file outside "
                  "this workspace, re-read it before acting: the retained conversation does not replace it.\n")
         if handoff and handoff[0]:
             was, now = _engine_label(*handoff), _engine_label(job.provider, job.model)
@@ -398,7 +399,7 @@ turns), {history_hint}, DESKTOP.md (desktop helper).
 
 Your WORKING.md (working state saved from earlier sessions):
 {working.strip() or "(empty)"}
-{owner_block(notes)}
+{memory_block(memory)}
 {chat}
 
 Your task: reply to {_source_label(job)} below. Answer follow-ups directly from \
@@ -411,24 +412,16 @@ Current message:
 """
 
 
-def owner_block(notes: str) -> str:
-    """The owner's own rules, decisions and open tasks, quoted, in a fresh-session prompt (empty when none)."""
-    if not notes.strip():
-        return ""
-    return ("\nWhat the owner told you (quoted from the chat by Bot-Office, also in OWNER-NOTES.md; decisions, standing "
-            "rules and open tasks that still hold, even where the messages below no longer show them; the owner's "
-            f"newest message wins where they differ):\n{notes.strip()}\n")
-
-
-def build_resume_prompt(job: Job, notes: str = "") -> str:
-    """Prompt for a resumed session: only the new message and a short reminder."""
-    owner = (f" OWNER-NOTES.md (pre-filled) quotes the owner's decisions, standing rules and open tasks: re-read it if "
-             "your context was compacted.") if notes.strip() else ""
+def build_resume_prompt(job: Job, digest: str = "") -> str:
+    """Prompt for a resumed session: only the new message and a short reminder. *digest* (engines with no
+    compaction hook) is the bounded head and tail of memory.md, so a rule survives a compaction the engine
+    does not announce."""
+    owner = ("\n" + memory_block(digest, MEMORY_DIGEST_LIMIT)) if digest.strip() else ""
     return f"""New turn ({_source_label(job)}). This turn runs in a new job directory \
 (the current directory). {_reply_rule(job)} Update WORKING.md there only if your tasks changed \
 (it is pre-filled with your saved copy), and memory.md only for durable facts. Rules from the start of this \
-session still apply (unfinished: end with BOT-OFFICE-STATUS: not_done|blocked|waiting_on_user — <reason>).{owner}
-
+session still apply (unfinished: end with BOT-OFFICE-STATUS: not_done|blocked|waiting_on_user — <reason>).
+{owner}
 Current message:
 {job.prompt}
 """
@@ -675,7 +668,8 @@ def task_status_block(tasks: list, changes: str = "") -> str:
             detail = task.checkpoint or task.status_note
             # the list comes highest priority first; non-normal priorities are named
             flag = "" if getattr(task, "priority", "normal") == "normal" else f" · {task.priority}"
-            lines.append(f"- [{labels.get(task.status, task.status)}{flag}] {str(task.id)[:8]} {_short(task.title, 130)}"
+            due = f" · due {task.due_at:%Y-%m-%d}" if getattr(task, "due_at", None) else ""
+            lines.append(f"- [{labels.get(task.status, task.status)}{flag}{due}] {str(task.id)[:8]} {_short(task.title, 130)}"
                          + (f" — {_short(detail, 100)}" if detail else ""))
         if len(tasks) > shown:
             lines.append(f"and {len(tasks) - shown} more (`bot-task list`)")
@@ -805,9 +799,6 @@ def prepare_bot_workspace(
     if current and seed is not None:
         inline = history if len(history.encode()) <= SEED_INLINE_BYTES else ""
     working = cap_working(memory.read_working(bot.id))
-    notes = owner_notes([m.text for m in store.list_messages(bot.id, OWNER_NOTES_SCAN, up_to=current.id if current else None,
-                                                             include_progress=False)
-                         if m.role == "user" and m.source in ("chat", "api") and not _bot_written(m)])
     ids = current.attachments if current else []
     all_paths = _stable_paths(store, bot, ids)
     # only real images go to the provider's image input; uploaded files are named in the prompt as data
@@ -828,9 +819,11 @@ def prepare_bot_workspace(
     steered = steer_note([m for m in steers or [] if m.id not in seen], by_message)
     layers = baseline_mod.effective_layers(store)
     job.layer_texts = layers
-    prompt = build_prompt(bot, job, working, recent, inline, handoff, layers, notes) + retry + steered + status_block + brief
+    prompt = build_prompt(bot, job, working, recent, inline, handoff, layers, bot_memory) + retry + steered + status_block + brief
     layer_notes = "".join(layer.resume_note(layers[layer.key], memory.bot_dir(bot.id)) for layer in baseline_mod.LAYERS)
-    resume_prompt = (build_resume_prompt(job, notes) + retry + steered + status_block + settings_note(bot, memory.bot_dir(bot.id), stable_extra)
+    # engines with a compaction hook (Claude) get their state from it; the others carry a bounded memory.md digest
+    hooked = (job.provider or bot.default_provider) == "claude"
+    resume_prompt = (build_resume_prompt(job, "" if hooked else bot_memory) + retry + steered + status_block + settings_note(bot, memory.bot_dir(bot.id), stable_extra)
                      + rules_note(shared, memory.bot_dir(bot.id)) + layer_notes
                      + brief)
     note = "\n" + images_note(store, bot) + "\n" if indexed or all_paths else ""
@@ -863,7 +856,7 @@ def prepare_bot_workspace(
         "prompt.txt": prompt,
         "prompt-resume.txt": resume_prompt,
         WORKING_FILE: working,
-        OWNER_NOTES_FILE: notes,
+        STATE_FILE: state_file(bot_memory, status_block, working),
     }
     for name, text in files.items():
         # a retried job reuses its workspace: replace any link the bot left, never write through it

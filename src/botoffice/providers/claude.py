@@ -9,12 +9,12 @@ from ..compaction import COMPACT_POLICY, compact_token_limit
 from .cli import CliAdapter
 
 # Session-only settings (never saved): PreCompact stdout is appended to the compaction
-# instructions; SessionStart(compact) re-adds the bot's bounded WORKING.md and the owner's OWNER-NOTES.md
-# (their rules, decisions and open tasks, quoted by Bot-Office) after compaction.
+# instructions; SessionStart(compact) prints DURABLE-STATE.md (memory.md capped, the open tasks, WORKING.md; written by
+# Bot-Office into the job directory) after a compaction. A fixed read-only command, so it is safe in every access mode.
 CLAUDE_SETTINGS = {
     "hooks": {
         "PreCompact": [{"hooks": [{"type": "command", "command": "printf '%s\\n' " + shlex.quote(COMPACT_POLICY)}]}],
-        "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": "cat WORKING.md OWNER-NOTES.md 2>/dev/null || true"}]}],
+        "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": "cat DURABLE-STATE.md 2>/dev/null || true"}]}],
     }
 }
 
@@ -27,10 +27,10 @@ UNATTENDED_TOOLS = ("Bash", "Read", "Edit", "Write", "MultiEdit", "NotebookEdit"
 
 
 def claude_settings(job, full: bool) -> dict:
-    """Per-invocation --settings: compaction hooks (full access), and the 0.11.0 action gate:
+    """Per-invocation --settings: compaction hooks (every access mode), and the 0.11.0 action gate:
     a PreToolUse hook to bin/bot-office-gate plus deny rules for the protected paths (Claude
     documents deny rules as applying even under bypassPermissions)."""
-    settings = copy.deepcopy(CLAUDE_SETTINGS) if full else {}
+    settings = copy.deepcopy(CLAUDE_SETTINGS)
     if job is None or not job.gate_command:
         return settings
     settings.setdefault("hooks", {})["PreToolUse"] = [

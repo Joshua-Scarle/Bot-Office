@@ -2,16 +2,15 @@
 from __future__ import annotations
 
 import os
-import re
 
 WORKING_FILE = "WORKING.md"
 WORKING_LIMIT = 6000  # characters; hard cap enforced by Bot-Office after every turn
 WORKING_TRUNCATED = "\n\n[Bot-Office truncated this file: keep WORKING.md under 6000 characters and prune finished items]\n"
-OWNER_NOTES_FILE = "OWNER-NOTES.md"
-OWNER_NOTES_LIMIT = 3000  # characters; newest statements win
-OWNER_NOTE_LINE = 300  # characters kept of one statement
-OWNER_NOTES_SCAN = 400  # newest chat messages looked at
 RECENT_MESSAGES = 6  # injected into the prompt only when a fresh session starts
+# The bot's durable state travels inline (not as a request to read a file): memory.md, the open tasks and WORKING.md.
+STATE_FILE = "DURABLE-STATE.md"  # written into every job directory; the Claude compact hook prints it
+MEMORY_PROMPT_LIMIT = 6000  # characters of memory.md inlined in a fresh session (about 1.5k tokens, once per session)
+MEMORY_DIGEST_LIMIT = 1500  # the same for a resumed turn of an engine without a compaction hook (about 400 tokens/turn)
 
 
 def compact_token_limit() -> int:
@@ -34,9 +33,9 @@ people, conditions, safety rules).
 Drop finished tasks and their details, directory listings, file contents, long command or test \
 output, superseded plans, greetings and small talk. Do not write a lifetime history or a diary; \
 a finished item only stays if a later task depends on it. Keep exact commands, ids, paths and \
-error strings only where they are still needed. The bot also keeps WORKING.md (bounded working \
-state) and OWNER-NOTES.md (the owner's own standing rules, decisions and open tasks, verbatim) in its job \
-directory; stay consistent with them, and never drop an owner's standing rule, decision or open task."""
+error strings only where they are still needed. The bot also keeps memory.md (durable facts, the owner's \
+standing rules and decisions) and WORKING.md in its job directory, and Bot-Office re-adds both and the task list \
+after this compaction; stay consistent with them, and never drop an owner's standing rule, decision or open task."""
 
 
 def cap_working(text: str) -> str:
@@ -45,52 +44,31 @@ def cap_working(text: str) -> str:
     return text[: WORKING_LIMIT - len(WORKING_TRUNCATED)] + WORKING_TRUNCATED
 
 
-_I = re.IGNORECASE
-_DAYS = r"(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|tonight|eod|end of (?:the )?(?:day|week|month)|next week"
-# Statements an owner makes in plain chat that a bot must still honour after a compaction or a session reset.
-# Matched on sentences (not questions), kept verbatim: no model is asked to remember them.
-OWNER_PATTERNS = (
-    ("rule", re.compile(r"\bfrom now on\b|\bgoing forward\b|\bstanding (?:rule|instruction)s?\b|\balways\b|\bnever\b"
-                        r"|\bevery (?:reply|response|message|time)\b|\bdon'?t ever\b|\bdo not ever\b", _I)),
-    ("decision", re.compile(r"\b(?:we|i)(?:'ve| have)? (?:decided|chose|agreed|picked|settled)\b|\bdecision\b"
-                            r"|\blet'?s go with\b|\b(?:we|i)(?:'re| are) going with\b|\bwent with\b", _I)),
-    ("task", re.compile(r"\bopen task\b|\bto-?do\b|\bnot (?:done|started) yet\b|\bstill (?:need|have) to\b"
-                        r"|\bneeds? to be done\b|\bdon'?t forget\b|\bremind me\b|\bdeadline\b"
-                        rf"|\bdue (?:on |by )?(?:{_DAYS})|\bby (?:{_DAYS})", _I)),
-)
-OWNER_PATTERNS += (("fact", re.compile(r"\bfyi\b|\bremember (?:that|this)\b|\bfor (?:later|the record)\b|\bnote that\b", _I)),)
-_SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
+def cap_memory(text: str, limit: int = MEMORY_PROMPT_LIMIT) -> str:
+    """memory.md for a prompt: whole when it fits, else its head (where the standing rules usually are) and its
+    tail (the newest notes) around a marker that says how much was left out and where the rest is."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    tail = limit // 3
+    head = limit - tail
+    gap = len(text) - head - tail
+    return (text[:head].rstrip() + f"\n[... {gap} characters of memory.md left out here: read memory.md for them ...]\n"
+            + text[-tail:].lstrip())
 
 
-def owner_statements(text: str) -> list[str]:
-    """The sentences of one owner message that read as a rule, decision or open task: ``[kind] sentence``."""
-    found = []
-    for sentence in _SENTENCE.split(text):
-        sentence = " ".join(sentence.split())
-        if len(sentence) < 8 or sentence.endswith("?"):
-            continue
-        for kind, pattern in OWNER_PATTERNS:
-            if pattern.search(sentence):
-                clipped = sentence if len(sentence) <= OWNER_NOTE_LINE else sentence[:OWNER_NOTE_LINE] + " [...]"
-                found.append(f"[{kind}] {clipped}")
-                break
-    return found
+def memory_block(memory: str, limit: int = MEMORY_PROMPT_LIMIT) -> str:
+    """The inline memory.md section of a fresh-session prompt or digest (empty when the file is empty)."""
+    if not memory.strip():
+        return ""
+    return ("\nYour memory.md (durable facts, the owner's standing rules and decisions; inlined by Bot-Office, "
+            f"the file is in the current directory):\n{cap_memory(memory, limit)}\n")
 
 
-def owner_notes(texts: list[str]) -> str:
-    """OWNER-NOTES.md: the owner's rules, decisions and open tasks, verbatim, oldest first, newest kept when
-    over the cap. *texts* are the owner's own messages, oldest first. Generated every turn from the chat, so
-    an edited or withdrawn message drops out by itself."""
-    lines: list[str] = []
-    for text in texts:
-        for line in owner_statements(text):
-            if line in lines:
-                lines.remove(line)  # restated: keep the latest position
-            lines.append(line)
-    kept, size = [], 0
-    for line in reversed(lines):
-        if size + len(line) + 1 > OWNER_NOTES_LIMIT:
-            break
-        kept.append(line)
-        size += len(line) + 1
-    return "\n".join(reversed(kept))
+def state_file(memory: str, tasks_block: str, working: str) -> str:
+    """DURABLE-STATE.md: everything that must outlive a context compaction, for the Claude SessionStart(compact)
+    hook to print: memory.md (capped), the open tasks and WORKING.md."""
+    return ("Bot-Office re-adds your durable state after a context compaction. Anything the owner stated earlier "
+            "(a decision, a standing rule, an open task) is in memory.md or the task list below; both win over "
+            "your summary.\n" + (memory_block(memory) or "\nYour memory.md is empty.\n") + (tasks_block or "")
+            + f"\nYour WORKING.md:\n{working.strip() or '(empty)'}\n")
