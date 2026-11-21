@@ -1,7 +1,7 @@
-"""Slice 1 connectors (Engineer 8): official hosted MCP servers (Railway, Cloudflare) for Claude jobs.
+"""Slice 1 connectors: official hosted MCP servers (Railway, Cloudflare) for Claude jobs.
 
 Bot-Office is the OAuth client (dynamic client registration + PKCE S256, MCP authorization spec). The
-provider redirects Joshua's *browser* to http://127.0.0.1:<port>/v1/connectors/oauth/callback; the SSH
+provider redirects the owner's *browser* to http://127.0.0.1:<port>/v1/connectors/oauth/callback; the SSH
 tunnel to the loopback UI (README, "SSH tunnel") carries it to the controller. Tokens live in a 0700
 directory outside the repo (0600 files), are refreshed here, and reach a job only as an environment
 variable that the --mcp-config header names as ${VAR}: never in argv, the database, events or logs.
@@ -123,8 +123,7 @@ def store_dir() -> Path:
 
 
 def _forbidden_roots() -> list[Path]:
-    roots = [Path(__file__).resolve().parents[2], Path.home() / "printpilot-agentdesk"]
-    return [root.resolve() for root in roots]
+    return [Path(__file__).resolve().parents[2]]  # the checkout / install tree
 
 
 def _secure_dir() -> Path:
@@ -358,7 +357,7 @@ def _purge_pending() -> None:
 
 
 def start_oauth(connector_id: str, port: int, transport: Transport | None = None) -> str:
-    """The authorize URL for Joshua's browser (state, PKCE S256, resource indicator)."""
+    """The authorize URL for the owner's browser (state, PKCE S256, resource indicator)."""
     transport = transport or _http
     c = get(connector_id)
     meta = discover(c, transport)

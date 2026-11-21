@@ -116,7 +116,7 @@ def test_claude_exec_argv_stdin_and_env(monkeypatch, tmp_path):
     args, kwargs = calls[1]
     assert args == (
         "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--replay-user-messages",
-        "--permission-mode", "acceptEdits", "--disallowedTools", "AskUserQuestion", "--permission-prompts", "none", "--effort", "medium",
+        "--permission-mode", "acceptEdits", "--disallowedTools", "AskUserQuestion", "--permission-prompts", "none", "--mcp-config", "{\"mcpServers\": {}}", "--strict-mcp-config", "--effort", "medium",
     )
     assert "--dangerously-skip-permissions" not in args and "--bare" not in args
     assert kwargs["cwd"] == tmp_path

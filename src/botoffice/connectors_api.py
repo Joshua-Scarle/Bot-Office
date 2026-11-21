@@ -1,4 +1,4 @@
-"""Routes of the connectors panel (Engineer 8). Owner (master token) only: a job's agent token is not
+"""Routes of the connectors panel . Owner (master token) only: a job's agent token is not
 accepted here, so a bot cannot read or set a connector secret. No response carries a secret value."""
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def register(app: FastAPI, auth, store, settings, transport=None) -> None:
         return {"enabled": connectors.enabled(), "callback": connectors.redirect_uri(settings.port),
                 "connectors": await asyncio.to_thread(view)}
 
-    # Joshua's browser lands here (via the SSH tunnel to 127.0.0.1): no bearer header, so the one-time
+    # The owner's browser lands here (via the SSH tunnel to 127.0.0.1): no bearer header, so the one-time
     # state of start_oauth is what authorises it. Registered before the {connector_id} routes.
     @app.get(connectors.CALLBACK_PATH, response_class=HTMLResponse)
     async def oauth_callback(code: str | None = Query(None, max_length=4096), state: str | None = Query(None, max_length=256),

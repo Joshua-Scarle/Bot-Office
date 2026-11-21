@@ -157,10 +157,10 @@ def test_store_modes_location_and_no_plaintext_in_db(secrets_dir, store, bot):
     assert SECRET in (secrets_dir / "railway.json").read_text()
 
 
-@pytest.mark.parametrize("where", ["repo", "install"])
+@pytest.mark.parametrize("where", ["repo", "data"])
 def test_store_refuses_a_directory_inside_the_repo_or_install_tree(monkeypatch, where):
     repo = Path(connectors.__file__).resolve().parents[2]
-    target = repo / "secrets" if where == "repo" else Path.home() / "printpilot-agentdesk" / "connectors"
+    target = repo / "secrets" if where == "repo" else repo / "data" / "connectors"
     monkeypatch.setenv(connectors.DIR_ENV, str(target))
     with pytest.raises(connectors.ConnectorError):
         connectors.save_token(None, "railway", SECRET)
