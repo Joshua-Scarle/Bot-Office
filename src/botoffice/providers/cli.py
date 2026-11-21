@@ -36,11 +36,14 @@ def git_env(job: Job) -> dict[str, str]:
     """0.12.4 fix2: git config for every Bot-Office run, through the environment (command scope: it
     outranks the repo's and the user's config files): the pre-push check (bin/bot-office-git-hook)
     and, when the controller holds a GitHub token, the credential helper for https://github.com
-    (an empty helper first clears any other). A command that changes these always asks (git_guard)."""
+    (an empty helper first clears any other; useHttpPath so the ticket's repository is checked). A
+    command that changes these always asks (git_guard)."""
     pairs = [("core.hooksPath", str(REPO_BIN / "git-hooks"))]
     if job.github_credential:
         helper = "credential.https://github.com.helper"
-        pairs += [(helper, ""), (helper, str(REPO_BIN / "bot-office-credential"))]
+        pairs += [(helper, ""), (helper, str(REPO_BIN / "bot-office-credential")),
+                  # fix3: git names the repository, so a ticket is used only for its own repo
+                  ("credential.https://github.com.useHttpPath", "true")]
     env = {"GIT_CONFIG_COUNT": str(len(pairs))}
     for index, (key, value) in enumerate(pairs):
         env[f"GIT_CONFIG_KEY_{index}"] = key

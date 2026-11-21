@@ -227,6 +227,8 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
         )"""
     )
     db.execute("CREATE INDEX IF NOT EXISTS approvals_grant ON approvals(bot_id, input_hash, status)")
+    # 0.12.4 fix3: the exact updates (repo, ref, operation, old/new sha) a push approval covers
+    add_columns(db, "approvals", (("push_plan", "TEXT"),))
     db.execute(
         """CREATE TABLE IF NOT EXISTS gate_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, job_id TEXT, provider TEXT, decision TEXT NOT NULL,

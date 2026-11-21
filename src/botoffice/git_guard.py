@@ -116,6 +116,16 @@ class Ctx:
     cwd: str | None = None
     moved_out: bool = False  # without a root: a `cd` left for somewhere not known to be inside
     commands: int = 0
+    sends: list = None  # fix3 #4: why a part of the command sends something out (the "send" class)
+
+    def __post_init__(self):
+        if self.sends is None:
+            self.sends = []
+
+
+# fix3 #5: the controller sets this to its cached GitHub API lookup (owner, repo) -> default branch or
+# None; the hooks and shims (no token) leave it None, so an unknown default asks there
+default_lookup = None
 
 
 class _Hit(Exception):
@@ -275,7 +285,7 @@ def scan_text(text: str, ctx: Ctx, depth: int = 0) -> None:
             _hit("a command with too many parts to check")
         _scan_command(words, ctx, depth)
     if "<<" in text and _interpreter_in(commands):
-        _raw_code(text)
+        _raw_code(text, ctx, depth)
 
 
 def _interpreter_in(commands: list[list[str]]) -> bool:
@@ -311,8 +321,11 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
         if program == "gh":
             _gh(rest, ctx, depth)
             return
-        if program in ("curl", "wget", "http", "https", "xh", "xhs", "httpie", "wcurl"):
+        if program in HTTP_PROGRAMS:
             _http(program, rest, ctx)
+            return
+        if program in MAIL_PROGRAMS and (index == 0 or any(_base(w) in RUNNERS for w in words[:index])):
+            ctx.sends.append(f"sending email ({program})")
             return
         if program in RM_PROGRAMS or program == "gio" or program in ("find", "rsync", "mv", "apply_patch"):
             _delete(program, rest, ctx)
@@ -325,7 +338,7 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
             _shell(program, rest, ctx, depth)
             return
         if INTERPRETERS.match(program):
-            _interpreter(rest, ctx)
+            _interpreter(rest, ctx, depth)
             return
         if program in RUNNERS:
             for item in rest:
@@ -381,7 +394,7 @@ def _script_file(path: str, ctx: Ctx, depth: int) -> None:
     text = _read(path, ctx)
     if text:
         scan_text(text, ctx, depth + 1)
-        _raw_code(text)
+        _raw_code(text, ctx, depth)
 
 
 def _read(path: str, ctx: Ctx) -> str:
@@ -397,22 +410,78 @@ def _read(path: str, ctx: Ctx) -> str:
     return ""
 
 
-def _interpreter(rest: list[str], ctx: Ctx) -> None:
+def _interpreter(rest: list[str], ctx: Ctx, depth: int = 0) -> None:
     """python -c / node -e / perl -e ...: judge the code text; a script file is read when it can be."""
-    _raw_code(" ".join(rest))
+    _raw_code(" ".join(rest), ctx, depth)
     for word in rest:
         if not word.startswith("-") and not _dynamic(word):
             text = _read(word, ctx)
             if text:
-                _raw_code(text)
+                _raw_code(text, ctx, depth)
             break
 
 
 _RAW_WORDS = re.compile(r"[a-z_][a-z0-9_]*", re.IGNORECASE)
+# fix3 #1: string literals in code (one level of quotes, no nesting) and lists of them
+_LITERAL = re.compile(r"""(['"])((?:\\.|(?!\1)[^\\\n]){1,2000})\1""")
+_LITERAL_LIST = re.compile(r"""[\[(]\s*(?:(?:'[^'\n]{0,300}'|"[^"\n]{0,300}")\s*,\s*){1,40}"""
+                           r"""(?:'[^'\n]{0,300}'|"[^"\n]{0,300}")\s*,?\s*[\])]""")
+# programs worth reading a literal as a shell command for (os.system("git push ..."), exec('rm -rf ...'))
+_LITERAL_PROGRAMS = frozenset({"git", "gh", "rm", "rmdir", "unlink", "shred", "find", "rsync", "mv", "sh", "bash",
+                               "zsh", "env", "sudo", "xargs"}) | frozenset(("curl", "wget", "http", "https", "xh",
+                                                                           "xhs", "sendmail", "mail", "mailx",
+                                                                           "msmtp", "swaks", "mutt"))
+# fix3 #4: code that sends over HTTP(S) with a method other than GET, or sends email
+_CODE_SEND = re.compile(
+    r"\b(?:requests|httpx|session|aiohttp|axios|got|ky|superagent|needle)\s*\.\s*"
+    r"(?:post|put|patch|delete)\s*\(|"
+    r"\brequests\s*\.\s*request\s*\(\s*['\"](?:post|put|patch|delete)|"
+    r"\bmethod\s*[:=]\s*['\"](?:post|put|patch|delete)['\"]|"
+    r"\burlopen\s*\([^)]*\bdata\s*=|\bRequest\s*\([^)]*\bdata\s*=|"
+    r"\.request\s*\(\s*['\"](?:POST|PUT|PATCH|DELETE)['\"]|"
+    r"\bcurl_setopt\s*\([^)]*CURLOPT_POST|\bNet::HTTP::(?:Post|Put|Patch|Delete)\b|->\s*(?:post|put)\s*\(",
+    re.IGNORECASE)
+_CODE_MAIL = re.compile(r"\bsmtplib\b|\bnodemailer\b|\bNet::SMTP\b|\bsendmail\b|\bPHPMailer\b|\bmail\s*\(\s*\$",
+                        re.IGNORECASE)
+_CODE_URL = re.compile(r"\b(?:https?|wss?)://([^/\s'\"`:?#]+)", re.IGNORECASE)
 
 
-def _raw_code(text: str) -> None:
-    """Code we cannot parse as shell (python, node, a heredoc): the guarded words together."""
+def _literals(text: str) -> list[str]:
+    """Shell-like commands inside code: a string literal, or a list of literals joined as words."""
+    found = []
+    for match in _LITERAL_LIST.finditer(text[:SCAN_LIMIT]):
+        words = [item[1:-1] for item in re.findall(r"""'[^'\n]*'|"[^"\n]*\"""", match.group(0))]
+        if words and _base(words[0]) in _LITERAL_PROGRAMS:
+            found.append(" ".join(_shell_quote(word) for word in words))
+    for match in _LITERAL.finditer(text[:SCAN_LIMIT]):
+        value = match.group(2)
+        first = value.split(None, 1)[0] if value.split() else ""
+        if " " in value and _base(first) in _LITERAL_PROGRAMS:
+            found.append(value)
+        if len(found) > 50:
+            break
+    return found
+
+
+def _shell_quote(word: str) -> str:
+    return word if re.fullmatch(r"[\w@%+=:,./-]+", word) else "'" + word.replace("'", "'\"'\"'") + "'"
+
+
+def _raw_code(text: str, ctx: Ctx | None = None, depth: int = 0) -> None:
+    """Code we cannot parse as shell (python, node, a heredoc): the guarded words together, the shell
+    commands in its string literals, and HTTP or mail sends."""
+    if ctx is not None:
+        if depth < MAX_DEPTH:
+            for literal in _literals(text):
+                scan_text(literal, ctx, depth + 1)
+        if _CODE_MAIL.search(text):
+            ctx.sends.append("sending email from code")
+        elif _CODE_SEND.search(text):
+            hosts = [host.lower() for host in _CODE_URL.findall(text)]
+            outside = [host for host in hosts if not allowed_host(host)]
+            if outside or not hosts:
+                ctx.sends.append(f"a request that sends data to {outside[0] if outside else 'a host not known here'}"
+                                 " (from code)")
     low = text.lower()
     words = set(_RAW_WORDS.findall(low))
     if "git" in words and "push" in words and (words & set(DEFAULT_BRANCHES) or "+refs" in low or re.search(
@@ -598,7 +667,12 @@ def _git_dirs(directory: str | None) -> tuple[str, str] | None:
 def remote_default(directory: str | None, remote: str | None) -> str | None:
     """The default branch of *remote* (a remote name) as the repo around *directory* knows it:
     refs/remotes/<remote>/HEAD (set by clone or `git remote set-head`), else what the pre-push check
-    learned from the remote. None when unknown (a URL, a path, no such ref)."""
+    learned from the remote. For a github.com remote the controller asks GitHub first (fix3 #5).
+    None when unknown (a URL, a path, no such ref)."""
+    url = remote_url(directory, remote) if remote else None
+    hub = github_repo(normalise_remote(url)) if url else None
+    if hub and repo_default(*hub):
+        return repo_default(*hub)
     if not remote or not re.fullmatch(r"[A-Za-z0-9][\w.-]*", remote):
         return None
     dirs = _git_dirs(directory)
@@ -1018,13 +1092,64 @@ def _http(program: str, args: list[str], ctx: Ctx) -> None:
     github = any(_GITHUB_URL.search(u) for u in urls) or bool(_GITHUB_URL.search(everything))
     unknown_host = any(_dynamic(u) for u in urls)
     if program in ("http", "https", "xh", "xhs", "httpie") and not method:
-        if any(re.match(r"^[\w.-]+(?:=|:=|==|@)", u) for u in urls[1:]):
+        if any(re.match(r"^[\w.-]+(?:=(?!=)|:=|@)", u) for u in urls[1:]):
             method = "POST"
+    _http_send(program, method, body, args, urls, ctx)
     if not (github or (unknown_host and method.upper() in ("PUT", "PATCH", "DELETE"))):
         return
     target = next((u for u in urls if _GITHUB_URL.search(u)), urls[0] if urls else "")
     _github_write(method or ("POST" if body else ""), target, body, [*args, *(b for b in bodies if b)], program,
                   unknown_body=any(b is None for b in bodies))
+
+
+HTTP_PROGRAMS = frozenset({"curl", "wget", "http", "https", "xh", "xhs", "httpie", "wcurl"})
+MAIL_PROGRAMS = frozenset({"sendmail", "mail", "mailx", "msmtp", "swaks", "mutt", "neomutt", "s-nail"})
+# fix3 #4: the hosts a bot may send to (a non-GET request) without a card: this machine and the package
+# registries installs talk to (docs/APPROVALS.md "Sending"); BOT_OFFICE_SEND_ALLOW_HOSTS adds more
+SEND_ALLOWED_HOSTS = frozenset({
+    "localhost", "127.0.0.1", "::1", "0.0.0.0",
+    "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "registry.yarnpkg.com", "crates.io",
+    "static.crates.io", "index.crates.io", "proxy.golang.org", "sum.golang.org", "rubygems.org",
+    "repo.maven.apache.org", "repo1.maven.org"})
+_URLISH = re.compile(r"^(?:[a-z][a-z0-9+.-]*://\S+|(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?|"
+                     r"localhost(?::\d+)?(?:[/?#]\S*)?|\d+\.\d+\.\d+\.\d+(?::\d+)?(?:[/?#]\S*)?|:\d*(?:/\S*)?)$",
+                     re.IGNORECASE)
+_HOST = re.compile(r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/\s]*@)?(\[[^\]]*\]|[^:/\s?#]*)", re.IGNORECASE)
+
+
+def allowed_host(host: str) -> bool:
+    """A host on the send allowlist (this machine, the controller, package registries, the owner's list)."""
+    host = host.strip("[]").lower().rstrip(".")
+    extra = {h.strip().lower() for h in os.environ.get("BOT_OFFICE_SEND_ALLOW_HOSTS", "").split(",") if h.strip()}
+    controller = re.match(r"^https?://(\[[^\]]*\]|[^:/]+)", os.environ.get("BOT_OFFICE_API_URL", ""))
+    if controller:
+        extra.add(controller.group(1).strip("[]").lower())
+    return host in SEND_ALLOWED_HOSTS or host in extra
+
+
+def _http_send(program: str, method: str, body: bool, args: list[str], urls: list[str], ctx: Ctx) -> None:
+    """Any request but GET/HEAD/OPTIONS to a host off the allowlist, or to a host not known here, sends."""
+    verb = (method or ("POST" if body else "GET")).upper()
+    if any(a in ("-G", "--get") for a in args) and not method:
+        verb = "GET"
+    if verb in ("GET", "HEAD", "OPTIONS"):
+        return
+    label = f"{verb} request" if _METHOD.match(verb) else "request whose method is not known until it runs"
+    targets = [u for u in urls if _URLISH.match(u) or _dynamic(u)]
+    if program in ("http", "https", "xh", "xhs", "httpie"):
+        targets = targets[:1]
+    hosts = []
+    for target in targets:
+        if _dynamic(target) and not re.match(r"^[a-z]+://[\w.-]+(?:[:/]|$)", target, re.IGNORECASE):
+            hosts.append(None)
+            continue
+        found = _HOST.match(target)
+        name = found.group(1) if found else ""
+        hosts.append(name or ("localhost" if target.startswith(":") else None))
+    outside = [h for h in hosts if h and not allowed_host(h)]
+    if outside or not hosts or None in hosts:
+        where = outside[0] if outside else "a host not known until it runs"
+        ctx.sends.append(f"a {label} to {where} ({program})")
 
 
 # --- MCP / connector tools ------------------------------------------------------------------------
@@ -1047,6 +1172,32 @@ def _input_strings(value, out: list[str], depth: int = 0) -> None:
     elif isinstance(value, list):
         for item in value:
             _input_strings(item, out, depth + 1)
+
+
+def mcp_repo(data: dict) -> tuple[str, str] | None:
+    """(owner, repo) a connector call names: owner + repo, or "owner/repo" in repo / repository /
+    full_name, or a github.com URL."""
+    owner, repo = data.get("owner"), data.get("repo") or data.get("repository") or data.get("full_name")
+    if isinstance(owner, str) and isinstance(repo, str) and owner and repo and "/" not in repo:
+        return owner, repo
+    for value in (repo, data.get("url"), data.get("repo_url")):
+        if isinstance(value, str):
+            found = re.match(r"^(?:https?://(?:www\.)?github\.com/)?([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", value.strip())
+            if found:
+                return found.group(1), found.group(2)
+    return None
+
+
+def repo_default(owner: str, repo: str) -> str | None:
+    """The default branch of github.com/<owner>/<repo> from the controller's cached lookup, or None
+    (no lookup here, no token, not found)."""
+    if default_lookup is None or not owner or not repo or _dynamic(owner + repo):
+        return None
+    try:
+        value = default_lookup(owner, repo)
+    except Exception:  # noqa: BLE001
+        return None
+    return value if isinstance(value, str) and value else None
 
 
 def _mcp(tool: str, data: dict | None, ctx: Ctx) -> None:
@@ -1073,12 +1224,17 @@ def _mcp(tool: str, data: dict | None, ctx: Ctx) -> None:
     if code_host and (words & {"push", "commit", "upload"} or {"create", "or", "update", "file"} <= words
                       or ("update" in words and words & {"file", "files", "contents"})
                       or ("create" in words and words & {"file", "files"})):
-        strings: list[str] = []
-        _input_strings(data or {}, strings)
         branches = [data.get(k) for k in ("branch", "ref", "head", "base") if isinstance((data or {}).get(k), str)]
-        if not branches or any(_DEFAULT_REF.match(b.strip()) or b.strip() in ("HEAD", "@") or _dynamic(b)
-                               for b in branches):
+        branches = [re.sub(r"^(?:refs/)?heads/", "", b.strip()) for b in branches]
+        if not branches or any(_DEFAULT_REF.match(b) or b in ("HEAD", "@") or _dynamic(b) for b in branches):
             _hit("a connector tool that commits or pushes to the default branch")
+        # fix3 #5: the target repo's real default branch (the controller asks GitHub, cached); unknown asks
+        target = mcp_repo(data or {})
+        default = repo_default(*target) if target else None
+        if default is None:
+            _hit("a connector tool that commits or pushes to a repo whose default branch is not known")
+        if default in branches:
+            _hit(f"a connector tool that commits or pushes to the default branch ({default})")
     if words & {"delete", "remove", "trash"} and words & {"file", "files", "directory", "folder", "path"}:
         strings = []
         _input_strings(data or {}, strings)
@@ -1097,13 +1253,52 @@ SEND_KEY = "send"
 SEND_LABEL = "Sending email or messages"
 
 
-def send_reason(tool: str, command: str = "") -> str | None:
-    """Why this call sends email or a message to a person (always asks, in every run), or None."""
+# fix3 #4: connector tools that send, by the words of their name (the part after mcp__<server>__)
+_SEND_VERBS = frozenset({"send", "post", "reply", "publish", "tweet", "retweet", "forward", "broadcast", "dm",
+                         "sms", "email", "mail", "message", "notify", "announce", "comment", "invite", "share",
+                         "toot", "skeet", "upvote", "react", "respond"})
+_SEND_OBJECTS = frozenset({"message", "messages", "email", "emails", "mail", "comment", "comments", "issue",
+                           "issues", "discussion", "tweet", "post", "posts", "status", "reply", "chat", "dm", "sms",
+                           "notification", "invite", "invitation", "review"})
+_CREATE_VERBS = frozenset({"create", "add", "new", "write", "submit", "make", "open", "start", "schedule", "put"})
+_READ_VERBS = frozenset({"get", "list", "read", "search", "fetch", "query", "find", "view", "show", "download",
+                         "describe", "lookup", "check", "count", "watch", "export", "preview", "draft", "drafts",
+                         "compose", "save", "validate", "render", "parse"})
+
+
+def _send_tool(tool: str) -> bool:
+    action = tool.split("__")[-1] if "__" in tool else re.sub(r"^mcp[_\-.:/]*", "", tool, flags=re.IGNORECASE)
+    words = [w.lower() for w in re.split(r"[^A-Za-z0-9]+", _CAMEL.sub("_", action)) if w]
+    if not words or words[0] in _READ_VERBS:
+        return False
+    return bool(set(words) & _SEND_VERBS) or bool(set(words) & _CREATE_VERBS and set(words) & _SEND_OBJECTS)
+
+
+def send_reason(tool: str, command: str = "", tool_input: dict | None = None, cwd: str | None = None) -> str | None:
+    """Why this call sends something out of the machine (email, a message, a post, any non-GET request
+    to a host off the allowlist): always asks, in every run. None when it does not."""
     if command and SEND_SHELL.search(command):
         return "sending email or a message"
-    if tool and tool.lower().startswith("mcp") and SEND_TOOLS.search(tool):
-        return "sending a message through a connector"
+    if tool and (tool.lower().startswith("mcp") or tool == "MCP") and (SEND_TOOLS.search(tool) or _send_tool(tool)):
+        return "sending through a connector"
+    if command:
+        ctx = Ctx(root=cwd or None, cwd=cwd or None)
+        try:
+            if len(command) > SCAN_LIMIT:
+                return "a command too long to check"
+            scan_text(command, ctx)
+        except _Hit:
+            pass  # the git guard asks for it anyway; what it found so far still counts
+        except Exception:  # noqa: BLE001
+            return "a command that could not be read"
+        if ctx.sends:
+            return ctx.sends[0]
     return None
+
+
+def judge(tool: str, command: str = "", tool_input: dict | None = None, cwd: str | None = None) -> str | None:
+    """The git guard, then the send class: why this call needs the owner's card, or None."""
+    return classify(tool, command, tool_input, cwd) or send_reason(tool, command, tool_input, cwd)
 
 
 # --- the pre-push check (bin/bot-office-git-hook reports the real refs) ----------------------------
@@ -1119,6 +1314,9 @@ def classify_push(report: dict | None) -> str | None:
     if not isinstance(report, dict) or not isinstance(report.get("updates"), list):
         return "a push the check could not read"
     default = report.get("default_branch") if isinstance(report.get("default_branch"), str) else None
+    hub = github_repo(normalise_remote(str(report.get("url") or "")))
+    if hub and repo_default(*hub):
+        default = repo_default(*hub)  # fix3 #5: GitHub's own answer (the controller's cached lookup)
     if len(report["updates"]) > 500:
         return "a push of too many refs to check"
     for update in report["updates"]:
@@ -1183,6 +1381,410 @@ def push_commands(command: str) -> list[tuple[str | None, set[str] | None]]:
             refs.add(name)
         found.append((positional[0] if positional else None, refs or None))
     return found
+
+
+# --- fix3 #3: the exact update an approval covers -----------------------------------------------------
+
+def normalise_remote(url: str | None) -> str:
+    """One name per repository: host/path in lower case without user, port, scheme or a trailing .git
+    (https://u@github.com/O/R.git, git@github.com:O/R, ssh://git@github.com/O/R -> github.com/o/r); a
+    local path is file:<realpath>. "" for nothing."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    found = re.match(r"^([a-z][a-z0-9+.-]*)://(?:[^@/]*@)?(\[[^\]]*\]|[^/:]*)(?::\d*)?(/.*)?$", url, re.IGNORECASE)
+    if found and found.group(1).lower() == "file":
+        return "file:" + os.path.realpath(found.group(3) or "/")
+    if found:
+        host, path = found.group(2), found.group(3) or ""
+    else:
+        scp = re.match(r"^(?:[^@/:]+@)?([^/:]{2,}):(?!//)(.*)$", url)
+        if not scp:
+            return "file:" + os.path.realpath(url)
+        host, path = scp.group(1), scp.group(2)
+    path = re.sub(r"\.git$", "", path.strip("/")).strip("/")
+    return f"{host.lower()}/{path.lower()}"
+
+
+def github_repo(normalised: str) -> tuple[str, str] | None:
+    found = re.fullmatch(r"(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)", normalised or "")
+    return (found.group(1), found.group(2)) if found else None
+
+
+def _config(common: str) -> dict[tuple[str, str], dict[str, str]]:
+    """The repo's config file as {(section, subsection): {key: last value}} (enough for remotes and
+    branches; no includes). Read from the file: no git process."""
+    out: dict[tuple[str, str], dict[str, str]] = {}
+    try:
+        with open(os.path.join(common, "config"), encoding="utf-8", errors="replace") as handle:
+            text = handle.read(SCRIPT_LIMIT)
+    except OSError:
+        return out
+    section = ("", "")
+    for line in text.splitlines():
+        line = line.strip()
+        head = re.match(r'^\[\s*([\w.-]+)(?:\s+"((?:\\.|[^"\\])*)")?\s*\]', line)
+        if head:
+            name, sub = head.group(1).lower(), head.group(2)
+            if sub is None and "." in name:
+                name, sub = name.split(".", 1)
+            section = (name, (sub or "").replace('\\"', '"').replace("\\\\", "\\"))
+            continue
+        pair = re.match(r"^([A-Za-z][\w-]*)\s*(?:=\s*(.*))?$", line)
+        if pair:
+            value = re.sub(r"\s+[;#].*$", "", pair.group(2) or "true").strip()
+            if len(value) > 1 and value[0] == value[-1] == '"':
+                value = value[1:-1]
+            out.setdefault(section, {})[pair.group(1).lower()] = value
+    return out
+
+
+def _is_url(remote: str) -> bool:
+    return "://" in remote or remote.startswith(("/", "./", "../", "~")) or bool(re.match(r"^[^/:]+@?[^/:]*:", remote))
+
+
+def remote_url(directory: str | None, remote: str | None) -> str | None:
+    """Where `git push <remote>` goes from the repo around *directory*: the remote's pushurl or url
+    (read from the config file), or *remote* itself when it is a URL or a path."""
+    if not remote or _dynamic(remote):
+        return None
+    if _is_url(remote):
+        return os.path.join(directory or "", remote) if remote.startswith(("./", "../")) else remote
+    dirs = _git_dirs(directory)
+    if not dirs:
+        return None
+    entry = _config(dirs[1]).get(("remote", remote), {})
+    return entry.get("pushurl") or entry.get("url")
+
+
+def _read_ref(gitdir: str, common: str, ref: str, depth: int = 0) -> tuple[str | None, str | None]:
+    """(full ref name, sha) of *ref* from the files (loose ref, then packed-refs); symbolic refs once."""
+    if depth > 3 or ".." in ref.split("/"):
+        return None, None
+    for base in ((gitdir, common) if ref == "HEAD" or not ref.startswith("refs/") else (common, gitdir)):
+        try:
+            with open(os.path.join(base, ref), encoding="utf-8") as handle:
+                line = handle.read(4096).strip()
+        except OSError:
+            continue
+        if line.startswith("ref: "):
+            return _read_ref(gitdir, common, line[5:].strip(), depth + 1)
+        if _SHA.match(line):
+            return ref, line
+    try:
+        with open(os.path.join(common, "packed-refs"), encoding="utf-8") as handle:
+            for line in handle.read(4 * 1024 * 1024).splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref and _SHA.match(parts[0]):
+                    return ref, parts[0]
+    except OSError:
+        pass
+    return None, None
+
+
+def resolve_ref(directory: str | None, name: str) -> tuple[str | None, str | None]:
+    """(full ref, sha) a push source names, git's lookup order; (None, sha) for a plain sha."""
+    dirs = _git_dirs(directory)
+    if not dirs or not name or _dynamic(name):
+        return None, None
+    if _SHA.match(name):
+        return None, name
+    if name in ("HEAD", "@"):
+        return _read_ref(dirs[0], dirs[1], "HEAD")
+    for candidate in (name, f"refs/{name}", f"refs/tags/{name}", f"refs/heads/{name}", f"refs/remotes/{name}"):
+        if candidate != "HEAD" and (candidate.startswith("refs/") or candidate in ("FETCH_HEAD", "ORIG_HEAD")):
+            found = _read_ref(dirs[0], dirs[1], candidate)
+            if found[1]:
+                return found
+    return None, None
+
+
+def _push_words(command: str) -> list[tuple[str | None, list[str]]]:
+    """(-C directory or None, the words after `push`) of every `git push` in *command*."""
+    found = []
+    commands, nested = split_words(command)
+    for snippet in nested:
+        commands += split_words(snippet)[0]
+    for words in commands:
+        bases = [_base(word) for word in words]
+        if "git" not in bases:
+            continue
+        args = words[bases.index("git") + 1:]
+        i, directory = 0, None
+        while i < len(args) and args[i].startswith("-"):
+            if args[i] == "-C" and i + 1 < len(args):
+                directory = args[i + 1] if directory is None else os.path.join(directory, args[i + 1])
+            i += 2 if args[i] in _GIT_VALUE_OPTS else 1
+        if i < len(args) and args[i] == "push":
+            found.append((directory, args[i + 1:]))
+    return found
+
+
+def push_plan(command: str, cwd: str | None) -> list[dict] | None:
+    """The exact updates the `git push` commands in *command* would make, read from the repo's files
+    now: [{url (normalised), ref (full name), op (update|force|delete), old, new}]. old is the
+    remote-tracking ref (zero when there is none: a new branch). None when any part is not known
+    here (a pattern, --all/--mirror/--tags, an unresolvable source, an unknown remote): the approval
+    then covers no push and the pre-push check asks with the exact update."""
+    try:
+        pushes = _push_words(command)
+    except Exception:  # noqa: BLE001
+        return None
+    plan: list[dict] = []
+    for directory, rest in pushes:
+        if directory is not None:
+            if _dynamic(directory):
+                return None
+            directory = directory if os.path.isabs(directory) else os.path.join(cwd or "", directory)
+        else:
+            directory = cwd
+        dirs = _git_dirs(directory)
+        if not dirs:
+            return None
+        force = delete = False
+        positional: list[str] = []
+        skip = False
+        for arg in rest:
+            if skip:
+                skip = False
+            elif arg.startswith("--"):
+                name = arg[2:].split("=", 1)[0]
+                if name.startswith("force"):
+                    force = True
+                elif name == "delete":
+                    delete = True
+                elif name in ("all", "mirror", "tags", "prune", "branches") or name.startswith("follow"):
+                    return None
+                skip = f"--{name}" in _PUSH_VALUE_OPTS and "=" not in arg
+            elif arg.startswith("-") and arg != "-":
+                force = force or "f" in arg[1:]
+                delete = delete or "d" in arg[1:]
+                skip = arg[1:] == "o"
+            else:
+                positional.append(arg)
+        config = _config(dirs[1])
+        current = None
+        try:
+            with open(os.path.join(dirs[0], "HEAD"), encoding="utf-8") as handle:
+                line = handle.read(4096).strip()
+            current = line[len("ref: refs/heads/"):] if line.startswith("ref: refs/heads/") else None
+        except OSError:
+            pass
+        branch_cfg = config.get(("branch", current or ""), {})
+        remote = positional[0] if positional else (branch_cfg.get("pushremote") or
+                                                     config.get(("remote", ""), {}).get("pushdefault") or
+                                                     branch_cfg.get("remote") or "origin")
+        url = remote_url(directory, remote)
+        if not url:
+            return None
+        normalised = normalise_remote(url)
+        specs = positional[1:] or ([current] if current and not delete else [])
+        if not specs:
+            return None
+        for spec in specs:
+            one_force = force or spec.startswith("+")
+            spec = spec.lstrip("+")
+            if _dynamic(spec) or any(ch in spec for ch in "*?[{"):
+                return None
+            if delete:
+                src, dst = "", spec
+            elif ":" in spec:
+                src, dst = spec.split(":", 1)
+            else:
+                src, dst = spec, spec
+            full_src, new = resolve_ref(directory, src) if src else (None, ZERO)
+            if src and not new:
+                return None
+            if not dst or (dst in ("HEAD", "@") and src in ("HEAD", "@")):
+                dst = full_src or ""
+            if dst.startswith("refs/"):
+                full_dst = dst
+            elif full_src and full_src.startswith("refs/") and dst == src:
+                full_dst = full_src if full_src.startswith(("refs/heads/", "refs/tags/")) else ""
+            elif full_src and full_src.startswith("refs/tags/"):
+                full_dst = f"refs/tags/{dst}"
+            else:
+                full_dst = f"refs/heads/{re.sub(r'^heads/', '', dst)}"
+            if not full_dst or full_dst in ("refs/heads/HEAD", "refs/heads/@"):
+                return None
+            old = ZERO
+            if full_dst.startswith("refs/heads/") and not _is_url(remote):
+                old = _read_ref(dirs[0], dirs[1], f"refs/remotes/{remote}/{full_dst[len('refs/heads/'):]}")[1] or ZERO
+            op = "delete" if not src else "force" if one_force else "update"
+            plan.append({"url": normalised, "ref": full_dst, "op": op, "old": old, "new": new})
+    return plan or None
+
+
+def git_targets(argv: list[str], cwd: str | None) -> tuple[str | None, list[str]]:
+    """(operation, normalised repository URLs) a git or gh call needs the GitHub credential for:
+    ("push" | "fetch" | "gh", [...]); (None, []) for a call that does not reach a remote."""
+    if not argv:
+        return None, []
+    program = _base(argv[0])
+    args = argv[1:]
+    if program == "gh":
+        for i, arg in enumerate(args):
+            value = args[i + 1] if arg in ("-R", "--repo") and i + 1 < len(args) else (
+                arg.split("=", 1)[1] if arg.startswith("--repo=") else None)
+            if value:
+                found = re.match(r"^(?:https?://)?(?:github\.com/)?([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", value)
+                return "gh", [f"github.com/{found.group(1).lower()}/{found.group(2).lower()}"] if found else []
+        url = remote_url(cwd, "origin")
+        return "gh", [normalise_remote(url)] if url else []
+    if program != "git":
+        return None, []
+    i, directory = 0, cwd
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] == "-C" and i + 1 < len(args):
+            directory = os.path.join(directory or "", args[i + 1])
+        i += 2 if args[i] in _GIT_VALUE_OPTS else 1
+    if i >= len(args):
+        return None, []
+    sub, rest = args[i], args[i + 1:]
+    positional = [a for a in rest if not a.startswith("-")]
+    if sub == "push":
+        op = "push"
+    elif sub in ("fetch", "pull", "ls-remote", "clone", "remote", "archive"):
+        op = "fetch"
+    else:
+        return None, []
+    if sub == "clone":
+        return op, [normalise_remote(positional[0])] if positional else []
+    if sub == "remote" and positional[:1] != ["update"]:
+        return None, []
+    dirs = _git_dirs(directory)
+    config = _config(dirs[1]) if dirs else {}
+    if sub == "remote" or "--all" in rest or "--multiple" in rest:
+        names = positional[1:] if sub == "remote" and len(positional) > 1 else [
+            sub_name for (section, sub_name) in config if section == "remote" and sub_name]
+        if "--multiple" in rest:
+            names = positional
+    else:
+        current = None
+        if dirs:
+            try:
+                with open(os.path.join(dirs[0], "HEAD"), encoding="utf-8") as handle:
+                    line = handle.read(4096).strip()
+                current = line[len("ref: refs/heads/"):] if line.startswith("ref: refs/heads/") else None
+            except OSError:
+                pass
+        branch = config.get(("branch", current or ""), {})
+        fallback = (branch.get("pushremote") or config.get(("remote", ""), {}).get("pushdefault")
+                    if op == "push" else None) or branch.get("remote") or "origin"
+        names = [positional[0] if positional else fallback]
+    urls = [remote_url(directory, name) for name in names[:20]]
+    return op, sorted({normalise_remote(url) for url in urls if url})
+
+
+def only_pushes(command: str, cwd: str | None) -> bool:
+    """*command* is plain `git push` commands and calls the guard has no objection to (no nested
+    shell, no options that change git's config or skip its hooks): the pre-push check, which knows
+    the exact refs, can judge it."""
+    try:
+        commands, nested = split_words(command)
+    except Exception:  # noqa: BLE001
+        return False
+    if nested or not commands:
+        return False
+    pushes = 0
+    for words in commands:
+        if not words:
+            continue
+        if _base(words[0]) == "git" and "push" in words:
+            before, j = words[1:words.index("push")], 0
+            while j < len(before):  # only -C <dir> and --no-pager before `push`
+                if before[j] == "-C" and j + 1 < len(before):
+                    j += 2
+                elif before[j] in ("--no-pager", "-P"):
+                    j += 1
+                else:
+                    return False
+            if any(w.startswith(("--no-v", "--exec", "--receive-pack")) or _dynamic(w) for w in words):
+                return False
+            pushes += 1
+            continue
+        if judge("Bash", shlex_join(words), None, cwd) is not None:
+            return False
+    return pushes > 0
+
+
+def shlex_join(words: list[str]) -> str:
+    return " ".join(_shell_quote(word) for word in words)
+
+
+_PLAN_OPS = {"update":("create", "fast-forward"), "force": ("create", "fast-forward", "force"), "delete": ("delete",)}
+
+
+def update_op(update: dict) -> str:
+    """What one reported update does: delete, create, fast-forward or force."""
+    local, remote = str(update.get("local_sha") or ""), str(update.get("remote_sha") or "")
+    if set(local) == {"0"}:
+        return "delete"
+    if set(remote) == {"0"}:
+        return "create"
+    return "fast-forward" if update.get("fast_forward") is True else "force"
+
+
+def plan_covers(plan: list[dict] | None, report: dict | None) -> bool:
+    """Every update the pre-push check reports is one of *plan*'s, exactly: the same repository
+    (normalised URL), full ref name, old and new sha, and an operation the plan allows."""
+    if not plan or not isinstance(report, dict) or not isinstance(report.get("updates"), list) or not report["updates"]:
+        return False
+    url = normalise_remote(str(report.get("url") or ""))
+    left = list(plan)
+    for update in report["updates"]:
+        if not isinstance(update, dict):
+            return False
+        op = update_op(update)
+        match = next((item for item in left if item.get("url") == url and item.get("ref") == update.get("remote_ref")
+                      and item.get("old") == update.get("remote_sha") and item.get("new") == update.get("local_sha")
+                      and op in _PLAN_OPS.get(str(item.get("op")), ())), None)
+        if match is None:
+            return False
+        left.remove(match)
+    return True
+
+
+def describe_plan(plan: list[dict]) -> str:
+    return "; ".join(f"{item['url']} {item['ref']}: {item['old'][:10]} -> {item['new'][:10]} ({item['op']})"
+                     for item in plan)
+
+
+def push_identity(report: dict | None) -> list:
+    """What a pre-push approval is bound to: the repository and each update's ref, old and new sha."""
+    report = report if isinstance(report, dict) else {}
+    updates = report.get("updates") if isinstance(report.get("updates"), list) else []
+    return [normalise_remote(str(report.get("url") or "")), sorted(
+        [str(u.get("remote_ref")), str(u.get("remote_sha")), str(u.get("local_sha"))] for u in updates
+        if isinstance(u, dict))]
+
+
+# --- fix3 #4: a job with no bot records what it was refused, for the owner's Needs-you ------------
+
+REFUSED_FILE = ".bot-office-refused.jsonl"
+
+
+def record_refusal(what: str, why: str, kind: str = PRESET) -> None:
+    """Append one line to <workspace>/.bot-office-refused.jsonl (the gate file's directory); the
+    controller turns it into a Needs-you notice when the job ends. Never raises."""
+    import json
+    import time
+    gate = os.environ.get("BOT_OFFICE_GATE_FILE")
+    if not gate:
+        return
+    path = os.path.join(os.path.dirname(gate), REFUSED_FILE)
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 64 * 1024:
+            return
+        line = json.dumps({"what": str(what)[:600], "why": str(why)[:300], "kind": kind,
+                           "at": int(time.time())}) + "\n"
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, line.encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def readable_event(event) -> bool:

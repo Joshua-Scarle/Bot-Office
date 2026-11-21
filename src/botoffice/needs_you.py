@@ -11,7 +11,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 
-from . import continuation
+from . import continuation, git_guard
 from .assignments import utc_time
 from .catalog import ENGINE_LABELS
 from .cron import to_cron_time
@@ -144,6 +144,7 @@ def needs_you(store: JobStore) -> list[dict]:
                     "actions": ["dismiss"],
                 })
         _approvals(db, bots, items, store)
+        _refused_without_bot(db, items)
         for row in db.execute(
                 f"SELECT n.*, j.not_before FROM usage_notices n JOIN jobs j ON j.id=n.job_id "
                 f"WHERE {PARKED_SQL} AND n.attempt=j.attempts AND n.dismissed_at IS NULL ORDER BY n.created_at DESC"):
@@ -261,6 +262,20 @@ def _preview(text: str, limit: int = 160) -> str:
     return line if len(line) <= limit else line[:limit] + "…"
 
 
+def _push_update(row) -> str:
+    """fix3 #3: the exact update a push card covers (approving passes only that one)."""
+    pushes = row["tool"] == git_guard.PUSH_TOOL or git_guard.push_commands(row["summary"].partition(": ")[2])
+    if row["preset"] != git_guard.PRESET or not pushes:
+        return ""
+    try:
+        plan = json.loads(row["push_plan"] or "null")
+    except ValueError:
+        plan = None
+    if not plan:
+        return " — the exact update is not known yet; git's push check asks again with it"
+    return f" — exact update: {git_guard.describe_plan(plan)}"
+
+
 def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None) -> None:
     """0.11.0: approval cards (Approve once / Deny; Re-run once expired) and tripwire alerts."""
     since = (now() - FAILED_WINDOW).isoformat()
@@ -277,7 +292,7 @@ def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None)
             "class": (approval_card(store, dict(row))["label"] if store is not None else row["preset"]),
             "ask": (f"{bot['name']} asks to run ({row['source']}, {row['preset'] or 'rule'}): {_preview(row['summary'])} "
                     f"({len(row['summary'])} characters, fingerprint {row['input_hash'][:12]}; the whole command is below)"
-                    + (" — expired; Re-run approves it now" if expired else "")),
+                    + _push_update(row) + (" — expired; Re-run approves it now" if expired else "")),
             # the whole action as approved (Sec 5): the grant covers exactly this text
             "command": row["summary"], "fingerprint": row["input_hash"], "length": len(row["summary"]),
             "at": row["created_at"], "actions": ["rerun", "deny"] if expired else ["approve", "deny"],
@@ -291,6 +306,27 @@ def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None)
             "id": f"g:{row['id']}", "kind": "alert", "state": "tripwire", "bot_id": row["bot_id"],
             "bot_name": bot["name"], "notify": bool(bot["notify"]), "alert_id": row["id"], "job_id": row["job_id"],
             "title": "Protected file", "ask": f"{bot['name']} tried to touch a protected file (blocked): {row['summary']}",
+            "at": row["created_at"], "actions": ["dismiss"],
+        })
+
+
+def _refused_without_bot(db, items: list[dict]) -> None:
+    """fix3 #4: a job with no bot cannot wait for an approval card and continue (it has no bot
+    session to resume, and running it again would repeat its earlier steps), so a protected or
+    sending action is refused there; this notice tells the owner what and why (Dismiss)."""
+    since = (now() - FAILED_WINDOW).isoformat()
+    for row in db.execute("SELECT * FROM gate_log WHERE bot_id IS NULL AND effect='never' AND preset IN (?, ?) "
+                          "AND dismissed_at IS NULL AND created_at>=? ORDER BY id DESC LIMIT 20",
+                          ("git-guard", "send", since)):
+        what = row["summary"].removeprefix("refused: ")
+        items.append({
+            "id": f"g:{row['id']}", "kind": "alert", "state": "refused", "bot_id": None,
+            "bot_name": "Job without a bot", "notify": True, "alert_id": row["id"], "job_id": row["job_id"],
+            "title": "Refused: needs your approval",
+            "ask": (f"A job with no bot (job {str(row['job_id'])[:8]}) tried: {what}. It was refused. A job "
+                    "without a bot cannot wait for an Approve card and then continue: it has no bot session "
+                    "to resume, and running it again would repeat its earlier steps. To do this with an "
+                    "Approve card, give the task to a bot."),
             "at": row["created_at"], "actions": ["dismiss"],
         })
 

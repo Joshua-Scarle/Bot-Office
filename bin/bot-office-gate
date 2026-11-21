@@ -144,7 +144,14 @@ def _local_guard(event):
         command = " ".join(str(part) for part in command)
     tool = str(event.get("tool_name") or event.get("tool") or event.get("toolName") or "")
     cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else None
-    return git_guard.classify(tool, str(command or ""), data, cwd) or git_guard.send_reason(tool, str(command or ""))
+    command = str(command or "")
+    guarded = git_guard.classify(tool, command, data, cwd)
+    sending = None if guarded else git_guard.send_reason(tool, command, data, cwd)
+    if guarded or sending:
+        # fix3 #4: the controller shows the owner a Needs-you notice for it when the job ends
+        git_guard.record_refusal(command or f"{tool} {json.dumps(data, sort_keys=True)[:400]}", guarded or sending,
+                                 git_guard.SEND_KEY if sending else git_guard.PRESET)
+    return guarded or sending
 
 
 class _OutOfTime(Exception):
@@ -195,7 +202,8 @@ def _decide(provider, argv):
         guarded = _local_guard(event)
         if guarded:
             return _answer(provider, False, f"Bot-Office gate: {guarded} needs the owner's approval, and a job "
-                                            "with no bot cannot ask for it; action refused.")
+                                            "with no bot cannot wait for it; action refused (the owner gets a "
+                                            "notice). Do not run it another way.")
         return _answer(provider, True)
     if not _loopback(url):
         return _answer(provider, False, "Bot-Office gate: the controller URL is not loopback; action refused.")

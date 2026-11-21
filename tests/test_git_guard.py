@@ -296,13 +296,14 @@ def test_connector_tools_that_merge_delete_or_change_settings_are_guarded(tool, 
     ("mcp__github__create_pull_request", {"title": "x", "head": "feature"}), ("mcp__github__get_pull_request", {}),
     ("mcp__github__list_branches", {}), ("mcp__github__create_branch", {"branch": "feature"}),
     ("mcp__github__create_issue", {}), ("mcp__github__add_issue_comment", {}), ("mcp__github__update_pull_request", {}),
-    ("mcp__github__update_issue", {}), ("mcp__github__push_files", {"branch": "feature/x", "files": []}),
-    ("mcp__github__create_or_update_file", {"branch": "feature", "path": "a"}), ("mcp__github__get_file_contents", {}),
+    ("mcp__github__update_issue", {}), ("mcp__github__push_files", {"owner": "o", "repo": "r", "branch": "feature/x", "files": []}),
+    ("mcp__github__create_or_update_file", {"owner": "o", "repo": "r", "branch": "feature", "path": "a"}), ("mcp__github__get_file_contents", {}),
     ("mcp__github__create_repository", {"name": "x"}), ("mcp__github__search_code", {}), ("mcp__github__fork_repository", {}),
     ("mcp__gmail__delete_message", {}), ("mcp__gmail__send_message", {}), ("mcp__fs__delete_file", {"path": "tmp/x.txt"}),
     ("mcp__fs__read_file", {"path": "/etc/hosts"}), ("Read", {"file_path": "/etc/hosts"}), ("Bash", {}), ("Write", {"file_path": "a"}),
 ])
-def test_ordinary_connector_tools_are_not_asked(tool, data):
+def test_ordinary_connector_tools_are_not_asked(tool, data, monkeypatch):
+    monkeypatch.setattr(git_guard, "default_lookup", lambda owner, repo: "main")
     assert git_guard.classify(tool, "", data, WORK) is None, tool
 
 

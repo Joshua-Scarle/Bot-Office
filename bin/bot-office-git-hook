@@ -8,13 +8,16 @@ ref lines on stdin. It reports to the controller, as a "GitPush" gate event:
 - every update (local ref and sha, remote ref and sha) and whether it is a fast-forward
   (`git merge-base --is-ancestor`; unknown when the old commit is not here);
 - the remote's default branch, from the remote itself (`git ls-remote --symref <remote> HEAD`),
-  else refs/remotes/<remote>/HEAD, else unknown.
+  else refs/remotes/<remote>/HEAD, else unknown. For github.com the controller uses the GitHub API
+  instead (fix3: git_guard.classify_push), so the hook does not ask the remote.
 The controller (git_guard.classify_push) asks for a card when the push deletes a ref, is not a
 fast-forward, overwrites a tag, or goes to the default branch (or to any branch while that is
 unknown); a push the owner approved as a command passes once. The push runs only on an explicit
 allow: an unreachable controller, an answer it cannot read, a crash or running out of time stop it
-(exit 1). A job with no bot (no token, gate mode "local") is judged here with the same rules and a
-guarded push is refused. Then the repo's own pre-push hook runs, with the same input.
+(exit 1). A job with no bot (no token, gate mode "local") is judged here with the same rules; a
+guarded push is refused and recorded for the owner's Needs-you notice. Then the repo's own pre-push
+hook runs, with the same input: its local core.hooksPath, else an inherited global or system one,
+else <common git dir>/hooks.
 
 Not a Bot-Office run (no BOT_OFFICE_JOB_ID): only the repo's own hook runs. Stdlib only; never
 prints the token.
@@ -48,7 +51,9 @@ def git(*args, timeout=10):
     return done.returncode, done.stdout
 
 
-def default_branch(remote):
+def default_branch(remote, url=""):
+    if re.match(r"^(?:https?://|ssh://)?(?:[^@/]*@)?github\.com[:/]", url, re.IGNORECASE):
+        return None, None  # the controller asks the GitHub API
     code, out = git("ls-remote", "--symref", remote, "HEAD", timeout=LS_REMOTE_TIMEOUT)
     if code == 0 and out:
         found = re.search(r"^ref: refs/heads/(\S+)\tHEAD$", out, re.MULTILINE)
@@ -123,7 +128,7 @@ def gate_mode():
 def check(remote, url, text):
     """None when the push may go on, else why not."""
     report = {"remote": remote, "url": clean_url(url), "updates": updates(text)}
-    report["default_branch"], report["default_source"] = default_branch(remote)
+    report["default_branch"], report["default_source"] = default_branch(remote, url)
     event = {"hook_event_name": "PrePush", "tool_name": "GitPush", "tool_input": report, "cwd": os.getcwd()}
     if os.environ.get("BOT_OFFICE_AGENT_TOKEN"):
         allowed, why = ask(event)
@@ -132,14 +137,30 @@ def check(remote, url, text):
         sys.path.insert(0, str(HERE.parent / "src"))
         from botoffice import git_guard  # stdlib only
         reason = git_guard.classify_push(report)
-        return f"{reason} needs the owner's approval, and a job with no bot cannot ask for it" if reason else None
+        if not reason:
+            return None
+        git_guard.record_refusal(f"git push to {report['url']}", reason)
+        return (f"{reason} needs the owner's approval, and a job with no bot cannot wait for it; "
+                "the owner sees a notice")
     return "no job token in this run"
 
 
+def configured_hooks_path():
+    """core.hooksPath from the repo's, the user's or the system's config (the last one wins, as in
+    git), not the one this run set on the command line (scope "command")."""
+    code, out = git("config", "--show-scope", "--get-all", "core.hooksPath")
+    found = None
+    for line in (out or "").splitlines() if code == 0 else ():
+        scope, _, value = line.partition("\t")
+        if scope != "command" and value.strip():
+            found = value.strip()
+    return found
+
+
 def own_hook(name):
-    """The repo's own hook: its local core.hooksPath, else <common git dir>/hooks."""
-    code, out = git("config", "--local", "--get", "core.hooksPath")
-    directory = out.strip() if code == 0 and out and out.strip() else None
+    """The repo's own hook: core.hooksPath from its config (local, global or system), else
+    <common git dir>/hooks."""
+    directory = configured_hooks_path()
     if directory is None:
         code, out = git("rev-parse", "--git-common-dir")
         if code != 0 or not out.strip():

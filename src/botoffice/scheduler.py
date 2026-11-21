@@ -18,7 +18,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from . import attachments, autocontinue, baseline, continuation, failures, isolation, needs_you, procs, safefs
+from . import attachments, autocontinue, baseline, continuation, failures, git_guard, isolation, needs_you, procs
+from . import safefs
 from . import slash as slash_mod
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
@@ -761,11 +762,31 @@ class Scheduler:
             if not self._stopping:
                 self._queue_pending_steers(job.id, sink)
             self.store.revoke_agent_token(job.id)
+            self.rules.forget_job(str(job.id))
+            if not job.bot_id:
+                self._record_refusals(job)
             self._snapshots.pop(str(job.id), None)
             self._prepared.pop(str(job.id), None)
             sink.close()
             self._sinks.pop(str(job.id), None)
             sink.uninstall(token)
+
+    def _record_refusals(self, job: Job) -> None:
+        """fix3 #4: what the gate, the shims and the pre-push check refused a job with no bot (it
+        cannot wait for an approval), from <workspace>/.bot-office-refused.jsonl, as Needs-you notices."""
+        path = self.settings.data_dir / "workspaces" / str(job.id) / git_guard.REFUSED_FILE
+        text = safefs.read_text(path, default="", limit=64 * 1024)
+        for line in text.splitlines()[:20]:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict):
+                self.rules.log_refusal(job, str(item.get("what") or ""), str(item.get("why") or ""),
+                                       str(item.get("kind") or ""))
+        if text:
+            with contextlib.suppress(OSError):
+                path.unlink()
 
     def _finish(
         self,

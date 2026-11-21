@@ -390,7 +390,7 @@ def test_git_env_sets_the_hook_and_the_helper_only_with_a_token():
     plain = git_env(SimpleNamespace(github_credential=False))
     assert plain["GIT_CONFIG_COUNT"] == "1" and plain["GIT_CONFIG_KEY_0"] == "core.hooksPath"
     helped = git_env(SimpleNamespace(github_credential=True))
-    assert helped["GIT_CONFIG_COUNT"] == "3"
+    assert helped["GIT_CONFIG_COUNT"] == "4" and helped["GIT_CONFIG_VALUE_3"] == "true"
     assert helped["GIT_CONFIG_VALUE_1"] == "" and helped["GIT_CONFIG_VALUE_2"].endswith("bot-office-credential")
     assert not any("token" in value.lower() for value in helped.values())
 
@@ -427,7 +427,11 @@ def test_the_token_file_and_the_endpoint(settings, tmp_path, monkeypatch):
         agent = {"Authorization": "Bearer " + store.issue_agent_token(job)}
         assert client.post("/v1/agent/github-token", json={"host": "github.com"}).status_code == 401
         assert client.post("/v1/agent/github-token", headers=agent, json={"host": "evil.example"}).status_code == 404
-        got = client.post("/v1/agent/github-token", headers=agent, json={"host": "github.com", "for": "git"})
+        # fix3: a bare call gets nothing; a ticket for an allowed operation gets the token once
+        assert client.post("/v1/agent/github-token", headers=agent, json={"host": "github.com"}).status_code == 403
+        ticket = client.post("/v1/agent/github-ticket", headers=agent,
+                             json={"argv": ["git", "fetch", "https://github.com/o/r.git"], "cwd": "/"}).json()["tickets"][0]
+        got = client.post("/v1/agent/github-token", headers=agent, json={"host": "github.com", "tickets": [ticket]})
         assert got.status_code == 200 and got.json() == {"token": "github_pat_example"}
         with closing(store._connect()) as db:
             logged = " ".join(str(value) for row in db.execute("SELECT * FROM gate_log") for value in row)

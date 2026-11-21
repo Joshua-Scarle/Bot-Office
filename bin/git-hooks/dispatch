@@ -1,9 +1,10 @@
 #!/bin/sh
 # Bot-Office runs set core.hooksPath to this directory (bin/bot-office-git-hook); every hook here but
-# pre-push only runs the repo's own hook: its local core.hooksPath, else <common git dir>/hooks.
+# pre-push only runs the repo's own hook: core.hooksPath from its local, global or system config (the
+# last wins, as in git; not the one this run set, scope "command"), else <common git dir>/hooks.
 name=${0##*/}
 here=$(cd "${0%/*}" && pwd -P)
-dir=$(git config --local --get core.hooksPath 2>/dev/null)
+dir=$(git config --show-scope --get-all core.hooksPath 2>/dev/null | grep -v '^command	' | tail -n 1 | cut -f 2-)
 if [ -z "$dir" ]; then
     common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
     dir="$common/hooks"

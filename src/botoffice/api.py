@@ -27,7 +27,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import approval_classes, attachments, avatars, baseline, continuation, grok_bridge, health, isolation, needs_you, notify, safefs, vnc
+from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
+from . import isolation, needs_you, notify, safefs, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -2537,25 +2538,57 @@ def create_app(
             raise HTTPException(status_code=422, detail="invalid gate event") from exc
         return (await asyncio.to_thread(rules.decide, job, body.event, body.provider[:32])).as_dict()
 
+    # 0.12.4 fix3 #5: the git guard asks GitHub (cached) for a repo's real default branch
+    git_guard.default_lookup = github_access.DefaultBranches(lambda: action_rules.github_token(settings))
+
+    @app.post("/v1/agent/github-ticket")
+    async def agent_github_ticket(request: Request, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        """0.12.4 fix3 #2: one-time tickets for one git or gh call (the shim sends its words and
+        directory). The controller works out the operation and the GitHub repositories itself and
+        issues a ticket per repository only when it allows the call: a push or a gh call the guard
+        stops needs the owner's approval first. 403 otherwise; 404 when it holds no token."""
+        raw = await _read_capped(request, 64 * 1024, "ticket request")
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not isinstance(body.get("argv"), list):
+            raise HTTPException(status_code=422, detail="expected argv and cwd")
+        if action_rules.github_token(settings) is None:
+            raise HTTPException(status_code=404, detail="no GitHub token configured")
+        cwd = body.get("cwd") if isinstance(body.get("cwd"), str) else None
+        tickets, why = await asyncio.to_thread(rules.issue_ticket, job, body["argv"], cwd)
+        if not tickets:
+            raise HTTPException(status_code=403, detail=why)
+        return {"tickets": tickets, "expires_in": github_access.TICKET_SECONDS}
+
     @app.post("/v1/agent/github-token")
     async def agent_github_token(request: Request, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
-        """0.12.4 fix2: the GitHub token for a running job's git (bin/bot-office-credential) and gh (the
-        shim), so no token sits in the bots user's home or a bot's environment. 404 when the controller
-        holds none (docs/APPROVALS.md "GitHub credentials"). Each hand-out is logged, never the token."""
-        raw = await _read_capped(request, 4096, "credential request")
+        """0.12.4 fix3 #2: the GitHub token for exactly one ticketed operation (bin/bot-office-credential
+        for git, the gh shim for gh). The agent token alone gets 403: the ticket must be this job's,
+        unused, unexpired and, for git, for the repository git names. Each hand-out is logged with the
+        operation and repository the ticket was issued for, never the token."""
+        raw = await _read_capped(request, 8192, "credential request")
         try:
             body = json.loads(raw or b"{}")
         except ValueError:
             body = {}
-        host = str(body.get("host") or "github.com").lower() if isinstance(body, dict) else ""
+        body = body if isinstance(body, dict) else {}
+        host = str(body.get("host") or "github.com").lower()
         if host not in action_rules.GITHUB_HOSTS:
             raise HTTPException(status_code=404, detail="no credential for this host")
         token = action_rules.github_token(settings)
         if token is None:
             raise HTTPException(status_code=404, detail="no GitHub token configured")
-        purpose = str(body.get("for") or "")[:8] if isinstance(body, dict) else ""
-        await asyncio.to_thread(rules.log_credential, job, purpose)
-        return {"token": token}
+        path = body.get("path")
+        repo = git_guard.normalise_remote(f"https://{host}/{path}") if isinstance(path, str) and path else None
+        offered = body.get("tickets") if isinstance(body.get("tickets"), list) else [body.get("ticket")]
+        for ticket in offered[:8]:
+            used = rules.tickets.redeem(ticket, str(job.id), repo) if isinstance(ticket, str) else None
+            if used is not None:
+                await asyncio.to_thread(rules.log_credential, job, used)
+                return {"token": token}
+        raise HTTPException(status_code=403, detail="a ticket for this operation is required")
 
     @app.get("/v1/rules", dependencies=[Depends(auth)])
     async def list_rules(bot_id: UUID | None = None) -> dict:

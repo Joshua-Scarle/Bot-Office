@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from . import git_guard
+from . import git_guard, github_access
 from .domain import Job
 from .store import JobStore, now
 
@@ -162,7 +162,11 @@ class Action:
         """Exact action identity: tool, the exact command, paths and urls, the working directory
         (repo) and the tool's canonical arguments (an MCP call's target and content; a shell call's
         options besides its description); a grant covers only this action. Whitespace is kept
-        (Sec 10: `"a  b"` and `"a b"` are different arguments)."""
+        (Sec 10: `"a  b"` and `"a b"` are different arguments). A push the pre-push check reports
+        (fix3) is the repository and each update's ref, old and new sha, however the bot named it."""
+        if self.tool == git_guard.PUSH_TOOL:
+            body = json.dumps(["gitpush", git_guard.push_identity(self.data)])
+            return hashlib.sha256(body.encode()).hexdigest()
         data = self.data
         if _is_shell(self):
             data = {key: value for key, value in data.items() if key not in _SHELL_COSMETIC}
@@ -394,9 +398,12 @@ class Rules:
         self.store = store
         self.approval_ttl = timedelta(minutes=approval_ttl_min)
         self.extra_secrets = extra_secrets
-        # job id -> [(expiry, cwd, remote, branch names or None for any)]: see _give_pass
-        self._passes: dict[str, list[tuple[float, str | None, str | None, set[str] | None]]] = {}
+        # job id -> [(expiry, the exact updates approved)]: see _give_pass
+        self._passes: dict[str, list[tuple[float, list[dict]]]] = {}
+        # job id -> [(expiry, approved command)]: a gh call in it may get a GitHub ticket (issue_ticket)
+        self._approved: dict[str, list[tuple[float, str, str | None]]] = {}
         self._lock = threading.Lock()
+        self.tickets = github_access.Tickets()
 
     # --- rules CRUD (master token only) ---
 
@@ -465,7 +472,7 @@ class Rules:
         if guarded:
             return "ask", git_guard.PRESET, f"{guarded} always waits for your approval"
         # A16: so does sending email or messages to people (the "send" class is locked on)
-        sending = git_guard.send_reason(action.tool, action.command)
+        sending = git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
         if "ask" in effects:
@@ -499,20 +506,25 @@ class Rules:
             self._log(job, provider, "deny", "never", preset, action, None)
             return Decision("deny", "never", reason, preset)
         if not job.bot_id:
-            # A16: a job with no bot has no chat for a card: a guarded action is refused outright
-            self._log(job, provider, "deny", "never", preset, action, None)
+            # A16 (fix3): a job with no bot cannot pause and resume (no session to continue; running it
+            # again would repeat its earlier steps): refused, and a Needs-you notice says so
+            self._log(job, provider, "deny", "never", preset, action, None, note=why)
             return Decision("deny", "never", f"Blocked by Bot-Office: {why or 'this action needs approval'}, and a job "
-                                             "with no bot cannot ask for it. Not run.", preset)
+                                             "with no bot cannot wait for it. Not run; the owner sees a notice.", preset)
         if action.tool == git_guard.PUSH_TOOL and self._take_pass(job, action):
-            # the push the owner approved as a command (git push ...), now seen by the pre-push check
+            # the exact update the owner approved (as a command, or as this push), seen by the pre-push check
             self._log(job, provider, "allow", "grant", preset, action, None)
             return Decision("allow", "ask", "approved push", preset)
         grant = self.consume_grant(job, action)
         if grant is not None:
             self._log(job, provider, "allow", "grant", preset, action, grant)
-            if preset == git_guard.PRESET and action.command:
-                self._give_pass(job, action)
+            self._granted(job, action, grant, preset)
             return Decision("allow", "ask", f"approval #{grant} granted", preset, grant)
+        if preset == git_guard.PRESET and action.command and self._push_grant_waiting(job, action):
+            # the owner approved the exact update git's pre-push check reported; the push command may
+            # run, and the pre-push check lets only that update through (the grant is used there)
+            self._log(job, provider, "allow", "grant", preset, action, None)
+            return Decision("allow", "ask", "approved push (exact update)", preset)
         if len(action.detail) > APPROVAL_LIMIT:
             # the card must show the whole command; one this long cannot be reviewed, so not asked
             self._log(job, provider, "deny", "never", preset, action, None)
@@ -532,52 +544,151 @@ class Rules:
                   "BOT-OFFICE-STATUS: waiting_on_user — approval #" + str(approval))
         return Decision("deny", "ask", reason, preset, approval)
 
-    # --- the pre-push check after an approved `git push` command ---
+    # --- the pre-push check after an approval (fix3 #3: bound to the exact update) ---
 
-    def _give_pass(self, job: Job, action: Action) -> None:
-        """An approved command that pushes: its own pre-push check (bin/bot-office-git-hook) may pass
-        once, within PASS_SECONDS, for the same job, directory, remote and refs."""
-        pushes = git_guard.push_commands(action.command)
-        if not pushes:
+    def _granted(self, job: Job, action: Action, approval_id: int, preset: str | None) -> None:
+        """An approval was used: a command's push plan becomes a pass for its pre-push check, and
+        the command is remembered for gh tickets (issue_ticket), both for PASS_SECONDS."""
+        if not action.command:
             return
+        expires = time.monotonic() + PASS_SECONDS
+        plan = None
+        if preset == git_guard.PRESET:
+            row = self.get(approval_id) or {}
+            try:
+                plan = json.loads(row.get("push_plan") or "null")
+            except ValueError:
+                plan = None
         with self._lock:
-            self._passes.setdefault(str(job.id), []).extend(
-                (time.monotonic() + PASS_SECONDS, action.cwd, remote, refs) for remote, refs in pushes)
+            if plan:
+                self._passes.setdefault(str(job.id), []).append((expires, plan))
+            self._approved.setdefault(str(job.id), []).append((expires, action.command, action.cwd))
 
     def _take_pass(self, job: Job, action: Action) -> bool:
-        data = action.data if isinstance(action.data, dict) else {}
-        updates = [u for u in data.get("updates") or [] if isinstance(u, dict)]
-        remote, url = str(data.get("remote") or ""), str(data.get("url") or "")
-        names = {re.sub(r"^refs/(?:heads|tags)/", "", str(u.get("remote_ref") or "")) for u in updates}
+        """The pre-push check reports *action*: it passes once when every update it makes is one the
+        owner approved exactly (git_guard.plan_covers). Anything else (another repo, ref, old or new
+        sha, operation; an update not known when approved) asks with the exact update."""
         with self._lock:
             passes = self._passes.get(str(job.id), [])
-            for index, (expires, cwd, wanted_remote, refs) in enumerate(passes):
-                if expires < time.monotonic():
-                    continue
-                if cwd and action.cwd and not _related(cwd, action.cwd):
-                    continue
-                if wanted_remote and wanted_remote not in (remote, url):
-                    continue
-                if refs is not None and not names <= refs:
-                    continue
-                del passes[index]
+            for index, (expires, plan) in enumerate(passes):
+                if expires >= time.monotonic() and git_guard.plan_covers(plan, action.data):
+                    del passes[index]
+                    return True
+        return False
+
+    def _push_grant_waiting(self, job: Job, action: Action) -> bool:
+        """This resume turn holds an approved pre-push card (an exact update), and *action* is only
+        `git push` commands: let the command run so that the pre-push check can use the grant."""
+        if not job.origin_job_id or not job.bot_id or not git_guard.only_pushes(action.command, action.cwd):
+            return False
+        with closing(self.store._connect()) as db:
+            row = db.execute("SELECT 1 FROM approvals WHERE bot_id=? AND job_id=? AND resume_job_id=? AND "
+                             "status='approved' AND tool=? AND grant_expires_at>? LIMIT 1",
+                             (str(job.bot_id), str(job.origin_job_id), str(job.id), git_guard.PUSH_TOOL,
+                              now().isoformat())).fetchone()
+        return row is not None
+
+    def _push_allowed(self, job: Job, repos: list[str]) -> bool:
+        """A push to *repos* is approved for this job right now: a pass from an approved command, or
+        an approved pre-push card waiting for this resume turn."""
+        stamp = time.monotonic()
+        with self._lock:
+            if any(expires >= stamp and {item.get("url") for item in plan} & set(repos)
+                   for expires, plan in self._passes.get(str(job.id), [])):
+                return True
+        if not job.origin_job_id:
+            return False
+        with closing(self.store._connect()) as db:
+            rows = db.execute("SELECT push_plan FROM approvals WHERE bot_id=? AND job_id=? AND resume_job_id=? AND "
+                              "status='approved' AND tool=? AND grant_expires_at>?",
+                              (str(job.bot_id), str(job.origin_job_id), str(job.id), git_guard.PUSH_TOOL,
+                               now().isoformat())).fetchall()
+        for row in rows:
+            try:
+                plan = json.loads(row["push_plan"] or "[]")
+            except ValueError:
+                continue
+            if {item.get("url") for item in plan if isinstance(item, dict)} & set(repos):
                 return True
         return False
 
-    def log_credential(self, job: Job, purpose: str) -> None:
-        """A GitHub token handed to a run (never the token itself)."""
+    def _approved_command(self, job: Job, argv: list[str]) -> bool:
+        """*argv* is one of the commands in a command the owner approved for this job (PASS_SECONDS)."""
+        stamp = time.monotonic()
+        with self._lock:
+            approved = [(command, cwd) for expires, command, cwd in self._approved.get(str(job.id), [])
+                        if expires >= stamp]
+        want = [git_guard._base(argv[0]), *argv[1:]] if argv else []
+        for command, _cwd in approved:
+            try:
+                commands, nested = git_guard.split_words(command)
+                for snippet in nested:
+                    commands += git_guard.split_words(snippet)[0]
+            except Exception:  # noqa: BLE001, S112 — a command it cannot read approves nothing
+                continue
+            for words in commands:
+                bases = [git_guard._base(word) for word in words]
+                if want and want[0] in bases and [want[0], *words[bases.index(want[0]) + 1:]] == want:
+                    return True
+        return False
+
+    # --- fix3 #2: GitHub tickets (the token only for an operation the controller allows) ---
+
+    def issue_ticket(self, job: Job, argv: list[str], cwd: str | None) -> tuple[list[str], str]:
+        """One-time tickets for the git or gh call *argv* in *cwd*, one per GitHub repository it
+        reaches, or ([], why not). A push or a gh call the guard stops needs an approval first."""
+        if not job.bot_id or not isinstance(argv, list) or not argv or len(argv) > 200 or \
+                not all(isinstance(word, str) and len(word) <= 4096 for word in argv):
+            return [], "not a call the controller can judge"
+        op, repos = git_guard.git_targets(argv, cwd)
+        repos = [repo for repo in repos if git_guard.github_repo(repo)]
+        if op is None or not repos:
+            return [], "not a GitHub operation"
+        command = git_guard.shlex_join(argv)
+        guarded = git_guard.judge("Bash", command, None, cwd)
+        if guarded:
+            if op == "push" and not self._push_allowed(job, repos):
+                return [], f"{guarded}: waits for the owner's approval"
+            if op != "push" and not self._approved_command(job, argv):
+                return [], f"{guarded}: waits for the owner's approval"
+        tickets = []
+        for repo in repos:
+            ticket = self.tickets.issue(str(job.id), repo, op)
+            if ticket is None:
+                return [], "too many GitHub credential requests in this job"
+            tickets.append(ticket)
+        return tickets, ""
+
+    def forget_job(self, job_id: str) -> None:
+        with self._lock:
+            self._passes.pop(str(job_id), None)
+            self._approved.pop(str(job_id), None)
+        self.tickets.forget(str(job_id))
+
+    def log_credential(self, job: Job, ticket: github_access.Ticket) -> None:
+        """A GitHub token handed out for a ticket: the operation and repository the controller bound
+        the ticket to (never the token, never text the caller chose)."""
         self._log(job, "credential", "allow", "allow", "github-token",
-                  Action(tool="github-token", text=f"GitHub credential for {purpose or 'git'}"), None)
+                  Action(tool="github-token", text=f"GitHub credential for {ticket.op} {ticket.repo or '(no repo)'}"),
+                  None)
+
+    def log_refusal(self, job: Job, what: str, why: str, kind: str = "") -> None:
+        """fix3 #4: an action a job with no bot was refused where it ran (gate, shim, pre-push check;
+        bin/ writes it down, the scheduler reads it at the job's end), for a Needs-you notice."""
+        preset = git_guard.SEND_KEY if kind == git_guard.SEND_KEY else git_guard.PRESET
+        self._log(job, "local", "deny", "never", preset, Action(tool="refused", text=_short(what, 240)), None,
+                  note=_short(why, 160))
 
     def _log(self, job: Job, provider: str, decision: str, effect: str, preset: str | None, action: Action,
-             approval: int | None) -> None:
+             approval: int | None, note: str | None = None) -> None:
         with closing(self.store._connect()) as db:
             if db.execute("SELECT COUNT(*) FROM gate_log WHERE job_id=?", (str(job.id),)).fetchone()[0] >= GATE_LOG_PER_JOB:
                 return  # Sec 10: the decision still applies; only the log row is dropped
             db.execute("INSERT INTO gate_log (bot_id,job_id,provider,decision,effect,preset,tool,summary,approval_id,"
                        "created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                        (str(job.bot_id) if job.bot_id else None, str(job.id), provider, decision, effect, preset,
-                        action.tool[:80], action.summary, approval, now().isoformat()))
+                        action.tool[:80], (f"{action.summary} — {note}" if note else action.summary)[:SUMMARY_LIMIT + 200],
+                        approval, now().isoformat()))
 
     # --- approvals ---
 
@@ -587,6 +698,8 @@ class Rules:
         whole command (at most APPROVAL_LIMIT characters), never a shortened form."""
         stamp = now()
         unattended = self.strict(job)
+        summary = f"{action.tool}: {action.detail}"
+        plan = self._push_plan(action, preset)
         with closing(self.store._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -601,21 +714,39 @@ class Rules:
                     return None
                 cursor = db.execute(
                     "INSERT INTO approvals (bot_id,job_id,assignment_id,tool,summary,input_hash,scope,source,preset,"
-                    "status,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)",
+                    "status,expires_at,created_at,push_plan) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)",
                     (str(job.bot_id), str(job.id), str(job.assignment_id) if job.assignment_id else None,
-                     action.tool[:80], f"{action.tool}: {action.detail}", action.fingerprint,
+                     action.tool[:80], summary, action.fingerprint,
                      "unattended" if unattended else "attended", job.source or "api", preset,
-                     self._expiry(stamp, unattended), stamp.isoformat()))
+                     self._expiry(stamp, unattended), stamp.isoformat(), json.dumps(plan) if plan else None))
                 # 0.11.10: the Approve / Deny card in the bot's chat
                 db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
                            (str(job.bot_id), "system", "chat",
-                            f"Approval #{cursor.lastrowid} requested: {_short(f'{action.tool}: {action.detail}')}",
+                            f"Approval #{cursor.lastrowid} requested: {_short(summary)}",
                             stamp.isoformat(), cursor.lastrowid))
                 db.commit()
             except BaseException:
                 db.rollback()
                 raise
         return int(cursor.lastrowid)
+
+    @staticmethod
+    def _push_plan(action: Action, preset: str | None) -> list[dict] | None:
+        """The exact updates a push card covers (fix3 #3), None when not known here. A `git push`
+        command: the updates it would make, read from the repo now (old = the remote-tracking ref);
+        a pre-push report: its updates. Needs-you shows them; the pre-push check passes only those."""
+        if preset != git_guard.PRESET:
+            return None
+        if action.tool == git_guard.PUSH_TOOL and isinstance(action.data, dict):
+            url = git_guard.normalise_remote(str(action.data.get("url") or ""))
+            ops = {"delete": "delete", "create": "update", "fast-forward": "update", "force": "force"}
+            plan = [{"url": url, "ref": str(u.get("remote_ref")), "op": ops[git_guard.update_op(u)],
+                     "old": str(u.get("remote_sha")), "new": str(u.get("local_sha"))}
+                    for u in action.data.get("updates") or [] if isinstance(u, dict)]
+            return plan or None
+        if not action.command or not git_guard.push_commands(action.command):
+            return None
+        return git_guard.push_plan(action.command, action.cwd)
 
     def _expiry(self, stamp: datetime, unattended: bool) -> str | None:
         """Unattended requests expire after BOT_OFFICE_APPROVAL_TTL_MIN; attended ones (0.11.10)

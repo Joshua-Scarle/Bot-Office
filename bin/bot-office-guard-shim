@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""PATH shim for git, gh, curl and wget (bin/git etc. are stubs that run this file): the git guard for engines that have no hook.
+"""PATH shim for git, gh, curl, wget, httpie/xh and mail senders (bin/git etc. are stubs that run this
+file): the git guard and the send class for engines that have no hook, and GitHub tickets for all.
 
 Bot-Office puts bin/ first on a bot's PATH. For an engine that bin/bot-office-gate cannot hook
 (opencode, restricted Codex) the run's env has BOT_OFFICE_GUARD_SHIM=1: a push to the default branch, a
@@ -9,9 +10,14 @@ runs the real program at once. The variable stays set for the program's children
 hook, a script it runs reach the shim again). Without BOT_OFFICE_GUARD_SHIM (hooked engines, the
 owner's own shell) this is a pass-through. It fails closed: a crash refuses the command.
 
-In every Bot-Office run, gh gets the GitHub token from the controller (POST /v1/agent/github-token,
-docs/APPROVALS.md "GitHub credentials") as GH_TOKEN in its own environment only, never in the bot's
-environment or files. Stdlib only; never prints the token.
+GitHub credential (fix3, docs/APPROVALS.md "GitHub credentials"): for a git call that reaches a
+remote (push, fetch, pull, clone, ls-remote, remote update) and for every gh call, the shim sends the
+call's words and directory to POST /v1/agent/github-ticket. The controller works out the operation and
+the repositories itself and answers with one-time tickets only for a call it allows (a protected push
+or gh call needs the owner's approval first). git gets them as BOT_OFFICE_GITHUB_TICKETS for
+bin/bot-office-credential; for gh the shim exchanges its ticket for the token (POST
+/v1/agent/github-token) and passes it as GH_TOKEN to that one gh process only. Stdlib only; never
+prints the token.
 """
 import json
 import os
@@ -24,6 +30,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TIMEOUT = 20
+# git subcommands that reach a remote (the controller decides; this only saves a call for the rest)
+GIT_REMOTE = ("push", "fetch", "pull", "clone", "ls-remote", "remote", "archive")
+GIT_VALUE_OPTS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env")
 
 
 def real_program(name):
@@ -39,30 +48,72 @@ def real_program(name):
 
 def run(name, program, args):
     env = dict(os.environ)
-    if name == "gh":
-        token = github_token()
-        if token:
-            env["GH_TOKEN"] = token
+    env.pop("BOT_OFFICE_GITHUB_TICKETS", None)  # only tickets issued for this call
+    if name == "gh" or (name == "git" and reaches_remote(args) and credential_helper_set()):
+        tickets = github_tickets([name, *args])
+        if tickets and name == "git":
+            env["BOT_OFFICE_GITHUB_TICKETS"] = " ".join(tickets)
+        elif tickets:
+            token = exchange(tickets[0])
+            if token:
+                env["GH_TOKEN"] = token
     os.execve(program, [name, *args], env)
 
 
-def github_token():
-    """The GitHub token the controller holds for bot runs, or None (none configured, not a run)."""
+def reaches_remote(args):
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in GIT_VALUE_OPTS else 1
+    return i < len(args) and args[i] in GIT_REMOTE
+
+
+def credential_helper_set():
+    """The run's git config names bin/bot-office-credential (the controller holds a GitHub token)."""
+    count = os.environ.get("GIT_CONFIG_COUNT", "0")
+    return count.isdigit() and any(os.environ.get(f"GIT_CONFIG_VALUE_{i}", "").endswith("bot-office-credential")
+                                   for i in range(min(int(count), 50)))
+
+
+def post(path, body):
+    """POST to the controller with the job's token: (status, answer dict) or (None, None)."""
     token = os.environ.get("BOT_OFFICE_AGENT_TOKEN", "")
     url = os.environ.get("BOT_OFFICE_API_URL", "")
     if not token or not url or not loopback(url):
-        return None
-    request = urllib.request.Request(url.rstrip("/") + "/v1/agent/github-token", method="POST",
-                                     data=json.dumps({"host": "github.com", "for": "gh"}).encode(),
+        return None, None
+    request = urllib.request.Request(url.rstrip("/") + path, method="POST", data=json.dumps(body).encode(),
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(request, timeout=TIMEOUT) as response:
             answer = json.loads(response.read(65536).decode() or "{}")
+            return response.status, answer if isinstance(answer, dict) else {}
+    except urllib.error.HTTPError as exc:
+        return exc.code, {}
     except (urllib.error.URLError, OSError, ValueError):
-        return None
-    value = answer.get("token") if isinstance(answer, dict) else None
+        return None, None
+
+
+def github_tickets(argv):
+    """One-time tickets the controller issues for this call (none: not GitHub, not allowed, no token)."""
+    status, answer = post("/v1/agent/github-ticket", {"argv": argv, "cwd": os.getcwd()})
+    tickets = answer.get("tickets") if status == 200 and answer else None
+    return [t for t in tickets if isinstance(t, str) and t.isprintable() and " " not in t][:8] if isinstance(
+        tickets, list) else []
+
+
+def exchange(ticket):
+    """The GitHub token for one ticket (gh), or None."""
+    status, answer = post("/v1/agent/github-token", {"host": "github.com", "ticket": ticket})
+    value = answer.get("token") if status == 200 and answer else None
     return value if isinstance(value, str) and value and "\n" not in value else None
+
+
+def gate_mode():
+    try:
+        with open(os.environ.get("BOT_OFFICE_GATE_FILE") or "", encoding="utf-8") as handle:
+            return json.load(handle).get("mode")
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def refuse(text):
@@ -128,8 +179,15 @@ def _main():
         return refuse("the guard module is missing; action refused.")
     command = shlex.join([name, *args])
     cwd = os.getcwd()
-    if git_guard.classify("Bash", command, None, cwd) is None:
+    reason = git_guard.judge("Bash", command, None, cwd)
+    if reason is None:
         run(name, program, args)
+    if not os.environ.get("BOT_OFFICE_AGENT_TOKEN") and gate_mode() == "local":
+        # a job with no bot cannot wait for a card: refused, and the owner gets a Needs-you notice
+        sending = git_guard.classify("Bash", command, None, cwd) is None
+        git_guard.record_refusal(command, reason, git_guard.SEND_KEY if sending else git_guard.PRESET)
+        return refuse(f"{reason} needs the owner's approval, and a job with no bot cannot wait for it; "
+                      "action refused (the owner gets a notice).")
     allowed, why = ask(command, cwd)
     if allowed:
         run(name, program, args)

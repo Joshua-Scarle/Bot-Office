@@ -4769,7 +4769,7 @@ async function loadNeedsYou() {
     const row = el("div", "needs-item");
     const ask = el("button", "needs-ask", item.ask);
     ask.type = "button";
-    ask.onclick = () => selectBot(item.bot_id);
+    ask.onclick = () => { if (item.bot_id) selectBot(item.bot_id); };  // a job with no bot has no chat
     const bar = el("div", "tools-bar");
     // #10: "switch" is one "Retry on <provider>" button per enabled, signed-in other provider
     const actions = item.actions.flatMap((action) => action === "switch"
