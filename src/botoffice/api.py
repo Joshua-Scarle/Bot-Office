@@ -190,7 +190,7 @@ class ApprovalsBody(BaseModel):
 
 
 class NotificationsBody(BaseModel):
-    """Email classes (0.12.11): each toggle is optional; missing keys keep their value."""
+    """Email classes (0.12.13): each toggle is optional; missing keys keep their value."""
     model_config = ConfigDict(extra="forbid")
     needs_you: bool | None = None
     failed: bool | None = None

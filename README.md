@@ -197,11 +197,11 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
    ```
    If the check says STOP, do not continue: find the variable in the unit or its `EnvironmentFile` (`systemctl --user cat bot-office`) and fix `DB` by hand until the check passes.
    ```sh
-   STAMP=$(date +%Y%m%d-%H%M%S); B=~/backups/pre-0.12.11-$STAMP; mkdir -p "$B"
+   STAMP=$(date +%Y%m%d-%H%M%S); B=~/backups/pre-0.12.13-$STAMP; mkdir -p "$B"
    systemctl --user show bot-office -p FragmentPath -p DropInPaths -p EnvironmentFiles -p WorkingDirectory
    systemctl --user cat bot-office > "$B/bot-office.unit.txt"          # unit plus drop-ins, as systemd sees them
    cp -a ~/.config/systemd/user/bot-office.service* "$B/" 2>/dev/null   # the unit file and any .d directory
-   cd "$D" && git tag "backup/pre-0.12.11-$STAMP"
+   cd "$D" && git tag "backup/pre-0.12.13-$STAMP"
    python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); print("integrity:", d.execute("PRAGMA integrity_check").fetchone()[0]); d.close(); s.close()' "$DB" "$B/agentdesk.sqlite3"   # online backup, safe while running
    ```
    Keep `$STAMP`, `$B`, `$D`, `$DB` and `$BOT_OFFICE_DATA_DIR` in this shell for the rest (re-derive them the same way in a new shell).
@@ -289,7 +289,7 @@ Use the same shell as the setup (`$D`, `$B`, `$STAMP`, `$DB`, `$BOT_OFFICE_DATA_
    (`/status` needs the secret and returns two counts only; the secret goes through a file descriptor, not the command line.) Events created after the pusher stopped (a newly overdue task, a failed turn) stay in the controller database, unsent: nothing is lost, they simply are not mailed, and no Worker holds anything. If the counts never reach 0 (for example the mail is being rejected), do not delete yet: fix the mail path, or decide consciously that those messages are expendable and say so in the rollback note.
 4. Stop the sources: `systemctl --user disable --now bot-office-heartbeat.timer`, then in `ops/watchdog` `npx wrangler delete` (removes the Worker, its Durable Object and state).
 5. Undo the controller setting: delete the new drop-in (`rm ~/.config/systemd/user/bot-office.service.d/watchdog.conf`, and remove the directory if it is empty and you created it) or remove the `WATCHDOG_URL=` line you appended to the existing environment file. The live unit file and its other drop-ins were never modified; `diff -r` the copies in `$B` against `~/.config/systemd/user/` to confirm. Remove the heartbeat units and `~/.config/bot-office/heartbeat.env`, then `systemctl --user daemon-reload`.
-6. Controller code (still paused and drained; re-check `running` is 0): `systemctl --user stop bot-office`, `cd "$D" && git checkout backup/pre-0.12.11-$STAMP && .venv/bin/pip install -e .`, `systemctl --user start bot-office`, check it answers, and `rm "$BOT_OFFICE_DATA_DIR/PAUSE" "$BOT_OFFICE_DATA_DIR/NOTIFY_OFF"` (the old code ignores the files; they are removed so a later upgrade does not start paused or silent).
+6. Controller code (still paused and drained; re-check `running` is 0): `systemctl --user stop bot-office`, `cd "$D" && git checkout backup/pre-0.12.13-$STAMP && .venv/bin/pip install -e .`, `systemctl --user start bot-office`, check it answers, and `rm "$BOT_OFFICE_DATA_DIR/PAUSE" "$BOT_OFFICE_DATA_DIR/NOTIFY_OFF"` (the old code ignores the files; they are removed so a later upgrade does not start paused or silent).
 7. Database: nothing has to be restored. The new table and triggers are ignored by older versions (the triggers keep adding small rows). To remove them, with the controller stopped or idle:
    ```sh
    python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); [c.execute("DROP TRIGGER IF EXISTS "+t) for t in sys.argv[2:]]; c.execute("DROP TABLE IF EXISTS notify_events"); c.execute("DELETE FROM meta WHERE key LIKE \"notify-backfill%\" OR key IN (\"notify-email\",\"notify-cursor\",\"notify-epoch\",\"notify-freeze\")"); c.commit()' "$DB" notify_job_failed notify_job_done notify_question_open notify_asg_new notify_asg_state notify_asg_dropped notify_asg_overdue_close notify_approval_new notify_approval_expired notify_tripwire notify_usage_parked notify_watcher_paused notify_held_new notify_held_kind
