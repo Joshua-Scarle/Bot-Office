@@ -80,6 +80,9 @@ class Job(BaseModel):
     failure_kind: str | None = None
     # done | unverified (no status line) | not_done: … | blocked: … | waiting_on_user: …
     outcome: str | None = None
+    # 0.12.16: a done with the evidence it gave (verified 1), a bare done (0), or neither (None)
+    verified: int | None = None
+    evidence: str | None = None
     # provider attempts so far; a re-queued retry waits until not_before
     attempts: int = 0
     not_before: datetime | None = None
@@ -362,6 +365,10 @@ class Message(BaseModel):
     edit_of: int | None = None
     # the reply's job succeeded but the bot gave no BOT-OFFICE-STATUS line (shown as a subtle label)
     unverified: bool = False
+    # 0.12.16: what a done reply said it was checked with (None: none given, or not a done)
+    evidence: str | None = None
+    # 0.12.16: characters of the reply not shown here; the full text is job.reply_text (GET /v1/jobs/{job_id})
+    cut_chars: int = 0
     # 0.11.10: who wrote it, so only the owner's own typed messages look like the owner's.
     # owner: typed by the owner; bot: this bot's reply; bot_out: this bot's message to another bot;
     # bot_in: another bot's (or a bridge sender's) message to this bot; bot_reply: the other bot's

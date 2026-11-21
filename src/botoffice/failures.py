@@ -71,6 +71,24 @@ def split_status(reply: str) -> tuple[str, str, str]:
     return "\n".join(lines[:-1]).rstrip(), match.group(1).lower(), match.group(2).strip().strip("*`").strip()
 
 
+# 0.12.16: a "done" counts as verified only when its status line says what was checked and how
+NO_OP_DONE = re.compile(r"(?:nothing|no)\s+(?:new|to report|changed|to do|found)\b", re.IGNORECASE)
+MIN_EVIDENCE_WORDS = 3
+
+
+def judge_evidence(state: str, reason: str) -> tuple[int | None, str]:
+    """(verified, evidence) for a finished turn that ended with *state*. verified is None for states
+    that claim nothing (not_done, blocked, no status line: that one is "unverified" already); 1 for a
+    done whose reason says what was checked (three words or more, or a quiet "nothing new"); 0 for a
+    bare done. evidence is the text shown with it."""
+    if state != "done":
+        return None, ""
+    reason = reason.strip()
+    if len(reason.split()) >= MIN_EVIDENCE_WORDS or NO_OP_DONE.match(reason):
+        return 1, reason
+    return 0, ""
+
+
 REDACTED = "[redacted]"
 _BEARER = re.compile(r"(?i)\b(bearer\s+)[^\s\"',;]{6,}")
 _KEY_VALUE = re.compile(r"(?i)\b((?:x-)?api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password|passwd|"

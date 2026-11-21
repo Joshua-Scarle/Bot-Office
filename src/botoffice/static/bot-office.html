@@ -221,7 +221,13 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .msg .who button.mini { font-size: 12px; padding: 0 6px; margin-left: 6px; background: transparent; border-color: transparent; color: var(--muted); }
 .msg .who button.mini:hover { color: var(--text); border-color: var(--line); }
 .msg .tag { margin-left: 6px; font-style: italic; }
-.msg .tag.unverified { font-size: 11px; color: var(--muted); font-style: normal; opacity: .8; }
+.msg .tag.unverified { font-size: 12px; font-weight: 600; font-style: normal; color: #1a1300; background: var(--warn); padding: 1px 8px; border-radius: 999px; }
+.msg .foot { font-size: 12px; margin-top: 4px; max-width: 100%; overflow-wrap: anywhere; }
+.foot.notverified { color: var(--warn); }
+.foot.verified { color: var(--ok); }
+.msg .foot.cut { color: var(--warn); border: 1px solid var(--warn); border-radius: 8px; padding: 4px 8px; }
+.msg .foot.cut button { margin-left: 8px; }
+.pill.notverified { color: #1a1300; background: var(--warn); border-color: var(--warn); font-weight: 600; }
 .msg.archived { opacity: .5; }
 .msg.archived .who::after { content: " · archived"; }
 .edit-box { display: grid; gap: 6px; width: min(640px, 80vw); }
@@ -2218,8 +2224,38 @@ function jobRow(job, view, current) {
   if (job.not_before && new Date(job.not_before) > new Date())
     box.append(el("div", "drawer-meta", "Retry at " + new Date(job.not_before).toLocaleTimeString([], { timeStyle: "short" })));
   if (job.error) box.append(el("div", "drawer-meta bad", clip(job.error, 300)));
+  if (job.status === "succeeded" && (job.outcome === "unverified" || (job.outcome === "done" && job.verified === 0)))
+    head.append(el("span", "pill notverified", "Not verified"));
+  else if (job.status === "succeeded" && job.outcome === "done" && job.evidence)
+    box.append(el("div", "drawer-meta", "Verified by: " + clip(job.evidence, 300)));
   if (view) box.append(stepsDetails(view));
   box.append(logDetails(job.id));
+  return box;
+}
+
+// 0.12.16: a reply cut at 20,000 characters says so and can show the full text the job kept
+function cutNotice(m, body) {
+  const box = el("div", "foot cut");
+  box.setAttribute("role", "note");
+  box.append("This reply was cut at 20,000 characters; " + m.cut_chars.toLocaleString("en-US") + " characters not shown.");
+  if (!m.job_id) return box;
+  const button = el("button", "mini", "Show full reply");
+  button.type = "button";
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const full = (await api("/v1/jobs/" + m.job_id)).job.reply_text;
+      if (!full) { button.replaceWith(el("span", "", "The full reply was not kept.")); return; }
+      // a failed turn's message is "<failure line>\n\n---\n<partial text>": keep the failure line
+      const split = body.textContent.indexOf("\n\n---\n");
+      body.textContent = (m.role === "system" && split >= 0 ? body.textContent.slice(0, split + 6) : "") + full;
+      box.replaceChildren("Showing the full reply (" + m.cut_chars.toLocaleString("en-US") + " characters were cut from the chat copy).");
+    } catch (e) {
+      button.disabled = false;
+      setStatus("Could not load the full reply: " + (e && e.message ? e.message : e));
+    }
+  };
+  box.append(button);
   return box;
 }
 
@@ -2811,8 +2847,8 @@ async function loadMessages() {
     }
     if (m.edit_of) whoLine.append(el("span", "tag", "edited"));
     if (m.unverified) {
-      const tag = el("span", "tag unverified", "unverified");
-      tag.title = "The bot did not confirm whether this task is finished.";
+      const tag = el("span", "tag unverified", "Not verified");
+      tag.title = "The bot gave no evidence of what it checked, or did not say whether this is finished.";
       whoLine.append(tag);
     }
     if (m.archived_at) wrap.setAttribute("aria-label", "archived");
@@ -2860,6 +2896,9 @@ async function loadMessages() {
       };
       wrap.append(more);
     }
+    if (m.unverified) wrap.append(el("div", "foot notverified", "Not verified: no evidence of what was checked (a test, a command's output, a live check or a file)."));
+    else if (m.evidence) wrap.append(el("div", "foot verified", "Verified by: " + m.evidence));
+    if (m.cut_chars > 0) wrap.append(cutNotice(m, body));
     if (m.steer_job_id && m.steer_status === "queued" && m.steer_note) wrap.append(el("div", "delivery-note", m.steer_note));
     if (m.question) wrap.append(renderQuestion(m.question, bot.id));
     if (m.notice && m.notice.open) wrap.append(renderUsageNotice(m.notice));
@@ -4643,6 +4682,11 @@ async function loadAssignments() {
       const event = a.events[a.events.length - 1];
       if (event) box.append(el("div", "muted", "Last event: " + event.kind + " · " + event.actor + (event.note ? " · " + event.note : "")));
       if (a.status_note) box.append(el("div", "muted", a.status_note));
+      if (a.status === "done") {
+        const proof = [...a.events].reverse().find(e => e.kind === "evidence");
+        box.append(proof ? el("div", "foot verified", "Verified by: " + proof.note)
+                         : el("div", "foot notverified", "Not verified: no evidence was recorded when this was marked done."));
+      }
       const bar = el("div", "tools-bar");
       const button = (label, fn) => { const b = el("button", "", label); b.type = "button"; b.onclick = fn; bar.append(b); };
       const closed = a.stage === "completed" || a.stage === "dropped";

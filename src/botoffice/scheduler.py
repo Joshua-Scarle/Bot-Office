@@ -814,6 +814,7 @@ class Scheduler:
         with contextlib.suppress(OSError):
             log_path.chmod(0o600)
         outcome = None
+        verified, evidence = None, ""  # 0.12.16: did a done say how it was checked (failures.judge_evidence)
         stated = ("", "")  # the status line the bot ended with, if any (state, reason)
         if status == JobStatus.SUCCEEDED:
             # a finished run is not a finished task: the bot says so on its last line
@@ -822,6 +823,7 @@ class Scheduler:
             if state != "unverified":
                 stated = (state, reason)
             outcome = f"{state}: {reason}" if reason and state != "done" else state
+            verified, evidence = failures.judge_evidence(state, reason)
             if state in failures.NOT_DONE_LABELS:
                 status, kind = JobStatus.INCOMPLETE, failures.INCOMPLETE
                 error = f"{failures.NOT_DONE_LABELS[state]}: {reason or 'no reason given'}"
@@ -853,7 +855,7 @@ class Scheduler:
             reply_text=audit or None,
             failure_kind=kind,
             usage=result.usage if result else None,
-            outcome=outcome,
+            outcome=outcome, verified=verified, evidence=evidence,
         )
         if sink is not None:
             self._queue_pending_steers(job.id, sink)
@@ -1066,9 +1068,12 @@ class Scheduler:
             if partial:
                 # never drop the provider's own (partial or final) words
                 line += f"\n\n---\n{partial}"
-            self.store.publish_outcome(job.bot_id, job.id, "system", line, source=job.source)
+            self.store.publish_outcome(job.bot_id, job.id, "system", line, source=job.source,
+                                       cut_chars=max(0, len(audit) - REPLY_LIMIT))
             return
-        text = audit[:REPLY_LIMIT].strip()  # chat shows a truncated copy; the job keeps it all
+        # chat shows a truncated copy and says so (cut_chars); the job keeps it all (GET /v1/jobs/{id})
+        cut = max(0, len(audit) - REPLY_LIMIT)
+        text = audit[:REPLY_LIMIT].strip()
         if not text and stated[0]:
             # a reply that was only a status line: say that, never the raw log tail
             state, reason = stated
@@ -1077,6 +1082,9 @@ class Scheduler:
         if not text:
             log_text = self._read_text(log_path, 10**7).split("\n--- stderr ---\n")[0]
             text = log_text.strip()[-LOG_FALLBACK_LIMIT:] or "(no reply)"
+            if len(log_text.strip()) > LOG_FALLBACK_LIMIT:
+                text = (f"(no reply; only the last {LOG_FALLBACK_LIMIT:,} of {len(log_text.strip()):,} characters of "
+                        f"the log are shown)\n{text}")
         # Image file work happens before the lock; if an edit archives the turn meanwhile the
         # new files stay unreferenced and the TTL prune removes them.
         ids: list[str] = []
@@ -1094,7 +1102,7 @@ class Scheduler:
         # keeps the reply) or commits after both.
         with self.store.chat_lock:
             if self.store.publish_outcome(
-                job.bot_id, job.id, "assistant", text, source=job.source, attachments=ids,
+                job.bot_id, job.id, "assistant", text, source=job.source, attachments=ids, cut_chars=cut,
             ) is None:
                 return
             # One card per reply: the last ```ask fence wins; earlier ones are dropped.

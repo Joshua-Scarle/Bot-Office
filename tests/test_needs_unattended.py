@@ -81,18 +81,18 @@ def test_a_later_success_of_the_same_routine_clears_it(settings):
     desk.run(BLOCKED)
     # another routine succeeding does not clear it
     other = desk.store.create_routine(desk.bot.id, "0 9 * * *", "Other", True, name="other")
-    desk.adapter.reply = "ok\nBOT-OFFICE-STATUS: done"
+    desk.adapter.reply = "ok\nBOT-OFFICE-STATUS: done — ran the routine check, all passed"
     _, job = desk.scheduler.turns.post_message(desk.bot, "go", source="routine", routine_id=other.id)
     asyncio.run(desk.scheduler._execute(Slot.DESKTOP_1, desk.store.claim(Slot.DESKTOP_1, {"codex"})))
     assert [i["state"] for i in desk.items()] == ["blocked"]
-    desk.run("Fixed.\nBOT-OFFICE-STATUS: done")
+    desk.run("Fixed.\nBOT-OFFICE-STATUS: done — reran it, passes now")
     assert desk.items() == []
 
 
 def test_quiet_when_nothing_changed_is_not_flagged(settings):
     desk = Desk(settings)
     desk.run("Nothing new.\nBOT-OFFICE-STATUS: done — nothing new")
-    desk.run("BOT-OFFICE-STATUS: done")
+    desk.run("BOT-OFFICE-STATUS: done — nothing new")
     assert desk.items() == []
 
 
@@ -183,3 +183,14 @@ def test_a_repeated_dismiss_click_does_not_clear_newer_failures(settings):
     desk.run(BLOCKED)
     assert needs_you.dismiss_job(desk.store, str(old.id))  # the stale second click
     assert [i["count"] for i in desk.items()] == [1]
+
+
+def test_an_unattended_done_without_evidence_is_listed_until_a_checked_done_follows(settings):
+    desk = Desk(settings)
+    desk.run("Did it.\nBOT-OFFICE-STATUS: done")
+    items = desk.items()
+    assert [i["state"] for i in items] == ["no_evidence"] and "nothing to show it was checked" in items[0]["title"]
+    desk.run("Did it.\nBOT-OFFICE-STATUS: done")
+    assert [(i["state"], i["count"]) for i in desk.items()] == [("no_evidence", 2)]
+    desk.run("Did it.\nBOT-OFFICE-STATUS: done — ran pytest, 12 passed")
+    assert desk.items() == []

@@ -31,8 +31,9 @@ UNATTENDED_WINDOW = timedelta(days=7)
 BAD_END_SOURCES = ("routine", "wakeup", "inbox", "trigger")
 NO_STATUS_SOURCES = BAD_END_SOURCES
 NO_STATUS_REASON = "the turn ended without a BOT-OFFICE-STATUS line"
+NO_EVIDENCE_REASON = "it said done without saying what it checked or how"
 END_WORDS = {"blocked": "ended blocked", "waiting_on_user": "is waiting on you", "failed": "failed",
-             "no_status": "ended without a status line"}
+             "no_status": "ended without a status line", "no_evidence": "finished with nothing to show it was checked"}
 ASSIGNMENT_ACTIONS = ["reply", "start", "done", "dismiss"]
 # #10: a job parked on a usage limit for longer than this gets one notice per attempt
 PARK_NOTICE_AFTER = timedelta(minutes=10)
@@ -366,6 +367,8 @@ def _bad_end(job: sqlite3.Row) -> tuple[str, str] | None:
         return state, reason.strip()[:200] or "no reason given"
     if status == "succeeded" and job["outcome"] == "unverified" and job["source"] in NO_STATUS_SOURCES:
         return "no_status", NO_STATUS_REASON
+    if status == "succeeded" and job["outcome"] == "done" and job["verified"] == 0:
+        return "no_evidence", NO_EVIDENCE_REASON  # 0.12.16: a done is not a check
     return None
 
 
@@ -405,18 +408,21 @@ def _bad_ends(db: sqlite3.Connection, stamp: datetime) -> list[tuple[sqlite3.Row
     if not bad:
         return []
     wins = db.execute(
-        "SELECT bot_id, source, routine_id, assignment_id, watcher_id, outcome, finished_at FROM jobs "
+        "SELECT bot_id, source, routine_id, assignment_id, watcher_id, outcome, verified, finished_at FROM jobs "
         "WHERE status='succeeded' AND finished_at>=? AND bot_id IS NOT NULL ORDER BY finished_at",
         (min(row["finished_at"] for row, _, _ in bad),)).fetchall()
     # newest success per bot, per series and per series with a status line (one pass, no pairwise compare)
     by_bot: dict[str, str] = {}
     by_series: dict[tuple, str] = {}
     by_series_stated: dict[tuple, str] = {}
+    by_series_checked: dict[tuple, str] = {}
     for win in wins:
         by_bot[win["bot_id"]] = win["finished_at"]
         by_series[(win["bot_id"], _stream(win))] = win["finished_at"]
         if win["outcome"] != "unverified":
             by_series_stated[(win["bot_id"], _stream(win))] = win["finished_at"]
+            if win["verified"] != 0:
+                by_series_checked[(win["bot_id"], _stream(win))] = win["finished_at"]
     open_ends = []
     for row, category, reason in bad:
         key = (row["bot_id"], _stream(row))
@@ -426,7 +432,7 @@ def _bad_ends(db: sqlite3.Connection, stamp: datetime) -> list[tuple[sqlite3.Row
             row["failure_kind"] in ACTION_KINDS or key[1][0] == "source"))
         # a login or usage problem is fixed for the whole bot; the rest only by the same series running
         # well again (a missing status line only by a run that has one)
-        newest = by_bot if login else (by_series_stated if category == "no_status" else by_series)
+        newest = by_bot if login else {"no_status": by_series_stated, "no_evidence": by_series_checked}.get(category, by_series)
         if newest.get(row["bot_id"] if login else key, "") <= row["finished_at"]:
             open_ends.append((row, category, reason))
     return open_ends

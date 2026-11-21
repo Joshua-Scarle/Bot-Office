@@ -700,6 +700,10 @@ class JobStore:
                 ("restart_attempts", "INTEGER NOT NULL DEFAULT 0"),
                 # what the bot reported (BOT-OFFICE-STATUS line): done | unverified | not_done: reason …
                 ("outcome", "TEXT"),
+                # 0.12.16: a done turn with evidence of how it was checked: 1 (text in evidence), 0 (a bare
+                # done), NULL (not a done, or recorded before 0.12.16)
+                ("verified", "INTEGER"),
+                ("evidence", "TEXT"),
                 # claim order: Joshua's chat/API turns first, then bot-to-bot, then routines
                 ("priority", "INTEGER NOT NULL DEFAULT 0"),
                 # 0.10.0: the assignment this turn advances, its turn number there, whether the
@@ -827,6 +831,8 @@ class JobStore:
                 # 0.11.10: Bot-Office machinery (automatic continuations, assignment "Continue" steps,
                 # wake-up prompts, "Not done (continuing)" lines): kept, but not shown in the chat
                 ("hidden", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.12.16: characters of the reply left out of this message (the job keeps the full text)
+                ("cut_chars", "INTEGER NOT NULL DEFAULT 0"),
                 # 0.11.10: the chat line that carries an approval's Approve / Deny card
                 ("approval_id", "INTEGER"),
             ))
@@ -1692,13 +1698,15 @@ class JobStore:
         failure_kind: str | None = None,
         usage: dict | None = None,
         outcome: str | None = None,
+        verified: int | None = None,
+        evidence: str | None = None,
     ) -> Job | None:
         if status in {JobStatus.QUEUED, JobStatus.RUNNING}:
             raise ValueError("finish requires a terminal status")
         with closing(self._connect()) as db:
             db.execute(
                 "UPDATE jobs SET status=?, finished_at=?, exit_code=?, log_path=?, error=?, reply_path=?, "
-                "reply_text=?, failure_kind=?, usage_json=?, outcome=? WHERE id=? AND status=?",
+                "reply_text=?, failure_kind=?, usage_json=?, outcome=?, verified=?, evidence=? WHERE id=? AND status=?",
                 (
                     status.value,
                     now().isoformat(),
@@ -1710,6 +1718,8 @@ class JobStore:
                     failure_kind,
                     json.dumps(usage) if usage else None,
                     outcome,
+                    verified,
+                    clip_error(evidence) if evidence else None,
                     str(job_id),
                     JobStatus.RUNNING.value,
                 ),
@@ -2557,9 +2567,15 @@ class JobStore:
     def _message_rows(db: sqlite3.Connection, where: str, args: tuple, limit: int) -> list[sqlite3.Row]:
         """The newest *limit* (-1: all) rows matching *where*, oldest first, with the reply-verified and
         agent-sender columns."""
-        # a succeeded reply without a BOT-OFFICE-STATUS line is marked "unverified" (subtle label)
+        # a succeeded reply without a BOT-OFFICE-STATUS line, or a done without evidence of how it was checked
+        # (0.12.16; a task's `bot-task done --evidence` counts), is "unverified"; a done with evidence shows it
+        given = "EXISTS(SELECT 1 FROM assignment_events e WHERE e.job_id=j.id AND e.kind='evidence')"
         return db.execute(
-            f"SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='unverified', 0) AS unverified,"
+            "SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND (j.outcome='unverified'"
+            f" OR (j.outcome='done' AND j.verified=0 AND NOT {given})), 0) AS unverified,"
+            " CASE WHEN m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='done'"
+            " THEN COALESCE(j.evidence, (SELECT e.note FROM assignment_events e WHERE e.job_id=j.id AND e.kind='evidence'"
+            " ORDER BY e.id DESC LIMIT 1)) END AS evidence,"
             " COALESCE((SELECT a.from_bot FROM agent_messages a WHERE a.job_id=m.job_id LIMIT 1),"
             " (SELECT a.from_bot FROM agent_messages_x a WHERE a.sender_message_id=m.id OR a.target_message_id=m.id"
             " LIMIT 1)) AS agent_from"
@@ -2927,7 +2943,7 @@ class JobStore:
     def publish_outcome(
         self, bot_id: UUID | str, job_id: UUID | str, role: str, text: str, *,
         sender: str | None = None, source: str = "chat", attachments: list[str] | None = None,
-        hidden: bool = False,
+        hidden: bool = False, cut_chars: int = 0,
     ) -> Message | None:
         """Add a job's result to *bot_id*'s chat unless the turn that asked for it has been
         archived by an edit (checked and inserted in one transaction). Returns None if
@@ -2948,9 +2964,10 @@ class JobStore:
                     db.rollback()
                     return None
                 cursor = db.execute(
-                    "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments,hidden)"
-                    " VALUES (?,?,?,?,?,?,?,?,?)",
-                    (key, role, sender, source, text, job_key, now().isoformat(), json.dumps(ids), int(hidden)),
+                    "INSERT INTO messages (bot_id,role,sender,source,text,job_id,created_at,attachments,hidden,cut_chars)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (key, role, sender, source, text, job_key, now().isoformat(), json.dumps(ids), int(hidden),
+                     max(0, cut_chars)),
                 )
                 row = db.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
                 db.commit()
