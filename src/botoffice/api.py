@@ -2068,15 +2068,12 @@ def create_app(
             if reserved:
                 team.release_wait(store, job)
 
-    recall_slots = asyncio.Semaphore(2)
-
     @app.get("/v1/agent/recall")
     async def agent_recall(q: str = Query(min_length=1, max_length=recall.QUERY_CHARS), scope: str = Query(default="self"),
                            limit: int = Query(default=10, ge=1, le=recall.MAX_HITS),
                            job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
         try:
-            async with recall_slots:  # a few searches at a time; each runs off the event loop
-                return await asyncio.to_thread(recall.run, store, job, q, scope, limit)
+            return await asyncio.to_thread(recall.run, store, job, q, scope, limit)  # off the event loop; recall.SLOTS bounds the workers
         except recall.RecallError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 

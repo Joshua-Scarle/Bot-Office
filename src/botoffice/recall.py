@@ -9,6 +9,7 @@ untrusted data (``untrusted: true``; the client fences the text), at most 20 hit
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from urllib.parse import urlencode
@@ -19,6 +20,9 @@ SCOPES = ("self", "team")
 MAX_HITS = 20
 MAX_CHARS = 8_000  # the rendered hits: text, bot name, time and line framing
 HIT_CHARS = 600
+NAME_CHARS = 60  # a hit's bot name, so one hit is always far below MAX_CHARS
+SLOTS = threading.BoundedSemaphore(2)  # searches running at once; held by the worker thread itself
+SLOT_WAIT_S = 5.0
 QUERY_CHARS = 200
 SECONDS = 2.0  # one search is cut off after this long (a progress handler), whatever the index holds
 SNIPPET_TOKENS = 40
@@ -91,11 +95,12 @@ def search(db: sqlite3.Connection, bots: dict[str, str], query: str, limit: int 
     for row in rows:
         text = failures.redact(" ".join((row["snippet"] or "").split()))  # credential-shaped text is not handed on
         text = text if len(text) <= HIT_CHARS else text[: HIT_CHARS - 1] + "…"
-        size = len(text) + len(row["created_at"] or "") + len(bots[row["bot_id"]]) + 40  # the rendered line, not only the text
-        if used + size > MAX_CHARS and hits:
+        name = failures.redact(bots[row["bot_id"]])[:NAME_CHARS]
+        size = len(text) + len(str(row["created_at"] or "")[:40]) + len(name) + 40  # the rendered line, not only the text
+        if used + size > MAX_CHARS:
             break
         used += size
-        hits.append({"id": row["id"], "bot": bots[row["bot_id"]], "role": row["role"], "at": row["created_at"], "text": text})
+        hits.append({"id": row["id"], "bot_id": row["bot_id"], "bot": name, "role": row["role"], "at": str(row["created_at"] or "")[:40], "text": text})
     return hits
 
 
@@ -103,13 +108,21 @@ def run(store, job, query: str, scope: str = "self", limit: int = 10) -> dict:
     """The recall for a running *job*: its bot's own chat, plus readable teammates for scope team. Audited."""
     if scope not in SCOPES:
         raise RecallError(400, "scope must be self or team")
+    if not SLOTS.acquire(timeout=SLOT_WAIT_S):  # released here, in the worker, whatever happens to the request
+        raise RecallError(503, "recall is busy, try again")
+    try:
+        return _run(store, job, query, scope, limit)
+    finally:
+        SLOTS.release()
+
+
+def _run(store, job, query: str, scope: str, limit: int) -> dict:
     with closing(store._connect()) as db:
         bots = readable_bots(db, str(job.bot_id), scope)
         hits = search(db, bots, query, limit, exclude_job=str(job.id))
-    ids = {name: bot_id for bot_id, name in bots.items()}
-    for name in sorted({h["bot"] for h in hits}) or [bots[str(job.bot_id)]]:
-        team.log_read(store, job, "context_recall", ids[name], sum(1 for h in hits if h["bot"] == name))
-    return {"untrusted": True, "scope": scope, "count": len(hits), "hits": hits}
+    for bot_id in sorted({h["bot_id"] for h in hits}) or [str(job.bot_id)]:
+        team.log_read(store, job, "context_recall", bot_id, sum(1 for h in hits if h["bot_id"] == bot_id))
+    return {"untrusted": True, "scope": scope, "count": len(hits), "hits": [{k: v for k, v in h.items() if k != "bot_id"} for h in hits]}
 
 
 # ---- client side (the MCP server) -----------------------------------------------------------------------------

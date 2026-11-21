@@ -178,3 +178,30 @@ def test_rendered_output_stays_under_the_cap(settings):
         data = get(d, h, "lychee", limit=20).json()
         rendered = recall.render(data)
         assert len(rendered) <= recall.MAX_CHARS + 400  # the fence notice is a fixed few hundred characters
+
+
+def test_hostile_bot_name_cannot_bypass_cap_or_leak(settings):
+    with Desk(settings) as d:
+        reader = d.bot("Reader")
+        mate = d.bot("sk-" + "z9y8x7w6" * 4 + "N" * 9000)
+        add_message(d.store, mate, "user", "durian note")
+        _, h = run_job(d.store, reader)
+        data = get(d, h, "durian", scope="team").json()
+        assert data["count"] == 1 and len(data["hits"][0]["bot"]) <= recall.NAME_CHARS and "z9y8x7w6" not in json.dumps(data)
+        assert len(recall.render(data)) < recall.MAX_CHARS
+
+
+def test_slots_are_held_by_the_worker_and_busy_is_503(settings, monkeypatch):
+    import threading
+    with Desk(settings) as d:
+        bot = d.bot("Reader")
+        add_message(d.store, bot, "user", "fig note")
+        job, h = run_job(d.store, bot)
+        monkeypatch.setattr(recall, "SLOT_WAIT_S", 0.05)
+        taken = [recall.SLOTS.acquire() for _ in range(2)]
+        try:
+            assert get(d, h, "fig").status_code == 503
+        finally:
+            for _ in taken:
+                recall.SLOTS.release()
+        assert get(d, h, "fig").status_code == 200
