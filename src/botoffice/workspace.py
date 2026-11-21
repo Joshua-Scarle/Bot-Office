@@ -316,7 +316,7 @@ UNATTENDED_RULE = (
     "BOT-OFFICE-STATUS: done — nothing new.")
 
 
-# 0.12.20 (B11): a scheduled run starts with no approval from the turn that scheduled it (the gate
+# 0.12.18 (B11): a scheduled run starts with no approval from the turn that scheduled it (the gate
 # judges it by the bot's rules at fire time; this line only tells the bot so)
 SCHEDULED_RULE = {
     "wakeup": (" This run was started by a scheduled wake. Earlier approvals do not carry over; any send or "

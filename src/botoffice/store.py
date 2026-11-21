@@ -785,7 +785,7 @@ class JobStore:
                 ("tasks_seen_event", "INTEGER NOT NULL DEFAULT 0"),
                 # 0.11.10: a chat-only bot never continues by itself (no loop, verify or wake-up turns)
                 ("chat_only", "INTEGER NOT NULL DEFAULT 0"),
-                # 0.12.20 teammate tools: team_read section|all|none; team_private hides the bot from reads
+                # 0.12.18 teammate tools: team_read section|all|none; team_private hides the bot from reads
                 ("team_read", "TEXT NOT NULL DEFAULT 'section'"),
                 ("team_private", "INTEGER NOT NULL DEFAULT 0"),
             ))
