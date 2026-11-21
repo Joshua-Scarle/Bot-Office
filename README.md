@@ -362,6 +362,17 @@ Deployed 2026-11-21, no job running or queued at the restart (rechecked in the s
 
 Deployed 2026-11-21, no job running or queued at the restart (rechecked in the same command). Code SHA `414fb71`. Backups: tag `backup/pre-0.12.12-20261121-162358` and `~/backups/agentdesk.sqlite3.pre-0.12.12-20261121-162358`. Live check on a throwaway bot (deleted afterwards, 19 checks): a new bot got a character; Hide and Unhide by API and UI; PATCH and DELETE on `/v1/sections/hidden` gave 409; search found a hidden bot; the collapsed flag and membership survived a restart; a real turn showed the working and done faces. Review: Codex gpt-6.1-terra, high, 3 rounds (the diff was passed inline because its file sandbox does not start on this host); every finding was fixed or documented, and the round 3 fix was not re-reviewed. Rollback: check out the tag and restart; no schema change.
 
+## What changed in the E5-2 survival fix (version not bumped here)
+
+The owner's decisions, standing rules and open tasks no longer depend on the model writing them down. Found by the T-028 compaction / session-reset drill (`scripts/survival_drill.py`). 0.12.11 is taken by `feature/0.12.11-scripts-framed-only`, so this branch leaves the version alone (the next free number is 0.12.12; assign it when merging, to avoid a conflict on the four version lines).
+
+- **What the drill found (before the fix).** After a reset, a fresh session got `WORKING.md`, the last 6 messages and a *request to read* `memory.md`. A Haiku bot that had not saved an open task (it asked "do you want me to record it?", wrote no `bot-task`, left `WORKING.md` empty) answered "Open tasks: none" once four neutral turns had pushed the task out of the last 6 messages. A Sonnet bot kept everything in `memory.md` but, after a reset, answered without the owner's standing "end every reply with KUMQUAT-7" because it did not re-read `memory.md`.
+- **`OWNER-NOTES.md` (new, written by Bot-Office).** Every turn Bot-Office scans the owner's own chat messages (not other bots, replies or routines) and quotes, verbatim, the sentences that read as a standing rule ("from now on", "always", "never"), a decision ("we decided", "we chose"), an open task ("open task", "not done yet", "by Friday", "remind me") or an FYI. Questions are skipped; at most 3000 characters (newest kept), 300 per statement, restated lines are kept once. It is rebuilt from the chat each time, so an edited or withdrawn message drops out by itself. The file is in the job directory; it is not copied back.
+- **Fresh session / reset / handoff.** The quoted statements are inlined in the fresh-session prompt ("What the owner told you"), beyond the last 6 messages. OpenCode never resumes, so it gets them every turn.
+- **Compaction.** Claude's `SessionStart` (compact) hook now prints `OWNER-NOTES.md` after `WORKING.md`; the compaction policy (Claude and Codex) names it and says never to drop an owner's rule, decision or open task. A resumed turn mentions the file once it is non-empty. Cursor, Antigravity and OpenCode compaction has no hook, so only the resume-prompt pointer applies there (unverified live).
+- **Rule 3.** The numbered rules now tell the bot to record a decision, standing rule or open task in the same turn (memory.md, or a `bot-task`) and not to ask whether to save it.
+- **Limits.** Matching is by wording, so an unusual phrasing is missed; the plain-chat statement is still in the last-6 window and the model's own notes. Tests: `tests/test_owner_notes.py`.
+
 ## What changed in 0.12.10
 
 A **Run scripts** switch in the HTML viewer, for interactive reports.
@@ -864,6 +875,8 @@ Compaction is left to each CLI's native auto-compaction, with a keep/drop policy
 - Claude: `--autocompact <N>` and session-only `--settings` hooks: `PreCompact` prints the policy (appended to the compaction instructions) and `SessionStart` (matcher `compact`) re-adds `WORKING.md`.
 - Cursor, Antigravity, OpenCode: native compaction only (no documented instruction hook).
 `N` defaults to 100000 tokens (`BOT_OFFICE_COMPACT_TOKENS`, minimum 100000).
+
+The owner's own decisions, standing rules and open tasks are also quoted by Bot-Office into `OWNER-NOTES.md` and the fresh-session prompt, and re-added after a Claude compaction (see the E5-2 survival fix under "What changed").
 
 `WORKING.md` is the bot's bounded working state (current tasks, upcoming tasks plus how-to, decisions, open questions; the bot prunes finished items). It is copied into each job directory, saved back to `data/bots/<id>/WORKING.md` after every turn and hard-capped at 6000 characters.
 

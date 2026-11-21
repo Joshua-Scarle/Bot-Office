@@ -9,11 +9,12 @@ from ..compaction import COMPACT_POLICY, compact_token_limit
 from .cli import CliAdapter
 
 # Session-only settings (never saved): PreCompact stdout is appended to the compaction
-# instructions; SessionStart(compact) re-adds the bot's bounded WORKING.md after compaction.
+# instructions; SessionStart(compact) re-adds the bot's bounded WORKING.md and the owner's OWNER-NOTES.md
+# (their rules, decisions and open tasks, quoted by Bot-Office) after compaction.
 CLAUDE_SETTINGS = {
     "hooks": {
         "PreCompact": [{"hooks": [{"type": "command", "command": "printf '%s\\n' " + shlex.quote(COMPACT_POLICY)}]}],
-        "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": "cat WORKING.md 2>/dev/null || true"}]}],
+        "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": "cat WORKING.md OWNER-NOTES.md 2>/dev/null || true"}]}],
     }
 }
 

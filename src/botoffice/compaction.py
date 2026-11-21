@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import os
+import re
 
 WORKING_FILE = "WORKING.md"
 WORKING_LIMIT = 6000  # characters; hard cap enforced by Bot-Office after every turn
 WORKING_TRUNCATED = "\n\n[Bot-Office truncated this file: keep WORKING.md under 6000 characters and prune finished items]\n"
+OWNER_NOTES_FILE = "OWNER-NOTES.md"
+OWNER_NOTES_LIMIT = 3000  # characters; newest statements win
+OWNER_NOTE_LINE = 300  # characters kept of one statement
+OWNER_NOTES_SCAN = 400  # newest chat messages looked at
 RECENT_MESSAGES = 6  # injected into the prompt only when a fresh session starts
 
 
@@ -30,10 +35,62 @@ Drop finished tasks and their details, directory listings, file contents, long c
 output, superseded plans, greetings and small talk. Do not write a lifetime history or a diary; \
 a finished item only stays if a later task depends on it. Keep exact commands, ids, paths and \
 error strings only where they are still needed. The bot also keeps WORKING.md (bounded working \
-state) in its job directory; stay consistent with it."""
+state) and OWNER-NOTES.md (the owner's own standing rules, decisions and open tasks, verbatim) in its job \
+directory; stay consistent with them, and never drop an owner's standing rule, decision or open task."""
 
 
 def cap_working(text: str) -> str:
     if len(text) <= WORKING_LIMIT:
         return text
     return text[: WORKING_LIMIT - len(WORKING_TRUNCATED)] + WORKING_TRUNCATED
+
+
+_I = re.IGNORECASE
+_DAYS = r"(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|tonight|eod|end of (?:the )?(?:day|week|month)|next week"
+# Statements an owner makes in plain chat that a bot must still honour after a compaction or a session reset.
+# Matched on sentences (not questions), kept verbatim: no model is asked to remember them.
+OWNER_PATTERNS = (
+    ("rule", re.compile(r"\bfrom now on\b|\bgoing forward\b|\bstanding (?:rule|instruction)s?\b|\balways\b|\bnever\b"
+                        r"|\bevery (?:reply|response|message|time)\b|\bdon'?t ever\b|\bdo not ever\b", _I)),
+    ("decision", re.compile(r"\b(?:we|i)(?:'ve| have)? (?:decided|chose|agreed|picked|settled)\b|\bdecision\b"
+                            r"|\blet'?s go with\b|\b(?:we|i)(?:'re| are) going with\b|\bwent with\b", _I)),
+    ("task", re.compile(r"\bopen task\b|\bto-?do\b|\bnot (?:done|started) yet\b|\bstill (?:need|have) to\b"
+                        r"|\bneeds? to be done\b|\bdon'?t forget\b|\bremind me\b|\bdeadline\b"
+                        rf"|\bdue (?:on |by )?(?:{_DAYS})|\bby (?:{_DAYS})", _I)),
+)
+OWNER_PATTERNS += (("fact", re.compile(r"\bfyi\b|\bremember (?:that|this)\b|\bfor (?:later|the record)\b|\bnote that\b", _I)),)
+_SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def owner_statements(text: str) -> list[str]:
+    """The sentences of one owner message that read as a rule, decision or open task: ``[kind] sentence``."""
+    found = []
+    for sentence in _SENTENCE.split(text):
+        sentence = " ".join(sentence.split())
+        if len(sentence) < 8 or sentence.endswith("?"):
+            continue
+        for kind, pattern in OWNER_PATTERNS:
+            if pattern.search(sentence):
+                clipped = sentence if len(sentence) <= OWNER_NOTE_LINE else sentence[:OWNER_NOTE_LINE] + " [...]"
+                found.append(f"[{kind}] {clipped}")
+                break
+    return found
+
+
+def owner_notes(texts: list[str]) -> str:
+    """OWNER-NOTES.md: the owner's rules, decisions and open tasks, verbatim, oldest first, newest kept when
+    over the cap. *texts* are the owner's own messages, oldest first. Generated every turn from the chat, so
+    an edited or withdrawn message drops out by itself."""
+    lines: list[str] = []
+    for text in texts:
+        for line in owner_statements(text):
+            if line in lines:
+                lines.remove(line)  # restated: keep the latest position
+            lines.append(line)
+    kept, size = [], 0
+    for line in reversed(lines):
+        if size + len(line) + 1 > OWNER_NOTES_LIMIT:
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return "\n".join(reversed(kept))
