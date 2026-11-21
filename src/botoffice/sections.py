@@ -54,8 +54,8 @@ def ensure_schema(db: sqlite3.Connection) -> None:
 
 def reserved_key(name: str) -> str:
     """Case-, width-, invisible-character- and combining-mark-insensitive form used to compare against the reserved names."""
-    text = unicodedata.normalize("NFKC", name)
-    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc", "Mn", "Me")).casefold().strip()
+    text = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", name).casefold())   # casefold can add marks, so decompose again
+    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc", "Mn", "Me")).strip()
 
 
 def ensure_hidden(db: sqlite3.Connection) -> None:
