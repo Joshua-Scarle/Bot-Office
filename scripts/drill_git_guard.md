@@ -138,6 +138,11 @@ Delete the drill's approval cards from Needs-you (Deny) and any allow rule you a
 
 - An absolute-path program (`/usr/bin/git push ...`) is seen by the hook, not by the shims; the pre-push check
   sees it either way.
-- A script the hook cannot read (not in the working directory, over 64 KB, generated at run time) is not seen by
-  the hook; a push from it is still seen by the pre-push check. A delete or an MCP call from it is not.
+- A script file is not read by the hook (fix4: only inline code such as `python -c` or a here-document fed to an
+  interpreter); a push from it is still seen by the pre-push check. A delete, a send or an MCP call from it is not.
+- Normal work must not ask (fix4): `python tests/test_x.py`, `python -c 'import smtplib'`, a read-only GraphQL
+  POST, an embeddings call, and a feature-branch push while the remote's default is unknown all run without a card.
+  A POST to a sending endpoint (`curl -X POST https://hooks.slack.com/services/x -d '{}'`) asks.
+- Stale default branch: in a clone whose `origin/HEAD` names an old default, a push to the remote's real default
+  stops at the pre-push check (it asks the remote with `git ls-remote --symref`).
 - Every false positive is a card, never a refusal: approve it, or tell the bot to use a feature branch.

@@ -292,10 +292,11 @@ def test_settings_show_unpausable_bots_by_each_class_and_docs_say_checkpoint():
     start = html.index("function showApprovals(data)")
     body = html[start:html.index("\n}\n", start)]
     assert "c.enabled && loose.length" in body and "Advice only, can't pause: " in body
+    assert "This is defense in depth, not an inescapable boundary." in html and "pauses that one step" not in html
     docs = (root / "docs" / "APPROVALS.md").read_text()
     assert "A checkpoint, not enforcement." in docs and "fails closed" in docs and "s=sudo; $s" in docs
     readme = (root / "README.md").read_text()
-    assert "Classes are a checkpoint and a tripwire, not enforcement" in readme
+    assert "defense in depth, not an inescapable boundary" in readme and "every run" not in readme[readme.index("**Rarely ask"):][:4000]
 
 
 # --- custom patterns: the bot controls the input ---

@@ -219,8 +219,9 @@ def settings(store: JobStore) -> dict:
     return {"classes": classes, "timeout_min": timeout, "locked": {
         "key": git_guard.PRESET, "label": git_guard.LABEL, "enabled": True,
         "description": "Pushing to the default branch, merging a PR, force-pushing, deleting a branch, tag, repo or "
-                       "files outside the workspace, and changing repo settings always wait for your approval, in "
-                       "every run, whatever the rules, classes or bot access. Not switchable."}}
+                       "files outside the workspace, and changing repo settings wait for your approval when "
+                       "Bot-Office sees them, whatever the rules, classes or bot access. Not switchable. Defense "
+                       "in depth: a bot with full CLI access, running as the same Unix user, can get around it."}}
 
 
 def update(store: JobStore, *, enabled: dict[str, bool] | None = None, add: list[dict] | None = None,

@@ -594,7 +594,8 @@ dialog textarea { min-height: 90px; resize: vertical; }
     </section>
     <section class="settings-section" id="set-approvals" aria-labelledby="set-approvals-title">
       <h3 id="set-approvals-title">Approvals</h3>
-      <p class="muted">Bots work on their own and rarely ask. Turn on the kinds of action you want done, but not without your yes. When a bot tries one, it pauses that one step and its chat shows an Approve / Deny card.</p>
+      <p class="muted">Bots work on their own and rarely ask. Turn on the kinds of action you want done, but not without your yes. When Bot-Office recognises one, the bot pauses at that step and its chat shows an Approve / Deny card.</p>
+      <p class="muted">This is defense in depth, not an inescapable boundary. A bot with full CLI access runs as the same Unix user as these checks, so it can get around them if it sets out to, and some actions will not be caught. Use GitHub rulesets and account permissions for what must never happen.</p>
       <div id="approval-classes"></div>
       <details id="approval-add">
         <summary>Add your own</summary>
