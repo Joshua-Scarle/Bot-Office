@@ -468,23 +468,17 @@ class Rules:
         scope = "unattended" if self.strict(job) else "attended"
         with closing(self.store._connect()) as db:
             rows = list(self._rules(db, str(job.bot_id) if job.bot_id else None, scope))
-            if (job.source or "api") in UNATTENDED_SOURCES:  # the other scope's ask rules judge such a run too
-                rows += [rule for rule in self._rules(db, str(job.bot_id) if job.bot_id else None,
-                                                      "attended" if scope == "unattended" else "unattended")
-                         if rule["effect"] == "ask"]
+            if (job.source or "api") in UNATTENDED_SOURCES:  # as evaluate(): the other scope's never/ask rules judge such a run
+                other = "attended" if scope == "unattended" else "unattended"
+                rows += [rule for rule in self._rules(db, str(job.bot_id) if job.bot_id else None, other)
+                         if rule["effect"] != "allow" and rule["scope"] == other]
         explicit = any(rule["kind"] == "preset" and rule["pattern"] == "outbound" and rule["effect"] == "ask"
                        for rule in rows)
         mode = team.combine_send_mode(getattr(bot, "team_messaging", None), explicit)
         if tool and mode != "off":
-            both = rows + [rule for rule in self._rules_all(job) if rule["effect"] == "never"]
-            hit = {rule["effect"] for rule in both if _rule_matches(rule, Action(tool=tool), [])}
+            hit = {rule["effect"] for rule in rows if _rule_matches(rule, Action(tool=tool), [])}
             mode = "off" if "never" in hit else "ask" if "ask" in hit else mode
         return mode
-
-    def _rules_all(self, job: Job) -> list[sqlite3.Row]:
-        with closing(self.store._connect()) as db:
-            return list(self._rules(db, str(job.bot_id) if job.bot_id else None, "unattended")
-                        + self._rules(db, str(job.bot_id) if job.bot_id else None, "attended"))
 
     def _team_job(self, job: Job) -> bool:
         with closing(self.store._connect()) as db:
@@ -826,6 +820,11 @@ class Rules:
         the grant was issued to (it names the originating job). Returns the approval id."""
         if not job.origin_job_id or not job.bot_id:
             return None
+        origin = self.store.get(job.origin_job_id)
+        with closing(self.store._connect()) as db:
+            # B12: a resume turn that a teammate steered into is a team turn the card was not raised for
+            if team.steered_resume(db, job, origin):
+                return None
         stamp = now().isoformat()
         with closing(self.store._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
