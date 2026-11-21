@@ -9,7 +9,8 @@ ref lines on stdin. It reports to the controller, as a "GitPush" gate event:
   (`git merge-base --is-ancestor`; unknown when the old commit is not here);
 - the remote's default branch, from the remote itself (`git ls-remote --symref <remote> HEAD`),
   else refs/remotes/<remote>/HEAD, else unknown. For github.com the controller uses the GitHub API
-  instead (fix3: git_guard.classify_push), so the hook does not ask the remote.
+  (fix3: git_guard.classify_push), so the hook does not ask the remote; the clone's
+  refs/remotes/<remote>/HEAD is sent for when the controller holds no token.
 The controller (git_guard.classify_push) asks for a card when the push deletes a ref, is not a
 fast-forward, overwrites a tag, or goes to the default branch (or to any branch while that is
 unknown); a push the owner approved as a command passes once. The push runs only on an explicit
@@ -52,9 +53,10 @@ def git(*args, timeout=10):
 
 
 def default_branch(remote, url=""):
-    if re.match(r"^(?:https?://|ssh://)?(?:[^@/]*@)?github\.com[:/]", url, re.IGNORECASE):
-        return None, None  # the controller asks the GitHub API
-    code, out = git("ls-remote", "--symref", remote, "HEAD", timeout=LS_REMOTE_TIMEOUT)
+    # github.com: the controller asks the GitHub API; this run's one-time credential is spent, so the
+    # clone's own refs/remotes/<remote>/HEAD is the fallback when the controller holds no token
+    github = re.match(r"^(?:https?://|ssh://)?(?:[^@/]*@)?github\.com[:/]", url, re.IGNORECASE)
+    code, out = (None, None) if github else git("ls-remote", "--symref", remote, "HEAD", timeout=LS_REMOTE_TIMEOUT)
     if code == 0 and out:
         found = re.search(r"^ref: refs/heads/(\S+)\tHEAD$", out, re.MULTILINE)
         if found:

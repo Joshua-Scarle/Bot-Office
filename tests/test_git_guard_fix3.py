@@ -5,6 +5,7 @@ send-ish connector tools) asks; a job with no bot that is refused leaves a Needs
 inherited from the user's or system config still run; code in one-liners is read for commands."""
 import json
 import os
+import runpy
 import subprocess
 import sys
 import threading
@@ -257,8 +258,21 @@ def test_the_pre_push_check_and_the_command_guard_use_githubs_default(monkeypatc
     assert git_guard.classify_push(report)
     report["updates"] = [update("refs/heads/feature", "a" * 40, "b" * 40)]
     assert git_guard.classify_push(report) is None
+    # no token on the controller (GitHub not asked): the clone's own default, as the hook reports it
+    monkeypatch.setattr(git_guard, "default_lookup", lambda owner, repo: None)
+    assert git_guard.classify_push({**report, "default_branch": "main"}) is None
+    assert git_guard.classify_push(report)  # and unknown asks
+    monkeypatch.setattr(git_guard, "default_lookup", lambda owner, repo: "production")
     repo, _first, _second = github_clone(tmp_path, default="main")  # the clone's origin/HEAD is stale
     assert git_guard.classify("Bash", "git push origin HEAD:production", None, str(repo))
+
+
+def test_the_hook_reports_the_clones_default_for_github_without_asking_the_remote(tmp_path, monkeypatch):
+    repo, _first, _second = github_clone(tmp_path, default="trunk")
+    assert git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk").returncode == 0
+    hook = runpy.run_path(str(BIN / "bot-office-git-hook"))
+    monkeypatch.chdir(repo)
+    assert hook["default_branch"]("origin", "https://github.com/o/r.git") == ("trunk", "local")
 
 
 def test_default_branches_are_cached_and_need_the_token():
