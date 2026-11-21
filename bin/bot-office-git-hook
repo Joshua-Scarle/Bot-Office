@@ -7,13 +7,15 @@ always asks). bin/git-hooks/pre-push runs this file with git's arguments (remote
 ref lines on stdin. It reports to the controller, as a "GitPush" gate event:
 - every update (local ref and sha, remote ref and sha) and whether it is a fast-forward
   (`git merge-base --is-ancestor`; unknown when the old commit is not here);
-- the remote's default branch, from the remote itself (`git ls-remote --symref <remote> HEAD`),
-  else refs/remotes/<remote>/HEAD, else unknown. For github.com the controller uses the GitHub API
-  (fix3: git_guard.classify_push), so the hook does not ask the remote; the clone's
-  refs/remotes/<remote>/HEAD is sent for when the controller holds no token.
+- the remote's default branch, from the remote itself (`git ls-remote --symref <remote> HEAD`, with
+  the bot's own git credentials, a short timeout, cached in the git dir for an hour, five minutes when
+  it failed), and separately the clone's refs/remotes/<remote>/HEAD, which may be stale. When the
+  controller holds a GitHub token (the run's credential helper is bin/bot-office-credential) the hook
+  does not ask github.com: the controller uses the GitHub API (fix3: git_guard.classify_push).
 The controller (git_guard.classify_push) asks for a card when the push deletes a ref, is not a
-fast-forward, overwrites a tag, or goes to the default branch (or to any branch while that is
-unknown); a push the owner approved as a command passes once. The push runs only on an explicit
+fast-forward, overwrites a tag, or goes to the default branch (while that is not verified: main,
+master, trunk, production or the clone's own default; fix4 #1); a push the owner approved as a command
+passes once. The push runs only on an explicit
 allow: an unreachable controller, an answer it cannot read, a crash or running out of time stop it
 (exit 1). A job with no bot (no token, gate mode "local") is judged here with the same rules; a
 guarded push is refused and recorded for the owner's Needs-you notice. Then the repo's own pre-push
@@ -29,6 +31,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,7 +41,10 @@ HERE = Path(__file__).resolve().parent
 HOOKS = HERE / "git-hooks"
 TIMEOUT = 20
 DEADLINE = 60
-LS_REMOTE_TIMEOUT = 15
+LS_REMOTE_TIMEOUT = 6
+CACHE_FILE = "bot-office-default-branch.json"
+CACHE_TTL = 3600
+CACHE_UNKNOWN_TTL = 300
 ZERO = "0" * 40
 
 
@@ -52,21 +58,81 @@ def git(*args, timeout=10):
     return done.returncode, done.stdout
 
 
-def default_branch(remote, url=""):
-    # github.com: the controller asks the GitHub API; this run's one-time credential is spent, so the
-    # clone's own refs/remotes/<remote>/HEAD is the fallback when the controller holds no token
-    github = re.match(r"^(?:https?://|ssh://)?(?:[^@/]*@)?github\.com[:/]", url, re.IGNORECASE)
-    code, out = (None, None) if github else git("ls-remote", "--symref", remote, "HEAD", timeout=LS_REMOTE_TIMEOUT)
+def credential_helper_set():
+    """The run's git config names bin/bot-office-credential (the controller holds a GitHub token)."""
+    count = os.environ.get("GIT_CONFIG_COUNT", "0")
+    return count.isdigit() and any(os.environ.get(f"GIT_CONFIG_VALUE_{i}", "").endswith("bot-office-credential")
+                                   for i in range(min(int(count), 50)))
+
+
+def cache_path():
+    code, out = git("rev-parse", "--git-common-dir")
+    return os.path.join(out.strip(), CACHE_FILE) if code == 0 and out and out.strip() else None
+
+
+def cached(path, key):
+    try:
+        with open(path or "", encoding="utf-8") as handle:
+            entry = json.load(handle).get(key)
+        stamp, branch = entry
+        if isinstance(stamp, (int, float)) and time.time() < stamp and (branch is None or isinstance(branch, str)):
+            return True, branch
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return False, None
+
+
+def remember(path, key, branch):
+    if not path:
+        return
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        data = data if isinstance(data, dict) and len(data) < 200 else {}
+    except (OSError, ValueError):
+        data = {}
+    data[key] = [time.time() + (CACHE_TTL if branch else CACHE_UNKNOWN_TTL), branch]
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+
+
+def remote_head(remote, url):
+    """The remote's own default branch (`git ls-remote --symref <remote> HEAD`), cached; None when it
+    cannot be asked (no credentials, offline, timeout)."""
+    path, key = cache_path(), clean_url(url) or remote
+    hit, branch = cached(path, key)
+    if hit:
+        return branch
+    branch = None
+    code, out = git("ls-remote", "--symref", remote, "HEAD", timeout=LS_REMOTE_TIMEOUT)
     if code == 0 and out:
         found = re.search(r"^ref: refs/heads/(\S+)\tHEAD$", out, re.MULTILINE)
-        if found:
-            return found.group(1), "remote"
+        branch = found.group(1) if found else None
+    remember(path, key, branch)
+    return branch
+
+
+def local_head(remote):
+    """The clone's refs/remotes/<remote>/HEAD (may be stale), or None."""
     if re.fullmatch(r"[A-Za-z0-9][\w.-]*", remote):
         code, out = git("symbolic-ref", "-q", f"refs/remotes/{remote}/HEAD")
         prefix = f"refs/remotes/{remote}/"
         if code == 0 and out.strip().startswith(prefix):
-            return out.strip()[len(prefix):], "local"
-    return None, None
+            return out.strip()[len(prefix):]
+    return None
+
+
+def default_branch(remote, url=""):
+    """(default branch, source, clone's own default): source "remote" when the remote said so, else
+    the branch is None. github.com with the controller's token: the controller asks the GitHub API (this
+    run's one-time credential is spent), so the remote is not asked here."""
+    github = re.match(r"^(?:https?://|ssh://)?(?:[^@/]*@)?github\.com[:/]", url, re.IGNORECASE)
+    branch = None if github and credential_helper_set() else remote_head(remote, url)
+    return branch, "remote" if branch else None, local_head(remote)
 
 
 def updates(text):
@@ -130,7 +196,7 @@ def gate_mode():
 def check(remote, url, text):
     """None when the push may go on, else why not."""
     report = {"remote": remote, "url": clean_url(url), "updates": updates(text)}
-    report["default_branch"], report["default_source"] = default_branch(remote, url)
+    report["default_branch"], report["default_source"], report["local_default"] = default_branch(remote, url)
     event = {"hook_event_name": "PrePush", "tool_name": "GitPush", "tool_input": report, "cwd": os.getcwd()}
     if os.environ.get("BOT_OFFICE_AGENT_TOKEN"):
         allowed, why = ask(event)

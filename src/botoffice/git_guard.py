@@ -1,4 +1,5 @@
-"""0.12.4 git guard: actions that always stop on a card for the owner, in every run.
+"""0.12.4 git guard: actions that stop on a card for the owner when the guard sees them (defence in
+depth, not a boundary: a bot with full CLI access as the same Unix user can get around it).
 
 Pushing to the default branch, merging a PR, force-pushing, deleting a branch, tag or repo,
 deleting files outside the bot's workspace and changing repo settings are classified here, by
@@ -7,18 +8,20 @@ bot setting, run kind or CLI access level can say "allow". Only a "never" rule i
 Everything else a bot does (full CLI access) is untouched.
 
 ``classify`` reads the shell command as words (quotes removed, ``sh -c`` / ``eval`` / ``$( )`` /
-backticks / env and runner prefixes unwrapped, scripts and interpreter code scanned) and answers
-with a short reason, or None. It leans to asking: a false positive is a card, a false negative is
-a push. Still a tripwire, not a sandbox: shell indirection it cannot see (a binary that pushes
+backticks / env and runner prefixes unwrapped, inline interpreter code scanned; fix4: never script
+files or imports) and answers with a short reason, or None. Normal work must not ask: a feature
+push to a remote whose default is unknown, a script that mentions a push, a read-only POST pass. Still a tripwire, not a sandbox: shell indirection it cannot see (a binary that pushes
 by itself) is out of reach, which is why the PATH shims in bin/ cover the engines that have no
 hook. Stdlib only: bin/bot-office-gate and the shims import it too.
 """
 from __future__ import annotations
 
+import fnmatch
 import os
 import posixpath
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 
 DEFAULT_BRANCHES = ("main", "master", "trunk")
@@ -276,6 +279,10 @@ def scan_text(text: str, ctx: Ctx, depth: int = 0) -> None:
     """Raise _Hit if any command in shell *text* is guarded."""
     if depth > MAX_DEPTH:
         _hit("a command nested too deeply to check")
+    if "<<" in text:
+        text, documents = _heredocs(text)
+        for header, body in documents:
+            _heredoc(header, body, ctx, depth)
     commands, nested = split_words(text)
     for snippet in nested:
         scan_text(snippet, ctx, depth + 1)
@@ -284,12 +291,42 @@ def scan_text(text: str, ctx: Ctx, depth: int = 0) -> None:
         if ctx.commands > MAX_COMMANDS:
             _hit("a command with too many parts to check")
         _scan_command(words, ctx, depth)
-    if "<<" in text and _interpreter_in(commands):
-        _raw_code(text, ctx, depth)
 
 
-def _interpreter_in(commands: list[list[str]]) -> bool:
-    return any(INTERPRETERS.match(_base(word)) or _base(word) in SHELLS for words in commands for word in words)
+_HEREDOC = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z_][\w.-]*)\2")
+
+
+def _heredocs(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """(the text without its here-document bodies, [(the line that opens one, its body)]). A body with
+    no closing line is left in place."""
+    lines = text.split("\n")
+    kept: list[str] = []
+    documents: list[tuple[str, str]] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        for match in _HEREDOC.finditer(line):
+            delimiter = match.group(3)
+            end = next((k for k in range(i, len(lines))
+                        if (lines[k].lstrip("\t") if match.group(1) else lines[k]) == delimiter), None)
+            if end is None:
+                continue
+            documents.append((line, "\n".join(lines[i:end])))
+            i = end + 1
+    return "\n".join(kept), documents
+
+
+def _heredoc(header: str, body: str, ctx: Ctx, depth: int) -> None:
+    """fix4 #2: a here-document is judged only when it feeds a shell (as commands) or an interpreter
+    (as inline code); one written to a file or fed to another program is data."""
+    words = [_base(word) for command in split_words(header)[0] for word in command]
+    if any(word in SHELLS for word in words):
+        scan_text(body, ctx, depth + 1)
+        _raw_code(body, ctx, depth)
+    elif any(INTERPRETERS.match(word) for word in words):
+        _raw_code(body, ctx, depth)
 
 
 def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
@@ -338,7 +375,7 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
             _shell(program, rest, ctx, depth)
             return
         if INTERPRETERS.match(program):
-            _interpreter(rest, ctx, depth)
+            _interpreter(program, rest, ctx, depth)
             return
         if program in RUNNERS:
             for item in rest:
@@ -377,8 +414,7 @@ def _shell(program: str, rest: list[str], ctx: Ctx, depth: int) -> None:
         scan_text(" ".join(rest), ctx, depth + 1)
         return
     if program in ("source", "."):
-        _script_file(rest[0] if rest else "", ctx, depth)
-        return
+        return  # fix4 #2: a script file is not read (only inline code is judged)
     for position, word in enumerate(rest):
         if word.startswith("-") and not word.startswith("--") and "c" in word[1:]:
             tail = rest[position + 1:]
@@ -386,39 +422,74 @@ def _shell(program: str, rest: list[str], ctx: Ctx, depth: int) -> None:
                 scan_text(tail[0], ctx, depth + 1)
             return
         if not word.startswith("-"):
-            _script_file(word, ctx, depth)
-            return
+            return  # a script file: not read (fix4 #2)
 
 
-def _script_file(path: str, ctx: Ctx, depth: int) -> None:
-    text = _read(path, ctx)
-    if text:
-        scan_text(text, ctx, depth + 1)
-        _raw_code(text, ctx, depth)
+# fix4 #2: only inline code is judged (python -c, node -e, perl -e, an awk program...), never the
+# contents of a script file or the modules it imports: a test file or a library that mentions a push or
+# SMTP is not a push or a send. The pre-push check and the shims still see what a script really runs.
+# interpreter family -> (short option letters whose value is code, long options whose value is code)
+_INLINE = {"python": ("c", ("--command",)), "pypy": ("c", ()), "node": ("ep", ("--eval", "--print")),
+           "bun": ("ep", ("--eval", "--print")), "deno": ("", ()), "perl": ("eE", ()), "ruby": ("e", ()),
+           "php": ("r", ("--run",)), "lua": ("e", ()), "osascript": ("e", ()), "tclsh": ("", ()),
+           "awk": ("", ()), "pwsh": ("c", ("-command", "--command")), "powershell": ("c", ("-command",))}
+# options whose value is the next word (not code), per family; "-m"/"-f" name a module or a script file
+_VALUE_OPTS = {"python": ("-W", "-X"), "pypy": ("-W", "-X"), "node": ("-r", "--require", "--import"),
+               "bun": ("-r", "--preload"), "awk": ("-v", "-F")}
+_FILE_OPTS = {"python": ("-m",), "pypy": ("-m",), "awk": ("-f",), "perl": (), "ruby": ()}
 
 
-def _read(path: str, ctx: Ctx) -> str:
-    if not path or _dynamic(path):
-        return ""
-    full = path if os.path.isabs(path) else os.path.join(ctx.cwd or "", path)
-    try:
-        if os.path.isfile(full) and os.path.getsize(full) <= SCRIPT_LIMIT:
-            with open(full, encoding="utf-8", errors="replace") as handle:
-                return handle.read(SCRIPT_LIMIT)
-    except OSError:
-        return ""
-    return ""
+def _family(program: str) -> str:
+    for name in ("python", "pypy", "nodejs", "node", "deno", "bun", "perl", "ruby", "php", "lua", "tclsh",
+                 "pwsh", "powershell", "osascript"):
+        if program.startswith(name):
+            return "node" if name == "nodejs" else name
+    return "awk" if program.endswith("awk") else program
 
 
-def _interpreter(rest: list[str], ctx: Ctx, depth: int = 0) -> None:
-    """python -c / node -e / perl -e ...: judge the code text; a script file is read when it can be."""
-    _raw_code(" ".join(rest), ctx, depth)
-    for word in rest:
-        if not word.startswith("-") and not _dynamic(word):
-            text = _read(word, ctx)
-            if text:
-                _raw_code(text, ctx, depth)
+def inline_code(program: str, rest: list[str]) -> list[str]:
+    """The code given inline to an interpreter: the value of python -c, node -e/-p, perl -e/-E, ruby -e,
+    php -r, pwsh -c, `deno eval`, or an awk program. A script file (and what follows it) is not code."""
+    family = _family(program)
+    letters, longs = _INLINE.get(family, ("", ()))
+    codes: list[str] = []
+    i = 0
+    while i < len(rest):
+        word = rest[i]
+        following = rest[i + 1] if i + 1 < len(rest) else ""
+        if word == "--" or word == "-":
             break
+        if not word.startswith("-"):
+            if family == "awk" and not codes:
+                codes.append(word)
+            elif family == "deno" and word == "eval":
+                codes.append(following)
+            break
+        name, eq, value = word.partition("=")
+        if name.lower() in longs:
+            codes.append(value if eq else following)
+            i += 1 if eq else 2
+            continue
+        if word in _FILE_OPTS.get(family, ()):
+            break
+        if word in _VALUE_OPTS.get(family, ()):
+            i += 2
+            continue
+        cluster = word[1:] if not word.startswith("--") else ""
+        found = next((k for k, letter in enumerate(cluster) if letter in letters), None)
+        if found is not None:
+            tail = cluster[found + 1:]
+            codes.append(tail or following)
+            i += 1 if tail else 2
+            continue
+        i += 1
+    return [code for code in codes if code]
+
+
+def _interpreter(program: str, rest: list[str], ctx: Ctx, depth: int = 0) -> None:
+    """python -c / node -e / perl -e ...: judge the inline code only (fix4 #2)."""
+    for code in inline_code(program, rest):
+        _raw_code(code, ctx, depth)
 
 
 _RAW_WORDS = re.compile(r"[a-z_][a-z0-9_]*", re.IGNORECASE)
@@ -441,9 +512,10 @@ _CODE_SEND = re.compile(
     r"\.request\s*\(\s*['\"](?:POST|PUT|PATCH|DELETE)['\"]|"
     r"\bcurl_setopt\s*\([^)]*CURLOPT_POST|\bNet::HTTP::(?:Post|Put|Patch|Delete)\b|->\s*(?:post|put)\s*\(",
     re.IGNORECASE)
-_CODE_MAIL = re.compile(r"\bsmtplib\b|\bnodemailer\b|\bNet::SMTP\b|\bsendmail\b|\bPHPMailer\b|\bmail\s*\(\s*\$",
-                        re.IGNORECASE)
-_CODE_URL = re.compile(r"\b(?:https?|wss?)://([^/\s'\"`:?#]+)", re.IGNORECASE)
+# fix4 #2: a call that sends mail (an SMTP connection, a send), not an import or a mention
+_CODE_MAIL = re.compile(r"\bSMTP(?:_SSL)?\s*\(|\.(?:sendmail|send_message|sendMail)\s*\(|\bcreateTransport\s*\(|"
+                        r"\bNet::SMTP\s*->\s*new\b|\bMIME::Lite\b.*->\s*send\b|\bmail\s*\(\s*\$")
+_CODE_URL = re.compile(r"\bhttps?://[^\s'\"`<>(){}]+", re.IGNORECASE)
 
 
 def _literals(text: str) -> list[str]:
@@ -476,12 +548,14 @@ def _raw_code(text: str, ctx: Ctx | None = None, depth: int = 0) -> None:
                 scan_text(literal, ctx, depth + 1)
         if _CODE_MAIL.search(text):
             ctx.sends.append("sending email from code")
-        elif _CODE_SEND.search(text):
-            hosts = [host.lower() for host in _CODE_URL.findall(text)]
-            outside = [host for host in hosts if not allowed_host(host)]
-            if outside or not hosts:
-                ctx.sends.append(f"a request that sends data to {outside[0] if outside else 'a host not known here'}"
-                                 " (from code)")
+        else:
+            # fix4 #3: a known sending endpoint (chat, webhook, mail or social API) named in the code
+            posting = bool(_CODE_SEND.search(text))
+            for url in _CODE_URL.findall(text[:SCAN_LIMIT])[:200]:
+                where = send_endpoint(url, "POST" if posting else "GET")
+                if where:
+                    ctx.sends.append(f"a request to {where} (from code)")
+                    break
     low = text.lower()
     words = set(_RAW_WORDS.findall(low))
     if "git" in words and "push" in words and (words & set(DEFAULT_BRANCHES) or "+refs" in low or re.search(
@@ -621,9 +695,13 @@ def _git_out(directory: str | None, *args: str) -> str | None:
     return done.stdout.strip() if done.returncode == 0 else None
 
 
-# remote default branches the pre-push check learned from the remote itself (ls-remote --symref), by
-# (git common dir, remote): used when the repo has no refs/remotes/<remote>/HEAD
-_LEARNED: dict[tuple[str, str], str] = {}
+# remote default branches the pre-push check learned from the remote itself (ls-remote --symref, with
+# the bot's own git credentials), by (git common dir, remote): (expiry, branch), LEARNED_TTL
+_LEARNED: dict[tuple[str, str], tuple[float, str]] = {}
+LEARNED_TTL = 3600
+# fix4 #1: while a remote's default branch is not verified (no GitHub API answer, no ls-remote answer),
+# these and the clone's own refs/remotes/<remote>/HEAD are guarded as the default; other branches pass
+FALLBACK_DEFAULTS = frozenset({*DEFAULT_BRANCHES, "production"})
 
 
 def _git_dirs(directory: str | None) -> tuple[str, str] | None:
@@ -665,14 +743,24 @@ def _git_dirs(directory: str | None) -> tuple[str, str] | None:
 
 
 def remote_default(directory: str | None, remote: str | None) -> str | None:
-    """The default branch of *remote* (a remote name) as the repo around *directory* knows it:
-    refs/remotes/<remote>/HEAD (set by clone or `git remote set-head`), else what the pre-push check
-    learned from the remote. For a github.com remote the controller asks GitHub first (fix3 #5).
-    None when unknown (a URL, a path, no such ref)."""
+    """The verified default branch of *remote* (a remote name): GitHub's answer (the controller's cached
+    API lookup) for a github.com remote, else what the pre-push check learned from the remote itself
+    (ls-remote). None when not verified; the clone's own refs/remotes/<remote>/HEAD may be stale and is
+    only part of the fallback (fix4 #1: local_default, is_default)."""
     url = remote_url(directory, remote) if remote else None
     hub = github_repo(normalise_remote(url)) if url else None
     if hub and repo_default(*hub):
         return repo_default(*hub)
+    if not remote or not re.fullmatch(r"[A-Za-z0-9][\w.-]*", remote):
+        return None
+    dirs = _git_dirs(directory)
+    learned = _LEARNED.get((os.path.realpath(dirs[1]), remote)) if dirs else None
+    return learned[1] if learned and learned[0] > time.monotonic() else None
+
+
+def local_default(directory: str | None, remote: str | None) -> str | None:
+    """refs/remotes/<remote>/HEAD of the repo around *directory* (set by clone or `git remote set-head`;
+    not updated when the remote's default changes), or None."""
     if not remote or not re.fullmatch(r"[A-Za-z0-9][\w.-]*", remote):
         return None
     dirs = _git_dirs(directory)
@@ -681,18 +769,24 @@ def remote_default(directory: str | None, remote: str | None) -> str | None:
     try:
         with open(os.path.join(dirs[1], "refs", "remotes", remote, "HEAD"), encoding="utf-8") as handle:
             line = handle.read(4096).strip()
-        prefix = f"ref: refs/remotes/{remote}/"
-        if line.startswith(prefix) and line[len(prefix):]:
-            return line[len(prefix):]
     except OSError:
-        pass
-    return _LEARNED.get((os.path.realpath(dirs[1]), remote))
+        return None
+    prefix = f"ref: refs/remotes/{remote}/"
+    return line[len(prefix):] if line.startswith(prefix) and line[len(prefix):] else None
+
+
+def is_default(branch: str, verified: str | None, local: str | None = None) -> bool:
+    """Whether a push to *branch* counts as a push to the default branch: main/master/trunk always; the
+    verified default when there is one; else (not known) production and the clone's own default too."""
+    if _DEFAULT_REF.match(branch) or (verified and branch == verified):
+        return True
+    return not verified and (branch in FALLBACK_DEFAULTS or bool(local and branch == local))
 
 
 def learn_default(directory: str | None, remote: str | None, branch: str | None) -> None:
     dirs = _git_dirs(directory)
     if dirs and remote and branch and len(_LEARNED) < 10000:
-        _LEARNED[(os.path.realpath(dirs[1]), remote)] = branch
+        _LEARNED[(os.path.realpath(dirs[1]), remote)] = (time.monotonic() + LEARNED_TTL, branch)
 
 
 def _implicit_push_risky(directory: str | None, remote: str | None, via_head: bool, overrides: dict) -> bool:
@@ -704,9 +798,8 @@ def _implicit_push_risky(directory: str | None, remote: str | None, via_head: bo
         return True  # detached HEAD, or not a repo we can read
     if _DEFAULT_REF.match(branch):
         return True
-    default = remote_default(directory, remote or "origin")
-    if default is None or branch == default:
-        return True  # the remote's default branch is not known here: ask
+    if is_default(branch, remote_default(directory, remote or "origin"), local_default(directory, remote or "origin")):
+        return True
     mode = overrides.get("push.default") or _git_out(directory, "config", "--get", "push.default") or "simple"
     if mode in ("matching", "upstream", "tracking"):
         return True
@@ -841,6 +934,7 @@ def _git_push(rest: list[str], directory: str | None, overrides: dict) -> None:
     if remote and (_DEFAULT_REF.match(remote) or _dynamic(remote) and not refspecs):
         _hit("git push naming the default branch")
     default = remote_default(directory, remote or "origin")
+    local = local_default(directory, remote or "origin")
     for refspec in refspecs:
         if _dynamic(refspec) or any(ch in refspec for ch in "*?[{"):
             _hit("git push with a refspec that is not known until it runs")
@@ -858,10 +952,9 @@ def _git_push(rest: list[str], directory: str | None, overrides: dict) -> None:
         branch = re.sub(r"^(?:refs/)?heads/", "", destination)
         if branch in ("HEAD", "@"):
             _hit("git push to the remote's HEAD (its default branch)")
-        if default is None:
-            _hit("git push to a branch of a remote whose default branch is not known here")
-        if branch == default:
-            _hit(f"git push to the default branch ({default})")
+        if is_default(branch, default, local):
+            _hit(f"git push to the default branch ({branch})" if default else
+                 f"git push to {branch}, which may be the default branch (the remote's is not verified)")
     only_head = bool(refspecs) and all(re.fullmatch(r"(?:HEAD|@)(?::.*)?", r) and ":" not in r for r in refspecs)
     if not refspecs or only_head:
         if _implicit_push_risky(directory, remote, only_head, overrides):
@@ -1104,52 +1197,100 @@ def _http(program: str, args: list[str], ctx: Ctx) -> None:
 
 HTTP_PROGRAMS = frozenset({"curl", "wget", "http", "https", "xh", "xhs", "httpie", "wcurl"})
 MAIL_PROGRAMS = frozenset({"sendmail", "mail", "mailx", "msmtp", "swaks", "mutt", "neomutt", "s-nail"})
-# fix3 #4: the hosts a bot may send to (a non-GET request) without a card: this machine and the package
-# registries installs talk to (docs/APPROVALS.md "Sending"); BOT_OFFICE_SEND_ALLOW_HOSTS adds more
-SEND_ALLOWED_HOSTS = frozenset({
-    "localhost", "127.0.0.1", "::1", "0.0.0.0",
-    "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "registry.yarnpkg.com", "crates.io",
-    "static.crates.io", "index.crates.io", "proxy.golang.org", "sum.golang.org", "rubygems.org",
-    "repo.maven.apache.org", "repo1.maven.org"})
+# fix4 #3: the endpoints that send to people: chat and webhook hosts, mail APIs, social posts. A request
+# to one of them with a method other than GET/HEAD/OPTIONS sends (any method, for an API that also
+# sends on GET). Every other request does not ask (a read-only GraphQL POST, an embeddings or LLM
+# API call). (host, path pattern or "" for any path, any method); a "*." host also matches its
+# subdomains. BOT_OFFICE_SEND_HOSTS adds "host" or "host/path-prefix" entries (comma or space separated).
+_TWEETS = r"/(?:2/(?:tweets|dm_conversations)|1\.1/(?:statuses/(?:update|retweet)|direct_messages))"
+_DISCORD = r"/api/(?:v\d+/)?(?:webhooks/|channels/[^/]+/messages)"
+_GMAIL = r"/(?:upload/)?gmail/v1/users/[^/]+/(?:messages|drafts)/send"
+_GRAPH = (r"/(?:v1\.0|beta)/(?:me|users/[^/]+)/(?:sendmail|messages/[^/]+/(?:send|reply|replyall|forward))|"
+          r"/(?:v1\.0|beta)/(?:chats|teams)/.+/messages")
+_OUTLOOK = r"/api/[^/]+/(?:me|users/[^/]+)/(?:sendmail|messages/[^/]+/(?:send|reply|replyall|forward))"
+SEND_ENDPOINTS = (
+    ("hooks.slack.com", "", False),
+    ("slack.com", r"/api/(?:chat\.|files\.(?:upload|completeUploadExternal)|conversations\.invite)", True),
+    ("discord.com", _DISCORD, False), ("discordapp.com", _DISCORD, False),
+    ("api.telegram.org", r"/bot[^/]*/(?:send|forward|copy)", True),
+    ("graph.microsoft.com", _GRAPH, False),
+    ("outlook.office.com", _OUTLOOK, False), ("outlook.office365.com", _OUTLOOK, False),
+    ("*.webhook.office.com", "", False),
+    ("gmail.googleapis.com", _GMAIL, False), ("www.googleapis.com", _GMAIL, False),
+    ("chat.googleapis.com", r"/v1/spaces/[^/]+/messages", False),
+    ("api.sendgrid.com", "", False), ("api.mailgun.net", "", False), ("api.eu.mailgun.net", "", False),
+    ("api.postmarkapp.com", "", False), ("api.resend.com", "", False), ("api.twilio.com", "", False),
+    ("api.brevo.com", "", False), ("api.sendinblue.com", "", False), ("api.mailjet.com", "", False),
+    ("api.sparkpost.com", "", False), ("mandrillapp.com", "", False), ("api.smtp2go.com", "", False),
+    ("email.*.amazonaws.com", "", False), ("api.pushover.net", "", False), ("ntfy.sh", "", False),
+    ("api.x.com", _TWEETS, False), ("api.twitter.com", _TWEETS, False),
+    ("graph.facebook.com", "", False),
+    ("api.linkedin.com", r"/(?:v2/(?:ugcPosts|shares|messages|socialActions)|rest/(?:posts|messages|socialActions))",
+     False),
+    ("bsky.social", r"/xrpc/com\.atproto\.repo\.createRecord", False),
+)
+# a URL in a variable whose name says where it goes ($SLACK_WEBHOOK_URL)
+_SEND_VAR = re.compile(r"webhook|slack|discord|telegram|twilio|sendgrid|mailgun|postmark|resend|teams_?url",
+                       re.IGNORECASE)
+_URL_PARTS = re.compile(r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/\s]*@)?(\[[^\]]*\]|[^:/\s?#]*)(?::\d+)?([^?#\s]*)",
+                        re.IGNORECASE)
+
+
+def _host_matches(pattern: str, host: str) -> bool:
+    if pattern.startswith("*."):
+        return host.endswith(pattern[1:])
+    return fnmatch.fnmatchcase(host, pattern) if "*" in pattern else host == pattern
+
+
+def send_endpoints() -> list[tuple[str, str, bool]]:
+    extra = []
+    for item in re.split(r"[,\s]+", os.environ.get("BOT_OFFICE_SEND_HOSTS", "")):
+        host, slash, path = item.strip().lower().partition("/")
+        if host:
+            extra.append((host, "/" + re.escape(path) if slash and path else "", False))
+    return [*SEND_ENDPOINTS, *extra]
+
+
+def send_endpoint(url: str, method: str) -> str | None:
+    """The host of the sending endpoint *url* reaches with *method*, or None when it is not one."""
+    found = _URL_PARTS.match(url.strip())
+    if not found:
+        return None
+    host, path = found.group(1).strip("[]").lower().rstrip("."), found.group(2) or "/"
+    reading = method.upper() in ("GET", "HEAD", "OPTIONS")
+    for pattern, path_pattern, any_method in send_endpoints():
+        if not _host_matches(pattern, host) or (reading and not any_method):
+            continue
+        if not path_pattern or re.match(path_pattern, path, re.IGNORECASE):
+            return host  # not the path: a webhook or bot path can hold its secret
+    return None
+
+
 _URLISH = re.compile(r"^(?:[a-z][a-z0-9+.-]*://\S+|(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?|"
                      r"localhost(?::\d+)?(?:[/?#]\S*)?|\d+\.\d+\.\d+\.\d+(?::\d+)?(?:[/?#]\S*)?|:\d*(?:/\S*)?)$",
                      re.IGNORECASE)
-_HOST = re.compile(r"^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/\s]*@)?(\[[^\]]*\]|[^:/\s?#]*)", re.IGNORECASE)
-
-
-def allowed_host(host: str) -> bool:
-    """A host on the send allowlist (this machine, the controller, package registries, the owner's list)."""
-    host = host.strip("[]").lower().rstrip(".")
-    extra = {h.strip().lower() for h in os.environ.get("BOT_OFFICE_SEND_ALLOW_HOSTS", "").split(",") if h.strip()}
-    controller = re.match(r"^https?://(\[[^\]]*\]|[^:/]+)", os.environ.get("BOT_OFFICE_API_URL", ""))
-    if controller:
-        extra.add(controller.group(1).strip("[]").lower())
-    return host in SEND_ALLOWED_HOSTS or host in extra
 
 
 def _http_send(program: str, method: str, body: bool, args: list[str], urls: list[str], ctx: Ctx) -> None:
-    """Any request but GET/HEAD/OPTIONS to a host off the allowlist, or to a host not known here, sends."""
+    """fix4 #3: a request to a known sending endpoint (SEND_ENDPOINTS, BOT_OFFICE_SEND_HOSTS) sends; a
+    non-GET request to a URL held in a variable named like one ($SLACK_WEBHOOK_URL) too. Other
+    requests (any method, any host) do not ask here."""
     verb = (method or ("POST" if body else "GET")).upper()
     if any(a in ("-G", "--get") for a in args) and not method:
         verb = "GET"
-    if verb in ("GET", "HEAD", "OPTIONS"):
-        return
-    label = f"{verb} request" if _METHOD.match(verb) else "request whose method is not known until it runs"
     targets = [u for u in urls if _URLISH.match(u) or _dynamic(u)]
     if program in ("http", "https", "xh", "xhs", "httpie"):
         targets = targets[:1]
-    hosts = []
     for target in targets:
-        if _dynamic(target) and not re.match(r"^[a-z]+://[\w.-]+(?:[:/]|$)", target, re.IGNORECASE):
-            hosts.append(None)
+        if _dynamic(target):
+            if verb not in ("GET", "HEAD", "OPTIONS") and _SEND_VAR.search(target):
+                ctx.sends.append(f"a {verb} request to {target} ({program})")
+                return
             continue
-        found = _HOST.match(target)
-        name = found.group(1) if found else ""
-        hosts.append(name or ("localhost" if target.startswith(":") else None))
-    outside = [h for h in hosts if h and not allowed_host(h)]
-    if outside or not hosts or None in hosts:
-        where = outside[0] if outside else "a host not known until it runs"
-        ctx.sends.append(f"a {label} to {where} ({program})")
+        where = send_endpoint(target, verb if _METHOD.match(verb) else "POST")
+        if where:
+            ctx.sends.append(f"a {verb} request to {where} ({program})")
+            return
 
 
 # --- MCP / connector tools ------------------------------------------------------------------------
@@ -1228,13 +1369,12 @@ def _mcp(tool: str, data: dict | None, ctx: Ctx) -> None:
         branches = [re.sub(r"^(?:refs/)?heads/", "", b.strip()) for b in branches]
         if not branches or any(_DEFAULT_REF.match(b) or b in ("HEAD", "@") or _dynamic(b) for b in branches):
             _hit("a connector tool that commits or pushes to the default branch")
-        # fix3 #5: the target repo's real default branch (the controller asks GitHub, cached); unknown asks
+        # fix3 #5: the target repo's real default branch (the controller asks GitHub, cached); fix4 #1:
+        # while unknown, production is guarded too (main/master/trunk always are) and other branches pass
         target = mcp_repo(data or {})
         default = repo_default(*target) if target else None
-        if default is None:
-            _hit("a connector tool that commits or pushes to a repo whose default branch is not known")
-        if default in branches:
-            _hit(f"a connector tool that commits or pushes to the default branch ({default})")
+        if any(is_default(b, default) for b in branches):
+            _hit(f"a connector tool that commits or pushes to the default branch ({default or 'not known'})")
     if words & {"delete", "remove", "trash"} and words & {"file", "files", "directory", "folder", "path"}:
         strings = []
         _input_strings(data or {}, strings)
@@ -1275,10 +1415,10 @@ def _send_tool(tool: str) -> bool:
 
 
 def send_reason(tool: str, command: str = "", tool_input: dict | None = None, cwd: str | None = None) -> str | None:
-    """Why this call sends something out of the machine (email, a message, a post, any non-GET request
-    to a host off the allowlist): always asks, in every run. None when it does not."""
-    if command and SEND_SHELL.search(command):
-        return "sending email or a message"
+    """Why this call sends something to people (email, a message, a post, a request to a known sending
+    endpoint): always asks. None when it does not."""
+    if command and SEND_SHELL.search(_heredocs(command)[0] if "<<" in command else command):
+        return "sending email or a message"  # not in a here-document's text (fix4 #2: judged below)
     if tool and (tool.lower().startswith("mcp") or tool == "MCP") and (SEND_TOOLS.search(tool) or _send_tool(tool)):
         return "sending through a connector"
     if command:
@@ -1310,10 +1450,15 @@ _SHA = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 def classify_push(report: dict | None) -> str | None:
     """Judge the refs a push really updates, as git's pre-push hook sees them: deleting a ref, a
     non-fast-forward (force) update, overwriting a tag, anything outside branches and tags, and the
-    remote's default branch (or any branch while that is unknown) ask."""
+    remote's default branch ask. fix4 #1: the default is GitHub's answer or the remote's own (ls-remote);
+    while neither is known, main, master, trunk, production and the clone's refs/remotes/<remote>/HEAD
+    are guarded and other branches pass."""
     if not isinstance(report, dict) or not isinstance(report.get("updates"), list):
         return "a push the check could not read"
-    default = report.get("default_branch") if isinstance(report.get("default_branch"), str) else None
+    named = report.get("default_branch") if isinstance(report.get("default_branch"), str) else None
+    default = named if report.get("default_source") == "remote" else None
+    hint = report.get("local_default") if isinstance(report.get("local_default"), str) else None
+    hint = hint or (named if not default else None)  # a default the remote did not confirm
     hub = github_repo(normalise_remote(str(report.get("url") or "")))
     if hub and repo_default(*hub):
         default = repo_default(*hub)  # fix3 #5: GitHub's own answer (the controller's cached lookup)
@@ -1329,10 +1474,9 @@ def classify_push(report: dict | None) -> str | None:
             return f"deleting {ref} on the remote"
         if ref.startswith("refs/heads/"):
             branch = ref[len("refs/heads/"):]
-            if _DEFAULT_REF.match(branch) or branch == default:
-                return f"pushing to the default branch ({branch})"
-            if not default:
-                return f"pushing {branch} to a remote whose default branch is not known"
+            if is_default(branch, default, hint):
+                return f"pushing to the default branch ({branch})" if default or _DEFAULT_REF.match(branch) else \
+                    f"pushing to {branch}, which may be the default branch (the remote's is not verified)"
         elif ref.startswith("refs/tags/"):
             if set(remote) != {"0"}:
                 return f"overwriting the tag {ref[len('refs/tags/'):]}"

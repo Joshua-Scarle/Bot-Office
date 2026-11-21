@@ -246,8 +246,11 @@ def test_connector_pushes_use_the_repos_real_default_branch(monkeypatch):
     assert git_guard.classify(push, "", {"owner": "o", "repo": "r", "branch": "production"}, "/")
     assert git_guard.classify(push, "", {"repository": "o/r", "branch": "production"}, "/")
     assert git_guard.classify(push, "", {"owner": "o", "repo": "r", "branch": "feature"}, "/") is None
-    assert git_guard.classify(push, "", {"owner": "o", "repo": "unknown", "branch": "feature"}, "/")  # unknown asks
-    assert git_guard.classify(push, "", {"branch": "feature"}, "/")  # no repo named: asks
+    # fix4 #1: an unknown default guards main, master, trunk and production only
+    assert git_guard.classify(push, "", {"owner": "o", "repo": "unknown", "branch": "feature"}, "/") is None
+    assert git_guard.classify(push, "", {"owner": "o", "repo": "unknown", "branch": "production"}, "/")
+    assert git_guard.classify(push, "", {"branch": "feature"}, "/") is None
+    assert git_guard.classify(push, "", {"branch": "production"}, "/")
     assert git_guard.classify("mcp__github__merge_pull_request", "", {"owner": "o", "repo": "r"}, "/")
 
 
@@ -258,21 +261,28 @@ def test_the_pre_push_check_and_the_command_guard_use_githubs_default(monkeypatc
     assert git_guard.classify_push(report)
     report["updates"] = [update("refs/heads/feature", "a" * 40, "b" * 40)]
     assert git_guard.classify_push(report) is None
-    # no token on the controller (GitHub not asked): the clone's own default, as the hook reports it
+    # no token on the controller (GitHub not asked): the remote's own answer (ls-remote) when the hook
+    # has one; else (fix4 #1) the usual names and the clone's own default are guarded, nothing else
     monkeypatch.setattr(git_guard, "default_lookup", lambda owner, repo: None)
-    assert git_guard.classify_push({**report, "default_branch": "main"}) is None
-    assert git_guard.classify_push(report)  # and unknown asks
+    assert git_guard.classify_push({**report, "default_branch": "feature", "default_source": "remote"})
+    assert git_guard.classify_push({**report, "default_branch": "main", "default_source": "remote"}) is None
+    assert git_guard.classify_push({**report, "local_default": "feature"})
+    assert git_guard.classify_push(report) is None
     monkeypatch.setattr(git_guard, "default_lookup", lambda owner, repo: "production")
     repo, _first, _second = github_clone(tmp_path, default="main")  # the clone's origin/HEAD is stale
     assert git_guard.classify("Bash", "git push origin HEAD:production", None, str(repo))
 
 
-def test_the_hook_reports_the_clones_default_for_github_without_asking_the_remote(tmp_path, monkeypatch):
+def test_with_the_controllers_token_the_hook_does_not_ask_github(tmp_path, monkeypatch):
     repo, _first, _second = github_clone(tmp_path, default="trunk")
     assert git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk").returncode == 0
     hook = runpy.run_path(str(BIN / "bot-office-git-hook"))
     monkeypatch.chdir(repo)
-    assert hook["default_branch"]("origin", "https://github.com/o/r.git") == ("trunk", "local")
+    for key, value in {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper",
+                       "GIT_CONFIG_VALUE_0": str(BIN / "bot-office-credential")}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setitem(hook["default_branch"].__globals__, "remote_head", lambda *a: pytest.fail("asked GitHub"))
+    assert hook["default_branch"]("origin", "https://github.com/o/r.git") == (None, None, "trunk")
 
 
 def test_default_branches_are_cached_and_need_the_token():
@@ -290,11 +300,12 @@ def test_default_branches_are_cached_and_need_the_token():
 # --- #4 sending is a class: it asks in every run ----------------------------------------------------
 
 @pytest.mark.parametrize("command", [
-    "curl -X POST https://hooks.slack.com/services/x -d '{}'", "curl -d @report.json https://api.example.com/v1",
-    "curl --json '{}' https://example.org/x", "wget --post-data=a=b https://example.org/form",
-    "http POST example.org/x a=b", "xh example.org/x a=b", "sendmail owner@example.com < note.txt",
-    "python3 -c \"import requests; requests.post('https://example.org/hook', json={})\"",
-    "node -e \"fetch('https://example.org/x', {method: 'POST', body: 'x'})\"",
+    "curl -X POST https://hooks.slack.com/services/x -d '{}'", "curl -d @report.json https://api.sendgrid.com/v3/mail/send",
+    "curl --json '{}' https://discord.com/api/webhooks/1/x", "wget --post-data=a=b https://api.twilio.com/2010-04-01/x",
+    "http POST api.mailgun.net/v3/x/messages a=b", "xh hooks.slack.com/services/x a=b",
+    "sendmail owner@example.com < note.txt",
+    "python3 -c \"import requests; requests.post('https://hooks.slack.com/services/x', json={})\"",
+    "node -e \"fetch('https://graph.microsoft.com/v1.0/me/sendMail', {method: 'POST', body: 'x'})\"",
     "python3 -c \"import smtplib; smtplib.SMTP('mail.example.org').sendmail('a', 'b', 'c')\""])
 def test_a_request_that_sends_asks(command):
     assert git_guard.judge("Bash", command, None, clone_workspace()), command
@@ -303,16 +314,19 @@ def test_a_request_that_sends_asks(command):
 @pytest.mark.parametrize("command", [
     "curl https://example.org/data.json", "curl -X POST http://127.0.0.1:8080/v1/x -d a", "wget https://example.org/f",
     "curl -d a http://localhost:9000/x", "http example.org/search q==x", "pip install requests",
-    "python3 -c \"import requests; print(requests.get('https://example.org').text)\"", "ls mail"])
+    "python3 -c \"import requests; print(requests.get('https://example.org').text)\"", "ls mail",
+    # fix4 #3: a POST that is not to a known sending endpoint does not ask
+    "curl -d @report.json https://api.example.com/v1", "wget --post-data=a=b https://example.org/form",
+    "http POST example.org/x a=b", "curl -X POST https://ci.internal.example/hook"])
 def test_reading_and_local_requests_do_not_ask(command):
     assert git_guard.judge("Bash", command, None, clone_workspace()) is None, command
 
 
-def test_the_allowlist_can_be_extended(monkeypatch):
+def test_the_sending_endpoints_can_be_extended(monkeypatch):
     command = "curl -X POST https://ci.internal.example/hook"
-    assert git_guard.judge("Bash", command, None, clone_workspace())
-    monkeypatch.setenv("BOT_OFFICE_SEND_ALLOW_HOSTS", "ci.internal.example")
     assert git_guard.judge("Bash", command, None, clone_workspace()) is None
+    monkeypatch.setenv("BOT_OFFICE_SEND_HOSTS", "ci.internal.example")
+    assert git_guard.judge("Bash", command, None, clone_workspace())
 
 
 @pytest.mark.parametrize("tool,asked", [
@@ -329,13 +343,13 @@ def test_a_job_with_no_bot_is_refused_with_a_notice(world):
     before = head(remote)
     store.create("check", "codex", source="api")
     adapter.turns = [[("commit", "throwaway"), ("hooked", "git push origin HEAD:main"), ("direct", "git push origin HEAD:main"),
-                      ("hooked", "curl -X POST https://hooks.example.invalid/x -d a")]]
+                      ("hooked", "curl -X POST https://email.example.invalid.amazonaws.com/x -d a")]]
     run_next(store, scheduler)
     assert adapter.seen[-1][1] == [0, ("gate", 2), ("ran", 1), ("gate", 2)], adapter.seen
     assert head(remote) == before and pending(store) == []
     notices = [item for item in needs_you(store) if item.get("state") == "refused"]
     texts = " ".join(item["ask"] for item in notices)
-    assert len(notices) >= 3 and "git push" in texts and "hooks.example.invalid" in texts
+    assert len(notices) >= 3 and "git push" in texts and "amazonaws.com" in texts
     assert all(item["bot_name"] == "Job without a bot" and item["actions"] == ["dismiss"] for item in notices)
 
 
@@ -382,7 +396,7 @@ def test_send_programs_go_through_the_shim(tmp_path):
     gate_file = tmp_path / "gate.json"
     gate_file.write_text(json.dumps({"mode": "local"}))
     env = {"PATH": f"{BIN}:/usr/bin:/bin", "BOT_OFFICE_GUARD_SHIM": "1", "BOT_OFFICE_JOB_ID": "1",
-           "BOT_OFFICE_GATE_FILE": str(gate_file)}
+           "BOT_OFFICE_GATE_FILE": str(gate_file), "BOT_OFFICE_SEND_HOSTS": "hooks.example.invalid"}
     done = subprocess.run([str(BIN / "curl"), "-s", "-X", "POST", "https://hooks.example.invalid/x"], cwd=tmp_path,
                           env=env, capture_output=True, timeout=60, check=False)
     assert done.returncode != 0 and b"notice" in done.stderr

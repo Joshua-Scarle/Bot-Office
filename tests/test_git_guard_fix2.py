@@ -57,11 +57,13 @@ def test_the_default_branch_is_read_from_the_clone_not_assumed():
     assert not asks("git push -u origin fix-123", work)
 
 
-def test_an_unknown_default_branch_asks(tmp_path):
+def test_an_unknown_default_branch_guards_the_usual_names_only(tmp_path):
+    # fix4 #1: no verified default: main, master, trunk and production ask, a feature branch does not
     (tmp_path / ".git").mkdir()  # a repo with no refs/remotes/origin/HEAD
-    assert asks("git push origin feature/x", str(tmp_path))
-    assert asks("git push", str(tmp_path))
-    assert asks("git push origin feature/x", None)
+    assert not asks("git push origin feature/x", str(tmp_path))
+    assert not asks("git push origin feature/x", None)
+    assert asks("git push origin production", str(tmp_path)) and asks("git push origin master", None)
+    assert asks("git push", str(tmp_path))  # not on a branch here: where it goes is not known
 
 
 @pytest.mark.parametrize("command", ["git branch -d old", "git branch -D old", "git branch --delete old",
@@ -120,7 +122,9 @@ def update(ref, local=SHA_A, remote=SHA_B, fast_forward=True):
     ([update("refs/tags/v1", remote=ZERO)], "main", False),  # a new tag
     ([update("refs/heads/production")], "production", True),
     ([update("refs/heads/main")], "production", True),  # the usual names always ask
-    ([update("refs/heads/feature")], None, True),  # default not known
+    ([update("refs/heads/feature")], None, False),  # fix4 #1: default not known: the usual names only
+    ([update("refs/heads/production")], None, True),
+    ([update("refs/heads/trunk")], None, True),
     ([update("refs/heads/feature", local=ZERO)], "main", True),  # delete
     ([update("refs/heads/feature", fast_forward=False)], "main", True),
     ([update("refs/heads/feature", fast_forward=None)], "main", True),  # old commit not here: not proven
@@ -130,7 +134,8 @@ def update(ref, local=SHA_A, remote=SHA_B, fast_forward=True):
     ("garbage", "main", True),
 ])
 def test_classify_push(updates, default, asked):
-    reason = git_guard.classify_push({"remote": "origin", "updates": updates, "default_branch": default})
+    reason = git_guard.classify_push({"remote": "origin", "updates": updates, "default_branch": default,
+                                      "default_source": "remote" if default else None})
     assert (reason is not None) == asked, reason
 
 
@@ -361,8 +366,11 @@ def test_the_pre_push_hook_fails_closed(tmp_path):
     gate_file = tmp_path / "gate.json"
     gate_file.write_text(json.dumps({"mode": "local"}))
     assert run({"BOT_OFFICE_GATE_FILE": str(gate_file)}, "garbage\n").returncode == 1
-    # local mode: the default branch is not known here (no remote), so even a feature push is refused
-    assert run({"BOT_OFFICE_GATE_FILE": str(gate_file)}).returncode == 1
+    # local mode: the default branch is not known here (no remote): a feature push goes on (fix4 #1),
+    # a push to production is refused
+    assert run({"BOT_OFFICE_GATE_FILE": str(gate_file)}).returncode == 0
+    production = f"refs/heads/production {SHA_A} refs/heads/production {ZERO}\n"
+    assert run({"BOT_OFFICE_GATE_FILE": str(gate_file)}, production).returncode == 1
     # not a Bot-Office run: only the repo's own hook (none here)
     assert subprocess.run([sys.executable, "-I", str(hook), "origin", "x"], input=line.encode(),
                           env={"PATH": "/usr/bin:/bin"}, cwd=tmp_path, capture_output=True, timeout=60,

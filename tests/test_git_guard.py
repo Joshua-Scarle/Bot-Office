@@ -213,8 +213,10 @@ def test_implicit_pushes_are_judged_from_the_repo(tmp_path):
     git("commit", "-q", "--allow-empty", "-m", "x", cwd=work)
     git("remote", "add", "origin", str(bare), cwd=work)
     root = str(work)
-    # fix2: origin's default branch is not known yet (no refs/remotes/origin/HEAD): every push asks
-    assert guarded("git push origin feature", root) and guarded("git push", root)
+    # fix4 #1: origin's default branch is not known (no refs/remotes/origin/HEAD): main, master, trunk and
+    # production ask (here `git push` is on main), another branch does not
+    assert guarded("git push origin feature", root) is None
+    assert guarded("git push origin production", root) and guarded("git push", root)
     git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=work)
     git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main", cwd=work)
     # on main: every implicit form goes to the default branch
@@ -257,15 +259,20 @@ def test_implicit_pushes_are_judged_from_the_repo(tmp_path):
     assert guarded("git -c alias.x='push origin main' x", root)
 
 
-def test_scripts_the_command_runs_are_read(tmp_path):
+def test_script_files_are_not_read_only_inline_code(tmp_path):
+    # fix4 #2: a script file's contents are not judged (the pre-push check and the shims see what it
+    # really runs); the code given inline (-c, -e, an interpreter's here-document) is
     (tmp_path / "release.sh").write_text("#!/bin/sh\nset -e\ngit push origin main\n")
     (tmp_path / "py.py").write_text("import subprocess\nsubprocess.run(['git', 'push', 'origin', 'main'])\n")
-    (tmp_path / "ok.sh").write_text("#!/bin/sh\ngit status\nls\n")
     root = str(tmp_path)
     for command in ("bash release.sh", "sh ./release.sh", "bash -e release.sh", f"bash {tmp_path}/release.sh",
                     "source release.sh", ". ./release.sh", "python3 py.py", "python py.py --x"):
+        assert guarded(command, root) is None, command
+    for command in ("bash -c 'git push origin main'",
+                    "python3 -c \"import subprocess; subprocess.run(['git', 'push', 'origin', 'main'])\"",
+                    "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push', 'origin', 'main'])\nEOF",
+                    "bash <<'EOF'\ngit push origin main\nEOF"):
         assert guarded(command, root), command
-    assert guarded("bash ok.sh", root) is None and guarded("bash missing.sh", root) is None
 
 
 @pytest.mark.parametrize("tool,data", [
