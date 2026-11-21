@@ -142,6 +142,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 @media (prefers-reduced-motion: no-preference) {
   .char.working .look { animation: char-look 1.6s ease-in-out infinite; }
   .char.waiting .face { animation: char-bob 2.2s ease-in-out infinite; }
+  .char.tracking .look { animation-name: none; }   /* the pointer wins over the canned look while it is in the window */
 }
 @keyframes char-look { 0%, 100% { transform: translateX(-2.2px); } 50% { transform: translateX(2.2px); } }
 @keyframes char-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.6px); } }
@@ -992,7 +993,7 @@ function charBody(shape, fill) {
 function charFace(shape, expr) {
   const [cy, gap] = CHAR_FACE[shape] || CHAR_FACE.square;
   const face = svgEl("g", {}, "face"), xs = [24 - gap, 24 + gap];
-  const eyes = svgEl("g", {}, expr === "working" ? "look" : "");
+  const eyes = svgEl("g", {}, expr === "working" ? "eyes look" : "eyes");
   const mark = (d) => svgEl("path", {d}, "mark");
   for (const x of xs) {
     if (expr === "working") eyes.append(svgEl("rect", {x: x - 2.6, y: cy - 3.4, width: 5.2, height: 3.6, rx: 1.8}, "eye"));
@@ -1052,6 +1053,56 @@ function scheduleDoneRefresh() {
   if (!state.doneUntil.size) return;
   const next = Math.min(...state.doneUntil.values());
   state.doneTimer = setTimeout(() => { renderBots(); renderHeader(); scheduleDoneRefresh(); }, next - now + 250);
+}
+// 0.12.20 eyes follow the pointer on the empty-chat hello screen. Mouse events only set a target; one requestAnimationFrame loop eases the
+// eye group toward it (clamped to a small radius so the eyes stay in the face) and stops once settled. Off under prefers-reduced-motion.
+const EYE_MAX = 2.2;                                          // eye travel in viewBox units (the canned look-left-right swings +-2.2)
+const EYE_MAX_BY_SHAPE = {droplet: 1.6, triangle: 1.6, star: 1.6};   // low or narrow faces get less room
+const EYE = {ptr: null, cur: [0, 0], raf: 0, installed: false};
+function eyeLimit(shape) { return EYE_MAX_BY_SHAPE[shape] || EYE_MAX; }
+function eyeReduced() { return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches; }
+// pointer vector (dx, dy in px from the face) -> eye offset, never longer than max
+function eyeOffset(dx, dy, max) {
+  const dist = Math.hypot(dx, dy);
+  if (!dist) return [0, 0];
+  const mag = Math.min(max, max * dist / 60);
+  return [dx / dist * mag, dy / dist * mag];
+}
+function eyeTarget(node) {
+  if (!EYE.ptr) return [0, 0];
+  const r = node.getBoundingClientRect();
+  return eyeOffset(EYE.ptr[0] - (r.left + r.width / 2), EYE.ptr[1] - (r.top + r.height / 2), eyeLimit(node.dataset.shape));
+}
+function eyeStep() {
+  EYE.raf = 0;
+  const node = document.querySelector(".empty .char"), eyes = node && node.querySelector(".eyes");
+  if (!eyes || eyeReduced()) { EYE.cur = [0, 0]; if (eyes) eyeApply(node, eyes, null); return; }
+  const want = eyeTarget(node);
+  EYE.cur = EYE.cur.map((v, i) => v + (want[i] - v) * 0.2);
+  const settled = Math.hypot(want[0] - EYE.cur[0], want[1] - EYE.cur[1]) < 0.02;
+  if (settled) EYE.cur = want;
+  eyeApply(node, eyes, !EYE.ptr && settled ? null : EYE.cur);
+  if (!settled) EYE.raf = requestAnimationFrame(eyeStep);
+}
+// off = null clears the offset and hands the eyes back to the canned animation
+function eyeApply(node, eyes, xy) {
+  node.classList.toggle("tracking", !!xy);
+  if (xy) eyes.style.transform = "translate(" + xy[0].toFixed(2) + "px," + xy[1].toFixed(2) + "px)";
+  else eyes.style.removeProperty("transform");
+}
+function eyeKick() { if (!EYE.raf) EYE.raf = requestAnimationFrame(eyeStep); }
+function eyeStop() { if (EYE.raf) cancelAnimationFrame(EYE.raf); EYE.raf = 0; }
+function eyeMove(ev) { if (eyeReduced()) { EYE.ptr = null; eyeStop(); return; } EYE.ptr = [ev.clientX, ev.clientY]; eyeKick(); }
+function eyeLeave() { EYE.ptr = null; eyeKick(); }        // the loop eases the eyes back to centre, then clears the offset
+// called once per empty-chat render: installs the window listeners the first time, then makes sure the new face gets its offset
+function eyeTrack() {
+  if (!EYE.installed) {
+    EYE.installed = true;
+    window.addEventListener("pointermove", eyeMove, {passive: true});
+    document.addEventListener("mouseleave", eyeLeave);
+    document.addEventListener("mouseout", (ev) => { if (!ev.relatedTarget) eyeLeave(); });
+  }
+  if (EYE.ptr) eyeKick();
 }
 // the badge for emoji, uploaded and pattern avatars; a character shows its status in its face instead
 function setDot(dot, bot) {
@@ -2917,6 +2968,7 @@ async function loadMessages() {
     const av = el("div", "avatar");
     staticAvatar(av, bot);
     box2.append(av, el("p", "", "Say hello to " + bot.name + "."));
+    eyeTrack();   // eyes follow the pointer on the hello screen
     nodes.push(box2);
   }
   if (bot.activity && !hasPending) {
