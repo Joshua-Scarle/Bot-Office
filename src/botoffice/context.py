@@ -20,7 +20,7 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import cron
+from . import cron, failures
 from .rules import untrusted
 
 CAP = 6000
@@ -46,7 +46,7 @@ EMPTY_HEAD = ("Standing context for this turn: what you and the owner were last 
 
 
 def _flat(text: str | None, limit: int) -> str:
-    text = " ".join(_CONTROL.sub(" ", text or "").split())
+    text = failures.redact(" ".join(_CONTROL.sub(" ", text or "").split()))
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 

@@ -152,3 +152,29 @@ def test_fetch_validates_arguments():
     for bad in ({}, {"query": " "}, {"query": "x", "scope": "all"}, {"query": "x", "limit": True}, {"query": "x", "limit": "5"}):
         with pytest.raises(TeamClientError):
             recall.fetch(client, bad)
+
+
+def test_query_is_not_echoed_and_credential_shaped_text_is_redacted(settings):
+    with Desk(settings) as d:
+        bot = d.bot("Reader")
+        key = "sk-" + "a1b2c3d4" * 4
+        add_message(d.store, bot, "user", f"the deploy key is {key} for the form")
+        add_message(d.store, bot, "user", "api_key=hunter2hunter2 form")
+        _, h = run_job(d.store, bot)
+        token = h["Authorization"].split()[1]
+        data = get(d, h, token).json()
+        assert token not in json.dumps(data) and "query" not in data
+        blob = json.dumps(get(d, h, "form").json())
+        assert key not in blob and "hunter2hunter2" not in blob and "[redacted]" in blob
+
+
+def test_rendered_output_stays_under_the_cap(settings):
+    from botoffice.team_client import wrap_untrusted  # noqa: F401
+    with Desk(settings) as d:
+        bot = d.bot("Reader with a rather long name " + "x" * 40)
+        for n in range(30):
+            add_message(d.store, bot, "user", f"lychee {n} " + "pad " * 400)
+        _, h = run_job(d.store, bot)
+        data = get(d, h, "lychee", limit=20).json()
+        rendered = recall.render(data)
+        assert len(rendered) <= recall.MAX_CHARS + 400  # the fence notice is a fixed few hundred characters

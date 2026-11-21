@@ -13,11 +13,11 @@ import time
 from contextlib import closing
 from urllib.parse import urlencode
 
-from . import history, team
+from . import failures, history, team
 
 SCOPES = ("self", "team")
 MAX_HITS = 20
-MAX_CHARS = 8_000
+MAX_CHARS = 8_000  # the rendered hits: text, bot name, time and line framing
 HIT_CHARS = 600
 QUERY_CHARS = 200
 SECONDS = 2.0  # one search is cut off after this long (a progress handler), whatever the index holds
@@ -89,11 +89,12 @@ def search(db: sqlite3.Connection, bots: dict[str, str], query: str, limit: int 
         db.set_progress_handler(None, 0)
     hits, used = [], 0
     for row in rows:
-        text = " ".join((row["snippet"] or "").split())
+        text = failures.redact(" ".join((row["snippet"] or "").split()))  # credential-shaped text is not handed on
         text = text if len(text) <= HIT_CHARS else text[: HIT_CHARS - 1] + "…"
-        if used + len(text) > MAX_CHARS and hits:
+        size = len(text) + len(row["created_at"] or "") + len(bots[row["bot_id"]]) + 40  # the rendered line, not only the text
+        if used + size > MAX_CHARS and hits:
             break
-        used += len(text)
+        used += size
         hits.append({"id": row["id"], "bot": bots[row["bot_id"]], "role": row["role"], "at": row["created_at"], "text": text})
     return hits
 
@@ -108,7 +109,7 @@ def run(store, job, query: str, scope: str = "self", limit: int = 10) -> dict:
     ids = {name: bot_id for bot_id, name in bots.items()}
     for name in sorted({h["bot"] for h in hits}) or [bots[str(job.bot_id)]]:
         team.log_read(store, job, "context_recall", ids[name], sum(1 for h in hits if h["bot"] == name))
-    return {"untrusted": True, "query": (query or "")[:QUERY_CHARS], "scope": scope, "count": len(hits), "hits": hits}
+    return {"untrusted": True, "scope": scope, "count": len(hits), "hits": hits}
 
 
 # ---- client side (the MCP server) -----------------------------------------------------------------------------
