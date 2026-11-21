@@ -421,7 +421,7 @@ def recent_sends(db: sqlite3.Connection, sender_id: str, window_s: int, at: date
                       (str(sender_id), cutoff)).fetchone()[0]
 
 
-def _free_card(db: sqlite3.Connection, job, kind: str, ref: str, text: str) -> int | None:
+def _free_card(db: sqlite3.Connection, job, kind: str, ref: str, text: str, delivery: str = "steer") -> int | None:
     """In ask mode a send goes out only after the user approved a card for exactly this send: an approval this job
     consumed for this send tool whose recorded arguments name this target and this text, that no earlier send has
     used."""
@@ -436,13 +436,14 @@ def _free_card(db: sqlite3.Connection, job, kind: str, ref: str, text: str) -> i
             data, _ = json.JSONDecoder().raw_decode(row["summary"][len(tool) + 2:])  # the card's canonical arguments
         except ValueError:
             continue
-        if isinstance(data, dict) and data.get("bot") == ref and data.get("text") == text:
+        if isinstance(data, dict) and data.get("bot") == ref and data.get("text") == text \
+                and (data.get("mode") or "steer") == delivery:
             return int(row["id"])
     return None
 
 
 def reserve_send(store, job, target_id: str, kind: str, mode: str = "allow", ref: str = "", text: str = "",
-                 limit: int | None = None, window_s: int | None = None, at: datetime | None = None) -> int:
+                 delivery: str = "steer", limit: int | None = None, window_s: int | None = None, at: datetime | None = None) -> int:
     """Check and take the send in one write transaction, so concurrent sends cannot overshoot the limit and one
     approval cannot pay for two: the ``team_sends`` row (status sent) is the count and the audit. TeamError 403 (ask
     without an approved card for this exact send) or 429 (over the window limit; the refusal is audited, at most one
@@ -455,7 +456,7 @@ def reserve_send(store, job, target_id: str, kind: str, mode: str = "allow", ref
         try:
             card = 0
             if mode == "ask":
-                card = _free_card(db, job, kind, ref, text) or 0
+                card = _free_card(db, job, kind, ref, text, delivery) or 0
                 if not card:
                     raise TeamError(403, "this bot's teammate messages need the user's approval first (team_messaging "
                                          "is ask). Use the team_message or team_ask tool: it raises the approval card. "
@@ -488,7 +489,7 @@ def settle_send(store, row_id: int, delivered: bool) -> None:
             db.execute("UPDATE team_sends SET status='failed' WHERE id=?", (int(row_id),))
 
 
-def send_gate(store, rules, job, target_id: str, kind: str, ref: str = "", text: str = "") -> int:
+def send_gate(store, rules, job, target_id: str, kind: str, ref: str = "", text: str = "", delivery: str = "steer") -> int:
     """The one check every job send goes through (the HTTP routes and the inbox-file path): the sender's mode
     (its team_messaging setting, outbound ask rules, owner rules on the tool), then reserve_send. Returns the reserved
     row id. TeamError 403 (off; ask without an approved card for this send) or 429; nothing is sent then."""
@@ -496,7 +497,7 @@ def send_gate(store, rules, job, target_id: str, kind: str, ref: str = "", text:
     if mode == "off":
         raise TeamError(403, "team messaging is off for this bot (its team_messaging setting or an owner rule); "
                              "nothing was sent. Tell the user if it matters.")
-    return reserve_send(store, job, target_id, kind, mode, ref, text)
+    return reserve_send(store, job, target_id, kind, mode, ref, text, delivery)
 
 
 def _directly_team(db: sqlite3.Connection, job) -> bool:

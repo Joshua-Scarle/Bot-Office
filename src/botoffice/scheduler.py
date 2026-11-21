@@ -513,7 +513,7 @@ class Scheduler:
                 if not isinstance(job_id, str) or not isinstance(token, str) or not self.store.valid_desk_agent_token(job_id, sender.id, token):
                     raise TurnError("invalid originating job token")
                 job = self.store.get(job_id)
-                slot = team.send_gate(self.store, self.rules, job, str(target.id), "message", to, text) \
+                slot = team.send_gate(self.store, self.rules, job, str(target.id), "message", to, text, "steer") \
                     if job and sender.id != target.id else 0
                 try:
                     self.turns.post_agent_message(sender, target, text, data["job_id"])
