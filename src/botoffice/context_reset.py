@@ -1,4 +1,4 @@
-"""Session reset (0.12.18): what "a clean session" means, beyond forgetting the CLI's session id.
+"""Session reset (0.12.20): what "a clean session" means, beyond forgetting the CLI's session id.
 
 ``POST /v1/bots/{id}/session/reset`` records a context floor in SQLite (store.reset_context: the newest
 message and job, atomically with the no-queued-or-running-job check). From then on the prompt assembler
@@ -92,6 +92,8 @@ def _clean(store, memory, bot_id, bot_dir: Path, gen: int, engines: Iterable[str
             attachments_fd = safefs.open_dir(attachments.directory(store.path.parent, bot_id))
         except FileNotFoundError:
             attachments_fd = None
+        except ValueError as exc:  # attachments.directory refused the path (a link in it): owed, not diverted
+            raise OSError(f"attachment directory refused: {exc}") from exc
         if attachments_fd is not None:
             fds.append(attachments_fd)
             _move(attachments_fd, attachments.INDEX_FILE, archive_fd)

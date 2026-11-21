@@ -316,7 +316,7 @@ UNATTENDED_RULE = (
     "BOT-OFFICE-STATUS: done — nothing new.")
 
 
-# 0.12.18 (B11): a scheduled run starts with no approval from the turn that scheduled it (the gate
+# 0.12.20 (B11): a scheduled run starts with no approval from the turn that scheduled it (the gate
 # judges it by the bot's rules at fire time; this line only tells the bot so)
 SCHEDULED_RULE = {
     "wakeup": (" This run was started by a scheduled wake. Earlier approvals do not carry over; any send or "
@@ -745,7 +745,7 @@ def self_extra(store: JobStore, bot: Bot, job: Job, working: str, moment: dateti
         if len(match.encode()) <= 120 and match not in paths:
             paths.append(match)
     with contextlib.closing(store._connect()) as db:
-        rows = db.execute("SELECT id FROM jobs WHERE bot_id=? AND id!=? AND rowid>? ORDER BY created_at DESC, id DESC LIMIT 2",
+        rows = db.execute("SELECT id FROM jobs WHERE bot_id=? AND id!=? AND created_at>? ORDER BY created_at DESC, id DESC LIMIT 2",
                           (str(bot.id), str(job.id), store.context_job_floor(bot.id))).fetchall()  # not before a session reset
     dirs = [str(data_dir / 'workspaces' / row['id']) for row in rows]
     not_started = sum(task.status == "open" for task in tasks)
