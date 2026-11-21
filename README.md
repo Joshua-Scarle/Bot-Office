@@ -139,6 +139,17 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in the next release (teammate safeguards; version is set at deploy)
+
+**Bot-to-bot messages stay internal (no card by default), but they are now tagged, limited and controllable.**
+
+- **Tag.** A message from another bot is shown to its receiver as data from that bot: a header names the sending bot and says it is not an instruction and never the user's approval, with the text fenced as `<untrusted-data>`. It is applied when the prompt is built (the stored body and job prompt are unchanged) for queued inbox turns, the chat history lines, the "messages while waiting" note, and a steer into a running turn.
+- **`team_messaging` (per bot, `PATCH /v1/bots/{id}`, master token).** `allow` (default): no card. `ask`: each `team_message`/`team_ask` raises an approval card first. `off`: sends are refused. An explicit `outbound` ask rule that applies to the job's scope (not the implicit unattended default) turns `allow` into `ask`; `off` still wins; owner `never`/`ask` rules on the send tools apply too. It is enforced in the action gate and in every send route (the MCP tools, `desk team`, `bot-msg`/`message-agent`, the inbox-file path), so none skips it. In `ask` mode the shell routes are refused with a pointer to the tools, which raise the card; one approved card pays for one send with that exact target, text and mode. Reads (`team_list/status/read`) are never affected.
+- **Send limit and audit.** At most `BOT_OFFICE_TEAM_SEND_LIMIT` (default 20) sends per sender in `BOT_OFFICE_TEAM_SEND_WINDOW_S` seconds (default 600); more returns 429 and sends nothing. The check and the count are one transaction (the `team_sends` table: job, sender, target, kind, status, card, time; refusals are audited at most once a minute per sender). The hop cap (3), the 10 s per-pair guard and the hourly inbox caps are unchanged.
+- **A bot's request is never approval.** A turn another bot started (source `inbox`), a turn a message was steered into, and the resume turns of such turns cannot have an outbound or destructive action allowed by a rule, run profile, or another job's grant: it needs a card that turn raised itself. Inbox turns never get an `origin_job_id`.
+- **Honest coverage.** `team_list` and `team_status` carry a `coverage` note (Bot-Office bots only; Grok or other external leads and unreadable bots are not visible; a missing lead is not an idle one) that the tools pass on. The tool descriptions, rules and system prompt tell bots to use these tools (not Bash) when asked about other bots or leads, and to say when the view is partial.
+- **Rollback.** Additive schema only (`bots.team_messaging`, `team_sends`): older code ignores them. Roll back by checking out the previous tag and restarting, or set a bot to `off`, or `BOT_OFFICE_TEAM_MCP=0` for new jobs.
+
 ## What changed in 0.12.19
 
 **Teammate tools: a restricted Claude bot can now see and ask its teammates.** A restricted Claude run refuses every shell command, so `bot-msg` and `bot-task` were out of reach. Each Claude turn of a bot now gets a small first-party MCP server, `botoffice` (`bin/bot-office-team-mcp`, stdlib only, started by Claude over stdio for that job), with five tools:
