@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+# Re-exec under the app's own virtualenv when started by another interpreter (e.g. the system
+# python3 a `#!/usr/bin/env python3` shebang finds), so `botoffice` and its dependencies import.
+_ROOT = Path(__file__).resolve().parent.parent
+_VENV_PYTHON = _ROOT / ".venv" / "bin" / "python"
+if _VENV_PYTHON.exists() and Path(sys.prefix).resolve() == (_ROOT / ".venv").resolve():
+    # In the venv: drop the loop marker so a nested script a child starts under a non-venv python
+    # still re-execs (the marker is exported and inherited by children).
+    os.environ.pop("BOT_OFFICE_VENV_REEXEC", None)
+elif _VENV_PYTHON.exists() and os.environ.get("BOT_OFFICE_VENV_REEXEC") != str(os.getpid()):
+    # The marker is this process's pid (exec keeps the pid), so one inherited from an ancestor
+    # never blocks the re-exec; it only stops a loop if the venv python is not the venv.
+    os.environ["BOT_OFFICE_VENV_REEXEC"] = str(os.getpid())
+    try:
+        os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+    except OSError:
+        os.environ.pop("BOT_OFFICE_VENV_REEXEC", None)  # fall through with this interpreter
+
+sys.path.insert(0, str(_ROOT / "src"))
+
+from botoffice.machine_cli import main  # noqa: E402
+
+raise SystemExit(main())

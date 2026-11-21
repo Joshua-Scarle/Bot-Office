@@ -155,6 +155,12 @@ BUILTIN: tuple[ApprovalClass, ...] = (
         "devices", "Controlling printers and the screen",
         "3D printer control (PrusaLink, OctoPrint) and clicking or typing on a desktop (desk click/type/key).",
         False, shell=_shell(r"\b(?:prusa-?link|octoprint(?:-cli)?|octocmd)\b", r"\bdesk\s+(?:click|type|key)\b")),
+    # E6-1: decided by Bot-Office itself for every bin/machine call (machines.py), never by the gate
+    # hook, so it has no patterns. Off means bots cannot use your computers at all.
+    ApprovalClass(
+        "computer", "Controlling a computer",
+        "Listing, reading, copying and running commands on your paired computers (Settings > Computers). "
+        "Each call waits for your yes unless you saved an Always grant. Off: bots cannot use them at all.", True),
     ApprovalClass(
         "connectors", "Any connector action",
         "Every tool call through a connector (MCP server), including ones that only read.", False,

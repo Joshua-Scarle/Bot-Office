@@ -1,0 +1,18 @@
+# The SSH tunnel to Bot Office: this computer's 127.0.0.1:18787 reaches the server's 127.0.0.1:8787.
+# Copy to ~/.config/systemd/user/ and put BOTOFFICE_SSH=user@server in
+# ~/.config/botoffice-agent/tunnel.env (the server's host key must already be in ~/.ssh/known_hosts).
+[Unit]
+Description=Bot Office SSH tunnel (127.0.0.1:18787)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/botoffice-agent/tunnel.env
+ExecStart=/usr/bin/ssh -N -T -i %h/.ssh/bo_tunnel -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes \
+  -o StrictHostKeyChecking=yes -L 127.0.0.1:18787:127.0.0.1:8787 ${BOTOFFICE_SSH}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

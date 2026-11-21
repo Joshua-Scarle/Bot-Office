@@ -393,6 +393,12 @@ dialog textarea { min-height: 90px; resize: vertical; }
 .approval-row input[type=checkbox] { margin-top: 4px; }
 .approval-row .muted { font-size: 13px; }
 .approval-warn { padding: 8px 10px; border: 1px solid #8a6d2b; border-radius: 8px; background: #221d12; font-size: 14px; }
+.computer-row { display: grid; gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.computer-row.revoked { opacity: .55; }
+.computer-code { font: 600 28px/1.3 ui-monospace, monospace; letter-spacing: .08em; }
+.machine-args { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 13px; }
+.machine-args dt { opacity: .75; }
+.machine-args dd { margin: 0; word-break: break-word; font-family: ui-monospace, monospace; }
 .question-option { display: block; text-align: left; }
 .question-option small { display: block; opacity: .75; }
 .question-prompt { white-space: pre-wrap; }
@@ -614,6 +620,14 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <p class="muted" id="approval-gates"></p>
       <p class="approval-warn" id="approval-unpausable" role="note" hidden></p>
       <div class="tools-bar"><button id="approvals-save" type="button" class="primary">Save</button><span id="approvals-state" class="muted" role="status"></span></div>
+    </section>
+    <section class="settings-section" id="set-computers" aria-labelledby="set-computers-title">
+      <h3 id="set-computers-title">Computers</h3>
+      <p class="muted">Your own computers that bots can reach through Bot Office (botoffice-agent on the computer, over its SSH tunnel). Every call waits for your yes in the bot's chat unless you saved an Always grant. Revoke cuts a computer off at once.</p>
+      <div id="computers-list"></div>
+      <div id="computers-grants"></div>
+      <div class="tools-bar"><button id="computer-add" type="button">Add computer</button><span id="computers-state" class="muted" role="status"></span></div>
+      <div id="computer-code" hidden></div>
     </section>
     <section class="settings-section" id="set-engines" aria-labelledby="set-engines-title">
       <h3 id="set-engines-title">Engines</h3>
@@ -2655,6 +2669,7 @@ function approvalPreview(text) {
   return { shown, more, changed: shown !== text };
 }
 function renderApproval(a, bot) {
+  if (a.machine) return renderMachineApproval(a, bot);
   const card = el("div", "approval-card " + a.status);
   card.setAttribute("role", "group");
   card.setAttribute("aria-label", "Approval " + a.id);
@@ -2691,6 +2706,97 @@ function renderApproval(a, bot) {
     bar.append(yes, no);
     card.append(bar);
   }
+  return card;
+}
+/* a call to one of the owner's computers (Settings > Computers): the whole action, never clipped */
+function machineApprovalState(a) {
+  if (a.status === "pending") return "Waiting for you" + (a.expires_at ? " · until " + new Date(a.expires_at).toLocaleTimeString([], { timeStyle: "short" }) : "");
+  if (a.status === "approved") return "Approved · running on the computer";
+  if (a.status === "consumed") return "Approved · done";
+  if (a.status === "denied") return "Denied";
+  return "No answer in time · denied";
+}
+function machineArgRows(m) {
+  const args = m.args || {};
+  const rows = [["Tool", m.tool]];
+  if (args.path !== undefined) {
+    rows.push(["Path", String(args.path)]);
+    if (m.requested && m.requested !== args.path) rows.push(["", "asked as " + m.requested]);
+  }
+  if (m.tool === "run") {
+    if (Array.isArray(args.argv) && args.argv.length) rows.push(["Command", args.argv.join(" ")]);
+    else if (args.sh !== undefined) rows.push(["Command", "sh -c " + args.sh]);
+    if (args.cwd !== undefined) rows.push(["In", String(args.cwd)]);
+    if (args.timeout !== undefined) rows.push(["Timeout", args.timeout + " s"]);
+  }
+  if (m.tool === "push") {
+    if (args.size !== undefined) rows.push(["Size", args.size + " bytes"]);
+    if (args.sha256 !== undefined) rows.push(["SHA-256", String(args.sha256)]);
+  }
+  if (m.tool === "read") {
+    if (args.offset !== undefined) rows.push(["Offset", String(args.offset)]);
+    if (args.length !== undefined) rows.push(["Length", String(args.length)]);
+  }
+  const list = el("dl", "machine-args");
+  for (const [k, v] of rows) list.append(el("dt", "", k), el("dd", "", v));
+  return list;
+}
+function renderMachineApproval(a, bot) {
+  const m = a.machine;
+  const card = el("div", "approval-card " + a.status);
+  card.setAttribute("role", "group");
+  card.setAttribute("aria-label", "Computer approval " + a.id);
+  card.append(el("strong", "", bot.name + " wants to use your computer " + m.name + " (" + (m.hostname || "") + ")"));
+  card.append(el("pre", "approval-command", a.summary || ""));
+  card.append(machineArgRows(m));
+  if (m.full_access) card.append(el("div", "approval-warn", "A command runs as you on this computer, with your files and network, unless sandboxing is on. Read it whole."));
+  card.append(el("div", "muted", machineApprovalState(a)));
+  if (a.status !== "pending") return card;
+  const bar = el("div", "tools-bar");
+  const yes = el("button", "primary", "Approve once");
+  const no = el("button", "", "Deny");
+  const buttons = [yes, no];
+  const act = async (fn) => {
+    for (const b of buttons) b.disabled = true;
+    try { await fn(); state.msgSig = ""; await loadMessages(); }
+    catch (e) { for (const b of buttons) b.disabled = false; if (e instanceof AuthError) return handleError(e); setStatus(e.message, true); }
+  };
+  yes.type = no.type = "button";
+  yes.onclick = () => act(() => api("/v1/approvals/" + a.id + "/approve", { method: "POST" }));
+  no.onclick = () => act(() => api("/v1/approvals/" + a.id + "/deny", { method: "POST" }));
+  bar.append(yes);
+  let panel = null;
+  if (m.can_always && m.always) {
+    const always = el("button", "", "Always…");
+    always.type = "button";
+    buttons.push(always);
+    panel = el("div", "");
+    panel.hidden = true;
+    const input = el("input");
+    input.value = m.always;
+    input.readOnly = m.tool === "run" || m.tool === "shot";
+    input.setAttribute("aria-label", "Always pattern");
+    const save = el("button", "primary", "Save and approve");
+    save.type = "button";
+    buttons.push(save);
+    save.onclick = () => act(async () => {
+      const pattern = input.value;
+      try { await api("/v1/machines/approvals/" + a.id + "/always", { method: "POST", body: JSON.stringify({ pattern }) }); }
+      catch (e) {
+        if (!/confirm/i.test(e.message || "")) throw e;
+        if (!confirm("This pattern covers a lot of the computer: " + pattern + ". Allow it for 30 days?")) return;
+        await api("/v1/machines/approvals/" + a.id + "/always", { method: "POST", body: JSON.stringify({ pattern, confirm_broad: true }) });
+      }
+    });
+    panel.append(input, el("div", "tools-bar"), el("div", "muted",
+      "This bot may then do this on " + m.name + " without asking for 30 days (paths matching the pattern; for run, exactly this command). Revoke it in Settings > Computers."));
+    panel.children[1].append(save);
+    always.onclick = () => { panel.hidden = !panel.hidden; if (!panel.hidden && !input.readOnly) input.focus(); };
+    bar.append(always);
+  }
+  bar.append(no);
+  card.append(bar);
+  if (panel) card.append(panel);
   return card;
 }
 function renderQuestion(question, botId) {
@@ -4472,6 +4578,7 @@ async function loadSettings() {
     api("/v1/providers").catch(() => [])]);
   showLayer("rules", rules); showLayer("system", system); showBehavior(settings); showNotify(settings); showApprovals(settings.approvals);
   showEngines(engines);
+  loadComputers();
 }
 function showEngines(engines) {
   $("engines-list").replaceChildren(...engines.map((e) => {
@@ -4489,10 +4596,129 @@ $("engines-recheck").onclick = async () => {
   finally { button.disabled = false; }
 };
 $("office-settings").onclick = async () => {
-  for (const id of ["rules-state", "system-state", "behavior-state", "approvals-state"]) $(id).textContent = "";
+  for (const id of ["rules-state", "system-state", "behavior-state", "approvals-state", "computers-state"]) $(id).textContent = "";
   $("set-advanced").open = false;
   $("settings-dialog").showModal();
   try { await loadSettings(); } catch (e) { if (e instanceof AuthError) return handleError(e); $("rules-state").textContent = e.message; }
+};
+/* Settings > Computers: the owner's own computers (botoffice-agent), their per-device flags and Always grants */
+function computerTime(iso) {
+  if (!iso) return "";
+  const t = new Date(iso), s = Math.round((Date.now() - t.getTime()) / 1000);
+  if (s >= 0 && s < 60) return "just now";
+  if (s >= 0 && s < 3600) return Math.round(s / 60) + " min ago";
+  if (s >= 0 && s < 86400) return Math.round(s / 3600) + " h ago";
+  return t.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+async function loadComputers() {
+  try { showComputers(await api("/v1/machines")); }
+  catch (e) { if (e instanceof AuthError) return handleError(e); $("computers-state").textContent = e.message; }
+}
+async function computerAction(path, options, done) {
+  $("computers-state").textContent = "Working...";
+  try { await api(path, options); $("computers-state").textContent = done; }
+  catch (e) { if (e instanceof AuthError) return handleError(e); $("computers-state").textContent = e.message; }
+  await loadComputers();
+}
+function computerButton(label, onclick, cls) {
+  const b = el("button", cls || "mini", label);
+  b.type = "button";
+  b.onclick = onclick;
+  return b;
+}
+const COMPUTER_FLAGS = [
+  ["sandbox", "Sandbox shell commands (bwrap): run commands read-only, without network, with private folders hidden"],
+  ["confirm_local", "Confirm on the computer (pop-up) for run and push"]];
+function computerRow(m) {
+  const row = el("div", "computer-row " + m.status);
+  row.append(el("strong", "", m.name + (m.hostname ? " (" + m.hostname + ")" : "")));
+  const facts = [m.os || "", m.status === "revoked" ? "" : (m.online ? "● Online" : "○ Offline") +
+    (m.last_seen_at ? " · last seen " + computerTime(m.last_seen_at) : ""), m.status].filter(Boolean);
+  row.append(el("div", "muted", facts.join(" · ")));
+  if (m.fingerprint) row.append(el("div", "", "Fingerprint " + m.fingerprint));
+  if (m.status === "revoked") { row.append(el("div", "muted", "Revoked " + computerTime(m.revoked_at))); return row; }
+  const bar = el("div", "tools-bar");
+  if (m.status === "pending") {
+    row.append(el("div", "approval-warn", "Waiting for Activate: compare this fingerprint with the one `botoffice-agent status` prints on the computer"));
+    const fp = m.fingerprint;
+    bar.append(computerButton("Activate", () => {
+      if (!confirm("Activate " + (m.hostname || m.name) + "?\nFingerprint " + fp + "\nOnly if the computer prints exactly this fingerprint.")) return;
+      computerAction("/v1/machines/" + m.id + "/activate", { method: "POST", body: JSON.stringify({ fingerprint: fp }) }, "Activated.");
+    }, "primary"));
+  } else if (m.status === "active") {
+    const rotate = computerButton("Rotate token", () =>
+      computerAction("/v1/machines/" + m.id + "/rotate", { method: "POST" }, "Token rotated."));
+    rotate.disabled = !m.online;
+    if (!m.online) rotate.title = "The computer must be online to receive a new token";
+    bar.append(rotate);
+  }
+  bar.append(computerButton("Revoke", () => {
+    if (!confirm("Revoke " + m.name + "? Bots lose access to it at once.")) return;
+    computerAction("/v1/machines/" + m.id + "/revoke", { method: "POST" }, "Revoked.");
+  }));
+  row.append(bar);
+  const flags = m.flags || {}, local = m.local_flags || {};
+  for (const [key, label] of COMPUTER_FLAGS) {
+    const lab = el("label", "check");
+    const box = el("input");
+    box.type = "checkbox"; box.checked = !!flags[key];
+    box.onchange = async () => {
+      box.disabled = true;
+      $("computers-state").textContent = "Saving...";
+      try { await api("/v1/machines/" + m.id, { method: "PATCH", body: JSON.stringify({ [key]: box.checked }) }); $("computers-state").textContent = "Saved for " + m.name + "."; }
+      catch (e) { box.checked = !box.checked; if (e instanceof AuthError) return handleError(e); $("computers-state").textContent = e.message; }
+      finally { box.disabled = false; }
+    };
+    lab.append(box, " " + label);
+    row.append(lab);
+  }
+  row.append(el("div", "muted", "The computer's own setting wins: if its config says on or off, that applies; this only counts when it says 'server'."));
+  const own = COMPUTER_FLAGS.filter(([key]) => local[key] && local[key] !== "server")
+    .map(([key]) => (key === "sandbox" ? "sandbox " : "confirm on the computer ") + local[key]);
+  if (own.length) row.append(el("div", "muted", "This computer's own config: " + own.join(", ")));
+  return row;
+}
+function grantPattern(g) {
+  if (g.tool !== "run") return g.pattern;
+  try {
+    const p = JSON.parse(g.pattern);
+    return (Array.isArray(p.argv) ? p.argv.join(" ") : "") + (p.cwd ? " (in " + p.cwd + ")" : "");
+  } catch (e) { return g.pattern; }
+}
+function showComputers(data) {
+  const machines = data.machines || [], grants = data.grants || [];
+  $("computers-list").replaceChildren(...(machines.length ? machines.map(computerRow) : [el("p", "muted", "No computers yet.")]));
+  const box = $("computers-grants");
+  box.replaceChildren(el("h4", "", "Always grants"));
+  if (!grants.length) { box.append(el("p", "muted", "No Always grants.")); return; }
+  for (const g of grants) {
+    const row = el("div", "engine-row");
+    const until = g.expires_at ? " · until " + new Date(g.expires_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
+    row.append(el("span", "", g.bot_name + " · " + g.tool + " on " + g.machine_name + ": " + grantPattern(g) + until),
+      computerButton("Revoke", () => {
+        if (!confirm("Revoke this Always grant? " + g.bot_name + " will ask again.")) return;
+        computerAction("/v1/machine-grants/" + g.id + "/revoke", { method: "POST" }, "Grant revoked.");
+      }));
+    box.append(row);
+  }
+}
+$("computer-add").onclick = async () => {
+  const name = prompt("A name for the computer (e.g. Laptop):", "");
+  if (name === null) return;
+  const button = $("computer-add");
+  button.disabled = true;
+  try {
+    const r = await api("/v1/machines/pairing-codes", { method: "POST", body: JSON.stringify({ name: name.trim() }) });
+    const area = $("computer-code");
+    const expires = r.expires_at ? "Expires " + new Date(r.expires_at).toLocaleTimeString([], { timeStyle: "short" }) : "";
+    area.replaceChildren(el("div", "computer-code", r.code), el("div", "muted", expires),
+      el("pre", "approval-command", "botoffice-agent pair " + r.code),
+      el("p", "muted", "Valid for 10 minutes, once. Then come back here, check the fingerprint the computer prints, and click Activate."),
+      computerButton("Refresh list", () => loadComputers()));
+    area.hidden = false;
+    $("computers-state").textContent = "Pairing code ready.";
+  } catch (e) { if (e instanceof AuthError) return handleError(e); $("computers-state").textContent = e.message; }
+  finally { button.disabled = false; }
 };
 $("settings-close").onclick = () => $("settings-dialog").close();
 function layerButtons(prefix, path, label) {

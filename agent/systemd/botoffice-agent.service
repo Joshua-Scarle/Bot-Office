@@ -1,0 +1,17 @@
+# The Bot Office device companion. Copy to ~/.config/systemd/user/ after `botoffice-agent pair CODE`.
+# Exit 3 means the pairing was revoked or never made: it is not restarted until you pair again.
+# The confirm pop-up and `shot` need your desktop session (DISPLAY / WAYLAND_DISPLAY): most desktops
+# export them to user services; if not, run `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY`.
+[Unit]
+Description=Bot Office device companion
+After=botoffice-tunnel.service
+Wants=botoffice-tunnel.service
+
+[Service]
+ExecStart=%h/.local/bin/botoffice-agent run
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=default.target
