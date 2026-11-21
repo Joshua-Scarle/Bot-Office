@@ -5,6 +5,7 @@ import base64
 import contextlib
 from contextlib import closing
 import hashlib
+import hmac
 import json
 import math
 import re
@@ -417,7 +418,7 @@ def _page_with_csp() -> tuple[str, str]:
     csp = (
         "default-src 'none'; "
         f"script-src 'self' {hashes('script')}; style-src {hashes('style')}; "
-        "img-src blob: data:; media-src blob:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; base-uri 'none'; "
+        "img-src blob: data:; media-src blob:; frame-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; base-uri 'none'; "
         "form-action 'none'; frame-ancestors 'none'"
     )
     return html, csp
@@ -1141,11 +1142,54 @@ def create_app(
         if mime is None:
             label = attachments.display_name(attachment_id)
             served, preview = attachments.serve_type(attachment_id)
-            inline = preview is not None and not download  # only a PDF or plain text; never html or svg
+            inline = preview in ("pdf", "text") and not download  # html and svg are framed only through /view
             headers["Content-Disposition"] = f'{"inline" if inline else "attachment"}; filename="{label}"'
             return Response(data, media_type=served if inline else "application/octet-stream", headers=headers)
         headers["Content-Disposition"] = "inline"
         return Response(data, media_type=mime, headers=headers)
+
+    VIEW_SECONDS = 120
+
+    def _view_signature(bot_id: UUID, attachment_id: str, expires: int) -> str:
+        key = (settings.read_token() or "").encode()
+        if not key:
+            raise HTTPException(status_code=503, detail="API token is not configured")
+        mac = hmac.new(key, f"view\n{bot_id}\n{attachment_id}\n{expires}".encode(), hashlib.sha256)
+        return base64.urlsafe_b64encode(mac.digest()).decode().rstrip("=")
+
+    @app.post("/v1/bots/{bot_id}/attachments/{attachment_id}/view-link", dependencies=[Depends(auth)])
+    async def attachment_view_link(bot_id: UUID, attachment_id: str) -> dict:
+        """A two-minute URL for the sandboxed viewer of one HTML or SVG file: an iframe cannot send the bearer
+        token, so the link itself carries a signature for exactly this bot and file."""
+        _bot(bot_id)
+        if not attachments.is_file_id(attachment_id) or attachments.serve_type(attachment_id)[1] not in ("html", "svg"):
+            raise HTTPException(status_code=400, detail="only an html or svg file can be viewed")
+        try:
+            await asyncio.to_thread(attachments.size, settings.data_dir, bot_id, attachment_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=404, detail="attachment not found") from exc
+        expires = int(time.time()) + VIEW_SECONDS
+        sig = _view_signature(bot_id, attachment_id, expires)
+        return {"url": f"/v1/bots/{bot_id}/attachments/{attachment_id}/view?exp={expires}&sig={sig}", "expires_in": VIEW_SECONDS}
+
+    @app.get("/v1/bots/{bot_id}/attachments/{attachment_id}/view")
+    async def view_attachment(bot_id: UUID, attachment_id: str, exp: int = 0, sig: str = "") -> Response:
+        """An HTML or SVG file for the page's sandboxed iframe. Authorised by the signed link, not the bearer.
+        The response carries ``Content-Security-Policy: sandbox`` (no allow-same-origin, no scripts, no network), and the
+        page frames it with an empty ``sandbox`` attribute as well."""
+        if exp < int(time.time()) or not hmac.compare_digest(sig.encode(), _view_signature(bot_id, attachment_id, exp).encode()):
+            raise HTTPException(status_code=403, detail="link expired or invalid")
+        served, preview = attachments.serve_type(attachment_id)
+        if not attachments.is_file_id(attachment_id) or preview not in ("html", "svg"):
+            raise HTTPException(status_code=404, detail="attachment not found")
+        try:
+            data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=404, detail="attachment not found") from exc
+        return Response(data, media_type=served, headers={
+            "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": attachments.VIEW_CSP + "; frame-ancestors 'self'",
+            "Content-Disposition": f'inline; filename="{attachments.display_name(attachment_id)}"'})
 
     def _png_response(request: Request, data: bytes, mime: str, versioned: bool) -> Response:
         tag = avatars.etag(data)
@@ -1991,12 +2035,15 @@ def create_app(
     async def search_messages(
         q: str = Query(..., min_length=1, max_length=200), bot: UUID | None = None,
         limit: int = Query(30, ge=1, le=100), before: int | None = Query(None, ge=1),
+        offset: int = Query(0, ge=0, le=100000),
     ) -> MessageSearch:
-        """Search chat messages, newest first: one bot (``bot=``) or all. ``snippet`` wraps each match in
-        U+0002 ... U+0003. Archived messages and Bot-Office machinery lines are not searched."""
+        """Search chat messages, best match first (FTS5 bm25, newest first on a tie): one bot (``bot=``) or all.
+        Also searched: names of attached files and Bot Office's own status lines (``hidden`` is true on those; they
+        are not shown in the chat). ``offset`` pages. ``snippet`` wraps each match in U+0002 ... U+0003.
+        Archived (rewound) messages are not searched."""
         if bot is not None:
             _bot(bot)
-        hits, more = store.search_messages(q, bot_id=bot, limit=limit, before=before)
+        hits, more = store.search_messages(q, bot_id=bot, limit=limit, before=before, offset=offset)
         return MessageSearch(hits=hits, has_more=more)
 
     @app.post(
