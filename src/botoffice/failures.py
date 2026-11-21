@@ -71,22 +71,101 @@ def split_status(reply: str) -> tuple[str, str, str]:
     return "\n".join(lines[:-1]).rstrip(), match.group(1).lower(), match.group(2).strip().strip("*`").strip()
 
 
-# 0.12.16: a "done" counts as verified only when its status line says what was checked and how
+# 0.12.16: a "done" counts as verified only when its status line says what was checked and how.
+# 0.12.18: and the words must name a check, and the check must not be a failed one.
 NO_OP_DONE = re.compile(r"(?:nothing|no)\s+(?:new|to report|changed|to do|found)\b", re.IGNORECASE)
 MIN_EVIDENCE_WORDS = 3
+CHECK_WORDS = re.compile(
+    r"\b(?:ran|run|runs|running|tests?|tested|pytest|unittest|lint|linted|build|built|compiled|passed|passes|passing|"
+    r"checked?|checks?|verified|verify|confirmed?|curl|diff|grep|read|reread|opened|inspected|compared|reviewed|"
+    r"measured|queried|listed|counted|matches|matched|output|exit(?:ed)?|logs?|screenshots?|live|http|status|"
+    r"returned|reproduced|rendered|loaded|fetched|replayed|asserted?|validated?|benchmark(?:ed)?)\b", re.IGNORECASE)
+# a check that did not succeed: "3 failed", "tests failed", a traceback, a non-zero exit, an HTTP 4xx/5xx ...
+_NEGATED = re.compile(r"\b(?:0|no|zero|without|not\s+any)\s+(?:test\s+|new\s+)?(?:failures?|failed|failing|fails?|errors?)\b", re.IGNORECASE)
+FAILED_COUNT = re.compile(r"\b[1-9]\d*\s+(?:tests?\s+|checks?\s+)?(?:failed|failing|failures?|errors?)\b", re.IGNORECASE)
+FAILED_WORD = re.compile(
+    r"\b(?:fail(?:ed|s|ing|ure|ures)?|errored|traceback|timed\s+out|unsuccessful|did\s+not\s+pass|didn['\u2019]t\s+pass|"
+    r"not\s+passing|exit(?:ed)?(?:\s+(?:code|status))?\s*[1-9]\d*|(?:http|status|returned)\s+[45]\d\d)\b", re.IGNORECASE)
+PASS_WORD = re.compile(r"\b(?:passed|passes|passing|succeeded|succeeds|success(?:ful(?:ly)?)?|green|now\s+works?|exit(?:ed)?\s+0|"
+                       r"returned\s+(?:200|ok)|fixed)\b", re.IGNORECASE)
+
+
+def failed_check(text: str) -> bool:
+    """Does *text* cite a check that did not succeed? "0 failed" and "no errors" do not count; a failure
+    followed by a pass ("the failing test now passes") is read as the fix, a counted failure never is."""
+    text = _NEGATED.sub(" ", text)
+    if FAILED_COUNT.search(text):
+        return True
+    last = None
+    for last in FAILED_WORD.finditer(text):
+        pass
+    return last is not None and not PASS_WORD.search(text, last.end())
 
 
 def judge_evidence(state: str, reason: str) -> tuple[int | None, str]:
     """(verified, evidence) for a finished turn that ended with *state*. verified is None for states
     that claim nothing (not_done, blocked, no status line: that one is "unverified" already); 1 for a
-    done whose reason says what was checked (three words or more, or a quiet "nothing new"); 0 for a
-    bare done. evidence is the text shown with it."""
+    done whose reason names a check (three words or more, with a word like ran / tested / checked /
+    output, and no failed result), or a quiet "nothing new"; 0 for a bare done, words that name no check,
+    or a cited check that failed. evidence is the text shown with it; a failed one keeps its text so the
+    owner can see what was cited."""
     if state != "done":
         return None, ""
     reason = reason.strip()
-    if len(reason.split()) >= MIN_EVIDENCE_WORDS or NO_OP_DONE.match(reason):
+    if NO_OP_DONE.match(reason):
         return 1, reason
-    return 0, ""
+    if len(reason.split()) < MIN_EVIDENCE_WORDS or not CHECK_WORDS.search(reason):
+        return 0, ""
+    if failed_check(reason):
+        return 0, reason
+    return 1, reason
+
+
+# 0.12.18: a reply that says the work could not be done is not a done. Checked on the status reason and the
+# opening and closing paragraphs only, so a long report that mentions a failed attempt in the middle stays done.
+_CANT = (r"(?:could\s?n['\u2019]?t|could\s+not|can['\u2019]?t|cannot|can\s+not|unable\s+to|(?:was|am|is)\s*(?:n['\u2019]?t|not)\s+able\s+to|"
+         r"not\s+able\s+to|failed\s+to|did\s*(?:n['\u2019]?t|not)\s+manage\s+to|never\s+(?:got|managed))")
+INABILITY = re.compile(
+    rf"\b{_CANT}\s+(?:\w+\s+){{0,3}}?(?:tell|answer|do|complete|finish|get|reach|access|see|check|verify|find|produce|"
+    r"determine|run|send|open|read|load|connect|fetch|retrieve|proceed|continue|build|deploy|write|create|"
+    r"obtain|poll|sweep|list|set|make|log|authenticate|log\s+in|install|start)\b"
+    r"|\bno\s+(?:live\s+|usable\s+|real\s+|current\s+)?(?:data|state|access|view)\b(?!\s+(?:loss|issues?|problems?|changes?|errors?|leaks?))"
+    r"|\b(?:not\s+complete[d]?|incomplete|blocked\s+(?:by|on)|was\s+blocked|is\s+blocked)\b"
+    r"|\bwork\s+(?:is\s+)?(?:not|n['\u2019]t)\s+(?:done|finished|complete)", re.IGNORECASE)
+# "couldn't find any problem" is a result, not an inability
+BENIGN = re.compile(
+    rf"\b{_CANT}\s+(?:find|see|reproduce|detect|spot|trigger)\s+(?:any|a|an|the|one)?\s*(?:\w+\s+)?"
+    r"(?:problems?|issues?|bugs?|errors?|regressions?|leaks?|differences?|mismatch(?:es)?|failures?|duplicates?|conflicts?)\b",
+    re.IGNORECASE)
+WAITING_ON_YOU = re.compile(
+    r"\b(?:paste|send\s+me|share|let\s+me\s+know|tell\s+me\s+(?:which|what|where)|need\s+(?:you|your)|your\s+(?:decision|answer|input|go-ahead)|"
+    r"if\s+you\s+(?:give|send|share|paste|can)|waiting\s+for\s+you)\b", re.IGNORECASE)
+_PARAGRAPHS = re.compile(r"\n\s*\n")
+ADMISSION_NOTE = "marked done, but the reply says the work could not be completed"
+
+
+def admitted_incomplete(reply: str, reason: str) -> str | None:
+    """The sentence that says the work could not be completed, from the status *reason* or the first or
+    last paragraph of *reply*; None when nothing does."""
+    paragraphs = [p.strip() for p in _PARAGRAPHS.split(reply.strip()) if p.strip()]
+    pieces = [reason] + ([paragraphs[0], paragraphs[-1]] if paragraphs else [])
+    for piece in pieces:
+        for sentence in re.split(r"(?<=[.!?])\s+|\n", piece):
+            if INABILITY.search(sentence) and not BENIGN.search(sentence):
+                return sentence.strip()
+    return None
+
+
+def judge_done(reply: str, state: str, reason: str) -> tuple[str, str]:
+    """(state, reason) after a done that admits it could not finish is recorded as what it was: waiting_on_user
+    when the reply asks the owner for something, else blocked. Other states and a plain done are unchanged."""
+    if state != "done":
+        return state, reason
+    said = admitted_incomplete(reply, reason)
+    if said is None:
+        return state, reason
+    kind = "waiting_on_user" if WAITING_ON_YOU.search(reply[-600:] + " " + reason) else "blocked"
+    return kind, f"{ADMISSION_NOTE}: {clip(said, 160)}"
 
 
 REDACTED = "[redacted]"
