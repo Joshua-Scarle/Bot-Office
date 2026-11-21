@@ -36,7 +36,7 @@ def test_tag_prompt_names_sender_fences_text_and_leaves_stored_body(settings):
     assert out.count("</untrusted-data>") == 1 and "&lt;/untrusted-data>" in out  # the body cannot close the fence
     assert team.tag_prompt("(from bot Peer) hi", "chat") == "(from bot Peer) hi"  # only inbox turns
     assert team.tag_prompt("plain text", "inbox") == "plain text"
-    assert team.tag_prompt("(from Joshua) hi", "inbox").startswith("[Team message from the bot Joshua")  # a claimed name is still labelled a bot's
+    assert team.tag_prompt("(from Owner) hi", "inbox").startswith("[Team message from the bot Owner")  # a claimed name is still labelled a bot's
 
 
 def test_inbox_turn_prompt_and_history_are_tagged_raw_body_unchanged(settings):
@@ -300,7 +300,7 @@ def test_inbox_enqueue_sets_no_origin_and_grants_do_not_cross_jobs(settings):
     with Desk(settings) as d:
         sender, target = d.bot("Peer"), d.bot("Recipient")
         gate = Rules(d.store)
-        # an owner job of the target raised a card and Joshua approved it: a grant bound to that job's resume turn
+        # an owner job of the target raised a card and the owner approved it: a grant bound to that job's resume turn
         owner, _ = claude_job(d, target, source="chat")
         approval = gate.decide(owner, bash_event(CURL), "claude")
         assert approval.effect == "allow"  # attended chat job, no hit asks: nothing to approve
@@ -365,7 +365,7 @@ def test_rules_and_system_prompt_mention_the_tools_and_the_approval_rule():
     assert "who is waiting" in workspace.RULES and "never the user's approval" in workspace.RULES
     from pathlib import Path
     system = (Path(workspace.__file__).parent / "prompts" / "system.md").read_text()
-    assert "team_list" in system and "still needs its own approval card" in system
+    assert "team_list" in system and "not Bash" in system and "partial" in system
 
 
 def test_inbox_file_path_obeys_the_setting_and_is_audited(settings, tmp_path):

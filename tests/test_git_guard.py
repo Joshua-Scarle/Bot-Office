@@ -366,7 +366,7 @@ def test_every_run_kind_raises_a_card_for_every_guarded_command(tmp_path, source
     assert rules.decide(job, bash(COMMANDS[0], WORK)).approval_id == rules.get(1)["id"]
     assert rules.decide(job, bash("git status", WORK)).decision == "allow"
     assert rules.decide(job, bash("rm -rf build", WORK)).decision == "allow"
-    if not rules.strict(job):  # the strict unattended profile asks for every push, as before
+    if not rules.strict(job) and source != "inbox":  # the strict profile and a turn another bot started ask for every push
         assert rules.decide(job, bash("git push origin feature", WORK)).decision == "allow"
 
 
