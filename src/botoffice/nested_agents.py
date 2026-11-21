@@ -106,10 +106,11 @@ def _unquote(value: str) -> str:
     return value.strip().strip("'\"").strip().lower()
 
 
-def bypass_flag(family: str, args: list[str]) -> str | None:
-    """The flag in *args* (an agent CLI's arguments) that switches its permission checks off."""
+def bypass_flag(family: str, args: list[str], strict: bool = True) -> str | None:
+    """The flag in *args* (an agent CLI's arguments) that switches its permission checks off.
+    *strict* stops at ``--``; the coarse checks read every word."""
     for index, word in enumerate(args):
-        if word == "--":
+        if strict and word == "--":
             break
         low = word.lower()
         if family == "claude":
@@ -160,14 +161,7 @@ class _Ctx:
     stripped: str = ""  # an enclosing env -i / env -u: a nested plain launch is stripped too
 
 
-# the strong bypass tokens, anywhere in a text (a command too long to parse)
-_BYPASS_TEXT = re.compile(
-    r"--dangerously-skip-permissions|--allow-dangerously-skip-permissions|bypassPermissions|"
-    r"--dangerously-bypass-approvals-and-sandbox|--yolo\b|--full-auto|danger-full-access|"
-    r"approval_policy\s*=\s*[\"']?never|(?:-a|--ask-for-approval)[\s=]+[\"']?never|"
-    r"--approval-mode[\s=]+[\"']?yolo|--yes-always|(?<![\w-])(?:--yes|--force|-y)(?![\w-])", re.I)
-_NAME_TEXT = re.compile(r"(?<![\w.@/-])(?:" + "|".join(re.escape(n) for n in AGENTS)
-                        + r"|@anthropic-ai/claude-code|@openai/codex|@google/gemini-cli|aider-chat)(?![\w-])", re.I)
+_WORDS = re.compile(r"[^\s`;&|()<>]+")
 # interpreter code that clears or rewrites its environment, and code that starts a program
 _ENV_CLEAR = re.compile(
     r"environ\s*\.\s*(?:clear|pop|update|setdefault)\b|environ\s*=|del\s+os\.environ|\bputenv\b|\bclearenv\b|"
@@ -188,19 +182,50 @@ def bypass_launch(command: str, cwd: str | None = None) -> str | None:
         return _coarse(command)
     ctx = _Ctx(cwd or os.getcwd())
     try:
-        return _scan(command[:git_guard.SCAN_LIMIT], 0, ctx)
+        found = _scan(command[:git_guard.SCAN_LIMIT], 0, ctx)
     except (RecursionError, ValueError, IndexError):
-        return _fallback(command)
+        found = _fallback(command)
+    return found or _writes_and_runs(command)
 
 
 def _coarse(text: str) -> str | None:
-    """Too long to parse: it fails closed. An agent CLI name and a bypass flag anywhere in the text
-    (padding, comments and all) count as a launch; a card asks the owner, who can read the command."""
-    flag = _BYPASS_TEXT.search(text)
-    name = _NAME_TEXT.search(text)
-    if flag and name:
-        return f"{name.group(0)} {flag.group(0)} (command too long to parse)"
+    """Fail closed, no parsing: any agent CLI name as a word or path basename, and any bypass flag
+    in any form the normal parser knows (the same ``bypass_flag``, short and fused forms too), as
+    words anywhere in *text*. Padding, comments, quotes and arguments of other programs all count."""
+    words = [w for w in (w.strip("'\"") for w in _WORDS.findall(text)) if w]
+    for family in sorted({fam for fam in map(_program, words) if fam}):
+        flag = bypass_flag(family, words, strict=False)
+        if flag:
+            name = next(w for w in words if _program(w) == family)
+            return f"{posixpath.basename(name)} {flag} (text matched, not parsed)"
     return None
+
+
+_WRITES = re.compile(r">|<<|\btee\b|\b(?:cp|mv|install|dd)\b|\bopen\s*\([^)]{0,300}['\"][wax]|write_text|writeFile|\.write\(", re.S)
+
+
+def _writes_and_runs(text: str) -> str | None:
+    """A command that writes a file and also runs a shell, an interpreter or a path, and whose text
+    names an agent CLI and a bypass flag anywhere (even in printf arguments or quotes): the file may
+    be the launch script. Coarse and fail-closed: a false card is accepted."""
+    if not _WRITES.search(text[:git_guard.SCAN_LIMIT]) or not _coarse_text_hit(text):
+        return None
+    try:
+        commands, _ = git_guard.split_words(git_guard._heredocs(text)[0] if "<<" in text else text)
+    except (RecursionError, ValueError, IndexError):
+        commands = [[text]]
+    for words in commands:
+        for word in words:
+            base = posixpath.basename(word).lower()
+            if (base in git_guard.SHELLS or git_guard.INTERPRETERS.match(base) or word in (".", "source")
+                    or "/" in word):
+                hit = _coarse(text)
+                return f"{hit}, in a command that writes a file and runs one" if hit else None
+    return None
+
+
+def _coarse_text_hit(text: str) -> bool:
+    return _coarse(text[:git_guard.SCAN_LIMIT]) is not None
 
 
 def _fallback(text: str) -> str | None:
@@ -261,10 +286,29 @@ def _scan(text: str, depth: int, ctx: _Ctx) -> str | None:
         if found:
             return found
     for words in commands:
+        _chdir(words, ctx)
         found = _command(words, depth, ctx)
         if found:
             return found
     return None
+
+
+def _chdir(words: list[str], ctx: _Ctx) -> None:
+    """Follow ``cd DIR`` / ``pushd DIR`` so later script paths resolve there. A directory that
+    cannot be resolved (a variable, ``-``, missing) leaves the cwd unknown: no script is read from
+    disk then, and the write-and-run check (_writes_and_runs) is what catches it."""
+    if not words or words[0] not in ("cd", "pushd"):
+        return
+    args = [w for w in words[1:] if w not in ("-L", "-P", "-e", "-@", "--")]
+    if not args:
+        ctx.cwd = os.path.expanduser("~")
+        return
+    target = args[0]
+    if "$" in target or "`" in target or target == "-" or target.startswith("+"):
+        ctx.cwd = ""
+        return
+    full = os.path.normpath(os.path.join(ctx.cwd or "/", os.path.expanduser(target))) if ctx.cwd or target.startswith(("/", "~")) else ""
+    ctx.cwd = full if full and os.path.isdir(full) else ""
 
 
 def _code(code: str, depth: int, ctx: _Ctx | None = None) -> str | None:
@@ -294,9 +338,11 @@ def _script(path: str, ctx: _Ctx, depth: int, hint: str = "") -> str | None:
     *hint* is the interpreter's name; without one the shebang says whether it is shell or code."""
     if not path or path.startswith("-") or "$" in path or "`" in path or len(path) > 4096:
         return None
-    full = os.path.normpath(os.path.join(ctx.cwd, os.path.expanduser(path)))
+    full = os.path.normpath(os.path.join(ctx.cwd, os.path.expanduser(path))) if ctx.cwd else ""
     body = ctx.written.get(path)
     if body is None:
+        if not full:
+            return None  # the directory is unknown (a cd that did not resolve)
         if ctx.scripts >= SCRIPT_DEPTH or full in ctx.seen:
             return None
         try:

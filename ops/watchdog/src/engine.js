@@ -121,7 +121,9 @@ export class Engine {
       for (const [kind, inc] of Object.entries(s.incidents)) {
         // the first heartbeat that clears an open incident is where its outage ended, not the later tick
         // that notices; a later heartbeat that fails again reopens it
-        if (kind === "heartbeat_missing" || ((kind === "controller_down" || kind === "unhealthy") && healthy)) inc.ended ??= now;
+        // (controller_down: any heartbeat that reports the controller reachable, healthy or not)
+        const reachable = !!(data && data.controller_reachable);
+        if (kind === "heartbeat_missing" || (kind === "controller_down" && reachable) || (kind === "unhealthy" && healthy)) inc.ended ??= now;
         else if (kind === "controller_down" || kind === "unhealthy") delete inc.ended;
       }
       await this.#save(s);
@@ -182,7 +184,8 @@ export class Engine {
     const skip = new Set(unjudged(problems, s.hb));
     const current = new Map(problems.map((p) => [p.kind, p]));
     for (const p of problems) {
-      if (s.incidents[p.kind]) continue;
+      // still a problem at this tick (a heartbeat missed again): an earlier recovery stamp no longer holds
+      if (s.incidents[p.kind]) { delete s.incidents[p.kind].ended; continue; }
       const cls = classOf(p.kind);
       const muted = !s.prefs[cls];
       const text = p.text + (cls === "backup" && s.backup_reason ? ` Reason code: ${s.backup_reason}.` : "");

@@ -486,3 +486,29 @@ test("a heartbeat that fails again after a healthy one does not end the outage",
   assert.equal(done.length, 1);
   assert.match(done[0].text, /lasted about 30 min/); // from the last healthy heartbeat (0) to 30
 });
+
+const sick = { controller_reachable: true, healthz: { ...good.healthz, db_reachable: false } };
+
+test("controller_down ends at the first heartbeat that reaches the controller, healthy or not", async () => {
+  const r = rig();
+  await r.beat(good); await r.engine.tick(); await r.go(); // good at minute 0
+  r.at(5); await r.beat(down); r.at(6); await r.engine.tick(); await r.go(); // down, detected at 6
+  r.at(10); await r.beat(sick); // reachable but unhealthy at minute 10 ...
+  r.at(15); await r.engine.tick(); await r.go(); // ... noticed at 15
+  r.at(20); await r.beat(good); await r.engine.tick(); await r.go();
+  const done = r.mails.filter((m) => /RECOVERED/.test(m.text) && /controller/i.test(m.text));
+  assert.ok(done.length >= 1);
+  assert.match(done[0].text, /lasted about 10 min/); // 0 to 10, not 15 or 20
+});
+
+test("a heartbeat_missing recovery stamp is cleared when another miss happens before reconciliation", async () => {
+  const r = rig();
+  await r.beat(); await r.engine.tick(); await r.go(); // heartbeat at minute 0
+  r.at(20); await r.engine.tick(); await r.go(); // missing, detected at 20
+  r.at(25); await r.beat(); // a heartbeat at 25 stamps a recovery ...
+  r.at(60); await r.engine.tick(); await r.go(); // ... but the tick at 60 finds it missing again: still the same outage
+  r.at(70); await r.beat(); await r.engine.tick(); await r.go();
+  const done = r.mails.filter((m) => /RECOVERED/.test(m.text));
+  assert.equal(done.length, 1);
+  assert.match(done[0].text, /lasted about 70 min/); // not 25
+});

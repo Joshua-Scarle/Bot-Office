@@ -484,3 +484,58 @@ def test_nested_detection_runs_in_bounded_time(command):
     started = time.perf_counter()
     hits(command)
     assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize("command", [
+    "/usr/bin/claude --dangerously-skip-permissions -p x", "codex -anever exec x", "codex -a never exec x",
+    "agent -f -p x", "agent --force -p x", "cursor-agent -y", "gemini --yolo -p x", "codex -sdanger-full-access exec",
+    "codex -c 'approval_policy=\"never\"' exec", "claude --permission-mode=bypassPermissions -p x",
+    "claude --permission-mode bypassPermissions", "aider --yes-always", "x=1 ./claude --dangerously-skip-permissions",
+    "foo --opt '/opt/bin/codex' --yolo", "claude -- --dangerously-skip-permissions",
+])
+def test_long_commands_use_the_same_flags_as_the_parser(tmp_path, command):
+    for padded in (command + "\n# " + "x" * 40000, "# " + "x" * 40000 + "\n" + command):
+        assert len(padded) > nested_agents.LONG_COMMAND and NESTED in hits_in(padded, tmp_path)
+
+
+def test_long_command_flag_list_is_the_parsers():
+    # one list: every flag the normal parser accepts is also found in a long command
+    for family, flag in (("claude", ["--dangerously-skip-permissions"]), ("codex", ["-a", "never"]),
+                         ("cursor", ["-f"]), ("gemini", ["-y"]), ("aider", ["--yes"])):
+        assert nested_agents.bypass_flag(family, flag, strict=False)
+
+
+def test_cd_is_followed_to_find_a_script(tmp_path):
+    sub = tmp_path / "work"
+    sub.mkdir()
+    write(sub / "a.sh", "claude --dangerously-skip-permissions -p x\n")
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    assert NESTED in hits_in(f"cd {sub} && bash a.sh", other)
+    assert NESTED in hits_in("cd work; bash a.sh", tmp_path)
+    assert NESTED in hits_in(f"pushd {sub} >/dev/null; ./a.sh", other)
+    assert NESTED in hits_in(f"cd {sub} && cd .. && cd work && sh a.sh", other)
+    # a cd that cannot be resolved: nothing read from disk, no false hit
+    assert NESTED not in hits_in("cd $UNKNOWN && bash a.sh", other)
+    assert NESTED not in hits_in(f"cd {other} && bash a.sh", tmp_path)
+
+
+@pytest.mark.parametrize("command", [
+    "printf '%s\\n' 'claude --dangerously-skip-permissions' > a.sh; bash a.sh",
+    "printf '%s\\n' 'codex --yolo exec x' | tee a.sh; sh ./a.sh",
+    "cd $UNKNOWN && echo x > a.sh && bash a.sh # claude --dangerously-skip-permissions",
+    "python3 -c \"open('a.sh','w').write('claude --dangerously-skip-permissions')\"; bash a.sh",
+    "cp tmpl.sh a.sh; sed -i 's/$/ /' a.sh; bash a.sh  # codex -a never",
+    "cat > a.sh <<EOF\nclaude --dangerously-skip-permissions\nEOF\nchmod +x a.sh; ./a.sh",
+])
+def test_write_and_run_with_agent_and_flag_text_is_a_hit(tmp_path, command):
+    assert NESTED in hits_in(command, tmp_path)
+
+
+@pytest.mark.parametrize("command", [
+    "printf '%s\\n' 'claude --dangerously-skip-permissions' > notes.txt",
+    "echo hi > a.sh; bash a.sh", "bash a.sh # claude --dangerously-skip-permissions",
+    "printf 'claude -p hi' > a.sh; bash a.sh",
+])
+def test_write_and_run_needs_all_three_parts(tmp_path, command):
+    assert NESTED not in hits_in(command, tmp_path)
