@@ -87,6 +87,8 @@ these lists. Nothing Bot Office sends can.
   - `shutdown`, `reboot`, `poweroff`, `halt`, `init 0|6`, `systemctl poweroff|reboot|halt`;
   - a fork bomb;
   - a recursive `chmod`, `chown` or `chgrp` of `/` or your home folder;
+  - a recursive `rm`, `chmod` or `chown` of a path with a shell variable in it (`rm -rf "$DIR/"`
+    is `rm -rf /` when `DIR` is empty), so a bot writes such paths out;
   - `find / -delete`, and decoded text piped into a shell;
   - any word that names a deny-listed path;
   - your own regular expressions in `deny.toml` (`commands`).
