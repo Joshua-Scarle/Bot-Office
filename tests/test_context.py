@@ -200,7 +200,6 @@ def test_workspace_gets_context_md_and_prompt_line(settings):
         prompt, _, _ = workspace.prepare_bot_workspace(d.store, Memory(settings.data_dir), bot, job, ws)
     assert "earlier AMA form thread" in (ws / "CONTEXT.md").read_text()
     assert "read CONTEXT.md" in prompt and "context_recall" in prompt
-    assert "read CONTEXT.md" in workspace.build_resume_prompt(job)
 
 
 def test_rules_text_has_ask_when_ambiguous_rule():
