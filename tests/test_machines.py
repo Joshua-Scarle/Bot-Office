@@ -703,3 +703,24 @@ def test_hub_fails_closed_when_the_grant_check_breaks():
     with pytest.raises(HubError) as caught:
         asyncio.run(hub.call("m", "read", {}, timeout=5, grant_id=1, alive=broken))
     assert caught.value.status == 403 and ws.sent == [] and hub.connections["m"].calls == {}
+
+
+def test_audit_keeps_command_text_but_not_output_or_contents(tmp_path):
+    # by design: the card, the request and the audit show the command the owner allowed (even an inline secret);
+    # what the call read, pushed or printed is never stored
+    store, bot, machine, job = setup(tmp_path)
+    grant = machines.record_request(store, job, machine, "grant", {"scope": "shell"}, "shell")
+    machines.approve(store, grant["approval_id"])
+    sh = "printf %s INLINE-SECRET > file; cat file"
+    call = machines.record_request(store, job, machine, "run", {**RUN, "argv": None, "sh": sh})
+    machines.begin_execute(store, call["id"], job)
+    machines.finish(store, call["id"], ok=True, result={"exit": 0, "stdout": "STDOUT-SECRET", "stderr": "STDERR-SECRET",
+                                                         "sha256": "f" * 64})
+    read = machines.record_request(store, job, machine, "read", READ)
+    machines.begin_execute(store, read["id"], job)
+    machines.finish(store, read["id"], ok=True, result={"data": "FILE-CONTENTS", "size": 13, "sha256": "e" * 64})
+    log = json.dumps(machines.audit_log(store, machine_id=machine["id"], job_id=str(job.id)))
+    stored = str([tuple(r) for r in sql(store, "SELECT summary, args_json, result_json FROM machine_requests")])
+    assert "INLINE-SECRET" in log and "INLINE-SECRET" in stored  # the command text is kept, and on the card
+    for hidden in ("STDOUT-SECRET", "STDERR-SECRET", "FILE-CONTENTS"):
+        assert hidden not in log and hidden not in stored

@@ -595,6 +595,7 @@ def describe(tool: str, args: dict, machine: dict) -> str:
 
 def audit_args(tool: str, args: dict) -> dict:
     """What the audit keeps of a call: paths, argv, sizes and hashes. Never file contents or output."""
+    # argv / sh stay in full on purpose: the owner sees on the card what they allowed, and the audit shows what ran.
     keep = ("path", "requested", "depth", "offset", "length", "argv", "sh", "cwd", "timeout", "dest", "source",
             "size", "file_size", "sha256", "overwrite", "scope")
     return {key: args[key] for key in keep if key in args and args[key] is not None}

@@ -135,4 +135,4 @@ The computer's own `config.toml` can set each switch to `on`, `off` or `server` 
   sizes. Settings > Computers > Audit shows it, filterable by computer, bot and session (job id).
 - The computer keeps `~/.local/state/botoffice-agent/audit.jsonl` (`botoffice-agent audit`). It
   records each call with its bot, grant and outcome, plus every End grant.
-- Neither record stores file contents or command output.
+- Neither record stores file contents or command output. Residual, by design: the card, the request record and both audits keep the command *text* (argv / `sh`, paths, sizes, hashes) so the owner can see what was asked and what ran; they do not store file *contents* or command *output*. A secret a bot puts on a command line (for example `--sh 'printf %s SECRET > file'`) will appear there, so do not pass secrets as arguments if you do not want them in the log. This is by design, like the documented `rm -r "$f"` refusal.

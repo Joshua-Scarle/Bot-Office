@@ -1,6 +1,7 @@
 """Device companion, the computer's side (agent/): paths, the deny-lists, caps, flags, confirm, End grant."""
 import asyncio
 import hashlib
+import json
 import os
 import sys
 import threading
@@ -912,3 +913,21 @@ def test_push_cancelled_before_the_rename_leaves_nothing(home):
         writer.commit(cancel)
     writer.close()
     assert not target.exists() and [p.name for p in target.parent.iterdir() if p.name.startswith(".")] == []
+
+
+def test_local_audit_keeps_the_command_text_not_its_output(home, tmp_path):
+    pytest.importorskip("websockets")
+
+    async def scenario():
+        agent, sent, cfg = _agent(home, tmp_path, confirm_local="off")
+        await agent.handle({"type": "call", "id": "r1", "op": "run", "args": {
+            "sh": "printf %s INLINE-SECRET > f; echo OUT-$((40+2)); cat f", "cwd": canonical(home / "work"), "timeout": 30,
+            "meta": {"bot": "Ada", "grant": 5, "scope": "shell", "request": 1}}})
+        await asyncio.wait_for(asyncio.gather(*agent.tasks), 15)
+        return sent, cfg
+
+    sent, cfg = asyncio.run(scenario())
+    assert any("OUT-42" in json.dumps(m) for m in sent)  # the output goes back to the bot
+    log = (cfg.state_dir / "audit.jsonl").read_text()
+    assert "INLINE-SECRET" in log  # the command text is the record of what ran (documented residual)
+    assert "OUT-42" not in log

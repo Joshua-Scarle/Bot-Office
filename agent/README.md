@@ -47,7 +47,7 @@ every grant. It is MIT licensed and uses the Python standard library plus `webso
   output stream is capped at 64 KiB. On timeout the whole process group is killed.
 - **Audit log** at `~/.local/state/botoffice-agent/audit.jsonl` (mode 0600). It records each call
   with its bot, grant, job and outcome, refused calls, and every End grant. It never stores file
-  contents or command output.
+  contents or command output. It does keep the command text: the card, the request record and both audits keep the command *text* (argv / `sh`, paths, sizes, hashes) so the owner can see what was asked and what ran; they do not store file *contents* or command *output*. A secret a bot puts on a command line (for example `--sh 'printf %s SECRET > file'`) will appear there, so do not pass secrets as arguments if you do not want them in the log. This is by design, like the documented `rm -r "$f"` refusal.
 
 ## Install (Linux laptop, from the release files)
 
