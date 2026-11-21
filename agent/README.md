@@ -71,11 +71,14 @@ cd ~/Downloads && sha256sum -c sha256sums.txt --ignore-missing
    Use the public key from step 1:
 
    ```text
-   restrict,port-forwarding,permitopen="127.0.0.1:8787",command="/bin/false" ssh-ed25519 AAAA... bo_tunnel-laptop
+   restrict,port-forwarding,permitopen="127.0.0.1:8787",permitlisten="127.0.0.1:1",command="/bin/false" ssh-ed25519 AAAA... bo_tunnel-laptop
    ```
 
    `restrict` turns off forwarding of agents and X11, PTYs and `~/.ssh/rc`. `port-forwarding` and
    `permitopen` then allow exactly one forward: to Bot Office on the server's loopback.
+   `port-forwarding` also turns remote forwards (`ssh -R`) back on. `permitlisten="127.0.0.1:1"`
+   turns them off again: port 1 is privileged, so the server never opens it for this user. (OpenSSH
+   rejects a key whose line says `permitlisten="none"`, so do not use that.)
    `command="/bin/false"` stops the key from running a shell or commands. The tunnel uses `-N`, so
    it never needs one.
 
