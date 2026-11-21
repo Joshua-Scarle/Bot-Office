@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import platform
 import socket
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 
-from . import __version__
+from . import __version__, tunnel
 from .config import FLAGS, ConfigError, TokenStore, fingerprint, load, read_device, write_device
 
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
@@ -28,6 +29,27 @@ def http_url(server: str) -> str:
     return urllib.parse.urlunsplit((scheme, parsed.netloc, parsed.path, "", ""))
 
 
+def _post_json(base: str, path: str, body: bytes) -> tuple[int, object]:
+    """POST without proxies; to the local tunnel only after checking the port is this user's."""
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme == "http":
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=30)
+        connection.sock = tunnel.connect(parsed.hostname or "", parsed.port or 80)
+    else:
+        connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=30,
+                                                 context=ssl.create_default_context())
+    try:
+        connection.request("POST", parsed.path + path, body=body, headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        payload = response.read(64 * 1024)
+    finally:
+        connection.close()
+    try:
+        return response.status, json.loads(payload or b"{}")
+    except ValueError:
+        return response.status, {}
+
+
 def cmd_pair(args, cfg) -> int:
     server = args.server or cfg.server
     base = http_url(server)
@@ -36,18 +58,10 @@ def cmd_pair(args, cfg) -> int:
         return 1
     body = json.dumps({"code": args.code, "hostname": socket.gethostname(),
                        "os": f"{platform.system()} {platform.release()}", "version": __version__}).encode()
-    request = urllib.request.Request(base + "/v1/machines/pair", data=body, method="POST",
-                                     headers={"Content-Type": "application/json"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=30) as response:
-            reply = json.load(response)
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = json.load(exc).get("detail")
-        except (ValueError, AttributeError):
-            detail = exc.reason
-        print(f"pairing failed: {exc.code} {detail}", file=sys.stderr)
+    status, reply = _post_json(base, "/v1/machines/pair", body)
+    if status != 200:
+        detail = reply.get("detail") if isinstance(reply, dict) else None
+        print(f"pairing failed: {status} {detail or ''}".rstrip(), file=sys.stderr)
         return 1
     token = reply.get("token")
     if not isinstance(token, str) or fingerprint(token) != reply.get("fingerprint"):
@@ -118,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load()
         return {"pair": cmd_pair, "run": cmd_run, "status": cmd_status, "unpair": cmd_unpair}[args.command](args, cfg)
-    except ConfigError as exc:
+    except (ConfigError, tunnel.TunnelNotOurs) as exc:
         print(f"botoffice-agent: {exc}", file=sys.stderr)
         return 2
     except (OSError, urllib.error.URLError) as exc:

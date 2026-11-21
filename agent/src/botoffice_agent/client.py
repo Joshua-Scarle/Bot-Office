@@ -16,12 +16,13 @@ import platform
 import socket
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
-from . import __version__, ops
+from . import __version__, ops, tunnel
 from .config import Config, TokenStore, effective
 from .paths import deny_roots
 
@@ -32,6 +33,8 @@ MAX_FRAME = 4 * 1024 * 1024
 CLOSE_REPLACED, CLOSE_REVOKED, CLOSE_PENDING = 4000, 4401, 4403
 EXIT_REVOKED = 3
 OPS = ("resolve", "ls", "read", "run", "pull", "push", "shot")
+CALLS_MAX = 8  # in flight here at once, whatever the server sends
+UPLOAD_QUEUE = 16  # push chunks buffered per call: the credit granted to Bot Office at a time
 
 
 class Revoked(Exception):
@@ -143,6 +146,8 @@ class Agent:
             except _Pending:
                 await asyncio.sleep(PENDING_WAIT)
                 continue
+            except tunnel.TunnelNotOurs as exc:
+                print(f"botoffice-agent: {exc}", flush=True)
             except (OSError, ConnectionClosed, InvalidHandshake, asyncio.TimeoutError) as exc:
                 if isinstance(exc, InvalidStatus) and exc.response.status_code in (401, 403):
                     raise Revoked("Bot Office refused the device token") from exc
@@ -151,9 +156,14 @@ class Agent:
 
     async def session(self) -> None:
         headers = {"Authorization": "Bearer " + self.token}
-        async with connect(ws_url(self.device.get("server") or self.cfg.server), additional_headers=headers,
-                           max_size=MAX_FRAME, ping_interval=20, ping_timeout=20, open_timeout=20,
-                           proxy=None) as ws:
+        url = ws_url(self.device.get("server") or self.cfg.server)
+        extra = {}
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme == "ws":
+            # plain ws is loopback only (the SSH tunnel): first make sure the port is this user's
+            extra["sock"] = await asyncio.to_thread(tunnel.connect, parsed.hostname or "", parsed.port or 80)
+        async with connect(url, additional_headers=headers, max_size=MAX_FRAME, ping_interval=20, ping_timeout=20,
+                           open_timeout=20, proxy=None, **extra) as ws:
             self.ws = ws
             try:
                 await self.send({"type": "hello", "os": f"{platform.system()} {platform.release()}",
@@ -201,16 +211,25 @@ class Agent:
         elif kind == "rotate" and isinstance(message.get("token"), str):
             await self.rotate(message["token"])
         elif kind == "call" and call_id:
+            if len(self.tasks) >= CALLS_MAX or call_id in self.cancels:
+                await self.send({"type": "result", "id": call_id, "ok": False, "code": "busy",
+                                 "error": "this computer is busy with other calls"})
+                return
             # before the task first runs: the upload chunks follow this frame at once
             self.cancels[call_id] = threading.Event()
             if message.get("op") == "push":
-                self.uploads[call_id] = asyncio.Queue()
+                self.uploads[call_id] = asyncio.Queue(UPLOAD_QUEUE)
             task = asyncio.get_running_loop().create_task(self.call(call_id, message.get("op"),
                                                                     message.get("args") or {}))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
         elif kind in ("chunk", "chunk_end") and call_id in self.uploads:
-            await self.uploads[call_id].put(message)
+            # never wait here: this loop also carries cancels. Bot Office sends only what we granted.
+            try:
+                self.uploads[call_id].put_nowait(message)
+            except asyncio.QueueFull:
+                self.cancels.get(call_id, threading.Event()).set()
+                self.uploads.pop(call_id, None)
         elif kind == "cancel" and call_id in self.cancels:
             self.cancels[call_id].set()
 
@@ -230,7 +249,7 @@ class Agent:
                  "args": _audit_args(str(op), args) if isinstance(args, dict) else {}}
         cancel = self.cancels.setdefault(call_id, threading.Event())
         if op == "push":
-            self.uploads.setdefault(call_id, asyncio.Queue())
+            self.uploads.setdefault(call_id, asyncio.Queue(UPLOAD_QUEUE))
         try:
             if op not in OPS or not isinstance(args, dict):
                 raise ValueError("unknown call")
@@ -240,6 +259,8 @@ class Agent:
                 entry["confirmed_local"] = True
                 if not await asyncio.to_thread(self.confirm, describe(op, args, meta)):
                     raise ops.Declined("declined on this computer (or no answer)")
+                if cancel.is_set():  # Bot Office gave up while the question was open: a late yes is void
+                    raise ops.Declined("cancelled by Bot Office while waiting for the answer here")
             data = await getattr(self, "_" + op)(call_id, args, ctx, cancel)
             entry.update(ok=True, **{key: data[key] for key in ("sha256", "size", "exit", "timed_out") if key in data})
             await self.send({"type": "result", "id": call_id, "ok": True, "data": data})
@@ -253,7 +274,9 @@ class Agent:
                 await self.send({"type": "result", "id": call_id, "ok": False, "code": code, "error": str(exc)[:500]})
         finally:
             self.cancels.pop(call_id, None)
-            self.uploads.pop(call_id, None)
+            queue = self.uploads.pop(call_id, None)
+            while queue is not None and not queue.empty():
+                queue.get_nowait()  # frees a handler waiting to put a chunk for a call that ended
             if op != "resolve" or not entry.get("ok"):
                 with contextlib.suppress(OSError):
                     self.audit.write(entry)
@@ -298,10 +321,13 @@ class Agent:
         queue = self.uploads[call_id]
         writer = await asyncio.to_thread(ops.PushWriter, args, ctx)
         try:
+            await self.send({"type": "credit", "id": call_id, "n": UPLOAD_QUEUE})
             while True:
                 message = await asyncio.wait_for(queue.get(), 120)
                 if cancel.is_set():
                     raise ValueError("cancelled")
+                if message["type"] == "chunk":
+                    await self.send({"type": "credit", "id": call_id, "n": 1})
                 if message["type"] == "chunk_end":
                     return await asyncio.to_thread(writer.commit)
                 try:

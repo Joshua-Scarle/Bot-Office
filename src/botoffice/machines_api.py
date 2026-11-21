@@ -26,6 +26,8 @@ from .store import JobStore
 PAIR_BODY_LIMIT = 4096
 REQUEST_BODY_LIMIT = 64 * 1024
 RESOLVE_TIMEOUT = 30.0
+PUSH_UPLOADS_MAX = 2  # push bodies received at once (each up to 100 MiB, spooled to disk)
+PUSH_BODY_TIMEOUT = 300.0  # the whole body; the helper sends it from this same server, so a stall is a fault
 TIMEOUTS = {"ls": 60.0, "read": 60.0, "pull": 900.0, "push": 900.0, "shot": 60.0}
 
 
@@ -87,6 +89,7 @@ def _render_run(data: dict) -> str:
 
 def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_scope: Callable) -> "MachineRoutes":
     hub = Hub(store)
+    uploading: set[int] = set()  # push requests whose body is being received now
     app.state.machine_hub = hub
     pair_limit = machines.RateLimit(*machines.PAIR_RATE)
     spool = Path(settings.data_dir)
@@ -231,17 +234,42 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
         item = _own(request_id, job)
         machines.expire(store)
         upload = None
+        claimed_upload = False
         try:
             if item["tool"] == "push":
+                # nothing is received before the request is approved, and one body at a time per request
+                # and at most PUSH_UPLOADS_MAX at once: a bot cannot fill the disk with unapproved uploads
+                item = _own(request_id, job)
+                if item["status"] != "approved":
+                    raise HTTPException(status_code=403, detail=f"request is {item['status']}, not approved")
                 bound = json.loads(item["args_json"])
+                declared = request.headers.get("content-length")
+                if declared is not None and (not declared.isdigit() or int(declared) != bound["size"]):
+                    machines.fail_unexecuted(store, request_id, job, "the upload is not the approved size")
+                    raise HTTPException(status_code=409, detail="the file's size differs from what was approved; ask again")
+                if request_id in uploading or len(uploading) >= PUSH_UPLOADS_MAX:
+                    raise HTTPException(status_code=429, detail="another upload is in progress; try again shortly")
+                uploading.add(request_id)
+                claimed_upload = True
                 upload = tempfile.TemporaryFile(dir=spool)
-                digest, size = hashlib.sha256(), 0
-                async for chunk in request.stream():
-                    size += len(chunk)
-                    if size > machines.TRANSFER_MAX or size > bound["size"]:
-                        break
-                    digest.update(chunk)
-                    await asyncio.to_thread(upload.write, chunk)
+                digest = hashlib.sha256()
+
+                async def receive() -> int:
+                    size = 0
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > machines.TRANSFER_MAX or size > bound["size"]:
+                            break
+                        digest.update(chunk)
+                        await asyncio.to_thread(upload.write, chunk)
+                    return size
+
+                try:
+                    size = await asyncio.wait_for(receive(), PUSH_BODY_TIMEOUT)
+                except asyncio.TimeoutError:
+                    # a stalled body must not keep an upload slot: it uses the approval up
+                    machines.fail_unexecuted(store, request_id, job, "the upload stalled")
+                    raise HTTPException(status_code=408, detail="the upload took too long; ask again") from None
                 if size != bound["size"] or digest.hexdigest() != bound["sha256"]:
                     # single use: content that differs from what was approved uses the approval up
                     machines.fail_unexecuted(store, request_id, job, "the file differs from the approved sha256")
@@ -251,6 +279,8 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
             claimed = call(machines.begin_execute, store, request_id, job)
             return await _dispatch(claimed, upload)
         finally:
+            if claimed_upload:
+                uploading.discard(request_id)
             if upload is not None:
                 upload.close()
 
