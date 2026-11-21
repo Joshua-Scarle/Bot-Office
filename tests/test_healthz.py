@@ -40,7 +40,7 @@ def test_healthz_shape_no_auth_and_no_secrets(settings, tmp_path, monkeypatch):
         assert resp.status_code == 200
         body = resp.json()
         text = resp.text
-    assert set(body) == {"ok", "version", "uptime_seconds", "scheduler", "db_reachable", "paused", "notify_backlog",
+    assert set(body) == {"ok", "version", "uptime_seconds", "scheduler", "db_reachable", "paused", "pause_requested", "notify_backlog",
                          "running_jobs", "backup", "disk_free_pct"}
     assert body["db_reachable"] is True and body["running_jobs"] == 0
     assert set(body["backup"]) == {"state", "age_hours", "bytes", "stale"}
@@ -468,6 +468,11 @@ def test_healthz_reports_the_pause_and_the_notify_backlog(settings, tmp_path, mo
     with TestClient(create_app(settings)) as client:
         assert client.get("/healthz").json()["paused"] is False
         (settings.data_dir / "PAUSE").write_text("")
-        body = client.get("/healthz").json()
+        body = {}
+        deadline = time.monotonic() + 3
+        while not body.get("paused") and time.monotonic() < deadline:  # reported only once the loop acknowledged it
+            time.sleep(0.05)
+            body = client.get("/healthz").json()
+        assert body["pause_requested"] is True
         assert body["paused"] is True and body["running_jobs"] == 0 and body["scheduler"]["alive"] is True
         assert body["notify_backlog"] == 0

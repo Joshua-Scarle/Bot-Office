@@ -89,3 +89,14 @@ test("the mail sender and the engine themselves refuse another address (defence 
   assert.equal(sent.length, 0);
   assert.throws(() => new Engine({ storage: {}, send, from: "w@example.test", to: "evil@example.test" }), /allowed/);
 });
+
+test("/status needs the secret and reports counts only", async () => {
+  const e = env();
+  assert.equal((await worker.fetch(post("/status", {}, "wrong"), e)).status, 401);
+  assert.equal((await worker.fetch(new Request("https://w.example/status"), e)).status, 404);
+  await worker.fetch(post("/events", { prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q:1", cls: "needs_you", bot: "bot-aaaaaa", kind: "question_open" }] }), e);
+  const res = await worker.fetch(post("/status", {}), e);
+  assert.deepEqual(await res.json(), { pending: 1, outbox: 0 });
+  await e.dobj.alarm();
+  assert.deepEqual(await (await worker.fetch(post("/status", {}), e)).json(), { pending: 0, outbox: 0 });
+});

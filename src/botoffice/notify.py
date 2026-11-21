@@ -109,8 +109,10 @@ def record_needs_you(store: JobStore) -> int:
     new = 0
     with closing(store._connect()) as db:
         for item in items:
+            # one per assignment per overdue episode (a new due time is a new episode)
+            due = db.execute("SELECT due_at FROM assignments WHERE id=?", (item["assignment_id"],)).fetchone()
             cur = db.execute("INSERT OR IGNORE INTO notify_events (key, cls, bot_id, ref, kind, created_at) "
-                             "VALUES (?,?,?,?,?,?)", (str(item["id"]), "needs_you", item["bot_id"], None,
+                             "VALUES (?,?,?,?,?,?)", (f"a:{item['assignment_id']}:overdue:{due['due_at'] if due else ''}", "needs_you", item["bot_id"], None,
                                                       "assignment_overdue", stamp))
             new += cur.rowcount
     return new

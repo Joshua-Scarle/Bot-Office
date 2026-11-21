@@ -181,6 +181,9 @@ def build(app_state: Any, backup_path: Path | None = None) -> dict[str, Any]:
     scheduler_ok = bool(live["alive"]) and live["last_tick_age_seconds"] is not None \
         and live["last_tick_age_seconds"] <= SCHEDULER_STALE_SECONDS
     db_ok, running, queued = True, None, None
+    # the acknowledgement is read BEFORE the running count: once the loop has acknowledged the pause nothing
+    # new starts, so a count taken after it is final
+    acked = scheduler.pause_acknowledged()
     try:
         running = len(store.running_job_ids())
         from . import notify  # late: notify imports this module
@@ -197,7 +200,8 @@ def build(app_state: Any, backup_path: Path | None = None) -> dict[str, Any]:
         "scheduler": {"alive": scheduler_ok, "last_tick_age_seconds": live["last_tick_age_seconds"]},
         "db_reachable": db_ok,
         "running_jobs": running,
-        "paused": scheduler.paused(),
+        "pause_requested": scheduler.paused(),
+        "paused": acked,
         "notify_backlog": queued,
         "backup": backup_status(backup_path),
         "disk_free_pct": free,

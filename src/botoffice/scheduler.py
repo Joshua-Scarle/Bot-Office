@@ -46,6 +46,7 @@ from .workspace import (
 
 SIGNAL_GRACE_SECONDS = 0.5
 PAUSE_FILE = "PAUSE"
+PAUSE_ACK_FRESH_SECONDS = 5.0  # a loop that has not passed for this long cannot vouch for the pause
 TICK_SECONDS = 1.0
 WATCHDOG_SECONDS = 60.0
 # a running turn this long past its timeout did not stop by itself (wait_for) and is cancelled
@@ -106,6 +107,8 @@ class Scheduler:
         self._steer_deferrals: dict[str, int] = {}
         self._last_tick = 0.0
         self._last_watchdog = 0.0
+        self._pause_seen = False
+        self._pause_seen_at = 0.0
         self._cancel_reasons: dict[str, str] = {}
         # run lanes (Settings.run_lanes) -> running job task / job id; desktops are leased by claim
         self._tasks: dict[int, asyncio.Task[None]] = {}
@@ -169,12 +172,16 @@ class Scheduler:
 
     async def _run_loop(self) -> None:
         while not self._stopping:
+            # the pause is read once per pass, before any claim: what this pass saw is what it acts on, and
+            # the acknowledgement (see pause_acknowledged) is only given for a pass that claims nothing
+            self._pause_seen = self.paused()
+            self._pause_seen_at = time.monotonic()
             self._reap_tasks()
             for lane in range(self.settings.run_lanes):
                 task = self._tasks.get(lane)
                 if task and not task.done():
                     continue
-                if self._stopping or self.paused():
+                if self._stopping or self._pause_seen:
                     break
                 job = self.store.claim(self.settings.desktops, self._enabled_providers())
                 if not job:
@@ -199,6 +206,12 @@ class Scheduler:
             return (self.settings.data_dir / PAUSE_FILE).exists()
         except OSError:
             return False
+
+    def pause_acknowledged(self) -> bool:
+        """True only once the run loop itself has seen the pause on a recent pass: it is not in the middle of a
+        claim and starts nothing more. Only then is the running count final. (PAUSE merely existing is not
+        enough: a claim may already be under way.)"""
+        return bool(self._pause_seen and time.monotonic() - self._pause_seen_at <= PAUSE_ACK_FRESH_SECONDS)
 
     def tick(self) -> None:
         if not self.paused():

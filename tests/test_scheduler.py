@@ -105,3 +105,40 @@ def test_the_pause_file_stops_claims_and_firing_and_lifts_without_a_restart(sett
         assert store.get(waiting.id).status == JobStatus.SUCCEEDED and fired
 
     asyncio.run(scenario())
+
+
+def test_a_pause_is_acknowledged_only_after_the_loop_has_seen_it(settings):
+    """/healthz may call the scheduler paused (and its running count final) only after the run loop itself
+    observed PAUSE on a pass: the file merely existing is not enough, a claim may be under way."""
+    pause = settings.data_dir / "PAUSE"
+
+    async def scenario():
+        store = JobStore(settings.data_dir / "jobs.sqlite3")
+        scheduler = Scheduler(store, settings, {"codex": FakeAdapter(delay=0.05)})
+        await scheduler.start()
+        await asyncio.sleep(0.2)
+        assert scheduler.pause_acknowledged() is False
+        pause.write_text("")
+        assert scheduler.paused() is True and scheduler.pause_acknowledged() is False  # no pass has run since
+        await asyncio.sleep(0.3)
+        assert scheduler.pause_acknowledged() is True
+        job = store.create("queued during the pause")
+        await asyncio.sleep(0.3)
+        assert store.get(job.id).status == JobStatus.QUEUED and scheduler.pause_acknowledged() is True
+        pause.unlink()
+        assert scheduler.pause_acknowledged() is True  # still the last observation until the next pass...
+        await asyncio.sleep(0.3)
+        assert scheduler.pause_acknowledged() is False  # ...which withdraws it
+        await scheduler.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_loop_that_stopped_passing_cannot_vouch_for_the_pause(settings):
+    async def scenario():
+        store = JobStore(settings.data_dir / "jobs.sqlite3")
+        scheduler = Scheduler(store, settings, {"codex": FakeAdapter()})
+        scheduler._pause_seen, scheduler._pause_seen_at = True, time.monotonic() - 60
+        assert scheduler.pause_acknowledged() is False
+
+    asyncio.run(scenario())

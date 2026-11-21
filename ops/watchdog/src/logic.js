@@ -4,7 +4,7 @@ export const HEARTBEAT_MAX_AGE_MS = 15 * 60 * 1000; // VPS / controller consider
 export const BACKUP_MAX_AGE_HOURS = 30;
 export const CLASSES = ["needs_you", "failed", "outage", "backup", "done"];
 export const DEFAULT_PREFS = { needs_you: true, failed: true, outage: true, backup: true, done: false };
-const KIND_CLASS = { heartbeat_missing: "outage", controller_down: "outage", unhealthy: "outage", backup_state: "backup", backup_stale: "backup" };
+const KIND_CLASS = { heartbeat_missing: "outage", controller_down: "outage", unhealthy: "outage", backup_state: "backup", backup_stale: "backup", backup_unverified: "backup" };
 export const classOf = (kind) => KIND_CLASS[kind];
 const BACKUP_STATES = ["ok", "failed", "not_configured", "unknown", "unjudged"];
 

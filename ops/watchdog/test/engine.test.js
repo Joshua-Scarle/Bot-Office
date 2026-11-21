@@ -109,11 +109,11 @@ test("OVERFLOW: 500 events end to end: every identity is in some mail, split int
     const batch = queue.filter((e) => e.seq > acked).slice(0, 100);
     const res = await r.engine.events(sanitizeEvents({ prefs: {}, epoch: "e1", upto: batch[batch.length - 1].seq, events: batch }));
     acked = Math.max(acked, res.ack);
-    for (let i = 0; i < 6; i++) { await r.go(); r.clock.t += 1; } // the alarm fires until the outbox is empty
-    minute += 61; // past even the slow gap (more than SOFT_CAP mails go out), so the next batch can mail
+    for (let i = 0; i < 6; i++) { await r.go(); r.clock.t += 61 * MIN; } // each part waits out even the slow gap (more than SOFT_CAP mails go out)
+    minute = Math.round((r.clock.t - T0) / MIN);
   }
   assert.equal(acked, 500);
-  r.at(minute + 61); for (let i = 0; i < 6; i++) { await r.go(); r.clock.t += 1; }
+  r.at(minute + 61); for (let i = 0; i < 6; i++) { await r.go(); r.clock.t += 61 * MIN; }
   const seen = new Set();
   let total = 0;
   for (const m of r.mails) {
@@ -132,7 +132,7 @@ test("OVERFLOW: 500 events end to end: every identity is in some mail, split int
 test("a digest of 100 failed jobs becomes three mails (40, 40, 20) that together name all 100, in order", async () => {
   const r = rig();
   await r.push(Array.from({ length: 100 }, (_, i) => ({ cls: "failed", kind: "auth", job: `j${i}` })));
-  for (let i = 0; i < 5; i++) { await r.go(); r.clock.t += 1; }
+  for (let i = 0; i < 5; i++) { await r.go(); r.clock.t += MIN_GAP_MS; }
   assert.deepEqual(r.mails.map((m) => m.text.match(/^- .*$/gm).length), [40, 40, 20]);
   assert.match(r.mails[0].subject, /40 turns failed \[part 1 of 3\]/);
   assert.match(r.mails[2].subject, /20 turns failed \[part 3 of 3\]/);
@@ -146,8 +146,58 @@ test("a failing part is retried and later parts do not overtake it", async () =>
   await r.go();
   assert.equal(r.sent.length, 0);
   r.clock.t += BACKOFF_BASE_MS + 1;
-  for (let i = 0; i < 4; i++) { await r.go(); r.clock.t += 1; }
+  for (let i = 0; i < 4; i++) { await r.go(); r.clock.t += MIN_GAP_MS; }
   assert.deepEqual(r.mails.map((m) => m.text.match(/^- .*$/gm).length), [40, 10]);
+});
+
+test("parts of one digest keep the mail gap: never two same-class mails closer than ten minutes", async () => {
+  const r = rig();
+  await r.push(Array.from({ length: 100 }, (_, i) => ({ cls: "failed", kind: "auth", job: `j${i}` })));
+  const times = [];
+  for (let min = 0; min <= 40 && r.sent.length < 3; min++) {
+    r.at(min);
+    const before = r.sent.length;
+    await r.go();
+    if (r.sent.length > before) times.push(min);
+    await r.go(); // a second alarm in the same minute sends nothing more
+  }
+  assert.equal(r.sent.length, 3);
+  assert.ok(times[1] - times[0] >= 10 && times[2] - times[1] >= 10, `sent at minutes ${times}`);
+  assert.ok(r.storage.alarm === null || r.storage.alarm >= r.clock.t);
+});
+
+test("every digest line carries the pseudonymous event id, so two same-kind events are told apart", async () => {
+  const r = rig();
+  await r.push([{ cls: "needs_you", id: "eaaaaaaaaaaaaaaa1", bot: "bot-abc123" }, { cls: "needs_you", id: "ebbbbbbbbbbbbbbb2", bot: "bot-abc123" }]);
+  await r.go();
+  const lines = r.mails[0].text.match(/^- .*$/gm);
+  assert.equal(lines.length, 2);
+  assert.notEqual(lines[0], lines[1]);
+  assert.match(lines[0], /\[eaaaaaaaaaaaaaaa1\]$/);
+});
+
+test("a backup status unreadable for hours raises an alert, keeps existing incidents, and recovers when readable", async () => {
+  const r = rig();
+  await r.beat(failedBackup); await r.engine.tick(); await r.go();
+  for (let h = 1; h <= 7; h++) { r.at(h * 60); await r.beat(timedOut); await r.engine.tick(); await r.go(); }
+  const inc = r.storage.raw("s").incidents;
+  assert.ok(inc.backup_state, "the earlier incident is preserved");
+  assert.ok(inc.backup_unverified, "sustained inability to read it is its own incident");
+  r.at(8 * 60); await r.beat(good); await r.engine.tick(); await r.go();
+  assert.equal(r.storage.raw("s").incidents.backup_unverified, undefined);
+  assert.equal(r.storage.raw("s").unjudged_since, undefined);
+});
+
+test("status reports what the Worker still holds unsent, for a rollback to wait on", async () => {
+  const r = rig();
+  assert.deepEqual(await r.engine.status(), { pending: 0, outbox: 0 });
+  await r.push(need(3));
+  assert.deepEqual(await r.engine.status(), { pending: 3, outbox: 0 });
+  await r.go();
+  assert.deepEqual(await r.engine.status(), { pending: 0, outbox: 0 });
+  const f = rig({ failSend: 1 });
+  await f.push(need(2)); await f.go();
+  assert.deepEqual(await f.engine.status(), { pending: 0, outbox: 1 }); // composed, being retried
 });
 
 test("when the Worker is full it acks only what it stored; the rest stays queued at the controller", async () => {

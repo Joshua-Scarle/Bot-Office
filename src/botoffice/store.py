@@ -282,7 +282,7 @@ def _init_notify_triggers(db: sqlite3.Connection) -> None:
         f"""CREATE TRIGGER IF NOT EXISTS notify_asg_dropped AFTER UPDATE OF status, updated_by ON assignments
             WHEN NEW.status='dropped' AND NEW.created_by='user' AND NEW.updated_by LIKE 'bot:%'
                  AND (OLD.status IS NOT NEW.status OR OLD.updated_by IS NOT NEW.updated_by)
-            BEGIN {insert} VALUES ('a:' || NEW.id || ':dropped_by_bot', 'needs_you', NEW.bot_id, NULL,
+            BEGIN {insert} VALUES ('a:' || NEW.id || ':dropped_by_bot:' || strftime('%Y-%m-%dT%H:%M:%f','now'), 'needs_you', NEW.bot_id, NULL,
                                    'assignment_dropped_by_bot', {stamp}); END""")
     db.execute(
         f"""CREATE TRIGGER IF NOT EXISTS notify_approval_new AFTER INSERT ON approvals WHEN NEW.status='pending'
@@ -307,12 +307,41 @@ def _init_notify_triggers(db: sqlite3.Connection) -> None:
                  AND (OLD.enabled IS NOT 0 OR OLD.paused_reason IS NOT NEW.paused_reason)
             BEGIN {insert} VALUES ('w:' || NEW.id || ':' || strftime('%Y-%m-%dT%H:%M:%f','now'), 'needs_you',
                                    NEW.bot_id, NULL, 'watcher_paused', {stamp}); END""")
-    for name, event in (("new", "INSERT"), ("kind", "UPDATE OF failure_kind, status")):  # one per bot, kind and day
-        db.execute(
-            f"""CREATE TRIGGER IF NOT EXISTS notify_held_{name} AFTER {event} ON jobs
-                WHEN NEW.status='queued' AND NEW.failure_kind IN ('budget','auto_cap') AND NEW.bot_id IS NOT NULL
-                BEGIN {insert} VALUES ('h:' || NEW.bot_id || ':' || NEW.failure_kind || ':' || strftime('%Y-%m-%d','now'),
-                                       'needs_you', NEW.bot_id, NULL, NEW.failure_kind || '_held', {stamp}); END""")
+    # a hold is a transition into queued+budget/auto_cap (a new job, or a job whose hold kind or status changed);
+    # each one is its own incident (job id and time in the key), a rewrite with the same values is not
+    held = ("NEW.status='queued' AND NEW.failure_kind IN ('budget','auto_cap') AND NEW.bot_id IS NOT NULL")
+    body = (f"BEGIN {insert} VALUES ('h:' || NEW.id || ':' || NEW.failure_kind || ':' || strftime('%Y-%m-%dT%H:%M:%f','now'), "
+            f"'needs_you', NEW.bot_id, NULL, NEW.failure_kind || '_held', {stamp}); END")
+    db.execute(f"CREATE TRIGGER IF NOT EXISTS notify_held_new AFTER INSERT ON jobs WHEN {held} {body}")
+    db.execute(f"CREATE TRIGGER IF NOT EXISTS notify_held_kind AFTER UPDATE OF failure_kind, status ON jobs "
+               f"WHEN {held} AND (OLD.status IS NOT 'queued' OR OLD.failure_kind IS NOT NEW.failure_kind) {body}")
+    # an assignment that became overdue and closes before any poll saw it: the close is the last chance to log it
+    db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS notify_asg_overdue_close AFTER UPDATE OF status ON assignments
+            WHEN NEW.status IN ('done','dropped') AND OLD.status NOT IN ('done','dropped') AND NEW.due_at IS NOT NULL
+                 AND NEW.dismissed_at IS NULL AND julianday(NEW.due_at) < julianday('now')
+            BEGIN {insert} VALUES ('a:' || NEW.id || ':overdue:' || NEW.due_at, 'needs_you', NEW.bot_id, NULL,
+                                   'assignment_overdue', {stamp}); END""")
+    _backfill_notify(db)
+
+
+def _backfill_notify(db: sqlite3.Connection) -> None:
+    """Once, at upgrade: needs-you states already open are logged (same keys as the triggers, so idempotent)."""
+    if db.execute("SELECT 1 FROM meta WHERE key='notify-backfill'").fetchone():
+        return
+    stamp = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+    insert = "INSERT OR IGNORE INTO notify_events (key, cls, bot_id, ref, kind, created_at)"
+    state = ("CASE WHEN stalled_at IS NOT NULL THEN 'stalled' WHEN status='waiting_on_user' THEN 'waiting_on_user' "
+             "WHEN status='blocked' AND escalate IS NOT 'never' THEN 'blocked' "
+             "WHEN status='waiting_on_bot' AND escalate IS 'always' THEN 'waiting_on_bot' END")
+    db.execute(f"{insert} SELECT 'a:' || id || ':' || {state} || ':' || COALESCE(stalled_at, updated_at), 'needs_you', "
+               f"bot_id, NULL, 'assignment_' || {state}, {stamp} FROM assignments "
+               f"WHERE status NOT IN ('done','dropped') AND dismissed_at IS NULL AND {state} IS NOT NULL")
+    db.execute(f"{insert} SELECT 'p:' || id || ':pending', 'needs_you', bot_id, job_id, 'approval_pending', {stamp} "
+               "FROM approvals WHERE status='pending'")
+    db.execute(f"{insert} SELECT 'q:' || id || ':open', 'needs_you', bot_id, NULL, 'question_open', {stamp} "
+               "FROM questions WHERE status='open'")
+    db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('notify-backfill', '1')")
 
 
 class BridgeHopConflict(Exception):

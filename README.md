@@ -163,11 +163,11 @@ Mail goes to one address only: **you@example.test**. The template sets it as `AL
 
 Two channels, one bearer secret (a file on the VPS, mode 0600, and a Worker secret): the *heartbeat pusher* (`scripts/healthz_push.py`, a systemd timer every 5 min, system `python3` ≥ 3.9) posts `/healthz` to `/heartbeat`; the *controller* posts events to `/events` every minute once `WATCHDOG_URL` is set. Neither follows a redirect, so the secret goes only to the configured URL (HTTPS only).
 
-**`GET /healthz`** (no auth, loopback like the rest of the API) returns only non-sensitive status: `ok`, `version`, `uptime_seconds`, `scheduler` (alive, last tick age), `db_reachable`, `running_jobs`, `paused` (the maintenance pause below), `notify_backlog`, `backup` (`state`, `age_hours`, `bytes`, `stale`) and `disk_free_pct`. The database and disk work runs on one daemon thread (3 s bound, shared by concurrent calls), never on the event loop; past the bound the answer is HTTP 503 `{"ok": false, "timed_out": true}` with no `backup` object, which the watchdog treats as "backup not judged". The backup status file (`~/contabo-backup/status.json`, or `BOT_OFFICE_BACKUP_STATUS`) is read by its own daemon thread that callers wait on for at most 1 s: opened without blocking, a regular file only, 64 KiB cap. On a stuck mount the answer is the last good read (up to 10 minutes old) or `backup.state` `unjudged`; neither `/healthz` nor the event pusher nor interpreter shutdown ever waits on the file system. A wrong-typed field or a finish time more than 6 minutes in the future reads as `unknown` (and stale).
+**`GET /healthz`** (no auth, loopback like the rest of the API) returns only non-sensitive status: `ok`, `version`, `uptime_seconds`, `scheduler` (alive, last tick age), `db_reachable`, `running_jobs`, `paused` (the maintenance pause below, true only once the scheduler has acknowledged it; `pause_requested` is the file merely existing), `notify_backlog`, `backup` (`state`, `age_hours`, `bytes`, `stale`) and `disk_free_pct`. The database and disk work runs on one daemon thread (3 s bound, shared by concurrent calls), never on the event loop; past the bound the answer is HTTP 503 `{"ok": false, "timed_out": true}` with no `backup` object, which the watchdog treats as "backup not judged". The backup status file (`~/contabo-backup/status.json`, or `BOT_OFFICE_BACKUP_STATUS`) is read by its own daemon thread that callers wait on for at most 1 s: opened without blocking, a regular file only, 64 KiB cap. On a stuck mount the answer is the last good read (up to 10 minutes old) or `backup.state` `unjudged`; neither `/healthz` nor the event pusher nor interpreter shutdown ever waits on the file system. A wrong-typed field or a finish time more than 6 minutes in the future reads as `unknown` (and stale).
 
-Limits: an overdue task that is finished within one detector cycle (about a minute) of becoming overdue is not logged; if the controller or VPS is down, the outage mail is the notice.
+Limits: an overdue assignment is logged by the detector (once per assignment and due time, about a minute) or, if it closes first, by a trigger at the close; if the controller or VPS is down, the outage mail is the notice.
 
-**Maintenance pause.** While the file `<data dir>/PAUSE` exists (`touch "$BOT_OFFICE_DATA_DIR/PAUSE"`), the scheduler claims nothing and fires nothing (no queued job starts, no routine, inbox message, wake-up or watcher); running turns finish and the hung-turn watchdog keeps working. New work from chat or the API is only queued and starts when the file is removed. It is checked on every pass (no restart needed), is also honoured at start-up (a restart with the file present comes up paused), and `/healthz` shows `"paused": true`. This is what the runbook uses to drain; the live master predates it (see step 10).
+**Maintenance pause.** While the file `<data dir>/PAUSE` exists (`touch "$BOT_OFFICE_DATA_DIR/PAUSE"`), the scheduler claims nothing and fires nothing (no queued job starts, no routine, inbox message, wake-up or watcher); running turns finish and the hung-turn watchdog keeps working. New work from chat or the API is only queued and starts when the file is removed. It is checked on every pass (no restart needed), is also honoured at start-up (a restart with the file present comes up paused), and `/healthz` shows `"pause_requested": true` at once and `"paused": true` only after the run loop has itself seen the file on a pass (a claim already under way has finished by then; the loop must have passed within the last 5 s). `running_jobs` is read after that acknowledgement, so `paused` true with `running_jobs` 0 means nothing is running and nothing will start. This is what the runbook uses to drain; the live master predates it (see step 10), so the very first deploy cannot rely on it.
 
 ### Setup (the live `bot-office` unit is never overwritten)
 
@@ -177,22 +177,34 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
 
 **On a machine with a checkout and Node (not the VPS):**
 
-1. `cd ops/watchdog && npm test` (43 tests; nothing to install).
+1. `cd ops/watchdog && npm test` (48 tests; nothing to install).
 2. `cp wrangler.toml.template wrangler.toml`; the recipient is already set to `you@example.test` (as `destination_address` and `ALERT_TO`): leave both as they are, any other value makes the Worker refuse to run. Fill in only `ALERT_FROM` (`watchdog@<your domain>`). `wrangler.toml` is local; do not commit it.
 3. In the Cloudflare dashboard (Email Routing): enable it, add you@example.test under **Destination addresses**, and click the verification link Cloudflare mails to it. Until it shows **Verified**, nothing can be delivered.
 4. `npx wrangler login`, then `npx wrangler deploy` (the first deploy creates the Worker and its Durable Object). Note the `https://<name>.<account>.workers.dev` URL.
 
 **On the VPS:**
 
-5. Preflight and backups (read-only except the copies; nothing is changed yet):
+5. Preflight and backups (read-only except the copies; nothing is changed yet). The VPS has no `sqlite3` CLI: every database access below is `python3` with its `sqlite3` module. First find the LIVE data directory from the running controller itself (its own environment), never from your shell, and check it holds the database the controller has open:
+   ```sh
+   PID=$(systemctl --user show bot-office -p MainPID --value); [ "${PID:-0}" -gt 0 ] || { echo "controller not running"; false; }
+   BOT_OFFICE_DATA_DIR=$(tr '\0' '\n' < /proc/$PID/environ | sed -n 's/^BOT_OFFICE_DATA_DIR=//p'); export BOT_OFFICE_DATA_DIR
+   DB="$BOT_OFFICE_DATA_DIR/agentdesk.sqlite3"
+   [ -n "$BOT_OFFICE_DATA_DIR" ] && [ -f "$DB" ] && ls -l /proc/$PID/fd | grep -q "$DB" && echo "data dir ok: $BOT_OFFICE_DATA_DIR" || echo "STOP: not the live data dir (variable unset in the unit, or the DB is not open by the controller)"
+   # read-only query helper and the two counts used below
+   sq() { python3 -c 'import sqlite3,sys,pathlib; c=sqlite3.connect(pathlib.Path(sys.argv[1]).resolve().as_uri()+"?mode=ro",uri=True); [print(*r) for r in c.execute(sys.argv[2])]' "$DB" "$1"; }
+   running() { sq "SELECT COUNT(*) FROM jobs WHERE status='running'"; }
+   queued()  { sq "SELECT COUNT(*) FROM jobs WHERE status='queued'"; }
+   ```
+   If the check says STOP, do not continue: find the variable in the unit or its `EnvironmentFile` (`systemctl --user cat bot-office`) and fix `DB` by hand until the check passes.
    ```sh
    STAMP=$(date +%Y%m%d-%H%M%S); B=~/backups/pre-0.12.11-$STAMP; mkdir -p "$B"
    systemctl --user show bot-office -p FragmentPath -p DropInPaths -p EnvironmentFiles -p WorkingDirectory
    systemctl --user cat bot-office > "$B/bot-office.unit.txt"          # unit plus drop-ins, as systemd sees them
    cp -a ~/.config/systemd/user/bot-office.service* "$B/" 2>/dev/null   # the unit file and any .d directory
    cd "$D" && git tag "backup/pre-0.12.11-$STAMP"
-   sqlite3 "$BOT_OFFICE_DATA_DIR/agentdesk.sqlite3" ".backup '$B/agentdesk.sqlite3'"
+   python3 -c 'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); print("integrity:", d.execute("PRAGMA integrity_check").fetchone()[0]); d.close(); s.close()' "$DB" "$B/agentdesk.sqlite3"   # online backup, safe while running
    ```
+   Keep `$STAMP`, `$B`, `$D`, `$DB` and `$BOT_OFFICE_DATA_DIR` in this shell for the rest (re-derive them the same way in a new shell).
 6. Create the secret and the heartbeat settings (mode 0600 for the secret; the pusher and the controller refuse anything else):
    ```sh
    umask 077; mkdir -p ~/.config/bot-office
@@ -209,38 +221,36 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
        printf '[Service]\nEnvironment=WATCHDOG_URL=%s\n' 'https://<worker-host>/heartbeat' > "$D_IN/watchdog.conf"
      systemctl --user daemon-reload
      ```
-8. Install the two NEW heartbeat units only (they do not exist yet; the check stops if one does):
+8. Check out the exact reviewed commit (a bare `git pull` can leave the checkout on master or on another revision) and install the two NEW heartbeat units only (they do not exist yet; the check stops if one does). The checkout is detached on purpose; `$B`'s tag is the way back:
    ```sh
-   cd "$D" && git pull && .venv/bin/pip install -e .
+   REV=<full 40-character hash of the reviewed commit>   # from the review; never a branch name or "master"
+   cd "$D" && git fetch origin && git checkout --detach "$REV" \
+     && [ "$(git rev-parse HEAD)" = "$REV" ] && [ -z "$(git status --porcelain)" ] && echo "at $REV, clean" || echo "STOP: not the reviewed commit"
+   .venv/bin/pip install -e .
    ls ~/.config/systemd/user/bot-office-heartbeat.* 2>/dev/null && echo 'exists: stop and review' || \
    install -m 644 -D -t ~/.config/systemd/user/ deploy/bot-office-heartbeat.service deploy/bot-office-heartbeat.timer
    systemctl --user daemon-reload
    ```
 9. From the dev machine, set the Worker secret from the VPS file without displaying it:
    `ssh <vps> 'cat ~/.config/bot-office/watchdog-secret' | npx wrangler secret put HEARTBEAT_SECRET`
-10. Quiesce, then restart the controller. A restart kills provider processes the controller started, so nothing may be running, and nothing may start between the check and the restart.
+10. Quiesce, then restart the controller. A restart kills provider processes the controller started, so nothing may be running, and nothing may start between the check and the restart. (`running`, `queued` and `sq` are from step 5.)
 
-    First define the two checks. Neither needs `/healthz` (the live master does not have it): the first reads the database, the second the new `/healthz` after the restart.
+    **First deployment only: the live master has no pause and no `/healthz`, so this window cannot be closed, only made small.** The old code ignores the `PAUSE` file, so nothing stops it claiming a job between "0 running" and the restart. Choose a quiet window (no chat open, no routine, inbox, wake-up or watcher due in the next few minutes: check the schedule), then:
     ```sh
-    DB="$BOT_OFFICE_DATA_DIR/agentdesk.sqlite3"
-    running() { sqlite3 -readonly "$DB" "SELECT COUNT(*) FROM jobs WHERE status='running'"; }
-    ```
-    **First deployment only: the live master has no pause.** It cannot be paused at run time, so the window between "0 running" and the restart cannot be closed on the old code. Make it as small as possible and make the new process start paused, so nothing else starts after the restart:
-    ```sh
-    touch "$BOT_OFFICE_DATA_DIR/PAUSE"      # ignored by the old code, honoured by the new one at start-up
-    until [ "$(running)" = 0 ]; do sleep 5; done && systemctl --user restart bot-office
+    touch "$BOT_OFFICE_DATA_DIR/PAUSE"      # ignored by the old code; the NEW process reads it before its first claim, so it starts paused
+    until [ "$(running)" = 0 ] && [ "$(queued)" = 0 ]; do sleep 1; done && systemctl --user restart bot-office
     sleep 5; curl -s http://127.0.0.1:8787/healthz   # expect "ok": true, the new version, "paused": true
     ```
-    Do not message bots or let routines fire meanwhile (check the schedule first). A turn that did start in that window is not lost: at start-up the controller replays it when its provider process is proven gone, otherwise fails it with kind `interrupted` (a failed-turn mail and a Needs-you item). Then lift the pause: `rm "$BOT_OFFICE_DATA_DIR/PAUSE"` and confirm `"paused": false`.
+    What this does not guarantee: a job claimed in the second or so between the last check and the restart is killed with the old process. It is not lost: at start-up the controller replays it when its provider process is proven gone, otherwise fails it with kind `interrupted` (a failed-turn mail and a Needs-you item). Then lift the pause: `rm "$BOT_OFFICE_DATA_DIR/PAUSE"` and confirm `"paused": false`.
 
-    **Every later restart (outage test, rollback of the Worker side, secret rotation): pause first, drain, then restart.**
+    **Every later restart (outage test, rollback of the Worker side, secret rotation) runs on code that has the acknowledged pause: pause first, wait for the acknowledgement and an empty count, then restart.**
     ```sh
     touch "$BOT_OFFICE_DATA_DIR/PAUSE"
-    until [ "$(curl -s http://127.0.0.1:8787/healthz | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["running_jobs"] if d["paused"] else "x")')" = 0 ]; do sleep 5; done
+    until curl -s http://127.0.0.1:8787/healthz | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d["paused"] is True and d["running_jobs"] == 0 else 1)'; do sleep 2; done
     systemctl --user restart bot-office      # the pause file survives and holds the new process paused
     sleep 5; curl -s http://127.0.0.1:8787/healthz && rm "$BOT_OFFICE_DATA_DIR/PAUSE"
     ```
-    The restart creates the `notify_events` table and its triggers (idempotent) and starts the event push.
+    The restart creates the `notify_events` table and its triggers (idempotent), logs once the needs-you states already open at that moment (a one-time backfill, marker `notify-backfill`; the first mail may therefore be a digest of what is open now) and starts the event push.
 11. Start the timer, push once, and let it survive logout:
     ```sh
     systemctl --user enable --now bot-office-heartbeat.timer
@@ -253,18 +263,33 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
 
 - **Destination.** The dashboard shows the address as **Verified** (step 3). The first mail below must arrive; check spam once and mark it not spam.
 - **Needs you / failed.** Create a needs-you item (a question card, or let a routine fail): within about 2 minutes one mail arrives, naming the bot label and a code only. Items arriving within 10 minutes of it come as one merged digest.
-- **Outage.** `systemctl --user stop bot-office-heartbeat.timer`, wait about 20 minutes: one ALERT mail; start the timer: one RECOVERED mail in the next digest. For the controller outage, pause and drain first (`touch "$BOT_OFFICE_DATA_DIR/PAUSE"`, wait until `/healthz` shows `"paused": true, "running_jobs": 0`), then `systemctl --user stop bot-office` (heartbeats keep coming): the "controller does not answer" alert and no backup alert; `systemctl --user start bot-office`, check `/healthz`, `rm "$BOT_OFFICE_DATA_DIR/PAUSE"`. Never stop the controller with a turn running.
+- **Outage.** `systemctl --user stop bot-office-heartbeat.timer`, wait about 20 minutes: one ALERT mail; start the timer: one RECOVERED mail in the next digest. For the controller outage, pause and drain first (`touch "$BOT_OFFICE_DATA_DIR/PAUSE"`, wait until `/healthz` shows `"paused": true, "running_jobs": 0`, the acknowledged pause), then `systemctl --user stop bot-office` (heartbeats keep coming): the "controller does not answer" alert and no backup alert; `systemctl --user start bot-office`, check `/healthz`, `rm "$BOT_OFFICE_DATA_DIR/PAUSE"`. Never stop the controller with a turn running.
 - **Backup.** Point a throwaway run's `BOT_OFFICE_BACKUP_STATUS` at a copy of `status.json` with `"state": "failed"` (not the real file): one backup mail with a reason code.
-- **Delivery after an outage.** Stop reaching the Worker (for example `WATCHDOG_URL` pointing to a dead host in a throwaway run), create two items, restore: both arrive; `sqlite3 <db> "select count(*) from notify_events"` falls as the cursor advances.
+- **Delivery after an outage.** Stop reaching the Worker (for example `WATCHDOG_URL` pointing to a dead host in a throwaway run), create two items, restore: both arrive; `sq "SELECT COUNT(*) FROM notify_events WHERE seq > COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='notify-cursor'),0)"` (the unacknowledged count) falls to 0.
 - **Toggles.** Switch a class off in Settings, repeat its trigger: no mail.
 
 ### Rollback (restores everything that was changed)
 
-1. Stop the sources: `systemctl --user disable --now bot-office-heartbeat.timer`, then in `ops/watchdog` `npx wrangler delete` (removes the Worker, its Durable Object and state; do it within 15 minutes of the timer stopping, or accept one missing-heartbeat mail).
-2. Undo the controller setting: delete the new drop-in (`rm ~/.config/systemd/user/bot-office.service.d/watchdog.conf`, and remove the directory if it is empty and you created it) or remove the `WATCHDOG_URL=` line you appended to the existing environment file. The live unit file and its other drop-ins were never modified; `diff -r` the copies in `$B` against `~/.config/systemd/user/` to confirm. Remove the heartbeat units and `~/.config/bot-office/heartbeat.env`, then `systemctl --user daemon-reload`.
-3. Controller code, with intake and scheduling paused and drained first (the new code is still the running one, so the pause works): `touch "$BOT_OFFICE_DATA_DIR/PAUSE"`, wait until `/healthz` shows `"paused": true, "running_jobs": 0`, `systemctl --user stop bot-office`, then `cd "$D" && git checkout backup/pre-0.12.11-$STAMP && .venv/bin/pip install -e .`, `systemctl --user start bot-office`, check it answers, and `rm "$BOT_OFFICE_DATA_DIR/PAUSE"` (the old code ignores the file; it is removed so a later upgrade does not start paused). Check `running` (the `sqlite3` function from step 10) is 0 before the stop if `/healthz` is unreachable.
-4. Database: nothing has to be restored. The new table and triggers are ignored by older versions (the triggers keep adding small rows). To remove them: `sqlite3 <db> "DROP TRIGGER IF EXISTS notify_job_failed; DROP TRIGGER IF EXISTS notify_job_done; DROP TRIGGER IF EXISTS notify_question_open; DROP TRIGGER IF EXISTS notify_asg_new; DROP TRIGGER IF EXISTS notify_asg_state; DROP TRIGGER IF EXISTS notify_asg_dropped; DROP TRIGGER IF EXISTS notify_approval_new; DROP TRIGGER IF EXISTS notify_approval_expired; DROP TRIGGER IF EXISTS notify_tripwire; DROP TRIGGER IF EXISTS notify_usage_parked; DROP TRIGGER IF EXISTS notify_watcher_paused; DROP TRIGGER IF EXISTS notify_held_new; DROP TRIGGER IF EXISTS notify_held_kind; DROP TABLE IF EXISTS notify_events; DELETE FROM meta WHERE key IN ('notify-email','notify-cursor','notify-epoch');"` (with the controller stopped or idle). The pre-deploy copy `$B/agentdesk.sqlite3` is only for a real corruption.
-5. Rotate the secret if it may have been exposed: write a new file, `wrangler secret put` it (if the Worker still exists), restart the controller the paused-and-drained way.
+Use the same shell as the setup (`$D`, `$B`, `$STAMP`, `$DB`, `$BOT_OFFICE_DATA_DIR`, `sq`; re-derive the data directory as in step 5).
+
+1. Pause and drain the controller (the new code is still running, so the acknowledged pause works): `touch "$BOT_OFFICE_DATA_DIR/PAUSE"`, wait until `/healthz` shows `"paused": true, "running_jobs": 0`.
+2. **Drain the mail before the Worker is deleted.** Deleting the Worker deletes its Durable Object, and anything it already acknowledged but has not mailed (pending, or retrying) cannot be replayed from the controller. Wait for both counts to be 0 (the controller keeps pushing while it runs; the Worker mails at least 10 minutes apart per class, so this can take 10 minutes or, after a flapping day, an hour):
+   ```sh
+   WURL=<https://worker-host>          # the Worker origin, without /heartbeat
+   wstatus() { curl -s -X POST -H @<(printf 'Authorization: Bearer %s\n' "$(cat ~/.config/bot-office/watchdog-secret)") "$WURL/status"; }
+   unacked() { sq "SELECT COUNT(*) FROM notify_events WHERE seq > COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='notify-cursor'),0)"; }
+   until [ "$(unacked)" = 0 ] && [ "$(wstatus)" = '{"pending":0,"outbox":0}' ]; do sleep 30; done; echo drained
+   ```
+   (`/status` needs the secret and returns two counts only; the secret goes through a file descriptor, not the command line.) If it never reaches 0 (for example the mail is being rejected), do not delete yet: fix the mail path, or decide consciously that those messages are expendable and say so in the rollback note.
+3. Stop the sources: `systemctl --user disable --now bot-office-heartbeat.timer`, then in `ops/watchdog` `npx wrangler delete` (removes the Worker, its Durable Object and state).
+4. Undo the controller setting: delete the new drop-in (`rm ~/.config/systemd/user/bot-office.service.d/watchdog.conf`, and remove the directory if it is empty and you created it) or remove the `WATCHDOG_URL=` line you appended to the existing environment file. The live unit file and its other drop-ins were never modified; `diff -r` the copies in `$B` against `~/.config/systemd/user/` to confirm. Remove the heartbeat units and `~/.config/bot-office/heartbeat.env`, then `systemctl --user daemon-reload`.
+5. Controller code (still paused and drained; re-check `running` is 0): `systemctl --user stop bot-office`, `cd "$D" && git checkout backup/pre-0.12.11-$STAMP && .venv/bin/pip install -e .`, `systemctl --user start bot-office`, check it answers, and `rm "$BOT_OFFICE_DATA_DIR/PAUSE"` (the old code ignores the file; it is removed so a later upgrade does not start paused).
+6. Database: nothing has to be restored. The new table and triggers are ignored by older versions (the triggers keep adding small rows). To remove them, with the controller stopped or idle:
+   ```sh
+   python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); [c.execute("DROP TRIGGER IF EXISTS "+t) for t in sys.argv[2:]]; c.execute("DROP TABLE IF EXISTS notify_events"); c.execute("DELETE FROM meta WHERE key IN (\"notify-email\",\"notify-cursor\",\"notify-epoch\",\"notify-backfill\")"); c.commit()' "$DB" notify_job_failed notify_job_done notify_question_open notify_asg_new notify_asg_state notify_asg_dropped notify_asg_overdue_close notify_approval_new notify_approval_expired notify_tripwire notify_usage_parked notify_watcher_paused notify_held_new notify_held_kind
+   ```
+   The pre-deploy copy `$B/agentdesk.sqlite3` is only for a real corruption.
+7. Rotate the secret if it may have been exposed: write a new file, `wrangler secret put` it (if the Worker still exists), restart the controller the paused-and-drained way.
 
 ## What changed in 0.12.11
 

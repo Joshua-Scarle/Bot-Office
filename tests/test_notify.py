@@ -6,6 +6,7 @@ import http.server
 import json
 import re
 import threading
+import time
 from contextlib import closing
 from datetime import timedelta
 
@@ -465,3 +466,55 @@ def test_overdue_is_logged_by_the_detector_once_and_stays_after_it_is_done(setti
         assert notify.record_needs_you(store) == 1 and notify.record_needs_you(store) == 0
         _sql(store, "UPDATE assignments SET status='done' WHERE id='late'")
         assert [r["kind"] for r in _rows(store)] == ["assignment_overdue"]
+
+
+def test_repeated_drops_and_budget_holds_each_log_their_own_incident(settings):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Ro", "", "codex", None)
+        _assignment(store, bot, "t1", status="active", created_by="user")
+        for _ in range(3):  # the owner reopens it, the bot drops it again: three incidents
+            _sql(store, "UPDATE assignments SET status='dropped', updated_by='bot:ro' WHERE id='t1'")
+            _sql(store, "UPDATE assignments SET status='active', updated_by='user' WHERE id='t1'")
+            time.sleep(0.01)
+        job = store.create("p", "codex", bot_id=bot.id)
+        for _ in range(3):  # held, released, held again (same bot, kind and day)
+            _sql(store, "UPDATE jobs SET status='queued', failure_kind='budget' WHERE id=?", str(job.id))
+            _sql(store, "UPDATE jobs SET status='queued', failure_kind='budget' WHERE id=?", str(job.id))  # a rewrite: not new
+            _sql(store, "UPDATE jobs SET status='running', failure_kind=NULL WHERE id=?", str(job.id))
+            time.sleep(0.01)
+        kinds = [r["kind"] for r in _rows(store)]
+    assert kinds.count("assignment_dropped_by_bot") == 3 and kinds.count("budget_held") == 3
+
+
+def test_an_assignment_that_goes_overdue_and_closes_between_polls_is_still_logged(settings):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Pi", "", "codex", None)
+        _assignment(store, bot, "late", status="active", due_at="2020-01-01T00:00:00+00:00")
+        _assignment(store, bot, "ontime", status="active", due_at="2999-01-01T00:00:00+00:00")
+        _sql(store, "UPDATE assignments SET status='done' WHERE id IN ('late','ontime')")
+        assert [r["kind"] for r in _rows(store)] == ["assignment_overdue"]
+        assert notify.record_needs_you(store) == 0
+        # the same assignment overdue again after a new due time is a new episode
+        _assignment(store, bot, "again", status="active", due_at="2020-01-01T00:00:00+00:00")
+        assert notify.record_needs_you(store) == 1
+        _sql(store, "UPDATE assignments SET due_at='2020-02-01T00:00:00+00:00' WHERE id='again'")
+        assert notify.record_needs_you(store) == 1 and notify.record_needs_you(store) == 0
+
+
+def test_needs_you_states_already_open_at_upgrade_are_logged_once(settings):
+    from botoffice.store import JobStore
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Qu", "", "codex", None)
+        _assignment(store, bot, "w", status="waiting_on_user")
+        _assignment(store, bot, "closed", status="done")
+        _question(store, bot, "q9")
+        _sql(store, "DELETE FROM notify_events")  # as if they predate the feature
+        _sql(store, "DELETE FROM meta WHERE key='notify-backfill'")
+        JobStore(store.path)  # the upgrade start
+        first = sorted(r["kind"] for r in _rows(store))
+        JobStore(store.path)  # a later start: nothing again
+        again = sorted(r["kind"] for r in _rows(store))
+    assert first == ["assignment_waiting_on_user", "question_open"] and again == first

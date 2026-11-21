@@ -36,6 +36,7 @@ export const SEND_TIMEOUT_MS = 8000;
 export const BACKOFF_BASE_MS = 30 * 1000;
 export const BACKOFF_MAX_MS = 60 * 60 * 1000;
 export const MAX_LINES = 40;
+export const UNVERIFIED_BACKUP_MS = 6 * 60 * 60 * 1000; // a backup status unreadable this long is itself an alert
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const fresh = () => ({ hb: null, first_seen: null, prefs: { ...DEFAULT_PREFS }, incidents: {}, pending: [], outbox: {}, last_sent: {}, sent_log: [], epoch: null, cursor: 0, backup_reason: null });
@@ -56,7 +57,7 @@ function line(e) {
     return `- ${e.text}${gone}`;
   }
   const it = e.item;
-  return `- ${it.bot}: ${it.kind.replace(/_/g, " ")}${it.job ? ` (job ${it.job})` : ""}`;
+  return `- ${it.bot}: ${it.kind.replace(/_/g, " ")}${it.job ? ` (job ${it.job})` : ""} [${e.id}]`;
 }
 
 /** The mails for one class: [{subject, text}], MAX_LINES entries each, every entry in exactly one. */
@@ -128,6 +129,14 @@ export class Engine {
     });
   }
 
+  /** Counts only: what the Worker still holds unsent (for a rollback to wait on). 0 and 0 means nothing is lost by deleting it. */
+  status() {
+    return this.#exclusive(async () => {
+      const s = await this.#load();
+      return { pending: s.pending.length, outbox: Object.values(s.outbox).reduce((n, list) => n + list.length, 0) };
+    });
+  }
+
   tick() {
     return this.#exclusive(async () => {
       const s = await this.#load(), now = this.clock();
@@ -139,6 +148,13 @@ export class Engine {
   }
 
   #reconcile(s, problems, now) {
+    if (s.hb && s.hb.data && s.hb.data.controller_reachable && s.hb.data.backup_state === "unjudged") {
+      s.unjudged_since ??= now;
+      if (now - s.unjudged_since >= UNVERIFIED_BACKUP_MS && !problems.some((p) => p.kind === "backup_unverified"))
+        problems = [...problems, { kind: "backup_unverified", text: `The backup status could not be read for about ${Math.round((now - s.unjudged_since) / 3600000)} h, so the backup cannot be verified.` }];
+    } else if (s.hb && s.hb.data && s.hb.data.backup_state !== "unjudged" && s.hb.data.controller_reachable) {
+      delete s.unjudged_since; // judged again
+    }
     const skip = new Set(unjudged(problems, s.hb));
     const current = new Map(problems.map((p) => [p.kind, p]));
     for (const p of problems) {
@@ -218,6 +234,7 @@ export class Engine {
             if (!s.outbox[mail.cls].length) delete s.outbox[mail.cls];
             s.last_sent[mail.cls] = now;
             s.sent_log.push(now);
+            if (s.outbox[mail.cls]) s.outbox[mail.cls][0].next_at = now + this.#gap(s, now); // the next part keeps the mail gap
           } else {
             box.attempts += 1;
             box.next_at = now + Math.min(BACKOFF_BASE_MS * 2 ** (box.attempts - 1), BACKOFF_MAX_MS);

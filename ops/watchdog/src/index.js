@@ -23,9 +23,10 @@ const ROUTES = { "/heartbeat": sanitize, "/events": sanitizeEvents };
 export default {
   async fetch(request, env) {
     const path = new URL(request.url).pathname;
-    if (request.method !== "POST" || !ROUTES[path]) return new Response("not found", { status: 404 });
+    if (request.method !== "POST" || !(ROUTES[path] || path === "/status")) return new Response("not found", { status: 404 });
     if (!(await authorized(request, env.HEARTBEAT_SECRET))) return new Response("unauthorized", { status: 401 });
     if (configError(env)) return new Response("misconfigured", { status: 503 }); // refuse to run with a recipient that is not the allowed one
+    if (path === "/status") return stub(env).fetch("https://watchdog.internal/status", { method: "POST" });
     const text = await request.text();
     if (text.length > MAX_BODY) return new Response("too large", { status: 413 });
     let data = null;
@@ -64,6 +65,7 @@ export class Watchdog {
     try {
       if (path === "/heartbeat") await this.engine.heartbeat(await request.json());
       else if (path === "/events") return Response.json(await this.engine.events(await request.json()));
+      else if (path === "/status") return Response.json(await this.engine.status());
       else if (path === "/tick") await this.engine.tick();
       else return new Response("not found", { status: 404 });
       return new Response("ok");
