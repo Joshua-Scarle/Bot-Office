@@ -5,7 +5,10 @@ Files (XDG paths; tests pass their own directories):
   (``"on"``, ``"off"`` or ``"server"``: on/off here always win; "server" follows the per-computer
   setting in Bot Office), ``confirm_command`` (argv list, ``{text}`` is replaced by the question),
   ``confirm_timeout`` (seconds; no answer is a no), ``token_store`` (``auto``, ``keyring``, ``file``).
-- ``~/.config/botoffice-agent/deny.toml``: ``paths = [...]`` added to the built-in deny-list.
+- ``~/.config/botoffice-agent/deny.toml``: ``paths = [...]`` added to the built-in deny-list and
+  ``commands = [...]`` (regular expressions; a ``run`` whose command matches one is refused) added
+  to the built-in catastrophic-command list. Only this file changes the deny-list: nothing Bot
+  Office sends can.
 - ``~/.config/botoffice-agent/device.json``: machine id, server, when paired (no secret).
 - the token: the libsecret keyring through ``secret-tool`` when it works, else
   ``~/.config/botoffice-agent/token`` (mode 0600; readable by anything running as you).
@@ -15,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tomllib
@@ -57,6 +61,7 @@ class Config:
     confirm_timeout: int = DEFAULT_CONFIRM_TIMEOUT
     token_store: str = "auto"
     deny: list[str] = field(default_factory=list)
+    deny_commands: list[str] = field(default_factory=list)
 
     @property
     def audit_path(self) -> Path:
@@ -112,10 +117,20 @@ def load(home: Path | None = None, cfg_dir: Path | None = None, st_dir: Path | N
     if store not in ("auto", "keyring", "file"):
         raise ConfigError("config.toml: token_store must be auto, keyring or file")
     cfg.token_store = store
-    deny = _read_toml(cfg.config_dir / "deny.toml").get("paths", [])
+    deny_file = _read_toml(cfg.config_dir / "deny.toml")
+    deny = deny_file.get("paths", [])
     if not isinstance(deny, list) or not all(isinstance(item, str) and item for item in deny):
         raise ConfigError("deny.toml: paths must be a list of paths")
     cfg.deny = deny
+    commands = deny_file.get("commands", [])
+    if not isinstance(commands, list) or not all(isinstance(item, str) and item for item in commands):
+        raise ConfigError("deny.toml: commands must be a list of regular expressions")
+    for item in commands:
+        try:
+            re.compile(item)
+        except re.error as exc:
+            raise ConfigError(f"deny.toml: commands: {item!r}: {exc}") from exc
+    cfg.deny_commands = commands
     return cfg
 
 

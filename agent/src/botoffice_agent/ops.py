@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .denycmd import Checker
 from .paths import DIR_FLAGS, LocalDenied, PathChanged, check_denied, open_parent, open_verified, resolve, under
 
 LS_MAX_DEPTH = 3
@@ -42,6 +43,11 @@ class Context:
     home: str
     roots: list[str]
     sandbox: bool = False
+    commands: Checker | None = None
+
+    def check_command(self, argv, sh, cwd: str) -> None:
+        """The command deny-list; it wins over any grant."""
+        (self.commands or Checker(self.home, self.roots)).check(argv, sh, cwd)
 
 
 def _arg_path(args: dict, key: str = "path") -> str:
@@ -58,7 +64,13 @@ def op_resolve(args: dict, ctx: Context) -> dict:
     path = args.get("path")
     if not isinstance(path, str) or not path:
         raise ValueError("path required")
-    return resolve(path, kind, ctx.home, ctx.roots)
+    found = resolve(path, kind, ctx.home, ctx.roots)
+    if "argv" in args or "sh" in args:  # run: the command deny-list too, before anyone is asked
+        argv, sh = args.get("argv"), args.get("sh")
+        if argv is not None and (not isinstance(argv, list) or not all(isinstance(item, str) for item in argv)):
+            raise ValueError("argv must be a list of strings")
+        ctx.check_command(argv, sh if argv is None else None, found["canonical"])
+    return found
 
 
 def op_ls(args: dict, ctx: Context) -> dict:
@@ -322,6 +334,7 @@ def op_run(args: dict, ctx: Context, cancelled: threading.Event | None = None) -
         command = ["/bin/sh", "-c", sh]
     else:
         raise ValueError("argv or sh required")
+    ctx.check_command(argv if argv is not None else None, sh if argv is None else None, cwd)  # again, at execution
     cwd_fd = open_verified(cwd, ctx.roots, directory=True)
     try:
         if ctx.sandbox:

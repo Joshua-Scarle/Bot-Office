@@ -1,9 +1,12 @@
 """``machine``: a bot's helper for the owner's paired computers (bin/machine).
 
-Every call except ``list`` asks the owner first: it prints that an approval is waiting and blocks
-(like ``desk ask``) until the owner decides in the chat or Needs-you, or the approval times out,
-which is a deny. Output from the computer is data, wrapped in <untrusted-data>. Files come into and
-go out of this job workspace only.
+Access is a session grant for this task (this job): the first call (or ``machine request --scope``)
+asks the owner ONCE with one card (bot, computer, task, scope, how long) and blocks (like
+``desk ask``) until the owner decides in the chat or Needs-you, or the card times out, which is a
+deny. After "Allow for this task" every call within that scope runs without another card until the
+task ends, the owner ends the grant, or the grant's time cap is reached. A call that needs a wider
+scope (read < files < shell) raises one widen card. Output from the computer is data, wrapped in
+<untrusted-data>. Files come into and go out of this job workspace only.
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ from pathlib import Path
 
 USAGE = """usage: machine [--machine NAME] COMMAND ...
   machine list                                   paired computers (no approval)
+  machine request --scope read|files|shell       ask for this task's access up front (one card)
   machine ls PATH [--depth 1-3]                  list a folder
   machine read PATH [--offset N] [--length N] [--b64]   read up to 1 MiB of a file
   machine run [--cwd DIR] [--timeout S] -- PROGRAM ARG...   run a command (no shell)
@@ -27,7 +31,9 @@ USAGE = """usage: machine [--machine NAME] COMMAND ...
   machine pull REMOTE_PATH LOCAL_DEST [--overwrite]   copy a file here (this workspace)
   machine push LOCAL_FILE REMOTE_PATH [--overwrite]   copy a file from this workspace there
   machine shot LOCAL_DEST                         screenshot into this workspace
-Each call waits for the owner's approval; no answer in time means no. Exit 3: denied or expired."""
+Scopes: read = ls, read, pull, shot; files = read + push; shell = files + run.
+The first call of a task waits for the owner's one approval card for this task; later calls in
+that scope run at once. No answer in time means no. Exit 3: denied, expired or the grant ended."""
 TRANSFER_MAX = 100 * 1024 * 1024
 POLL_SECONDS = 1.0
 EXIT_DENIED = 3
@@ -92,7 +98,7 @@ def _wait(client: Client, item: dict) -> dict:
             raise HelperError("denied: no answer in time")
         time.sleep(POLL_SECONDS)
         item = client.call("GET", f"/v1/agent/machines/requests/{item['id']}")
-    if item["status"] != "approved":
+    if item["status"] not in ("approved", "done"):
         raise HelperError(f"denied: the request is {item['status']}" + (f" ({item['error']})" if item.get("error") else ""))
     return item
 
@@ -108,6 +114,8 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("list")
     sub.add_parser("help")
+    request = sub.add_parser("request")
+    request.add_argument("--scope", required=True, choices=("read", "files", "shell"))
     ls = sub.add_parser("ls")
     ls.add_argument("path")
     ls.add_argument("--depth", type=int, default=1)
@@ -158,6 +166,11 @@ def run(argv: list[str]) -> int:
         for item in client.call("GET", "/v1/agent/machines"):
             state = "online" if item["online"] else "offline"
             print(f"{item['name']}\t{item['hostname']}\t{item['os']}\t{state}\tlast seen {item['last_seen_at'] or 'never'}")
+        return 0
+    if args.command == "request":
+        item = _wait(client, client.call("POST", "/v1/agent/machines/requests",
+                                         {"machine": args.machine, "tool": "grant", "scope": args.scope}, timeout=60))
+        print(f"allowed: {args.scope} access for this task" + (f" (grant #{item['grant_id']})" if item.get("grant_id") else ""))
         return 0
     workspace = _workspace() if args.command in ("pull", "push", "shot") else None
     if args.command == "ls":

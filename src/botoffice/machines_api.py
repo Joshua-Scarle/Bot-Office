@@ -1,7 +1,8 @@
 """HTTP and WebSocket routes for paired computers (see machines.py and machine_hub.py).
 
-Owner (master token): /v1/machines... (list, pairing codes, activate, revoke, rotate, flags, grants,
-audit) and the "Always" button of a machine approval card. Unauthenticated: POST /v1/machines/pair
+Owner (master token): /v1/machines... (list, pairing codes, activate, revoke, rotate, flags and the
+prompt setting, live grants with End grant, Stop all computer access, the grant cap, audit). The
+grant card itself is answered through /v1/approvals/{id}/approve|deny. Unauthenticated: POST /v1/machines/pair
 (rate-limited; it only turns a live code into a computer that still waits for Activate). Device
 token: the WebSocket /v1/machines/ws. Job agent token (bin/machine): /v1/agent/machines/*.
 """
@@ -43,11 +44,11 @@ class MachinePatch(BaseModel):
     name: str | None = Field(default=None, max_length=60)
     sandbox: bool | None = None
     confirm_local: bool | None = None
+    prompt_mode: str | None = Field(default=None, max_length=20)
 
 
-class AlwaysBody(BaseModel):
-    pattern: str | None = Field(default=None, max_length=500)
-    confirm_broad: bool = False
+class SettingsPatch(BaseModel):
+    grant_cap_min: int | None = None
 
 
 def _http(exc: machines.MachineError | HubError) -> HTTPException:
@@ -102,11 +103,24 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
 
     # --- owner ---
 
+    async def sweep() -> None:
+        machines.expire(store)
+        for grant_id in machines.sweep(store):
+            await hub.end_grant(grant_id)
+
+    def overview() -> dict:
+        return {"machines": machines.list_machines(store, hub.online()), "grants": machines.list_grants(store),
+                "computer_access": machines.class_enabled(store), "grant_cap_min": machines.grant_cap_minutes(store),
+                "defaults": {**machines.DEVICE_FLAG_DEFAULTS, "prompt_mode": machines.PROMPT_MODE_DEFAULT,
+                             "grant_cap_min": machines.GRANT_CAP_DEFAULT_MIN,
+                             "remember_days": machines.REMEMBER_TTL.days},
+                "scopes": {key: machines.SCOPE_WORDS[key] for key in machines.SCOPES},
+                "prompt_modes": list(machines.PROMPT_MODES)}
+
     @app.get("/v1/machines", dependencies=[Depends(auth)])
     async def list_machines() -> dict:
-        machines.expire(store)
-        return {"machines": machines.list_machines(store, hub.online()), "grants": machines.list_grants(store),
-                "defaults": machines.DEVICE_FLAG_DEFAULTS}
+        await sweep()
+        return overview()
 
     @app.post("/v1/machines/pairing-codes", status_code=201, dependencies=[Depends(auth)])
     async def pairing_code(body: CodeBody) -> dict:
@@ -115,6 +129,30 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
     @app.post("/v1/machines/{machine_id}/activate", dependencies=[Depends(auth)])
     async def activate(machine_id: str, body: ActivateBody) -> dict:
         return machines.public(call(machines.activate, store, machine_id, body.fingerprint), hub.is_online(machine_id))
+
+    @app.get("/v1/machines/audit", dependencies=[Depends(auth)])
+    async def audit_all(machine_id: str | None = None, bot_id: str | None = None, job_id: str | None = None,
+                        limit: int = 200) -> list[dict]:
+        return machines.audit_log(store, machine_id=machine_id or None, bot_id=bot_id or None, job_id=job_id or None,
+                                  limit=limit)
+
+    @app.post("/v1/machines/stop-all", dependencies=[Depends(auth)])
+    async def stop_all() -> dict:
+        """Stop all computer access: class "computer" off, every grant ended, calls in flight cancelled."""
+        for grant_id in machines.stop_all(store):
+            await hub.end_grant(grant_id)
+        return overview()
+
+    @app.post("/v1/machines/resume-all", dependencies=[Depends(auth)])
+    async def resume_all() -> dict:
+        machines.resume_all(store)
+        return overview()
+
+    @app.patch("/v1/machine-settings", dependencies=[Depends(auth)])
+    async def machine_settings(body: SettingsPatch) -> dict:
+        if body.grant_cap_min is not None:
+            call(machines.set_grant_cap, store, body.grant_cap_min)
+        return overview()
 
     @app.post("/v1/machines/{machine_id}/revoke", dependencies=[Depends(auth)])
     async def revoke(machine_id: str) -> dict:
@@ -133,27 +171,27 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
     @app.patch("/v1/machines/{machine_id}", dependencies=[Depends(auth)])
     async def patch_machine(machine_id: str, body: MachinePatch) -> dict:
         machine = call(machines.update_machine, store, machine_id, name=body.name, sandbox=body.sandbox,
-                       confirm_local=body.confirm_local)
+                       confirm_local=body.confirm_local, mode=body.prompt_mode)
         if body.sandbox is not None or body.confirm_local is not None:
             await hub.push_settings(machine_id)
         return machines.public(machine, hub.is_online(machine_id))
 
     @app.get("/v1/machines/{machine_id}/audit", dependencies=[Depends(auth)])
     async def machine_audit(machine_id: str, limit: int = 200) -> list[dict]:
-        return machines.audit_log(store, machine_id, limit)
+        return machines.audit_log(store, machine_id=machine_id, limit=limit)
 
     @app.get("/v1/machine-grants", dependencies=[Depends(auth)])
     async def grants(machine_id: str | None = None) -> list[dict]:
+        await sweep()
         return machines.list_grants(store, machine_id)
 
-    @app.post("/v1/machine-grants/{grant_id}/revoke", dependencies=[Depends(auth)])
-    async def revoke_grant(grant_id: int) -> dict:
-        return call(machines.revoke_grant, store, grant_id)
-
-    @app.post("/v1/machines/approvals/{approval_id}/always", dependencies=[Depends(auth)])
-    async def always(approval_id: int, body: AlwaysBody) -> dict:
-        machines.expire(store)
-        return call(machines.approve_always, store, approval_id, body.pattern, body.confirm_broad)
+    @app.post("/v1/machine-grants/{grant_id}/end", dependencies=[Depends(auth)])
+    async def end_grant(grant_id: int) -> dict:
+        """End grant (a task grant: its calls in flight are cancelled, their processes killed on the
+        computer) or Forget (a remembered grant)."""
+        grant = call(machines.end_grant, store, grant_id)
+        await hub.end_grant(grant_id, grant["machine_id"])
+        return machines.grant_view(grant)
 
     # --- the computer itself ---
 
@@ -194,22 +232,33 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
             raise HTTPException(status_code=403, detail="Controlling a computer is switched off in Settings > Approvals")
         machine = call(machines.find_for_bot, store, body.get("machine"))
         tool = body.get("tool")
-        args = call(machines.validate_args, tool, body.get("args"))
         if not machines.request_allowed(str(job.bot_id)):
             raise HTTPException(status_code=429, detail="too many computer requests this minute")
+        await sweep()
+        if tool == "grant":  # machine request --scope X: ask for the task's grant before the first call
+            scope = call(machines.check_scope, body.get("scope"))
+            if not hub.is_online(machine["id"]):
+                raise HTTPException(status_code=409, detail="the computer is offline")
+            return machines.request_view(call(machines.record_request, store, job, machine, "grant", {"scope": scope},
+                                              scope))
+        args = call(machines.validate_args, tool, body.get("args"))
         resolved = None
         kind = machines.RESOLVE_KIND.get(tool)
         if kind is not None:
             target = args["cwd"] if tool == "run" else args["path"]
+            probe = {"path": target, "kind": kind}
+            if tool == "run":  # the computer's command deny-list, before anyone is asked
+                probe.update(argv=args["argv"], sh=args["sh"])
             try:
-                resolved = await hub.call(machine["id"], "resolve", {"path": target, "kind": kind},
-                                          timeout=RESOLVE_TIMEOUT)
+                resolved = await hub.call(machine["id"], "resolve", probe, timeout=RESOLVE_TIMEOUT)
             except HubError as exc:
+                if exc.status != 409:  # offline is not a call
+                    machines.refused(store, job, machine, tool, args, blocked=exc.code == "denied_local",
+                                     why=exc.detail)
                 raise _http(exc) from exc
         elif not hub.is_online(machine["id"]):
             raise HTTPException(status_code=409, detail="the computer is offline")
         args = call(machines.canonical_args, tool, args, resolved)
-        machines.expire(store)
         item = call(machines.record_request, store, job, machine, tool, args)
         return machines.request_view(item)
 
@@ -221,7 +270,7 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
 
     @app.get("/v1/agent/machines/requests/{request_id}")
     async def agent_request_status(request_id: int, job=Depends(agent_scope)) -> dict:  # noqa: B008
-        machines.expire(store)
+        await sweep()
         return machines.request_view(_own(request_id, job))
 
     @app.post("/v1/agent/machines/requests/{request_id}/cancel")
@@ -232,21 +281,21 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
     @app.post("/v1/agent/machines/requests/{request_id}/execute")
     async def agent_execute(request_id: int, request: Request, job=Depends(agent_scope)):  # noqa: B008
         item = _own(request_id, job)
-        machines.expire(store)
+        await sweep()
         upload = None
         claimed_upload = False
         try:
             if item["tool"] == "push":
-                # nothing is received before the request is approved, and one body at a time per request
-                # and at most PUSH_UPLOADS_MAX at once: a bot cannot fill the disk with unapproved uploads
+                # nothing is received before the call is allowed, and one body at a time per request
+                # and at most PUSH_UPLOADS_MAX at once: a bot cannot fill the disk with unallowed uploads
                 item = _own(request_id, job)
                 if item["status"] != "approved":
-                    raise HTTPException(status_code=403, detail=f"request is {item['status']}, not approved")
+                    raise HTTPException(status_code=403, detail=f"request is {item['status']}, not allowed")
                 bound = json.loads(item["args_json"])
                 declared = request.headers.get("content-length")
                 if declared is not None and (not declared.isdigit() or int(declared) != bound["size"]):
-                    machines.fail_unexecuted(store, request_id, job, "the upload is not the approved size")
-                    raise HTTPException(status_code=409, detail="the file's size differs from what was approved; ask again")
+                    machines.fail_unexecuted(store, request_id, job, "the upload is not the declared size")
+                    raise HTTPException(status_code=409, detail="the file's size differs from what was declared; ask again")
                 if request_id in uploading or len(uploading) >= PUSH_UPLOADS_MAX:
                     raise HTTPException(status_code=429, detail="another upload is in progress; try again shortly")
                 uploading.add(request_id)
@@ -267,13 +316,13 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
                 try:
                     size = await asyncio.wait_for(receive(), PUSH_BODY_TIMEOUT)
                 except asyncio.TimeoutError:
-                    # a stalled body must not keep an upload slot: it uses the approval up
+                    # a stalled body must not keep an upload slot: it uses the call up
                     machines.fail_unexecuted(store, request_id, job, "the upload stalled")
                     raise HTTPException(status_code=408, detail="the upload took too long; ask again") from None
                 if size != bound["size"] or digest.hexdigest() != bound["sha256"]:
-                    # single use: content that differs from what was approved uses the approval up
-                    machines.fail_unexecuted(store, request_id, job, "the file differs from the approved sha256")
-                    raise HTTPException(status_code=409, detail="the file's content differs from what was approved "
+                    # single use: content that differs from what was declared uses the call up
+                    machines.fail_unexecuted(store, request_id, job, "the file differs from the declared sha256")
+                    raise HTTPException(status_code=409, detail="the file's content differs from what was declared "
                                         "(sha256/size); ask again")
                 upload.seek(0)
             claimed = call(machines.begin_execute, store, request_id, job)
@@ -285,18 +334,23 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
                 upload.close()
 
     async def _dispatch(claimed: dict, upload) -> object:
-        tool, args, machine = claimed["tool"], claimed["args"], claimed["machine"]
+        tool, args, machine, grant = claimed["tool"], claimed["args"], claimed["machine"], claimed["grant"]
         request_id = claimed["id"]
         source = f"machine:{machine['name']}:{tool}"
         bot = store.get_bot(claimed["bot_id"])
-        meta = {"request": request_id, "bot": bot.name if bot is not None else str(claimed["bot_id"])}
+        # the agent asks its local confirm once per grant (and scope) and ends calls by grant id
+        meta = {"request": request_id, "bot": bot.name if bot is not None else str(claimed["bot_id"]),
+                "grant": grant["id"], "scope": grant["scope"], "job": grant["job_id"], "until": grant["expires_at"],
+                "task": machines.task_label(store, grant["job_id"])[:200]}
+        tracked = {"grant_id": grant["id"],
+                   "alive": lambda: machines.grant_live(store, grant["id"], claimed["job_id"])}
         sink = None
         try:
             if tool in ("pull", "shot"):
                 sink = tempfile.TemporaryFile(dir=spool)
                 limit = machines.TRANSFER_MAX if tool == "pull" else machines.SHOT_MAX
                 data = await hub.call(machine["id"], tool, {**_wire(tool, args), "meta": meta},
-                                      timeout=TIMEOUTS[tool], sink=sink, limit=limit)
+                                      timeout=TIMEOUTS[tool], sink=sink, limit=limit, **tracked)
                 sink.seek(0)
                 digest, size = hashlib.sha256(), 0
                 while block := await asyncio.to_thread(sink.read, 1024 * 1024):
@@ -318,10 +372,10 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
                                          headers={"X-Machine-Sha256": data["sha256"], "X-Machine-Size": str(size)})
             timeout = args["timeout"] + 30.0 if tool == "run" else TIMEOUTS[tool]
             data = await hub.call(machine["id"], tool, {**_wire(tool, args), "meta": meta}, timeout=timeout,
-                                  upload=upload)
+                                  upload=upload, **tracked)
             machines.finish(store, request_id, ok=True, result=data)
         except HubError as exc:
-            machines.finish(store, request_id, ok=False, error=exc.detail)
+            machines.finish(store, request_id, ok=False, error=exc.detail, blocked=exc.code == "denied_local")
             raise _http(exc) from exc
         finally:
             if sink is not None:
@@ -358,7 +412,7 @@ def _wire(tool: str, args: dict) -> dict:
 
 
 class MachineRoutes:
-    """What api.py needs from this module: the Approve / Deny buttons of a machine card."""
+    """What api.py needs from this module: Allow for this task / Deny on a computer grant card."""
 
     def __init__(self, store: JobStore, hub: Hub):
         self.store = store

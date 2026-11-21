@@ -1,4 +1,4 @@
-"""Device companion, the computer's side (agent/): paths, the deny-list, caps, flags and confirm."""
+"""Device companion, the computer's side (agent/): paths, the deny-lists, caps, flags, confirm, End grant."""
 import asyncio
 import hashlib
 import os
@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent" / "src"))
 
-from botoffice_agent import cli, config, ops  # noqa: E402
+from botoffice_agent import cli, config, denycmd, ops  # noqa: E402
 from botoffice_agent.paths import LocalDenied, PathChanged, deny_roots, open_verified  # noqa: E402
 
 
@@ -376,6 +376,7 @@ def test_sandbox_runs_read_only_without_network_where_bwrap_works(home):
         pytest.skip("bwrap cannot build a sandbox on this host")
     ctx = ctx_for(home)
     ctx.sandbox = True
+    ctx.commands = denycmd.Checker(str(home), [])  # past the command tripwire: this tests the sandbox itself
     work = canonical(home / "work")
     done = ops.op_run({"sh": "cat a.txt; echo; ls -A ../.ssh | wc -l; touch new 2>/dev/null || echo ro", "cwd": work}, ctx)
     assert done["sandboxed"] and done["stdout"].split() == ["hello", "0", "ro"]
@@ -577,3 +578,223 @@ def test_root_never_sends_over_the_plain_tunnel():
     a, b = socketlib.socketpair(socketlib.AF_UNIX)
     with a, b, pytest.raises(tunnel.TunnelNotOurs, match="root"):
         tunnel.check(a, tables=[], uid=0, wait=0)
+
+
+# --- the command deny-list ---
+
+CATASTROPHIC_ARGV = [
+    ["rm", "-rf", "/"], ["rm", "-fr", "/"], ["rm", "-r", "-f", "/"], ["rm", "-rf", "--no-preserve-root", "/"],
+    ["rm", "--recursive", "--force", "/"], ["rm", "-rf", "~/"], ["rm", "-rf", "~"], ["rm", "-rf", "$HOME"],
+    ["rm", "-rf", "{home}"], ["rm", "-rf", "{home}/"], ["rm", "-Rf", "{home}/.."],
+    ["sudo", "rm", "-rf", "/"], ["env", "X=1", "nice", "-n", "5", "rm", "-rf", "/"], ["timeout", "5", "rm", "-rf", "/"],
+    ["rm", "-rf", "--", "/"], ["rm", "-rf", "/./"], ["rm", "-rf", "//"], ["/bin/rm", "-rf", "/"],
+    ["mkfs.ext4", "/dev/sda1"], ["mkfs", "-t", "ext4", "/dev/sdb"], ["mke2fs", "/dev/sdb"], ["wipefs", "-a", "/dev/sda"],
+    ["dd", "if=/dev/zero", "of=/dev/sda"], ["dd", "if=x.img", "of=/dev/nvme0n1", "bs=4M"], ["tee", "/dev/sda"],
+    ["shutdown", "-h", "now"], ["reboot"], ["poweroff"], ["halt"], ["/sbin/reboot"], ["systemctl", "poweroff"],
+    ["systemctl", "reboot"], ["sudo", "systemctl", "--no-wall", "reboot"], ["init", "0"], ["loginctl", "poweroff"],
+    ["chmod", "-R", "777", "/"], ["chown", "-R", "nobody", "~"], ["chmod", "--recursive", "000", "$HOME"],
+    ["find", "/", "-delete"], ["find", "~", "-exec", "rm", "-rf", "{}", "+"],
+    ["cat", "~/.ssh/id_ed25519"], ["cp", "{home}/.ssh/id_ed25519", "/tmp/x"], ["tar", "czf", "x.tgz", ".ssh"],
+    ["ls", "{home}/.config/google-chrome/Default/Cookies"], ["sqlite3", "--", "~/.mozilla/x"],
+    ["rsync", "-a", "--include=~/.gnupg/**", "x"], ["cat", "/etc/shadow"], ["bash", "-c", "rm -rf /"],
+    ["sh", "-c", "cat ~/.ssh/id_ed25519"], ["xargs", "rm", "-rf", "/"],
+]
+CATASTROPHIC_SH = [
+    "rm -rf /", "rm -fr /", "rm -rf --no-preserve-root /", "rm -rf ~/", "rm -rf $HOME", 'rm -rf "$HOME"',
+    "rm -rf ${HOME}", "rm -rf ~/*", "rm -rf /*", "cd / && rm -rf *", "true; rm -rf /", "echo hi | rm -rf /",
+    "sudo rm -rf / &", "r''m -rf /", 'rm -rf "/"', "rm -rf '/'", r"\rm -rf /", "rm -rf $X", "rm -rf $(pwd)/..",
+    "rm -rf `echo /`", "eval 'rm -rf /'", 'bash -c "rm -rf /"', "sh -c 'sh -c \"rm -rf ~\"'", "rm -rf /\nls",
+    "mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda bs=1M", "echo x > /dev/sda", "cat img >/dev/nvme0n1",
+    "echo x >> /dev/sdb1", "cat x | tee /dev/sda", "shutdown now", "reboot", "poweroff", "halt", "systemctl reboot",
+    "sudo systemctl poweroff", ":(){ :|:& };:", ": () { : | : & } ; :", "bomb(){ bomb|bomb& };bomb",
+    "chmod -R 777 /", "chown -R me ~", "chmod -R 000 $HOME", "find / -delete", "find ~ -exec rm {} +",
+    "cat ~/.ssh/id_ed25519", "cat $HOME/.ssh/id_ed25519", 'cat "$HOME"/.ssh/id_ed25519', "cd ~/.ssh && cat id*",
+    "cat ~/.ss?/id_ed25519", "cat ~/.s*/id_ed25519", "cp ~/.config/google-chrome/Default/Cookies /tmp/c",
+    "tar cz .ssh | base64", "d=.ssh; cat ~/$d/id_ed25519", "cat /etc/shadow", "echo cm0gLXJmIC8= | base64 -d | sh",
+    "rm -rf \"$(echo /)\"", "x=rm; $x -rf /", "rm -rf '/'\"\"", "rm -rf / 'unbalanced",
+]
+ALLOWED_ARGV = [
+    ["ls", "-la"], ["rm", "-rf", "build"], ["rm", "-rf", "{home}/work/sub"], ["rm", "a.txt"], ["rm", "-f", "/tmp/x"],
+    ["make", "test"], ["git", "status"], ["python3", "-c", "print(1)"], ["dd", "if=/dev/zero", "of=out.img",
+                                                                     "count=1"],
+    ["chmod", "-R", "go-w", "{home}/work"], ["find", ".", "-name", "*.pyc", "-delete"], ["echo", "reboot"],
+    ["grep", "-r", "shutdown", "."], ["cat", "/dev/null"], ["systemctl", "--user", "status"],
+]
+ALLOWED_SH = [
+    "ls -la | wc -l", "rm -rf build dist", "make test && echo ok", "for f in *.txt; do wc -l $f; done",
+    "echo hi > /dev/null", "find . -name '*.o' -delete", "git log --oneline | head", "cd sub && rm -rf node_modules",
+    "dd if=/dev/zero of=/tmp/x bs=1k count=1 2>/dev/null", "python3 -c 'print(42)'", "echo $HOME", "du -sh ~/work",
+]
+
+
+def _checker(home):
+    roots = deny_roots([*config.DEFAULT_DENY], str(home))
+    return denycmd.Checker(str(home), roots, ())
+
+
+@pytest.mark.parametrize("argv", CATASTROPHIC_ARGV, ids=lambda a: " ".join(a)[:40])
+def test_catastrophic_and_credential_argv_is_refused(home, argv):
+    with pytest.raises(LocalDenied):
+        _checker(home).check([item.replace("{home}", str(home)) for item in argv], None, str(home / "work"))
+
+
+@pytest.mark.parametrize("text", CATASTROPHIC_SH, ids=lambda t: t[:40])
+def test_catastrophic_and_credential_sh_is_refused(home, text):
+    with pytest.raises(LocalDenied):
+        _checker(home).check(None, text.replace("{home}", str(home)), str(home / "work"))
+
+
+@pytest.mark.parametrize("argv", ALLOWED_ARGV, ids=lambda a: " ".join(a)[:40])
+def test_ordinary_argv_is_allowed(home, argv):
+    _checker(home).check([item.replace("{home}", str(home)) for item in argv], None, str(home / "work"))
+
+
+@pytest.mark.parametrize("text", ALLOWED_SH, ids=lambda t: t[:40])
+def test_ordinary_sh_is_allowed(home, text):
+    _checker(home).check(None, text, str(home / "work"))
+
+
+def test_rm_in_the_home_folder_itself_is_catastrophic(home):
+    with pytest.raises(LocalDenied):
+        _checker(home).check(["rm", "-rf", "."], None, str(home))  # cwd is home
+    with pytest.raises(LocalDenied):
+        _checker(home).check(None, "rm -rf ..", str(home / "work"))
+    _checker(home).check(["rm", "-rf", "."], None, str(home / "work"))
+
+
+def test_deny_toml_commands_and_paths(home, tmp_path):
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "deny.toml").write_text('paths = ["~/work/secret"]\ncommands = ["\\\\bgit\\\\s+push\\\\b"]\n')
+    cfg = config.load(home, cfg_dir, tmp_path / "st")
+    roots = deny_roots(cfg.deny_entries(), str(home))
+    checker = denycmd.Checker(str(home), roots, cfg.deny_commands)
+    for argv, sh in ((["git", "push", "origin"], None), (None, "cd x && git  push"), (["cat", "secret/x"], None),
+                     (None, f"cat {cfg_dir}/config.toml")):
+        with pytest.raises(LocalDenied):
+            checker.check(argv, sh, str(home / "work"))
+    checker.check(["git", "pull"], None, str(home / "work"))
+    (cfg_dir / "deny.toml").write_text('commands = ["(unclosed"]\n')
+    with pytest.raises(config.ConfigError):
+        config.load(home, cfg_dir, tmp_path / "st")
+
+
+def test_resolve_and_run_check_the_command(home, tmp_path):
+    ctx = ctx_for(home)
+    work = canonical(home / "work")
+    with pytest.raises(LocalDenied):
+        ops.op_resolve({"path": "~/work", "kind": "dir", "argv": ["rm", "-rf", "/"], "sh": None}, ctx)
+    with pytest.raises(LocalDenied):
+        ops.op_resolve({"path": "~/work", "kind": "dir", "argv": None, "sh": "cat ~/.ssh/id_ed25519"}, ctx)
+    assert ops.op_resolve({"path": "~/work", "kind": "dir", "argv": ["ls"], "sh": None}, ctx)["canonical"] == work
+    # and again at execution, whatever was approved
+    marker = tmp_path / "never"
+    with pytest.raises(LocalDenied):
+        ops.op_run({"sh": f"touch {marker}; reboot", "cwd": work}, ctx)
+    assert not marker.exists()
+
+
+# --- session grants on the computer: confirm once per grant, End grant ---
+
+def _agent(home, tmp_path, confirm_local="on", confirm=None):
+    from botoffice_agent import client
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "config.toml").write_text(f'token_store = "file"\nconfirm_local = "{confirm_local}"\n')
+    cfg = config.load(home, cfg_dir, tmp_path / "st")
+    config.TokenStore(cfg, "abc").save("bom_abc_x")
+    agent = client.Agent(cfg, {"machine_id": "abc"}, config.TokenStore(cfg, "abc"), confirm=confirm)
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    agent.send = send
+    return agent, sent, cfg
+
+
+def test_confirm_local_asks_once_per_grant_and_again_when_widened(home, tmp_path):
+    pytest.importorskip("websockets")
+    asked = []
+    answers = {"7": True, "8": False}
+
+    def confirm(text):
+        asked.append(text)
+        return answers[text.split("#")[1].split()[0]] if "#" in text else True
+
+    async def scenario():
+        agent, sent, _ = _agent(home, tmp_path, confirm=confirm)
+        read = {"path": canonical(home / "work" / "a.txt")}
+
+        def meta(grant, scope):
+            return {"bot": "Ada", "grant": grant, "scope": scope, "task": f"#{grant} fix it", "until": "17:00"}
+
+        for index in range(3):
+            await agent.call(f"a{index}", "read", {**read, "meta": meta(7, "read")})
+        await agent.call("w1", "read", {**read, "meta": meta(7, "shell")})  # widened: asks again
+        for index in range(2):
+            await agent.call(f"b{index}", "read", {**read, "meta": meta(8, "read")})  # no: once, held for the grant
+        return sent
+
+    sent = asyncio.run(scenario())
+    assert len(asked) == 3
+    assert "Ada may look at files" in asked[0] and "for: #7 fix it" in asked[0] and "until 17:00" in asked[0]
+    assert [m["ok"] for m in sent] == [True, True, True, True, False, False]
+    assert sent[-1]["code"] == "declined_local"
+
+
+def test_confirm_local_off_never_asks(home, tmp_path):
+    pytest.importorskip("websockets")
+
+    def confirm(text):
+        raise AssertionError("asked")
+
+    async def scenario():
+        agent, sent, _ = _agent(home, tmp_path, confirm_local="off", confirm=confirm)
+        agent.server_flags = {"confirm_local": True}  # this computer's off wins over Bot Office
+        await agent.call("a", "read", {"path": canonical(home / "work" / "a.txt"), "meta": {"grant": 1, "scope": "read"}})
+        return sent
+
+    assert asyncio.run(scenario())[0]["ok"]
+
+
+def test_end_grant_kills_the_running_process_group(home, tmp_path):
+    pytest.importorskip("websockets")
+    pids = tmp_path / "pids"
+
+    async def scenario():
+        agent, sent, cfg = _agent(home, tmp_path, confirm_local="off")
+        meta = {"bot": "Ada", "grant": 5, "scope": "shell", "request": 1}
+        await agent.handle({"type": "call", "id": "r1", "op": "run", "args": {
+            "sh": f"sleep 120 & echo $! > {pids}; sleep 120", "cwd": canonical(home / "work"), "timeout": 300,
+            "meta": meta}})
+        await agent.handle({"type": "call", "id": "r2", "op": "run", "args": {
+            "argv": ["sleep", "120"], "cwd": canonical(home / "work"), "timeout": 300, "meta": {**meta, "grant": 6}}})
+        for _ in range(100):
+            if pids.exists() and pids.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        started = time.monotonic()
+        await agent.handle({"type": "end_grant", "grant": 5})
+        done = [task for task in agent.tasks]
+        await asyncio.wait(done, timeout=0.1)
+        while not any(m.get("id") == "r1" for m in sent) and time.monotonic() - started < 15:
+            await asyncio.sleep(0.05)
+        elapsed = time.monotonic() - started
+        still_other = any(not t.done() for t in agent.tasks)
+        # a call of the ended grant that arrives late is refused here
+        await agent.call("r3", "read", {"path": canonical(home / "work" / "a.txt"), "meta": meta})
+        await agent.handle({"type": "end_grant", "grant": 6})
+        await asyncio.wait_for(asyncio.gather(*agent.tasks), 15)
+        return sent, elapsed, still_other, cfg
+
+    sent, elapsed, still_other, cfg = asyncio.run(scenario())
+    first = next(m for m in sent if m["id"] == "r1")
+    assert first["ok"] and first["data"]["cancelled"] and first["data"]["exit"] is None and elapsed < 10
+    assert still_other  # another grant's call kept running until its own end
+    child = int(pids.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)  # the background child of the command's process group is gone too
+    assert next(m for m in sent if m["id"] == "r3")["code"] == "declined_local"
+    log = cfg.audit_path.read_text()
+    assert '"op": "end_grant"' in log and '"grant": 5' in log

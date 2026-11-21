@@ -275,6 +275,16 @@ def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None)
         if bot is None:
             continue
         expired = row["status"] == "expired"
+        if row["source"] == "machine":  # E6-1: one card per task asks for a scope on a computer
+            items.append({
+                "id": f"p:{row['id']}:{row['status']}", "kind": "approval", "state": row["status"],
+                "bot_id": row["bot_id"], "bot_name": bot["name"], "notify": bool(bot["notify"]),
+                "approval_id": row["id"], "job_id": row["job_id"], "title": f"Approval #{row['id']}",
+                "class": "Controlling a computer", "ask": row["summary"], "command": row["summary"],
+                "fingerprint": row["input_hash"], "length": len(row["summary"]), "at": row["created_at"],
+                "actions": ["allow_task", "deny"],
+            })
+            continue
         items.append({
             "id": f"p:{row['id']}:{row['status']}", "kind": "approval", "state": row["status"],
             "bot_id": row["bot_id"], "bot_name": bot["name"], "notify": bool(bot["notify"]),

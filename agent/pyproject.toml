@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "botoffice-agent"
-version = "0.1.0"
-description = "Device companion for Bot Office: lets your bots reach this computer, one approved call at a time"
+version = "0.2.0"
+description = "Device companion for Bot Office: lets your bots reach this computer, one grant per task, checked by its own deny-list"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
