@@ -662,6 +662,15 @@ class Scheduler:
                     run_job = run_job.model_copy(update={"prompt": line, "resume_prompt": line})
             else:
                 safefs.write_text(workspace / "prompt.txt", job.prompt, isolation.file_mode())
+                # A16: a job with no bot (POST /v1/jobs) has no agent token and no chat for an approval
+                # card, but the git guard must still stop it: the hook runs, and with no controller to ask
+                # its local fallback refuses every guarded command
+                safefs.write_text(workspace / ".bot-office-gate.json",
+                                  json.dumps({"mode": "attended", "job_id": str(job.id), "provider": job.provider}),
+                                  isolation.locked_file_mode())
+                run_job = job.model_copy(update={
+                    "gate_command": f"{REPO_BIN / 'bot-office-gate'} {job.provider} --mode attended",
+                    "unattended": False})
             result: RunResult = await asyncio.wait_for(
                 adapter.run(run_job, workspace, log_path, timeout),
                 timeout=timeout + 10,

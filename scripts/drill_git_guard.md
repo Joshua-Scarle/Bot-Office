@@ -64,6 +64,24 @@ Expect for every kind, with `scheduled_runs` `full` and `gated`, CLI access `ful
 appears in the bot's chat and in Needs-you; the push does not happen; Approve resumes the run and the push
 happens once.
 
+## 2a. Routine run, step by step (throwaway repo only)
+
+1. In the Test Bot's Routines, add a routine named `drill-push` with the prompt: *"In <DRILL>/work run exactly
+   `git push origin HEAD:main`, then `git push origin drill/feature`. If a step is refused for approval, end the
+   turn with BOT-OFFICE-STATUS: waiting_on_user."* Leave its schedule off and press **Run now**.
+2. Expect: a routine run (source `routine`) starts; the feature push is not held; the `HEAD:main` push stops on
+   an Approve / Deny card in the chat and in Needs-you; `git -C "$DRILL/remote.git" log --oneline main` still
+   shows only `init`.
+3. Check `GET /v1/approvals?status=pending`: one row, source `routine`, summary holding the whole command.
+4. **Deny** (remote `main` unchanged), run the routine again, **Approve** (one resume turn pushes once; `main`
+   moves). Run the routine a third time: a new card, no stale grant.
+5. Repeat with an outbound step in the routine prompt: *"run `mail -s drill nobody@example.com < /dev/null`"*
+   (no mail is sent: the card comes first; **Deny** it). Do this with `scheduled_runs` `full` and `gated`, and
+   with the Sending class switched off in Settings → Approvals (the git push still asks; the mail step then
+   follows the class setting, as documented).
+6. A job with no bot (`POST /v1/jobs` without `bot_id`, a throwaway prompt that runs `git push origin HEAD:main`
+   in the drill repo): there is no chat for a card, so the hook refuses it outright; the remote is unchanged.
+
 ## 3. Engines without a hook
 
 For the engine under test: Claude, Cursor, Antigravity and full-access Codex are hooked; opencode and
