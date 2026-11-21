@@ -246,7 +246,10 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
         kind = machines.RESOLVE_KIND.get(tool)
         if kind is not None:
             target = args["cwd"] if tool == "run" else args["path"]
-            probe = {"path": target, "kind": kind}
+            bot = store.get_bot(str(job.bot_id))
+            # who asks, for the computer's own record of a refusal (resolve itself is not a call)
+            probe = {"path": target, "kind": kind,
+                     "meta": {"bot": bot.name if bot is not None else str(job.bot_id), "job": str(job.id)}}
             if tool == "run":  # the computer's command deny-list, before anyone is asked
                 probe.update(argv=args["argv"], sh=args["sh"])
             try:
@@ -377,6 +380,9 @@ def register(app: FastAPI, *, store: JobStore, settings, auth: Callable, agent_s
         except HubError as exc:
             machines.finish(store, request_id, ok=False, error=exc.detail, blocked=exc.code == "denied_local")
             raise _http(exc) from exc
+        except asyncio.CancelledError:  # the bot hung up: the hub cancelled the call on the computer
+            machines.finish(store, request_id, ok=False, error="cancelled: the bot stopped waiting")
+            raise
         finally:
             if sink is not None:
                 sink.close()

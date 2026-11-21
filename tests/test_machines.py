@@ -1,4 +1,5 @@
 """Device companion, server side: pairing, device tokens, session grants, prompt modes, audit."""
+import asyncio
 import json
 from contextlib import closing
 from datetime import timedelta
@@ -209,17 +210,52 @@ def test_a_wider_call_raises_one_widen_card(tmp_path):
     push = machines.record_request(store, job, machine, "push", PUSH)
     assert push["status"] == "pending"
     run = machines.record_request(store, job, machine, "run", RUN)
-    assert run["approval_id"] == push["approval_id"]  # widened in place to shell: still one card
-    card = approval_card(store, machines.approval_dict(store, push["approval_id"]))["machine"]
+    # wider than the card on screen: that card is withdrawn and one new card asks for shell, so an
+    # Allow on the "files" card can never grant shell
+    assert run["approval_id"] != push["approval_id"]
+    assert machines.approval_dict(store, push["approval_id"])["status"] == "expired"
+    with pytest.raises(machines.MachineError):
+        machines.approve(store, push["approval_id"])
+    assert machines.get_request(store, push["id"])["approval_id"] == run["approval_id"]  # it waits on the new one
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT COUNT(*) FROM approvals WHERE source='machine' AND status='pending'").fetchone()[0] == 1
+    card = approval_card(store, machines.approval_dict(store, run["approval_id"]))["machine"]
     assert card["scope"] == "shell" and card["widen_from"] == "read" and card["full_access"]
-    assert "widen its access from read to shell" in machines.approval_dict(store, push["approval_id"])["summary"]
-    # the read grant keeps working while the widen card waits
+    assert "widen its access from read to shell" in machines.approval_dict(store, run["approval_id"])["summary"]
+    # the read grant keeps working while the widen card waits; a call it covers keeps the card
     assert machines.record_request(store, job, machine, "ls", LS)["status"] == "approved"
-    machines.approve(store, push["approval_id"])
+    assert machines.record_request(store, job, machine, "push", PUSH)["approval_id"] == run["approval_id"]
+    machines.approve(store, run["approval_id"])
     grants = machines.list_grants(store)
     assert len(grants) == 1 and grants[0]["scope"] == "shell"  # the same grant, widened; its end did not move
     assert machines.record_request(store, job, machine, "run", RUN)["status"] == "approved"
     assert machines.get_request(store, push["id"])["status"] == "approved"
+
+
+def test_ending_a_grant_denies_its_waiting_widen_card(tmp_path):
+    store, _, machine, job = setup(tmp_path)
+    first = machines.record_request(store, job, machine, "read", READ)
+    machines.approve(store, first["approval_id"])
+    grant = machines.list_grants(store)[0]
+    widen = machines.record_request(store, job, machine, "run", RUN)
+    machines.end_grant(store, grant["id"])
+    assert machines.approval_dict(store, widen["approval_id"])["status"] == "denied"
+    assert machines.get_request(store, widen["id"])["status"] == "denied"
+    with pytest.raises(machines.MachineError):  # a late Allow opens nothing
+        machines.approve(store, widen["approval_id"])
+    assert machines.list_grants(store) == []
+
+
+def test_a_widen_card_only_widens_the_grant_it_was_raised_for(tmp_path):
+    store, _, machine, job = setup(tmp_path)
+    first = machines.record_request(store, job, machine, "read", READ)
+    machines.approve(store, first["approval_id"])
+    widen = machines.record_request(store, job, machine, "run", RUN)
+    with closing(store._connect()) as db:  # the grant runs out without the sweep seeing it yet
+        db.execute("UPDATE machine_grants SET expires_at='2000-01-01T00:00:00+00:00'")
+    with pytest.raises(machines.MachineError):
+        machines.approve(store, widen["approval_id"])
+    assert machines.list_grants(store) == []
 
 
 def test_request_scope_up_front(tmp_path):
@@ -584,3 +620,54 @@ def test_hub_push_deadline_covers_a_stuck_socket():
         assert conn.ws.sent == ["call", "chunk", "cancel"] and conn.calls == {}
 
     asyncio.run(scenario())
+
+
+def test_hub_refuses_an_agent_without_session_grants(tmp_path):
+    from botoffice.machine_hub import CLOSE_OUTDATED, Hub
+    store, _, machine, _ = setup(tmp_path)
+
+    class FakeWS:
+        headers = {}
+        closed_with = None
+        sent = []
+
+        def __init__(self, hello):
+            self.hello = hello
+
+        async def accept(self):
+            pass
+
+        async def receive_text(self):
+            return json.dumps(self.hello)
+
+        async def close(self, code=1000, reason=""):
+            self.closed_with = code
+
+        async def send_text(self, text):
+            self.sent.append(text)
+
+    token = machines.rotate(store, machine["id"])
+    hub = Hub(store)
+    old = FakeWS({"type": "hello", "version": "0.1.0"})
+    old.headers = {"authorization": f"Bearer {token}"}
+    asyncio.run(hub.serve(old))
+    assert old.closed_with == CLOSE_OUTDATED and not hub.is_online(machine["id"])
+    events = [item["event"] for item in machines.audit_log(store, machine_id=machine["id"])]
+    assert "outdated_agent" in events and "connected" not in events
+
+
+def test_hub_sends_nothing_under_a_dead_grant():
+    from botoffice.machine_hub import Hub, HubError, _Connection
+
+    class WS:
+        sent = []
+
+        async def send_text(self, text):
+            self.sent.append(text)
+
+    hub = Hub(None)
+    ws = WS()
+    hub.connections["m"] = _Connection(ws, "m")
+    with pytest.raises(HubError) as caught:
+        asyncio.run(hub.call("m", "read", {}, timeout=5, grant_id=1, alive=lambda: False))
+    assert caught.value.status == 403 and ws.sent == []

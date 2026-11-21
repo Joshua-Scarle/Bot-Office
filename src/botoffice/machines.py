@@ -780,6 +780,7 @@ def end_grant(store: JobStore, grant_id: int, reason: str = "ended by you") -> d
             audit(db, "grant_ended", machine_id=row["machine_id"], bot_id=row["bot_id"], job_id=row["job_id"],
                   grant_id=grant_id, detail=reason)
         _drop_approved(db, "the grant was ended", grant_id=grant_id)
+        _drop_cards(db, row, "the grant was ended")
         return dict(db.execute("SELECT * FROM machine_grants WHERE id=?", (grant_id,)).fetchone())
 
 
@@ -794,6 +795,24 @@ def grant_live(store: JobStore, grant_id: int, job_id: str) -> bool:
                          (grant_id,)).fetchone()
     return (row is not None and row["ended_at"] is None and row["expires_at"] > _stamp() and row["job_id"] == job_id
             and row["job_status"] == "running" and row["machine_status"] == "active")
+
+
+def _drop_cards(db: sqlite3.Connection, grant: sqlite3.Row, why: str) -> None:
+    """A task grant ended: the task's waiting card (a widening, or one raised alongside) is denied
+    with it, so a late Allow cannot open a fresh grant. The bot can ask again."""
+    if grant["kind"] != "task":
+        return
+    stamp = _stamp()
+    rows = db.execute("SELECT a.id FROM machine_cards c JOIN approvals a ON a.id=c.approval_id WHERE c.machine_id=? "
+                      "AND c.bot_id=? AND c.job_id=? AND a.status='pending'",
+                      (grant["machine_id"], grant["bot_id"], grant["job_id"])).fetchall()
+    for row in rows:
+        db.execute("UPDATE approvals SET status='denied', decided_at=? WHERE id=? AND status='pending'",
+                   (stamp, row["id"]))
+        db.execute("UPDATE machine_requests SET status='denied', error=?, decided_at=?, finished_at=? "
+                   "WHERE approval_id=? AND status='pending'", (why, stamp, stamp, row["id"]))
+        audit(db, "grant_denied", machine_id=grant["machine_id"], bot_id=grant["bot_id"], job_id=grant["job_id"],
+              grant_id=grant["id"], detail=json.dumps({"approval": row["id"], "why": why}))
 
 
 def _drop_approved(db: sqlite3.Connection, why: str, *, grant_id: int | None = None,
@@ -823,6 +842,7 @@ def sweep(store: JobStore) -> list[int]:
                 audit(db, "grant_ended", machine_id=row["machine_id"], bot_id=row["bot_id"], job_id=row["job_id"],
                       grant_id=row["id"], detail=reason)
                 _drop_approved(db, f"the grant {reason}", grant_id=row["id"])
+                _drop_cards(db, row, f"the grant {reason}")
                 if row["kind"] == "task":
                     ended.append(int(row["id"]))
     return ended
@@ -873,14 +893,15 @@ def _card(db: sqlite3.Connection, store: JobStore, job, machine: dict, scope: st
     existing = db.execute("SELECT c.*, a.id AS approval_id FROM machine_cards c JOIN approvals a ON a.id=c.approval_id "
                           "WHERE c.machine_id=? AND c.bot_id=? AND c.job_id=? AND a.status='pending' ORDER BY a.id DESC "
                           "LIMIT 1", (machine["id"], bot_id, job_id)).fetchone()
+    replaced = None
     if existing is not None:
-        if not scope_covers(existing["scope"], scope):
-            summary = card_text(db, store, machine, bot_id, job_id, scope, current["scope"] if current else None)
-            db.execute("UPDATE machine_cards SET scope=? WHERE approval_id=?", (scope, existing["approval_id"]))
-            db.execute("UPDATE approvals SET summary=? WHERE id=?", (summary, existing["approval_id"]))
-            audit(db, "card_widened", machine_id=machine["id"], bot_id=bot_id, job_id=job_id,
-                  detail=f"approval #{existing['approval_id']}: {scope}")
-        return int(existing["approval_id"])
+        if scope_covers(existing["scope"], scope):
+            return int(existing["approval_id"])
+        # wider than the card on screen: that card is withdrawn (an Allow on it fails) and a new
+        # one asks for the wider scope, so the owner never allows more than the card they saw
+        replaced = int(existing["approval_id"])
+        db.execute("UPDATE approvals SET status='expired', decided_at=? WHERE id=? AND status='pending'",
+                   (_stamp(), replaced))
     pending = db.execute("SELECT COUNT(*) FROM approvals WHERE bot_id=? AND source='machine' AND status='pending'",
                          (bot_id,)).fetchone()[0]
     if pending >= PENDING_PER_BOT:
@@ -904,7 +925,14 @@ def _card(db: sqlite3.Connection, store: JobStore, job, machine: dict, scope: st
     db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
                (bot_id, "system", "chat", f"Approval #{approval_id} requested: {short}", stamp.isoformat(), approval_id))
     audit(db, "card", machine_id=machine["id"], bot_id=bot_id, job_id=job_id,
-          detail=json.dumps({"approval": approval_id, "scope": scope, "widen_from": current["scope"] if current else None}))
+          detail=json.dumps({"approval": approval_id, "scope": scope, "widen_from": current["scope"] if current else None,
+                             "replaces": replaced}))
+    if replaced is not None:  # its waiting calls wait on the new card
+        db.execute("UPDATE machine_requests SET approval_id=?, expires_at=? WHERE approval_id=? AND status='pending'",
+                   (approval_id, expires.isoformat(), replaced))
+        db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
+                   (bot_id, "system", "chat", f"Approval #{replaced} was replaced by #{approval_id} (a wider scope).",
+                    stamp.isoformat(), replaced))
     return approval_id
 
 
@@ -1028,6 +1056,9 @@ def _decide(db: sqlite3.Connection, store: JobStore, approval_id: int, status: s
             raise MachineError("the computer is not active")
         if not class_enabled(store):
             raise MachineError("Controlling a computer is switched off in Settings > Approvals", 403)
+        live = _live_task_grant(db, card["machine_id"], card["bot_id"], card["job_id"])
+        if card["widens"] is not None and (live is None or live["id"] != card["widens"]):
+            raise MachineError("the grant this card would widen has ended; the bot can ask again")
         grant = _open_task_grant(db, store, card["machine_id"], card["bot_id"], card["job_id"], card["scope"], "card",
                                  approval_id)
         if prompt_mode(dict(machine)) == "remember":

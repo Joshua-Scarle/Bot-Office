@@ -34,6 +34,7 @@ BACKOFF_MAX = 60.0
 PENDING_WAIT = 30.0
 MAX_FRAME = 4 * 1024 * 1024
 CLOSE_REPLACED, CLOSE_REVOKED, CLOSE_PENDING = 4000, 4401, 4403
+CAPS = ("grants", "end_grant", "deny_commands")  # Bot Office serves only agents that say these
 EXIT_REVOKED = 3
 OPS = ("resolve", "ls", "read", "run", "pull", "push", "shot")
 CALLS_MAX = 8  # in flight here at once, whatever the server sends
@@ -144,7 +145,8 @@ class Agent:
         self.connected = asyncio.Event()
         self.call_grants: dict[str, str] = {}  # call id -> grant id
         self.answers: dict[tuple[str, str], bool] = {}  # (grant, scope) -> the local answer
-        self.asking: dict[tuple[str, str], asyncio.Lock] = {}
+        self.asking: dict[str, asyncio.Lock] = {}  # one question at a time per grant
+        self.declined: set[str] = set()  # grants answered no (or not at all) here: no more questions
         self.ended: set[str] = set()  # grants Bot Office ended: their calls are refused here
 
     # --- flags ---
@@ -191,7 +193,7 @@ class Agent:
             try:
                 await self.send({"type": "hello", "os": f"{platform.system()} {platform.release()}",
                                  "version": __version__, "hostname": socket.gethostname(),
-                                 "local": self.cfg.local_flags()})
+                                 "local": self.cfg.local_flags(), "caps": list(CAPS)})
                 async for text in ws:
                     if isinstance(text, bytes):
                         continue
@@ -235,6 +237,11 @@ class Agent:
             await self.rotate(message["token"])
         elif kind == "call" and call_id:
             if len(self.tasks) >= CALLS_MAX or call_id in self.cancels:
+                meta = (message.get("args") or {}).get("meta") if isinstance(message.get("args"), dict) else None
+                meta = meta if isinstance(meta, dict) else {}
+                with contextlib.suppress(OSError):
+                    self.audit.write({"op": message.get("op"), "request": meta.get("request"), "bot": meta.get("bot"),
+                                      "grant": meta.get("grant"), "job": meta.get("job"), "ok": False, "code": "busy"})
                 await self.send({"type": "result", "id": call_id, "ok": False, "code": "busy",
                                  "error": "this computer is busy with other calls"})
                 return
@@ -270,25 +277,29 @@ class Agent:
                 self.cancels[call_id].set()
         for key in [key for key in self.answers if key[0] == grant]:
             self.answers.pop(key, None)
+        self.declined.discard(grant)
         with contextlib.suppress(OSError):
             self.audit.write({"op": "end_grant", "grant": grant, "ok": True})
 
     async def confirm_grant(self, op: str, args: dict, meta: dict, cancel: threading.Event) -> None:
-        """The local pop-up: once per grant and scope; a no (or no answer) holds for the grant."""
+        """The local pop-up: once per grant and scope (a widening asks again); a no (or no answer)
+        holds for the whole grant, whatever scope it is widened to later."""
         grant = meta.get("grant")
         if grant is None:  # an older Bot Office: one question per call
             if not await asyncio.to_thread(self.confirm, describe(op, args, meta)):
                 raise ops.Declined("declined on this computer (or no answer)")
             return
         key = (str(grant), str(meta.get("scope") or ""))
-        lock = self.asking.setdefault(key, asyncio.Lock())
+        lock = self.asking.setdefault(str(grant), asyncio.Lock())
         async with lock:
-            if key not in self.answers:
+            if key not in self.answers and str(grant) not in self.declined:
                 answer = await asyncio.to_thread(self.confirm, grant_question(meta))
                 if str(grant) in self.ended:
                     raise ops.Declined("the grant ended while waiting for the answer here")
                 self.answers[key] = answer
-        if not self.answers[key]:
+                if not answer:
+                    self.declined.add(str(grant))
+        if str(grant) in self.declined:
             raise ops.Declined("declined on this computer for this task (or no answer)")
 
     async def rotate(self, token: str) -> None:
@@ -323,6 +334,8 @@ class Agent:
                     raise ops.Declined("cancelled by Bot Office while waiting for the answer here")
             data = await getattr(self, "_" + op)(call_id, args, ctx, cancel)
             entry.update(ok=True, **{key: data[key] for key in ("sha256", "size", "exit", "timed_out") if key in data})
+            if data.get("cancelled") or data.get("timed_out"):  # killed: not a clean run in the record
+                entry.update(ok=False, code="cancelled" if data.get("cancelled") else "timed_out")
             await self.send({"type": "result", "id": call_id, "ok": True, "data": data})
         except asyncio.CancelledError:
             entry.update(ok=False, code="cancelled")
@@ -345,11 +358,17 @@ class Agent:
     async def _resolve(self, call_id, args, ctx, cancel) -> dict:
         return await asyncio.to_thread(ops.op_resolve, args, ctx)
 
+    @staticmethod
+    def _unless_cancelled(data: dict, cancel: threading.Event) -> dict:
+        if cancel.is_set():  # ended while the disk was read: nothing goes back
+            raise ValueError("cancelled")
+        return data
+
     async def _ls(self, call_id, args, ctx, cancel) -> dict:
-        return await asyncio.to_thread(ops.op_ls, args, ctx)
+        return self._unless_cancelled(await asyncio.to_thread(ops.op_ls, args, ctx), cancel)
 
     async def _read(self, call_id, args, ctx, cancel) -> dict:
-        return await asyncio.to_thread(ops.op_read, args, ctx)
+        return self._unless_cancelled(await asyncio.to_thread(ops.op_read, args, ctx), cancel)
 
     async def _run(self, call_id, args, ctx, cancel) -> dict:
         return await asyncio.to_thread(ops.op_run, args, ctx, cancel)
@@ -405,6 +424,8 @@ class Agent:
                 if message["type"] == "chunk":
                     await self.send({"type": "credit", "id": call_id, "n": 1})
                 if message["type"] == "chunk_end":
+                    if cancel.is_set():  # the last moment an End grant can still stop the write
+                        raise ValueError("cancelled")
                     return await asyncio.to_thread(writer.commit)
                 try:
                     block = base64.b64decode(message.get("data") or "", validate=True)
