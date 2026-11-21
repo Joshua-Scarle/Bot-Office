@@ -181,6 +181,7 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
 2. `cp wrangler.toml.template wrangler.toml`; the recipient is already set to `you@example.test` (as `destination_address` and `ALERT_TO`): leave both as they are, any other value makes the Worker refuse to run. Fill in only `ALERT_FROM` (`watchdog@<your domain>`). `wrangler.toml` is local; do not commit it.
 3. In the Cloudflare dashboard (Email Routing): enable it, add you@example.test under **Destination addresses**, and click the verification link Cloudflare mails to it. Until it shows **Verified**, nothing can be delivered.
 4. `npx wrangler login`, then `npx wrangler deploy` (the first deploy creates the Worker and its Durable Object). Note the `https://<name>.<account>.workers.dev` URL.
+   The Worker can also be deployed through the Cloudflare API instead of wrangler (used for the 0.12.13 deploy record below): upload the script with its bindings (Durable Object `WATCHDOG` / class `Watchdog` with migration `v1`, `send_email` binding `ALERT_EMAIL`, vars `ALERT_TO` and `ALERT_FROM`, secret `HEARTBEAT_SECRET`), a schedules PUT for `*/5 * * * *`, and enable the workers.dev subdomain for the Worker. The API token and the secret never go on a command line or into a file in the repo: pass them from a file you keep outside the repo (for example `curl -H @file` or `--data @file`, mode 600).
 
 **On the VPS:**
 
@@ -195,6 +196,7 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
    running() { sq "SELECT COUNT(*) FROM jobs WHERE status='running'"; }
    queued()  { sq "SELECT COUNT(*) FROM jobs WHERE status='queued'"; }
    ```
+   This one-shot open-file check can fail falsely: the controller opens SQLite per operation, so the file may simply be closed at that instant. Sample it several times (for example 10 tries, 1 s apart), or rely on the controller's own `Environment=` line in the unit and its process environment (`/proc/$PID/environ`, as above) to confirm the directory.
    If the check says STOP, do not continue: find the variable in the unit or its `EnvironmentFile` (`systemctl --user cat bot-office`) and fix `DB` by hand until the check passes.
    ```sh
    STAMP=$(date +%Y%m%d-%H%M%S); B=~/backups/pre-0.12.13-$STAMP; mkdir -p "$B"
@@ -274,7 +276,7 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
 Use the same shell as the setup (`$D`, `$B`, `$STAMP`, `$DB`, `$BOT_OFFICE_DATA_DIR`, `sq`; re-derive the data directory as in step 5).
 
 1. Pause and drain the controller (the new code is still running, so the acknowledged pause works): `touch "$BOT_OFFICE_DATA_DIR/PAUSE"`, wait until `/healthz` shows `"paused": true, "running_jobs": 0`.
-2. **Stop the controller's notify pusher first.** `touch "$BOT_OFFICE_DATA_DIR/NOTIFY_OFF"` (the running controller sees it within a minute; no restart). From then on it detects nothing new and pushes nothing past the highest event number logged when it first saw the flag (`sq "SELECT value FROM meta WHERE key='notify-freeze'"`). Do not trust any count until the notifier has seen the flag: step 3 waits for the `notify-freeze` marker (the notifier's interval is 60 s, so up to ~90 s) and treats a missing marker as NOT drained. (Without the flag, the alternative is to unset `WATCHDOG_URL` as in step 5 and restart the paused-and-drained way.)
+2. **Stop the controller's notify pusher first.** Before touching `NOTIFY_OFF`, make sure no old `notify-freeze` marker remains (`sq "SELECT value FROM meta WHERE key='notify-freeze'"` must print nothing). A stale one from an earlier freeze would be mistaken for the new one, and `notify_drained.py` would be trusted too early. If one exists, while `NOTIFY_OFF` is absent clear it with python3 sqlite3 (`python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("DELETE FROM meta WHERE key=\"notify-freeze\""); c.commit()' "$DB"`) and confirm it stays gone for 90 s (a notifier pass can still rewrite it). Only then `touch "$BOT_OFFICE_DATA_DIR/NOTIFY_OFF"` (the running controller sees it within a minute; no restart). From then on it detects nothing new and pushes nothing past the highest event number logged when it first saw the flag (`sq "SELECT value FROM meta WHERE key='notify-freeze'"`). Wait for a NEW marker before trusting `notify_drained.py`; do not trust any count until the notifier has seen the flag: step 3 waits for the `notify-freeze` marker (the notifier's interval is 60 s, so up to ~90 s) and treats a missing marker as NOT drained. (Without the flag, the alternative is to unset `WATCHDOG_URL` as in step 5 and restart the paused-and-drained way.)
 3. **Then drain the mail before the Worker is deleted.** Deleting the Worker deletes its Durable Object, and anything it already acknowledged but has not mailed (pending, or retrying) cannot be replayed from the controller. Wait until the controller has nothing unacknowledged up to the freeze and the Worker is empty (the Worker mails at least 10 minutes apart per class, so this can take 10 minutes or, after a flapping day, an hour):
    ```sh
    WURL=<https://worker-host>          # the Worker origin, without /heartbeat
@@ -296,6 +298,10 @@ Use the same shell as the setup (`$D`, `$B`, `$STAMP`, `$DB`, `$BOT_OFFICE_DATA_
    ```
    The pre-deploy copy `$B/agentdesk.sqlite3` is only for a real corruption.
 8. Rotate the secret if it may have been exposed: write a new file, `wrangler secret put` it (if the Worker still exists), restart the controller the paused-and-drained way.
+
+Deployed 2026-11-21 (ET, about 11:44, no job running or queued at the restart). Server master `00b4c08` (previous `e1e46fa`), version 0.12.13. Backups: tag `pre-healthz-20261121-174324` and DB copy `~/backups/agentdesk-pre-healthz-20261121-174324.sqlite3` (python3 sqlite3 backup API, integrity ok). Guarded cutover: one server script checked that master had not moved and nothing was busy, fast-forwarded master, import-checked the new code, then ran `first_deploy_pause.sh` (succeeded first try). `/healthz` straight after: HTTP 200, `ok` true, version 0.12.13, scheduler alive, `db_reachable` true, `running_jobs` 0; the 14 `notify_*` triggers and all 10 backfill markers were present. After lifting `PAUSE` a Test Bot job ("reply with exactly the word PONG") was claimed at once and answered `PONG`; its `done` trigger logged one event. Settings unchanged (the Test Bot settings row is byte-identical afterwards). The README's one-shot open-file check failed falsely on this controller (see step 5); a sampled check was used.
+
+The watchdog Worker was deployed through the Cloudflare API (not wrangler) as `bot-office-watchdog` on `bot-office-watchdog.<your-subdomain>.workers.dev`, `ALERT_FROM` `watchdog@example.test`, recipient `you@example.test`. **Pending:** the email destination's verification is pending with the owner, so the test email has **not** been sent yet. Until it shows Verified, nothing can be delivered, and the heartbeat, event push and mail paths are untested.
 
 ## What changed in 0.12.11
 
