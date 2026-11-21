@@ -412,3 +412,85 @@ def test_machine_approval_card_and_approve_route(settings):
         assert client.post(f"/v1/machines/approvals/{broad['approval_id']}/always", headers=H,
                            json={"pattern": "/srv/**", "confirm_broad": True}).status_code == 200
         assert client.get("/v1/machine-grants", headers=H).json()[0]["pattern"] == "/srv/**"
+
+
+def test_card_sizes_and_no_screenshot_grants(tmp_path):
+    assert machines._size(500) == "500 bytes"
+    assert machines._size(2048) == "2.0 KiB"
+    assert machines._size(100 * 1024 * 1024) == "100.0 MiB"
+    store, bot = make_store(tmp_path)
+    machine = machines.get_machine(store, paired(store)["machine_id"])
+    job = running(store, bot)
+    item = machines.record_request(store, job, machine, "shot", {"dest": "shot.png"})
+    assert approval_card(store, machines.approval_dict(store, item["approval_id"]))["machine"]["can_always"] is False
+    with pytest.raises(machines.MachineError):
+        machines.approve_always(store, item["approval_id"])
+    assert not machines.grant_matches("shot", "screen", {"dest": "x.png"})
+
+
+def test_hub_sends_a_push_only_as_far_as_the_agent_granted():
+    import asyncio
+    import io
+    from botoffice import machine_hub
+
+    class Conn:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, message):
+            self.sent.append(message["type"])
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        call, conn = machine_hub._Call(loop.create_future()), Conn()
+        sender = loop.create_task(machine_hub.Hub._send_upload(
+            conn, "c1", call, io.BytesIO(b"a" * (machine_hub.CHUNK * 3)), loop.time() + 5))
+        await asyncio.sleep(0.1)
+        assert conn.sent == []  # nothing before the first credit
+        call.credits, _ = 2, call.wake.set()
+        await asyncio.sleep(0.1)
+        assert conn.sent == ["chunk", "chunk"]
+        call.credits, _ = 5, call.wake.set()
+        await asyncio.wait_for(sender, 1)
+        assert conn.sent == ["chunk", "chunk", "chunk", "chunk_end"]
+        stalled = machine_hub._Call(loop.create_future())
+        with pytest.raises(asyncio.TimeoutError):
+            await machine_hub.Hub._send_upload(conn, "c2", stalled, io.BytesIO(b"x"), loop.time() + 0.2)
+
+    asyncio.run(scenario())
+
+
+def test_hub_push_deadline_covers_a_stuck_socket():
+    """A send that never completes (no room on the socket) still ends at the deadline with a cancel."""
+    import asyncio
+    import io
+    from botoffice import machine_hub
+
+    class Stuck:
+        def __init__(self):
+            self.sent = []
+
+        async def send_text(self, text):
+            self.sent.append(json.loads(text)["type"])
+            if self.sent[-1] == "chunk":
+                await asyncio.Event().wait()
+
+    async def scenario():
+        hub = machine_hub.Hub.__new__(machine_hub.Hub)
+        conn = machine_hub._Connection(Stuck(), "m1")
+        hub.connections = {"m1": conn}
+
+        async def grant():
+            while not conn.calls:
+                await asyncio.sleep(0.01)
+            call = next(iter(conn.calls.values()))
+            call.credits, _ = 4, call.wake.set()
+
+        asyncio.get_running_loop().create_task(grant())
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(machine_hub.HubError) as caught:
+            await hub.call("m1", "push", {}, timeout=0.5, upload=io.BytesIO(b"a" * 10))
+        assert caught.value.status == 504 and asyncio.get_running_loop().time() - started < 2
+        assert conn.ws.sent == ["call", "chunk", "cancel"] and conn.calls == {}
+
+    asyncio.run(scenario())

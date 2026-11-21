@@ -6,7 +6,12 @@ this computer, **one approved call at a time**. It is MIT licensed and uses the 
 ## How it is safe
 
 - **No open port.** The agent never listens. It connects out to `ws://127.0.0.1:18787`, which is
-  the local end of an SSH tunnel to the Bot Office server (`botoffice-tunnel.service`).
+  the local end of an SSH tunnel to the Bot Office server (`botoffice-tunnel.service`). Before it
+  sends its token there, it checks that the tunnel port belongs to your own user, so another
+  account on this computer cannot catch it. Run the agent as your own user: as root it refuses.
+- **Sandbox.** With the sandbox switch on, commands run in bubblewrap. On timeout or cancel the sandbox ends
+  with every process inside it. Without the sandbox, a command that starts a new session of its
+  own (a daemon) can outlive the call.
 - **Pairing, then Activate.** `botoffice-agent pair CODE` turns a one-time code from Settings >
   Computers into a device token. Before the computer can do anything, you check that the
   fingerprint the agent prints matches the one in Bot Office and press Activate.

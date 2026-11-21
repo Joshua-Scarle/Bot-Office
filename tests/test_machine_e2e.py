@@ -207,15 +207,56 @@ def test_push_bound_to_sha256(desk):
     digest = hashlib.sha256(data).hexdigest()
     status, item = request(desk, "push", {"path": "~/work/in.txt", "source": "in.txt", "size": len(data), "sha256": digest})
     assert status == 201
+    assert execute(desk, item["id"], raw=data)[0] == 403  # no body is taken before the approval
     decide(desk, item["approval_id"], "approve")
     status, answer = execute(desk, item["id"], raw=b"swapped content!")  # same size, other bytes
     assert status == 409 and not (desk["home"] / "work" / "in.txt").exists()
     assert execute(desk, item["id"], raw=data)[0] == 403  # the approval was used up
     status, item = request(desk, "push", {"path": "~/work/in.txt", "source": "in.txt", "size": len(data), "sha256": digest})
     decide(desk, item["approval_id"], "approve")
+    assert execute(desk, item["id"], raw=data + b"more")[0] == 409  # wrong size: refused before reading it
+    status, item = request(desk, "push", {"path": "~/work/in.txt", "source": "in.txt", "size": len(data), "sha256": digest})
+    decide(desk, item["approval_id"], "approve")
     status, answer = execute(desk, item["id"], raw=data)
     assert status == 200 and answer["sha256"] == digest
     assert (desk["home"] / "work" / "in.txt").read_bytes() == data
+
+
+def test_large_push_flows_by_credit(desk):
+    data = os.urandom(5 * 1024 * 1024 + 123)  # more chunks than the agent grants at once
+    digest = hashlib.sha256(data).hexdigest()
+    status, item = request(desk, "push", {"path": "~/work/big.bin", "source": "big.bin", "size": len(data), "sha256": digest})
+    decide(desk, item["approval_id"], "approve")
+    status, answer = execute(desk, item["id"], raw=data)
+    assert status == 200 and answer["sha256"] == digest
+    assert (desk["home"] / "work" / "big.bin").read_bytes() == data
+
+
+def test_a_stalled_upload_frees_its_slot(desk, monkeypatch):
+    import http.client
+    from botoffice import machines_api
+    monkeypatch.setattr(machines_api, "PUSH_BODY_TIMEOUT", 1.0)
+    data = b"z" * 4096
+    digest = hashlib.sha256(data).hexdigest()
+    port = int(desk["base"].rsplit(":", 1)[1])
+    stalled = []
+    for _ in range(machines_api.PUSH_UPLOADS_MAX):
+        status, item = request(desk, "push", {"path": "~/work/s.bin", "source": "s.bin", "size": len(data), "sha256": digest})
+        decide(desk, item["approval_id"], "approve")
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        connection.putrequest("POST", f"/v1/agent/machines/requests/{item['id']}/execute")
+        connection.putheader("Authorization", "Bearer " + desk["agent_token"])
+        connection.putheader("Content-Length", str(len(data)))
+        connection.endheaders()
+        connection.send(data[:100])  # and then nothing
+        stalled.append((connection, item["id"]))
+    for connection, request_id in stalled:
+        assert connection.getresponse().status == 408
+        connection.close()
+        assert machines.get_request(desk["store"], request_id)["status"] == "failed"
+    status, item = request(desk, "push", {"path": "~/work/s.bin", "source": "s.bin", "size": len(data), "sha256": digest})
+    decide(desk, item["approval_id"], "approve")
+    assert execute(desk, item["id"], raw=data)[0] == 200  # both slots are free again
 
 
 def _helper(desk, *args, approve=True):

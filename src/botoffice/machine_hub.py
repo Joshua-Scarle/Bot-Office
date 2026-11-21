@@ -4,7 +4,9 @@ Each active computer keeps one outgoing connection (through its SSH tunnel). The
 device token in the ``Authorization`` header, then a ``hello``; the hub answers ``welcome`` with
 the computer's flags. Calls go out as ``{"type": "call", "id", "op", "args"}`` and come back as
 ``{"type": "result", "id", "ok", ...}``; file bodies travel as base64 ``chunk`` frames of at most
-CHUNK bytes before the result (pull, shot) or after the call (push, closed by ``chunk_end``).
+CHUNK bytes before the result (pull, shot) or after the call (push, closed by ``chunk_end``). A push
+sends one chunk (or the ``chunk_end``) per credit the agent grants with ``{"type": "credit", "id",
+"n"}``, so the agent never has to stall its receive loop for a slow disk or an open question.
 
 A new connection for the same computer replaces the old one. Revoke closes the socket with 4401 and
 every call in flight fails at once. Close codes the agent acts on: 4401 revoked or invalid token
@@ -32,6 +34,8 @@ log = logging.getLogger("botoffice.machines")
 CHUNK = 256 * 1024
 FRAME_MAX = 2 * 1024 * 1024  # a base64 chunk plus its envelope, with room to spare
 HELLO_TIMEOUT = 10.0
+CREDIT_MAX = 64  # push chunks the agent may have asked for and not received yet
+CANCEL_SEND_TIMEOUT = 5.0
 INFLIGHT_MAX = 4
 SEEN_EVERY = 60.0
 CLOSE_REPLACED, CLOSE_REVOKED, CLOSE_PENDING = 4000, 4401, 4403
@@ -50,6 +54,8 @@ class _Call:
     sink: IO[bytes] | None = None
     limit: int = 0
     received: int = 0
+    credits: int = 0
+    wake: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
@@ -152,6 +158,11 @@ class Hub:
             call = conn.calls.get(message.get("id")) if isinstance(message.get("id"), str) else None
             if kind == "chunk" and call is not None:
                 self._chunk(conn, message, call)
+            elif kind == "credit" and call is not None:
+                n = message.get("n")
+                if isinstance(n, int) and not isinstance(n, bool) and 0 < n <= CREDIT_MAX:
+                    call.credits = min(CREDIT_MAX, call.credits + n)
+                    call.wake.set()
             elif kind == "result" and call is not None:
                 if not call.future.done():
                     call.future.set_result(message)
@@ -183,24 +194,23 @@ class Hub:
         call_id = secrets.token_hex(8)
         call = _Call(asyncio.get_running_loop().create_future(), sink, limit)
         conn.calls[call_id] = call
-        try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        async def send_all() -> None:
             await conn.send({"type": "call", "id": call_id, "op": op, "args": args})
             if upload is not None:
-                while chunk := await asyncio.to_thread(upload.read, CHUNK):
-                    if call.future.done():
-                        break
-                    await conn.send({"type": "chunk", "id": call_id, "data": base64.b64encode(chunk).decode()})
-                if not call.future.done():
-                    await conn.send({"type": "chunk_end", "id": call_id})
-            try:
-                result = await asyncio.wait_for(asyncio.shield(call.future), timeout)
+                await self._send_upload(conn, call_id, call, upload, deadline)
+
+        try:
+            try:  # one deadline for everything: the call, every chunk (disk and socket) and the result
+                await asyncio.wait_for(send_all(), max(0.0, deadline - loop.time()))
+                result = await asyncio.wait_for(asyncio.shield(call.future), max(0.0, deadline - loop.time()))
             except asyncio.TimeoutError:
-                with contextlib.suppress(Exception):
-                    await conn.send({"type": "cancel", "id": call_id})
+                await self._send_cancel(conn, call_id)
                 raise HubError("the computer did not answer in time", 504) from None
             except asyncio.CancelledError:
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(conn.send({"type": "cancel", "id": call_id}))
+                await asyncio.shield(self._send_cancel(conn, call_id))
                 raise
         except (WebSocketDisconnect, RuntimeError, ConnectionError) as exc:
             raise HubError("the computer disconnected") from exc
@@ -212,6 +222,35 @@ class Hub:
             raise HubError(f"{code}: {detail}", 403 if code in ("denied_local", "declined_local") else 422)
         data = result.get("data")
         return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    async def _send_cancel(conn: _Connection, call_id: str) -> None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(conn.send({"type": "cancel", "id": call_id}), CANCEL_SEND_TIMEOUT)
+
+    @staticmethod
+    async def _send_upload(conn: _Connection, call_id: str, call: _Call, upload: IO[bytes], deadline: float) -> None:
+        """Send *upload* as chunks, one per credit; stop early once the call has a result."""
+        loop = asyncio.get_running_loop()
+        while True:
+            while call.credits <= 0 and not call.future.done():
+                if loop.time() >= deadline:
+                    raise asyncio.TimeoutError
+                call.wake.clear()
+                waiter = asyncio.ensure_future(call.wake.wait())
+                try:
+                    await asyncio.wait({waiter, call.future}, timeout=deadline - loop.time(),
+                                       return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    waiter.cancel()
+            if call.future.done():
+                return
+            chunk = await asyncio.to_thread(upload.read, CHUNK)
+            call.credits -= 1
+            if not chunk:
+                await conn.send({"type": "chunk_end", "id": call_id})
+                return
+            await conn.send({"type": "chunk", "id": call_id, "data": base64.b64encode(chunk).decode()})
 
     async def _close(self, conn: _Connection, code: int, reason: str) -> None:
         conn.closed = True

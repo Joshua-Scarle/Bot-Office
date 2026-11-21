@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import functools
 import hashlib
 import os
@@ -71,8 +72,14 @@ def op_ls(args: dict, ctx: Context) -> dict:
 
     def walk(fd: int, prefix: str, level: int) -> None:
         nonlocal truncated
+        room = LS_MAX_ENTRIES - len(entries) + 1  # one more than fits tells us it was cut
+        items = []
         with os.scandir(fd) as found:
-            items = sorted(found, key=lambda entry: entry.name)
+            for entry in found:
+                items.append(entry)
+                if len(items) >= room:
+                    break
+        items.sort(key=lambda entry: entry.name)
         for entry in items:
             if len(entries) >= LS_MAX_ENTRIES:
                 truncated = True
@@ -180,12 +187,19 @@ class PushWriter:
         if self.written > self.size:
             raise ValueError("more data than approved")
         self.hash.update(data)
-        os.write(self.fd, data)
+        view = memoryview(data)
+        while view:
+            done = os.write(self.fd, view)
+            if done <= 0:
+                raise OSError("short write")
+            view = view[done:]
 
     def commit(self) -> dict:
         if self.written != self.size or self.hash.hexdigest() != self.sha256:
             raise ValueError("the content is not what was approved (sha256 or size)")
         os.fsync(self.fd)
+        if os.fstat(self.fd).st_size != self.size:
+            raise OSError("the written file is not the approved size")
         os.close(self.fd)
         self.fd = -1
         self._check_target()
@@ -217,13 +231,14 @@ def minimal_env(home: str) -> dict:
     return {"PATH": SAFE_PATH, "HOME": home, "USER": user, "LOGNAME": user, "LANG": "C.UTF-8"}
 
 
-def bwrap_prefix(cwd: str, roots: list[str], bwrap: str) -> list[str]:
+def bwrap_prefix(cwd: str, roots: list[str], bwrap: str, cwd_fd: int) -> list[str]:
     """Read-only view of the whole computer, a private /tmp, no network, deny-listed paths hidden,
-    killed with the agent. Nothing is writable except /tmp (in memory, gone after the command)."""
+    killed with the agent. Nothing is writable except /tmp (in memory, gone after the command).
+    The working folder is the verified fd bound over its canonical path, so a swap of the path
+    after the check cannot move the command elsewhere."""
     argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
-            "--unshare-net", "--unshare-pid", "--unshare-ipc", "--die-with-parent", "--new-session"]
-    if under(cwd, "/tmp") and cwd != "/tmp":
-        argv += ["--ro-bind", cwd, cwd]  # the private /tmp would hide an approved folder under /tmp
+            "--unshare-net", "--unshare-pid", "--unshare-ipc", "--die-with-parent", "--new-session",
+            "--ro-bind-fd", str(cwd_fd), cwd]
     for root in roots:
         try:
             info = os.lstat(root)
@@ -239,11 +254,14 @@ def bwrap_prefix(cwd: str, roots: list[str], bwrap: str) -> list[str]:
 @functools.cache
 def bwrap_works(bwrap: str) -> bool:
     """Once per agent run: can bwrap build the sandbox on this computer at all?"""
+    fd = os.open("/tmp", DIR_FLAGS)
     try:
-        done = subprocess.run(bwrap_prefix("/", [], bwrap) + ["true"], stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=20)
+        done = subprocess.run(bwrap_prefix("/tmp", [], bwrap, fd) + ["true"], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=20, pass_fds=(fd,))
     except (OSError, subprocess.SubprocessError):
         return False
+    finally:
+        os.close(fd)
     return done.returncode == 0
 
 
@@ -260,17 +278,34 @@ def _drain(stream, cap: int, out: dict, key: str) -> None:
     out[key + "_truncated"] = truncated
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _kill(process: subprocess.Popen) -> None:
+    """TERM, then KILL, to the command's whole process group (start_new_session made it its own)."""
+    pgid = process.pid
     for sig, wait in ((signal.SIGTERM, KILL_GRACE), (signal.SIGKILL, 5.0)):
         try:
-            os.killpg(process.pid, sig)
+            os.killpg(pgid, sig)
         except ProcessLookupError:
-            return
-        try:
-            process.wait(wait)
-            return
-        except subprocess.TimeoutExpired:
+            break
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if process.poll() is not None and not _group_alive(pgid):
+                break
+            time.sleep(0.05)
+        else:
             continue
+        break
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(5)
 
 
 def op_run(args: dict, ctx: Context, cancelled: threading.Event | None = None) -> dict:
@@ -296,11 +331,13 @@ def op_run(args: dict, ctx: Context, cancelled: threading.Event | None = None) -
             if not bwrap_works(bwrap):
                 raise LocalDenied("sandboxing is on but bwrap cannot create a sandbox here (are unprivileged "
                                   "user namespaces restricted?); refused")
-            command = bwrap_prefix(cwd, ctx.roots, bwrap) + command
-            where = {"cwd": "/"}
+            command = bwrap_prefix(cwd, ctx.roots, bwrap, cwd_fd) + command
+            where = {"cwd": "/", "pass_fds": (cwd_fd,)}
         else:
             # the verified fd, not the path: a swap after the check cannot move the command elsewhere
             where = {"cwd": f"/proc/self/fd/{cwd_fd}", "pass_fds": (cwd_fd,)}
+        if cancelled is not None and cancelled.is_set():
+            raise Declined("cancelled before it started")
         started = time.monotonic()
         try:
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -326,8 +363,7 @@ def op_run(args: dict, ctx: Context, cancelled: threading.Event | None = None) -
                 break
             time.sleep(0.05)
     finally:
-        if process.poll() is None or timed_out or stopped:
-            _kill(process)  # the whole process group: children too
+        _kill(process)  # the whole process group, also children left behind by a command that exited
     for reader in readers:
         reader.join(5)
     stdout, stderr = out.get("stdout", b""), out.get("stderr", b"")

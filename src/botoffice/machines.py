@@ -548,11 +548,11 @@ def binding_hash(machine_id: str, bot_id: str, job_id: str, tool: str, args: dic
 
 
 def _size(value: int) -> str:
-    for unit in ("bytes", "KiB", "MiB"):
-        if value < 1024 or unit == "MiB":
-            return f"{value} {unit}" if unit == "bytes" else f"{value / 1024:.1f} {unit}"
-        value /= 1024
-    return str(value)
+    if value < 1024:
+        return f"{value} bytes"
+    if value < 1024 * 1024:
+        return f"{value / 1024:.1f} KiB"
+    return f"{value / (1024 * 1024):.1f} MiB"
 
 
 def describe(tool: str, args: dict, machine: dict) -> str:
@@ -636,7 +636,7 @@ def grant_matches(tool: str, pattern: str, args: dict) -> bool:
         if tool == "run":
             return args.get("argv") is not None and pattern == run_pattern(args)
         if tool == "shot":
-            return pattern == "screen"
+            return False  # a screenshot always asks
         if tool == "push":
             if args.get("overwrite"):
                 return False  # replacing a file always asks
@@ -679,7 +679,7 @@ def suggested_pattern(tool: str, args: dict) -> str | None:
         except MachineError:
             return None
     if tool == "shot":
-        return "screen"
+        return None
     if tool == "push":
         return posixpath.dirname(args["path"]) + "/**"
     if tool == "ls":
@@ -859,7 +859,7 @@ def approve_always(store: JobStore, approval_id: int, pattern: object = None, co
         if tool == "run":
             saved = run_pattern(args)
         elif tool == "shot":
-            saved = "screen"
+            raise MachineError("a screenshot cannot be allowed always; approve it once", 400)
         else:
             saved = check_pattern(pattern if pattern is not None else suggested_pattern(tool, args), confirm_broad)
             if not grant_matches(tool, saved, {**args, "overwrite": False}):
@@ -986,5 +986,5 @@ def card(store: JobStore, item: dict) -> dict:
                         "status": row["machine_status"], "tool": row["tool"], "args": shown,
                         "requested": args.get("requested"), "request_status": row["status"],
                         "always": suggested_pattern(row["tool"], args),
-                        "can_always": row["tool"] != "run" or suggested_pattern("run", args) is not None,
+                        "can_always": suggested_pattern(row["tool"], args) is not None,
                         "full_access": row["tool"] == "run"}}

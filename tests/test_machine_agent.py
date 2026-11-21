@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -196,10 +197,12 @@ def test_sandbox_refuses_without_bwrap_and_hides_denied_paths(home, monkeypatch)
     monkeypatch.setattr(ops, "bwrap_works", lambda path: False)  # e.g. user namespaces restricted
     with pytest.raises(LocalDenied):
         ops.op_run({"argv": ["true"], "cwd": canonical(home / "work")}, ctx)
-    prefix = ops.bwrap_prefix(canonical(home / "work"), ctx.roots, "/usr/bin/bwrap")
+    prefix = ops.bwrap_prefix(canonical(home / "work"), ctx.roots, "/usr/bin/bwrap", 7)
     assert "--unshare-net" in prefix and "--die-with-parent" in prefix and prefix[-1] == "--"
     assert prefix[prefix.index(canonical(home / ".ssh")) - 1] == "--tmpfs"
     assert prefix[prefix.index("--chdir") + 1] == canonical(home / "work")
+    # the working folder is the verified fd, bound over its path, not the path looked up again
+    assert prefix[prefix.index("--ro-bind-fd") + 1:prefix.index("--ro-bind-fd") + 3] == ["7", canonical(home / "work")]
 
 
 # --- push / pull ---
@@ -409,4 +412,168 @@ def test_push_chunks_that_arrive_with_the_call_are_kept(home, tmp_path):
 
     sent = asyncio.run(scenario())
     assert sent[-1]["ok"], sent
+    assert sent[0] == {"type": "credit", "id": "p1", "n": client.UPLOAD_QUEUE}  # granted once ready to write
     assert Path(dest).read_bytes() == data
+
+
+def test_more_chunks_than_granted_cancel_that_push_without_stalling(home, tmp_path):
+    """The receive loop never waits on a full upload queue, so a cancel for another call still lands."""
+    import base64
+    from botoffice_agent import client
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.toml").write_text('token_store = "file"\n')
+    cfg = config.load(home, cfg_dir, tmp_path / "st")
+    config.TokenStore(cfg, "abc").save("bom_abc_x")
+    data = b"y" * (client.UPLOAD_QUEUE + 4)
+    dest = canonical(home / "work") + "/flood.bin"
+
+    async def scenario():
+        agent = client.Agent(cfg, {"machine_id": "abc"}, config.TokenStore(cfg, "abc"))
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        agent.send = send
+        await agent.handle({"type": "call", "id": "p1", "op": "push",
+                            "args": {"path": dest, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}})
+        agent.cancels["other"] = threading.Event()
+        started = time.monotonic()
+        for byte in data:  # a server that ignores the credit
+            await agent.handle({"type": "chunk", "id": "p1", "data": base64.b64encode(bytes([byte])).decode()})
+        await agent.handle({"type": "cancel", "id": "other"})
+        elapsed = time.monotonic() - started
+        other = agent.cancels.pop("other").is_set()
+        await asyncio.gather(*agent.tasks)
+        return sent, elapsed, other
+
+    sent, elapsed, other = asyncio.run(scenario())
+    assert elapsed < 1 and other
+    assert sent[-1]["ok"] is False and not Path(dest).exists()
+
+
+def test_children_left_behind_are_killed_when_the_command_exits(home, tmp_path):
+    ctx = ctx_for(home)
+    marker = tmp_path / "late"
+    done = ops.op_run({"sh": f"(sleep 2; touch {marker}) >/dev/null 2>&1 & echo started", "cwd": canonical(home / "work")},
+                      ctx)
+    assert done["exit"] == 0 and done["stdout"] == "started\n"
+    time.sleep(3)
+    assert not marker.exists()
+
+
+def test_cancelled_before_start_never_runs(home, tmp_path):
+    import threading
+    ctx = ctx_for(home)
+    cancel = threading.Event()
+    cancel.set()
+    marker = tmp_path / "ran"
+    with pytest.raises(ops.Declined):
+        ops.op_run({"argv": ["touch", str(marker)], "cwd": canonical(home / "work")}, ctx, cancel)
+    assert not marker.exists()
+
+
+def test_a_late_yes_after_cancel_is_void(home, tmp_path):
+    """Confirm-local: Bot Office cancels while the question is open; the later yes runs nothing."""
+    pytest.importorskip("websockets")
+    import threading
+    from botoffice_agent import client
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.toml").write_text('token_store = "file"\nconfirm_local = "on"\n')
+    cfg = config.load(home, cfg_dir, tmp_path / "st")
+    config.TokenStore(cfg, "abc").save("bom_abc_x")
+    marker = tmp_path / "ran"
+    asking, answer = threading.Event(), threading.Event()
+
+    def confirm(text):
+        asking.set()
+        answer.wait(10)
+        return True
+
+    async def scenario():
+        agent = client.Agent(cfg, {"machine_id": "abc"}, config.TokenStore(cfg, "abc"), confirm=confirm)
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        agent.send = send
+        await agent.handle({"type": "call", "id": "r1", "op": "run",
+                            "args": {"argv": ["touch", str(marker)], "cwd": canonical(home / "work"), "timeout": 5}})
+        await asyncio.to_thread(asking.wait, 10)
+        await agent.handle({"type": "cancel", "id": "r1"})
+        answer.set()
+        await asyncio.gather(*agent.tasks)
+        return sent
+
+    sent = asyncio.run(scenario())
+    assert sent[-1]["ok"] is False and sent[-1]["code"] == "declined_local"
+    assert not marker.exists()
+
+
+def test_large_folder_listing_stops_at_the_cap(home, monkeypatch):
+    ctx = ctx_for(home)
+    many = home / "work" / "many"
+    many.mkdir()
+    for index in range(50):
+        (many / f"f{index:03}").write_text("")
+    monkeypatch.setattr(ops, "LS_MAX_ENTRIES", 10)
+    listed = ops.op_ls({"path": canonical(many), "depth": 1}, ctx)
+    assert len(listed["entries"]) == 10 and listed["truncated"]
+
+
+# --- the local tunnel port must be this user's ---
+
+PROC_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:4963 00000000:0000 0A 00000000:00000000 00:00000000 00000000  {listener}        0 1 1
+   1: 0100007F:4963 0100007F:D431 01 00000000:00000000 00:00000000 00000000  {accepted}        0 2 1
+   2: 0100007F:D431 0100007F:4963 01 00000000:00000000 00:00000000 00000000  1000        0 3 1
+"""
+
+
+def test_tunnel_port_owner_is_checked():
+    from botoffice_agent import tunnel
+    table = PROC_TCP.format(listener=1000, accepted=1000)
+    assert tunnel._owner([table], 0x4963, 0xD431) == 1000
+    squatted = PROC_TCP.format(listener=1001, accepted=1001)
+    assert tunnel._owner([squatted], 0x4963, 0xD431) == 1001
+    assert tunnel._owner([table], 0x4963, 0x1111) is None
+
+
+def test_a_port_held_by_another_user_gets_nothing():
+    import socket as socketlib
+    from botoffice_agent import tunnel
+    import threading
+    listener = socketlib.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    port = listener.getsockname()[1]
+    accepted = []
+    threading.Thread(target=lambda: accepted.append(listener.accept()[0]), daemon=True).start()
+    try:
+        sock = tunnel.connect("127.0.0.1", port)  # our own listener: fine
+        own = sock.getsockname()[1]
+        with pytest.raises(tunnel.TunnelNotOurs):
+            tunnel.check(sock, uid=os.getuid() + 1, wait=0.2)  # as seen by someone else
+        # a listener that never accepts shows uid 0 for the waiting connection: refused
+        never = PROC_TCP.replace("4963", f"{port:04X}").replace("D431", f"{own:04X}").format(listener=0, accepted=0)
+        with pytest.raises(tunnel.TunnelNotOurs):
+            tunnel.check(sock, tables=[never], uid=os.getuid() or 1, wait=0.2)
+        sock.close()
+    finally:
+        listener.close()
+        for item in accepted:
+            item.close()
+    with pytest.raises(tunnel.TunnelNotOurs):
+        tunnel.connect("desk.example.com", 18787)
+
+
+def test_root_never_sends_over_the_plain_tunnel():
+    """For root, a listener that has not accepted yet looks like its own (uid 0): always refused."""
+    import socket as socketlib
+    from botoffice_agent import tunnel
+    a, b = socketlib.socketpair(socketlib.AF_UNIX)
+    with a, b, pytest.raises(tunnel.TunnelNotOurs, match="root"):
+        tunnel.check(a, tables=[], uid=0, wait=0)
