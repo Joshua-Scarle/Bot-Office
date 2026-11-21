@@ -42,6 +42,8 @@ log = logging.getLogger(__name__)
 META_KEY = "notify-email"
 CURSOR_KEY = "notify-cursor"
 EPOCH_KEY = "notify-epoch"
+FREEZE_KEY = "notify-freeze"
+OFF_FILE = "NOTIFY_OFF"  # in the data dir: no new detection, nothing past the sequence seen first is pushed
 DEFAULT_PREFS = {"needs_you": True, "failed": True, "outage": True, "backup": True, "done": False}
 EVENT_CLASSES = ("needs_you", "failed", "done")
 URL_ENV = "WATCHDOG_URL"
@@ -139,15 +141,15 @@ def _cursor(store: JobStore) -> int:
         return 0
 
 
-def build_batch(store: JobStore, stamp=None) -> tuple[dict, int, bool]:
+def build_batch(store: JobStore, stamp=None, limit: int | None = None) -> tuple[dict, int, bool]:
     """(payload, upto, more): the next events after the cursor. Events of a class that is switched off
     are skipped (covered by `upto`, never sent). Payload fields are codes, ids and counts only."""
     stamp = stamp or now()
     prefs = get_prefs(store)
     cursor = _cursor(store)
     with closing(store._connect()) as db:
-        rows = db.execute("SELECT seq, key, cls, bot_id, ref, kind FROM notify_events WHERE seq>? ORDER BY seq LIMIT ?",
-                          (cursor, BATCH + 1)).fetchall()
+        rows = db.execute("SELECT seq, key, cls, bot_id, ref, kind FROM notify_events WHERE seq>? AND seq<=? "
+                          "ORDER BY seq LIMIT ?", (cursor, limit if limit is not None else 1 << 62, BATCH + 1)).fetchall()
     more = len(rows) > BATCH
     rows = rows[:BATCH]
     events = [{"seq": row["seq"], "id": event_id(row["key"]), "cls": row["cls"], "bot": bot_label(row["bot_id"]),
@@ -228,10 +230,12 @@ class Notifier:
         more = False
         try:
             secret = read_secret(self.secret_file)
-            record_needs_you(self.store)
+            limit = self._freeze()
+            if limit is None:
+                record_needs_you(self.store)
             prune(self.store)
             self._watch_backlog()
-            body, upto, more = build_batch(self.store)
+            body, upto, more = build_batch(self.store, limit=limit)
             # a redirect is never followed: the bearer token goes to the configured URL only
             resp = httpx.post(events_url(self.url), json=body, timeout=TIMEOUT_SECONDS, follow_redirects=False,
                               headers={"Authorization": f"Bearer {secret}", "User-Agent": "bot-office-events/1"})
@@ -257,6 +261,20 @@ class Notifier:
             (log.warning if error else log.info)("watchdog events push: %s", error or "ok")
             self._last_error = error
         return error is None, error is None and more
+
+    def _freeze(self) -> int | None:
+        """With NOTIFY_OFF present (rollback): the highest sequence logged when it was first seen; later events
+        stay in the table, unsent. None when the flag is absent (any earlier freeze is cleared)."""
+        if not (self.store.path.parent / OFF_FILE).exists():
+            if self.store.get_meta(FREEZE_KEY):
+                self.store.delete_meta(FREEZE_KEY)
+            return None
+        frozen = self.store.get_meta(FREEZE_KEY)
+        if not frozen:
+            with closing(self.store._connect()) as db:
+                frozen = str(db.execute("SELECT COALESCE(MAX(seq),0) FROM notify_events").fetchone()[0])
+            self.store.set_meta(FREEZE_KEY, frozen)
+        return int(frozen)
 
     def _watch_backlog(self) -> None:
         over = backlog(self.store) > BACKLOG_LIMIT

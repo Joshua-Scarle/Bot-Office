@@ -518,3 +518,73 @@ def test_needs_you_states_already_open_at_upgrade_are_logged_once(settings):
         JobStore(store.path)  # a later start: nothing again
         again = sorted(r["kind"] for r in _rows(store))
     assert first == ["assignment_waiting_on_user", "question_open"] and again == first
+
+
+def test_keys_of_drops_holds_and_watcher_pauses_never_collide_in_one_millisecond(settings):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Zed", "", "codex", None)
+        _assignment(store, bot, "t1", status="active", created_by="user")
+        _sql(store, "INSERT INTO watchers (id, bot_id, kind, name, enabled, created_at) VALUES ('w1',?,?,?,1,'t')",
+             str(bot.id), "poll", "n")
+        job = store.create("p", "codex", bot_id=bot.id)
+        with closing(store._connect()) as db:  # one statement burst: no clock tick can tell them apart
+            for _ in range(5):
+                db.execute("UPDATE assignments SET status='dropped', updated_by='bot:z' WHERE id='t1'")
+                db.execute("UPDATE assignments SET status='active', updated_by='user' WHERE id='t1'")
+                db.execute("UPDATE watchers SET enabled=0, paused_reason='r' WHERE id='w1'")
+                db.execute("UPDATE watchers SET enabled=1, paused_reason=NULL WHERE id='w1'")
+                db.execute("UPDATE jobs SET status='queued', failure_kind='budget' WHERE id=?", (str(job.id),))
+                db.execute("UPDATE jobs SET status='running', failure_kind=NULL WHERE id=?", (str(job.id),))
+        kinds = [r["kind"] for r in _rows(store)]
+    assert kinds.count("assignment_dropped_by_bot") == kinds.count("watcher_paused") == kinds.count("budget_held") == 5
+
+
+def test_upgrade_backfill_covers_holds_paused_watchers_usage_notices_and_bot_drops(settings):
+    from botoffice.store import JobStore
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Ube", "", "codex", None)
+        _assignment(store, bot, "d1", status="dropped", created_by="user", updated_by="bot:ube")
+        _assignment(store, bot, "d2", status="dropped", created_by="user", updated_by="bot:ube", dismissed_at="t")
+        _sql(store, "INSERT INTO watchers (id, bot_id, kind, name, enabled, paused_reason, created_at) VALUES ('w1',?,?,?,0,'why','t')",
+             str(bot.id), "poll", "n")
+        budget = store.create("p", "codex", bot_id=bot.id)
+        capped = store.create("p", "codex", bot_id=bot.id)
+        _sql(store, "UPDATE jobs SET status='queued', failure_kind='budget' WHERE id=?", str(budget.id))
+        _sql(store, "UPDATE jobs SET status='queued', failure_kind='auto_cap' WHERE id=?", str(capped.id))
+        _sql(store, "INSERT INTO usage_notices (job_id, attempt, bot_id, provider, created_at) VALUES ('j1',1,?,?,'t')",
+             str(bot.id), "codex")
+        _sql(store, "INSERT INTO usage_notices (job_id, attempt, bot_id, provider, created_at, dismissed_at) "
+                    "VALUES ('j2',1,?,?,'t','t')", str(bot.id), "codex")
+        _sql(store, "DELETE FROM notify_events")
+        _sql(store, "DELETE FROM meta WHERE key='notify-backfill'")
+        JobStore(store.path)
+        first = sorted(r["kind"] for r in _rows(store))
+        JobStore(store.path)  # idempotent
+        again = sorted(r["kind"] for r in _rows(store))
+    assert first == sorted(["assignment_dropped_by_bot", "watcher_paused", "budget_held", "auto_cap_held", "usage_limit_parked"])
+    assert again == first
+
+
+def test_notify_off_freezes_detection_and_pushes_only_up_to_the_sequence_seen_first(settings, tmp_path, monkeypatch):
+    sent = []
+
+    def worker(url, json=None, **kw):
+        sent.extend(e["seq"] for e in json["events"])
+        return httpx.Response(200, json={"ack": json["upto"]})
+
+    monkeypatch.setattr(notify.httpx, "post", worker)
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Off", "", "codex", None)
+        _job(store, bot, "failed", error="x", kind="auth")
+        notifier = notify.Notifier(store, url="https://w.example/heartbeat", secret_file=_secret(tmp_path))
+        (store.path.parent / notify.OFF_FILE).touch()
+        assert notifier.push_once()[0] and sent == [1]  # the backlog at the flag goes out
+        _job(store, bot, "failed", error="x", kind="auth")  # created after the pusher stopped
+        _assignment(store, bot, "late", due_at="2020-01-01T00:00:00+00:00")  # detection is off too
+        assert notifier.push_once()[0] and sent == [1]
+        assert notify.backlog(store) == 1 and [r["seq"] for r in _rows(store)] == [1, 2]  # kept, not lost
+        (store.path.parent / notify.OFF_FILE).unlink()
+        assert notifier.push_once()[0] and sent[:2] == [1, 2] and notify.backlog(store) == 0

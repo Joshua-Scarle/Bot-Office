@@ -268,6 +268,12 @@ def _init_notify_triggers(db: sqlite3.Connection) -> None:
     write happens) and are logged by notify.record_needs_you instead."""
     stamp = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
     insert = "INSERT OR IGNORE INTO notify_events (key, cls, bot_id, ref, kind, created_at)"
+    # the sequence number this very insert will get: never reused (AUTOINCREMENT), so two incidents of the
+    # same row can never share a key, whatever the clock says
+    nxt = "(SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='notify_events'),0)+1)"
+    # CREATE ... IF NOT EXISTS keeps an older body, so the ones whose keys changed are replaced
+    for name in ("notify_asg_dropped", "notify_watcher_paused", "notify_held_new", "notify_held_kind"):
+        db.execute(f"DROP TRIGGER IF EXISTS {name}")
     state = ("CASE WHEN NEW.stalled_at IS NOT NULL THEN 'stalled' WHEN NEW.status='waiting_on_user' THEN 'waiting_on_user' "
              "WHEN NEW.status='blocked' AND NEW.escalate IS NOT 'never' THEN 'blocked' "
              "WHEN NEW.status='waiting_on_bot' AND NEW.escalate IS 'always' THEN 'waiting_on_bot' END")
@@ -282,7 +288,7 @@ def _init_notify_triggers(db: sqlite3.Connection) -> None:
         f"""CREATE TRIGGER IF NOT EXISTS notify_asg_dropped AFTER UPDATE OF status, updated_by ON assignments
             WHEN NEW.status='dropped' AND NEW.created_by='user' AND NEW.updated_by LIKE 'bot:%'
                  AND (OLD.status IS NOT NEW.status OR OLD.updated_by IS NOT NEW.updated_by)
-            BEGIN {insert} VALUES ('a:' || NEW.id || ':dropped_by_bot:' || strftime('%Y-%m-%dT%H:%M:%f','now'), 'needs_you', NEW.bot_id, NULL,
+            BEGIN {insert} VALUES ('a:' || NEW.id || ':dropped_by_bot:' || {nxt}, 'needs_you', NEW.bot_id, NULL,
                                    'assignment_dropped_by_bot', {stamp}); END""")
     db.execute(
         f"""CREATE TRIGGER IF NOT EXISTS notify_approval_new AFTER INSERT ON approvals WHEN NEW.status='pending'
@@ -305,12 +311,12 @@ def _init_notify_triggers(db: sqlite3.Connection) -> None:
         f"""CREATE TRIGGER IF NOT EXISTS notify_watcher_paused AFTER UPDATE OF enabled, paused_reason ON watchers
             WHEN NEW.enabled=0 AND NEW.paused_reason IS NOT NULL
                  AND (OLD.enabled IS NOT 0 OR OLD.paused_reason IS NOT NEW.paused_reason)
-            BEGIN {insert} VALUES ('w:' || NEW.id || ':' || strftime('%Y-%m-%dT%H:%M:%f','now'), 'needs_you',
+            BEGIN {insert} VALUES ('w:' || NEW.id || ':' || {nxt}, 'needs_you',
                                    NEW.bot_id, NULL, 'watcher_paused', {stamp}); END""")
     # a hold is a transition into queued+budget/auto_cap (a new job, or a job whose hold kind or status changed);
     # each one is its own incident (job id and time in the key), a rewrite with the same values is not
     held = ("NEW.status='queued' AND NEW.failure_kind IN ('budget','auto_cap') AND NEW.bot_id IS NOT NULL")
-    body = (f"BEGIN {insert} VALUES ('h:' || NEW.id || ':' || NEW.failure_kind || ':' || strftime('%Y-%m-%dT%H:%M:%f','now'), "
+    body = (f"BEGIN {insert} VALUES ('h:' || NEW.id || ':' || NEW.failure_kind || ':' || {nxt}, "
             f"'needs_you', NEW.bot_id, NULL, NEW.failure_kind || '_held', {stamp}); END")
     db.execute(f"CREATE TRIGGER IF NOT EXISTS notify_held_new AFTER INSERT ON jobs WHEN {held} {body}")
     db.execute(f"CREATE TRIGGER IF NOT EXISTS notify_held_kind AFTER UPDATE OF failure_kind, status ON jobs "
@@ -341,6 +347,15 @@ def _backfill_notify(db: sqlite3.Connection) -> None:
                "FROM approvals WHERE status='pending'")
     db.execute(f"{insert} SELECT 'q:' || id || ':open', 'needs_you', bot_id, NULL, 'question_open', {stamp} "
                "FROM questions WHERE status='open'")
+    # keys of the counter-keyed triggers cannot be recomputed: one fixed "open" key per row, once
+    db.execute(f"{insert} SELECT 'a:' || id || ':dropped_by_bot:open', 'needs_you', bot_id, NULL, 'assignment_dropped_by_bot', {stamp} "
+               "FROM assignments WHERE status='dropped' AND created_by='user' AND updated_by LIKE 'bot:%' AND dismissed_at IS NULL")
+    db.execute(f"{insert} SELECT 'h:' || id || ':' || failure_kind || ':open', 'needs_you', bot_id, NULL, failure_kind || '_held', {stamp} "
+               "FROM jobs WHERE status='queued' AND failure_kind IN ('budget','auto_cap') AND bot_id IS NOT NULL")
+    db.execute(f"{insert} SELECT 'w:' || id || ':open', 'needs_you', bot_id, NULL, 'watcher_paused', {stamp} "
+               "FROM watchers WHERE enabled=0 AND paused_reason IS NOT NULL")
+    db.execute(f"{insert} SELECT 'u:' || job_id || ':' || attempt, 'needs_you', bot_id, job_id, 'usage_limit_parked', {stamp} "
+               "FROM usage_notices WHERE dismissed_at IS NULL")
     db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('notify-backfill', '1')")
 
 
