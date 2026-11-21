@@ -266,3 +266,65 @@ def test_a_reset_clears_an_edit_whose_job_never_reached_a_provider(settings):
         assert all(word not in _everything(runs[-1]) for word in A_WORDS)
 
     asyncio.run(scenario())
+
+
+def test_the_job_floor_is_a_timestamp_that_survives_vacuum(settings):
+    async def scenario():
+        store, scheduler, bot, runs, bot_dir = _setup(settings, "claude")
+        client = TestClient(create_app(settings, {"claude": scheduler.providers["claude"]}, store=store))
+        _, first = scheduler.turns.post_message(bot, A_TASK)
+        await _turn(store, scheduler, "claude")
+        scheduler.turns.post_message(bot, "second")
+        await _turn(store, scheduler, "claude")
+        client.post(f"/v1/bots/{bot.id}/session/reset", headers=H)
+        assert isinstance(store.context_job_floor(bot.id), str) and store.context_job_floor(bot.id)
+        # renumber the implicit rowids: remove an early row, then VACUUM
+        import sqlite3
+
+        db = sqlite3.connect(settings.data_dir / "agentdesk.sqlite3", isolation_level=None)
+        db.execute("DELETE FROM jobs WHERE id NOT IN (SELECT id FROM jobs ORDER BY created_at DESC LIMIT 1)")
+        db.execute("VACUUM")
+        db.close()
+        scheduler.turns.post_message(bot, "unrelated")
+        await _turn(store, scheduler, "claude")
+        assert str(first.id) not in runs[-1].workspace_files["SELF.md"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("swap", ["archive-root", "bot-dir"])
+def test_swapping_the_archive_or_an_ancestor_during_cleanup_cannot_divert_the_move(settings, monkeypatch, tmp_path, swap):
+    """The directories are held as descriptors: a link planted over reset-archive, or over the bot directory
+    itself, after they were opened must not receive the archived files."""
+    import botoffice.context_reset as cleanup
+
+    store, scheduler, bot, runs, bot_dir = _setup(settings, "claude")
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "worklog.md").write_text(A_REPLY)
+    (bot_dir / "WORKING.md").write_text(A_WORKING)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_open, moved = cleanup._open, bot_dir.with_name(bot_dir.name + ".moved")
+
+    def swapping(name, parent, *, create=False):
+        fd = real_open(name, parent, create=create)
+        if name == "reset-archive":
+            if swap == "archive-root":
+                (bot_dir / "reset-archive").rename(bot_dir / "reset-archive.real")
+                (bot_dir / "reset-archive").symlink_to(outside)
+            else:
+                bot_dir.rename(moved)
+                bot_dir.symlink_to(outside)
+        return fd
+
+    monkeypatch.setattr(cleanup, "_open", swapping)
+    assert store.reset_context(bot.id) is not None
+    try:
+        cleanup.reconcile_context(store, scheduler.memory, bot.id)
+    except OSError:  # refusing (the cleanup stays owed) is fine; diverting is not
+        assert store.context_cleanup_pending(bot.id) is not None
+    assert list(outside.iterdir()) == []  # nothing landed where the link points
+    real = (bot_dir if swap == "archive-root" else moved)
+    archived = list(real.glob("reset-archive*/*/WORKING.md"))
+    assert len(archived) == 1 and archived[0].read_text() == A_WORKING
+    assert not (real / "WORKING.md").exists() and not (real / "worklog.md").exists()

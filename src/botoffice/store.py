@@ -785,7 +785,7 @@ class JobStore:
                 ("tasks_seen_event", "INTEGER NOT NULL DEFAULT 0"),
                 # 0.11.10: a chat-only bot never continues by itself (no loop, verify or wake-up turns)
                 ("chat_only", "INTEGER NOT NULL DEFAULT 0"),
-                # 0.12.18 teammate tools: team_read section|all|none; team_private hides the bot from reads
+                # 0.12.20 teammate tools: team_read section|all|none; team_private hides the bot from reads
                 ("team_read", "TEXT NOT NULL DEFAULT 'section'"),
                 ("team_private", "INTEGER NOT NULL DEFAULT 0"),
             ))
@@ -814,10 +814,10 @@ class JobStore:
                 )"""
             )
             db.execute("CREATE INDEX IF NOT EXISTS working_snapshots_bot ON working_snapshots(bot_id, job_id)")
-            # 0.12.18: where a session reset cut a bot's context (messages up to floor are not part of any later
+            # 0.12.20: where a session reset cut a bot's context (messages up to floor are not part of any later
             # prompt); cleaned=0 until the files (worklog, WORKING.md, ...) are archived (context_reset.py)
             db.execute("CREATE TABLE IF NOT EXISTS context_resets (bot_id TEXT PRIMARY KEY, floor INTEGER NOT NULL, "
-                       "job_floor INTEGER NOT NULL, gen INTEGER NOT NULL, reset_at TEXT NOT NULL, "
+                       "job_floor TEXT NOT NULL, gen INTEGER NOT NULL, reset_at TEXT NOT NULL, "
                        "cleaned INTEGER NOT NULL DEFAULT 0)")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS bot_aliases (alias TEXT PRIMARY KEY, bot_id TEXT NOT NULL)"
@@ -2996,7 +2996,7 @@ class JobStore:
                 raise
         return _model(Message, row, ("created_at", "archived_at"))
 
-    # --- session reset: where the bot's context starts (0.12.18) ---
+    # --- session reset: where the bot's context starts (0.12.20) ---
 
     @staticmethod
     def _context_floor(db: sqlite3.Connection, bot_id: str) -> int:
@@ -3009,11 +3009,12 @@ class JobStore:
         with closing(self._connect()) as db:
             return self._context_floor(db, str(bot_id))
 
-    def context_job_floor(self, bot_id: UUID | str) -> int:
-        """Row id of the newest job when the bot was last reset (0: never): jobs up to it are earlier work."""
+    def context_job_floor(self, bot_id: UUID | str) -> str:
+        """created_at of the bot's newest job when it was last reset (empty: never): jobs created up to it are
+        earlier work. A timestamp, not a rowid: jobs has no INTEGER PRIMARY KEY, so VACUUM may renumber rowids."""
         with closing(self._connect()) as db:
             row = db.execute("SELECT job_floor FROM context_resets WHERE bot_id=?", (str(bot_id),)).fetchone()
-        return row["job_floor"] if row else 0
+        return row["job_floor"] if row else ""
 
     def reset_context(self, bot_id: UUID | str) -> int | None:
         """Cut the bot's context at its newest message and job, atomically with the check that it has no queued
@@ -3028,7 +3029,7 @@ class JobStore:
                     db.rollback()
                     return None
                 last = db.execute("SELECT COALESCE(MAX(id), 0) FROM messages WHERE bot_id=?", (key,)).fetchone()[0]
-                jobs = db.execute("SELECT COALESCE(MAX(rowid), 0) FROM jobs").fetchone()[0]  # jobs are never deleted
+                jobs = db.execute("SELECT COALESCE(MAX(created_at), '') FROM jobs WHERE bot_id=?", (key,)).fetchone()[0]
                 before = db.execute("SELECT gen FROM context_resets WHERE bot_id=?", (key,)).fetchone()
                 gen = (before["gen"] if before else 0) + 1
                 db.execute("INSERT INTO context_resets (bot_id, floor, job_floor, gen, reset_at, cleaned) "
