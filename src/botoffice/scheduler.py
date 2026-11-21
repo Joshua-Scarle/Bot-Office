@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import stat
 import threading
 import time
@@ -43,6 +44,7 @@ from .workspace import (
     save_settings_snapshot,
 )
 
+SIGNAL_GRACE_SECONDS = 0.5
 TICK_SECONDS = 1.0
 WATCHDOG_SECONDS = 60.0
 # a running turn this long past its timeout did not stop by itself (wait_for) and is cancelled
@@ -140,6 +142,12 @@ class Scheduler:
             if not workspace.is_symlink():
                 shutil.rmtree(workspace / JOB_ATTACHMENTS_DIR, ignore_errors=True)
 
+    def begin_shutdown(self) -> None:
+        """SIGTERM/SIGINT reached the controller. systemd signals the whole service cgroup at once, so a
+        CLI can die before stop() runs; from now on a turn that did not succeed is an interruption (the
+        row stays RUNNING for recover_interrupted), not a provider error to retry later."""
+        self._stopping = True
+
     async def stop(self) -> None:
         self._stopping = True
         if self._loop_task:
@@ -158,6 +166,8 @@ class Scheduler:
                 task = self._tasks.get(lane)
                 if task and not task.done():
                     continue
+                if self._stopping:
+                    break
                 job = self.store.claim(self.settings.desktops, self._enabled_providers())
                 if not job:
                     break
@@ -624,6 +634,11 @@ class Scheduler:
                 adapter.run(run_job, workspace, log_path, timeout),
                 timeout=timeout + 10,
             )
+            if result.status != "succeeded" and not self._stopping and (result.exit_code or 0) < 0:
+                # killed by a signal: the service's SIGTERM may reach this process a moment after the child
+                await asyncio.sleep(SIGNAL_GRACE_SECONDS)
+            if self._stopping and result.status != "succeeded":
+                raise asyncio.CancelledError  # the CLI died with the service: see begin_shutdown
             if seed_generation is not None and result.exit_code is not None and not slash_turn:
                 # the provider process ran with the seed, so the fresh session has it; a
                 # cancellation or a failure before launch keeps it for the next turn
@@ -684,11 +699,15 @@ class Scheduler:
             self._settle(job)
             raise
         except TimeoutError:
+            if self._stopping:
+                raise asyncio.CancelledError from None
             self._finish(
                 job, workspace, JobStatus.FAILED, exit_code=124, log_path=log_path, error="job timed out",
                 result=RunResult("failed", exit_code=124, failure_kind=failures.TIMEOUT),
             )
         except Exception as exc:
+            if self._stopping:
+                raise asyncio.CancelledError from exc  # failed because the service is going down
             if not log_path.exists():
                 log_path.write_text(f"Bot-Office adapter error: {exc}\n", encoding="utf-8")
             self._finish(job, workspace, JobStatus.FAILED, log_path=log_path, error=str(exc),
@@ -1155,3 +1174,24 @@ class Scheduler:
                 }
             )
         return result
+
+
+def on_terminate(callback: Callable[[], None], signums: tuple[int, ...] = (signal.SIGTERM, signal.SIGINT)) -> bool:
+    """Run ``callback`` when one of ``signums`` arrives, then the handler that was installed before
+    (uvicorn's, which starts the graceful shutdown). Only the main thread can install handlers; anywhere
+    else (the test client's portal thread) nothing is changed and False is returned."""
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    for signum in signums:
+        previous = signal.getsignal(signum)
+
+        def handler(number, frame, previous=previous):
+            callback()
+            if callable(previous):
+                previous(number, frame)
+            elif previous == signal.SIG_DFL:
+                signal.signal(number, signal.SIG_DFL)
+                os.kill(os.getpid(), number)
+
+        signal.signal(signum, handler)
+    return True
