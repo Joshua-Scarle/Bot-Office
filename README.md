@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.12.12. What changed is recorded below: [0.12.12](#what-changed-in-01212), [0.12.11](#what-changed-in-01211), [0.12.10](#what-changed-in-01210), [0.12.9](#what-changed-in-0129), [0.12.8](#what-changed-in-0128), [0.12.7](#what-changed-in-0127), [0.12.6](#what-changed-in-0126), [0.12.5](#what-changed-in-0125), [0.12.4](#what-changed-in-0124), [0.12.3](#what-changed-in-0123), [0.12.2](#what-changed-in-0122), [0.12.1](#what-changed-in-0121), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.12.14. What changed is recorded below: [0.12.14](#what-changed-in-01214), [0.12.13](#what-changed-in-01213), [0.12.12](#what-changed-in-01212), [0.12.11](#what-changed-in-01211), [0.12.10](#what-changed-in-01210), [0.12.9](#what-changed-in-0129), [0.12.8](#what-changed-in-0128), [0.12.7](#what-changed-in-0127), [0.12.6](#what-changed-in-0126), [0.12.5](#what-changed-in-0125), [0.12.4](#what-changed-in-0124), [0.12.3](#what-changed-in-0123), [0.12.2](#what-changed-in-0122), [0.12.1](#what-changed-in-0121), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,17 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.12.14
+
+**Git guard, as defense in depth.** The git guard (approval cards for pushes to a default branch, deletes, sends and MCP calls) ships after four fix rounds. It is defense in depth, not an inescapable boundary: bots keep full CLI access as the same Unix user, and GitHub rulesets remain the backstop. Round 4 changed these things:
+
+- The default branch is verified (GitHub API, or `git ls-remote --symref` cached for 1 hour) before it is guarded. When it cannot be verified, only main, master, trunk, production and the clone's `origin/HEAD` are guarded, so feature pushes do not ask.
+- Only inline code (`python -c`, `node -e`, heredocs fed to an interpreter) is scanned. Script files are not read.
+- Sending is recognised by a list of known endpoints (`BOT_OFFICE_SEND_HOSTS` adds more), so ordinary POSTs do not raise cards.
+- Jobs without a bot still cannot be approved and resumed; run the job again from a bot to get a card (see `docs/APPROVALS.md`).
+
+**Known gaps:** a push to a real default branch outside the usual names passes when ls-remote fails and there is no token; MCP pushes with no token use the same fallback; deletes, sends and MCP calls made from script files are not seen by the command check (pushes still are, by the pre-push hook); unlisted webhook hosts, self-hosted Mastodon or Matrix, and SDK sends without a URL in the code are not caught; the ls-remote cache file is bot-writable; `BOT_OFFICE_SEND_HOSTS` is not seen by bot-less local-mode checks.
 
 ## What changed in 0.12.13
 
