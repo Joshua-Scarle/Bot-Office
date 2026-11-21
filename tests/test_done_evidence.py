@@ -30,14 +30,16 @@ def test_words_that_name_no_check_stay_unverified(reason):
 @pytest.mark.parametrize("reason", [
     "pytest: 3 failed, 9 passed", "ran pytest tests/test_x.py, 2 failed", "ran the build, exit code 1",
     "ran curl against staging, got HTTP 500", "checked the test run: traceback in test_x", "tests failed, see the log",
-    "ran lint, 4 errors"])
+    "ran lint, 4 errors", "ran pytest, tests failed; lint passed", "ran pytest, error during collection",
+    "nothing new; ran pytest, 3 failed", "ran pytest, 1 failed; no fix yet, 8 passed"])
 def test_failed_check_evidence_is_unverified_but_kept(reason):
     assert failures.judge_evidence("done", reason) == (0, reason)
 
 
 @pytest.mark.parametrize("reason", [
     "ran pytest tests/test_x.py, 12 passed", "ran pytest, 0 failed", "ran the build: no errors, exit 0",
-    "the failing test now passes, ran pytest tests/test_x.py", "checked the output file, matches", "nothing new"])
+    "the failing test now passes, ran pytest tests/test_x.py", "checked the output file, matches", "nothing new",
+    "ran pytest, 1 failed; fixed it and reran pytest, all passed"])
 def test_real_checks_are_verified(reason):
     assert failures.judge_evidence("done", reason) == (1, reason)
 
@@ -79,6 +81,14 @@ def test_status_reason_alone_is_enough(settings):
     "Fixed the bug; I could not reproduce the failure after the change.\nBOT-OFFICE-STATUS: done — ran pytest, 12 passed",
     "Done.\nBOT-OFFICE-STATUS: done — ran pytest tests/test_x.py, 12 passed, no data loss"])
 def test_a_real_done_is_not_downgraded(settings, reply):
+    _, _, job = run_turn(settings, reply)
+    assert job.status == JobStatus.SUCCEEDED and job.outcome == "done" and job.verified == 1
+
+
+@pytest.mark.parametrize("reply", [
+    "I couldn't access the old log, so I used the new log and completed the review.\nBOT-OFFICE-STATUS: done — checked the new log thoroughly",
+    "No data was lost; the migration is complete.\nBOT-OFFICE-STATUS: done — checked the migrated records"])
+def test_resolved_obstacles_and_negative_findings_stay_done(settings, reply):
     _, _, job = run_turn(settings, reply)
     assert job.status == JobStatus.SUCCEEDED and job.outcome == "done" and job.verified == 1
 

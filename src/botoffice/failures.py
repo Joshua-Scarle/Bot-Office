@@ -84,22 +84,24 @@ CHECK_WORDS = re.compile(
 _NEGATED = re.compile(r"\b(?:0|no|zero|without|not\s+any)\s+(?:test\s+|new\s+)?(?:failures?|failed|failing|fails?|errors?)\b", re.IGNORECASE)
 FAILED_COUNT = re.compile(r"\b[1-9]\d*\s+(?:tests?\s+|checks?\s+)?(?:failed|failing|failures?|errors?)\b", re.IGNORECASE)
 FAILED_WORD = re.compile(
-    r"\b(?:fail(?:ed|s|ing|ure|ures)?|errored|traceback|timed\s+out|unsuccessful|did\s+not\s+pass|didn['\u2019]t\s+pass|"
+    r"\b(?:fail(?:ed|s|ing|ure|ures)?|errors?|errored|exceptions?|traceback|timed\s+out|unsuccessful|did\s+not\s+pass|didn['\u2019]t\s+pass|"
     r"not\s+passing|exit(?:ed)?(?:\s+(?:code|status))?\s*[1-9]\d*|(?:http|status|returned)\s+[45]\d\d)\b", re.IGNORECASE)
-PASS_WORD = re.compile(r"\b(?:passed|passes|passing|succeeded|succeeds|success(?:ful(?:ly)?)?|green|now\s+works?|exit(?:ed)?\s+0|"
-                       r"returned\s+(?:200|ok)|fixed)\b", re.IGNORECASE)
+REPAIRED = re.compile(r"\b(?:re-?ran|rerun|re-?tested|fixed|now|again|after\s+(?:the\s+)?fix)\b[^;\n]*?\b(?:passed|passes|passing|green|succeeded|"
+                      r"success(?:ful(?:ly)?)?|exit(?:ed)?\s+0|returned\s+(?:200|ok))\b", re.IGNORECASE)
 
 
 def failed_check(text: str) -> bool:
-    """Does *text* cite a check that did not succeed? "0 failed" and "no errors" do not count; a failure
-    followed by a pass ("the failing test now passes") is read as the fix, a counted failure never is."""
+    """Does *text* cite a check that did not succeed? "0 failed" and "no errors" do not count. A failure
+    stays a failure unless a rerun or fix after it passed ("the failing test now passes", "fixed it and
+    reran pytest, all passed"); an unrelated pass ("tests failed; lint passed") does not repair it."""
     text = _NEGATED.sub(" ", text)
-    if FAILED_COUNT.search(text):
-        return True
     last = None
-    for last in FAILED_WORD.finditer(text):
+    for last in [*FAILED_COUNT.finditer(text), *FAILED_WORD.finditer(text)]:
         pass
-    return last is not None and not PASS_WORD.search(text, last.end())
+    if last is None:
+        return False
+    start = min(m.start() for m in [*FAILED_COUNT.finditer(text), *FAILED_WORD.finditer(text)])
+    return not REPAIRED.search(text, start)
 
 
 def judge_evidence(state: str, reason: str) -> tuple[int | None, str]:
@@ -112,12 +114,12 @@ def judge_evidence(state: str, reason: str) -> tuple[int | None, str]:
     if state != "done":
         return None, ""
     reason = reason.strip()
+    if failed_check(reason):
+        return 0, reason
     if NO_OP_DONE.match(reason):
         return 1, reason
     if len(reason.split()) < MIN_EVIDENCE_WORDS or not CHECK_WORDS.search(reason):
         return 0, ""
-    if failed_check(reason):
-        return 0, reason
     return 1, reason
 
 
@@ -129,7 +131,7 @@ INABILITY = re.compile(
     rf"\b{_CANT}\s+(?:\w+\s+){{0,3}}?(?:tell|answer|do|complete|finish|get|reach|access|see|check|verify|find|produce|"
     r"determine|run|send|open|read|load|connect|fetch|retrieve|proceed|continue|build|deploy|write|create|"
     r"obtain|poll|sweep|list|set|make|log|authenticate|log\s+in|install|start)\b"
-    r"|\bno\s+(?:live\s+|usable\s+|real\s+|current\s+)?(?:data|state|access|view)\b(?!\s+(?:loss|issues?|problems?|changes?|errors?|leaks?))"
+    r"|\bno\s+(?:live\s+|usable\s+|real\s+|current\s+)?(?:data|state|access|view)\b(?!\s+(?:loss|issues?|problems?|changes?|errors?|leaks?|(?:was|were|is|has|had|got)\b))"
     r"|\b(?:not\s+complete[d]?|incomplete|blocked\s+(?:by|on)|was\s+blocked|is\s+blocked)\b"
     r"|\bwork\s+(?:is\s+)?(?:not|n['\u2019]t)\s+(?:done|finished|complete)", re.IGNORECASE)
 # "couldn't find any problem" is a result, not an inability
@@ -137,6 +139,8 @@ BENIGN = re.compile(
     rf"\b{_CANT}\s+(?:find|see|reproduce|detect|spot|trigger)\s+(?:any|a|an|the|one)?\s*(?:\w+\s+)?"
     r"(?:problems?|issues?|bugs?|errors?|regressions?|leaks?|differences?|mismatch(?:es)?|failures?|duplicates?|conflicts?)\b",
     re.IGNORECASE)
+RESOLVED = re.compile(r"\b(?:instead|fell\s+back|worked\s+around|workaround|so\s+I\s+(?:used|read|checked|took|went|ran)|"
+                      r"but\s+(?:I\s+)?(?:was\s+able|managed)|and\s+(?:then\s+)?completed)\b", re.IGNORECASE)
 WAITING_ON_YOU = re.compile(
     r"\b(?:paste|send\s+me|share|let\s+me\s+know|tell\s+me\s+(?:which|what|where)|need\s+(?:you|your)|your\s+(?:decision|answer|input|go-ahead)|"
     r"if\s+you\s+(?:give|send|share|paste|can)|waiting\s+for\s+you)\b", re.IGNORECASE)
@@ -151,7 +155,7 @@ def admitted_incomplete(reply: str, reason: str) -> str | None:
     pieces = [reason] + ([paragraphs[0], paragraphs[-1]] if paragraphs else [])
     for piece in pieces:
         for sentence in re.split(r"(?<=[.!?])\s+|\n", piece):
-            if INABILITY.search(sentence) and not BENIGN.search(sentence):
+            if INABILITY.search(sentence) and not BENIGN.search(sentence) and not RESOLVED.search(sentence):
                 return sentence.strip()
     return None
 
