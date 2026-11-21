@@ -54,7 +54,7 @@ IDENTITY_MIGRATION = "crewdeck-identity-v1"
 EFFORT_MIGRATION = "crewdeck-effort-v1"
 READS_MIGRATION = "reads-seeded-v1"
 AVATARS_MIGRATION = "avatars.default_assigned"
-AVATAR_CHARS_MIGRATION = "avatars.characters_default"      # 0.12.11: generated patterns -> derived characters
+AVATAR_CHARS_MIGRATION = "avatars.characters_default"      # 0.12.12: generated patterns -> derived characters
 AVATAR_PATTERN_BACKUP = "avatars.pattern_backup"            # JSON {bot_id: old pattern seed}, to undo that migration
 # 0.9.0: Grok bridge rate/hop state moved from JSON files into SQLite (imported once)
 BRIDGE_IMPORT = "bridge_json_import"
@@ -984,7 +984,7 @@ class JobStore:
 
     @staticmethod
     def _migrate_avatar_characters(db: sqlite3.Connection) -> None:
-        """One-time (0.12.11): a bot still on a generated pattern gets the character its id hashes to. Uploads, emoji-only
+        """One-time (0.12.12): a bot still on a generated pattern gets the character its id hashes to. Uploads, emoji-only
         bots and bots that already have a character are untouched. The old seeds are kept as JSON in ``meta``
         (``avatars.pattern_backup``) so the change can be undone; 0.12.1 and older show the emoji for a character."""
         db.execute("BEGIN IMMEDIATE")

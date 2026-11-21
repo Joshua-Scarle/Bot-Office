@@ -1380,7 +1380,7 @@ def create_app(
 
     @app.put("/v1/sections/hidden/members", dependencies=[Depends(auth)])
     async def set_hidden_members(body: HiddenMembers) -> dict:
-        """0.12.11: make exactly these bots the Hidden section's members (others there return to Ungrouped)."""
+        """0.12.12: make exactly these bots the Hidden section's members (others there return to Ungrouped)."""
         return _sections(store.sections.set_hidden, [str(b) for b in body.bot_ids])
 
     @app.patch("/v1/sections/{section_id}", dependencies=[Depends(auth)])

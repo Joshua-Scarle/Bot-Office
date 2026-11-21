@@ -4,7 +4,7 @@ A bot belongs to at most one section. "Ungrouped" is virtual and always last: bo
 ``section_id = ''`` (an explicit order) come first, then bots with no row at all in the default
 name order. Every write is one ``BEGIN IMMEDIATE`` transaction that renumbers positions densely.
 
-0.12.11: "Hidden" is a built-in section (fixed id ``hidden``, a real ``bot_sections`` row created idempotently at
+0.12.12: "Hidden" is a built-in section (fixed id ``hidden``, a real ``bot_sections`` row created idempotently at
 startup, collapsed by default). It cannot be renamed, deleted or reordered, its name is reserved, and the sidebar
 draws it after Ungrouped. The layout reports it under its own ``hidden`` key, not in ``sections``. Hiding is
 only where the sidebar lists a bot: nothing else in the controller reads these tables.

@@ -1100,7 +1100,7 @@ function sidebarLayout() {
   const seen = new Set();
   const take = (ids) => ids.map((id) => { seen.add(id); return byId.get(id); }).filter(Boolean);
   const sections = lay.sections.map((s) => ({ ...s, bots: take(s.bot_ids) }));
-  const hid = lay.hidden || { collapsed: true, bot_ids: [] };   // 0.12.11: the built-in Hidden section, always drawn last
+  const hid = lay.hidden || { collapsed: true, bot_ids: [] };   // 0.12.12: the built-in Hidden section, always drawn last
   const hidden = { id: "hidden", name: "Hidden", builtin: true, collapsed: hid.collapsed, bots: take(hid.bot_ids) };
   const ungrouped = { id: "ungrouped", name: "Ungrouped", collapsed: lay.ungrouped.collapsed, bots: take(lay.ungrouped.bot_ids) };
   for (const bot of state.bots) if (!seen.has(bot.id)) ungrouped.bots.push(bot);
@@ -3954,7 +3954,7 @@ function updateIconPreview() {
   document.querySelectorAll(".kind-panel").forEach((p) => { p.hidden = p.dataset.panel !== state.kind; });
 }
 // which avatar type the saved bot has, as a picker choice
-function kindOf(bot) { return !bot ? "character" : bot.avatar === "upload" ? "upload" : bot.avatar === "character" || bot.avatar === "generated" ? "character" : "emoji"; }   // 0.12.11: no Pattern tab; an old pattern bot (API-only now) opens on Character and keeps its pattern until a shape is chosen
+function kindOf(bot) { return !bot ? "character" : bot.avatar === "upload" ? "upload" : bot.avatar === "character" || bot.avatar === "generated" ? "character" : "emoji"; }   // 0.12.12: no Pattern tab; an old pattern bot (API-only now) opens on Character and keeps its pattern until a shape is chosen
 // Each tab keeps its own pending choice, so moving between tabs never loses work and the saved result is always the open tab's
 function pendingSnapshot() { return { char: state.pendingChar, seed: state.pendingSeed, remove: state.removeImage, image: state.pendingImage }; }
 function chooseKind(kind) {
@@ -4202,7 +4202,7 @@ $("bot-form").onsubmit = async (event) => {
     } else if (state.removeImage && saved.avatar !== "emoji") {
       saved = await api("/v1/bots/" + saved.id + "/icon", { method: "DELETE" });
     }
-    if ($("f-hidden").checked !== state.hiddenAtOpen) {   // 0.12.11: the Hide toggle is a move into or out of the Hidden section
+    if ($("f-hidden").checked !== state.hiddenAtOpen) {   // 0.12.12: the Hide toggle is a move into or out of the Hidden section
       state.sections = await api("/v1/bots/" + saved.id + "/section", { method: "PUT", body: JSON.stringify({ section_id: $("f-hidden").checked ? "hidden" : null, index: 100000 }) });
       state.hiddenAtOpen = $("f-hidden").checked;
     }

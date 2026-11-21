@@ -47,7 +47,7 @@ PRESET_SEEDS = tuple(f"preset-{n}" for n in range(PRESET_COUNT))
 # the emoji after a rollback. The names are the contract (the UI holds the drawings; a test keeps both lists equal).
 CHAR_PREFIX = "char|"
 CHAR_SHAPES = ("square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond",
-               "squircle", "ghost", "shield", "triangle")   # 0.12.11 added the last four (new shapes go at the end)
+               "squircle", "ghost", "shield", "triangle")   # 0.12.12 added the last four (new shapes go at the end)
 CHAR_COLORS = ("blue", "violet", "pink", "red", "orange", "yellow", "green", "teal", "cyan", "slate")
 CHAR_EXPRESSIONS = ("idle", "working", "waiting", "done", "error", "sleeping")
 
@@ -89,7 +89,7 @@ def default_character(bot_id, used=()) -> str:
 
 def derived_character(key) -> str:
     """The character a bot gets from a stable hash of its id: shape and color from separate digest bytes. Used when
-    the 0.12.11 migration replaces a generated pattern (the same id always gives the same character)."""
+    the 0.12.12 migration replaces a generated pattern (the same id always gives the same character)."""
     digest = hashlib.sha256(("botoffice-char:" + str(key)).encode()).digest()
     shape = CHAR_SHAPES[int.from_bytes(digest[:4], "big") % len(CHAR_SHAPES)]
     color = CHAR_COLORS[int.from_bytes(digest[4:8], "big") % len(CHAR_COLORS)]
