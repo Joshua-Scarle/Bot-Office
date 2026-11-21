@@ -137,6 +137,10 @@ def check_layout(settings, launcher: Launcher | None) -> str | None:
                 "the bots could read the private dir")
     if launcher is None:
         return f"no usable root-owned launcher at {settings.launcher or DEFAULT_LAUNCHER} (deploy/install-isolation.sh)"
+    if not launcher_passes_git_config(launcher.path):
+        # 0.12.4 fix2: an older launcher drops GIT_CONFIG_*, so runs would lose the pre-push check
+        return (f"the launcher at {launcher.path} predates the push check (it drops GIT_CONFIG_*); "
+                "re-run deploy/install-isolation.sh --apply")
     if not private:
         return f"the controller runs as {user} but BOT_OFFICE_PRIVATE_DIR is not set"
     try:
@@ -148,6 +152,13 @@ def check_layout(settings, launcher: Launcher | None) -> str | None:
     if settings.token_file and private not in settings.token_file.parents:
         return f"BOT_OFFICE_TOKEN_FILE is outside the private dir {private}"
     return None
+
+
+def launcher_passes_git_config(path: Path) -> bool:
+    try:
+        return "GIT_CONFIG_" in Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
 
 
 def layout_error() -> str | None:

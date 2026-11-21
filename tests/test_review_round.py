@@ -86,7 +86,7 @@ def test_readme_states_the_profile_scope_honestly():
     from pathlib import Path
     text = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
     assert "bypass flags are unchanged from 0.10.x" in text and "Only strict-profile runs" in text
-    assert "refuses strict-profile runs (fail closed); other runs fail open except" in text
+    assert "the hook refuses the tool call in every run (fail closed" in text
     assert "MCP tools are refused" in text and "Skill, BashOutput, KillShell" in text
     assert "helpers reach Bot-Office" in text
     assert "this is not implemented" not in text and "implemented by `deploy/install-isolation.sh`" in text

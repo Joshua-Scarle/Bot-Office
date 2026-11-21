@@ -16,7 +16,7 @@ controller passed --allow-sudo for a bot Joshua allowed; umask 007 (the shared t
 bo-share with setgid dirs); an environment built from scratch: the bots user's HOME, USER,
 LOGNAME, SHELL (XDG_RUNTIME_DIR and the user-bus address only with --runtime-dir, which the
 controller passes for its own rootless podman calls, never for a bot CLI), plus an allowlist of
-the variables the controller sent as one JSON line on stdin (--env-stdin; never on the command line, where other users could read
+the variables the controller sent (incl. GIT_CONFIG_COUNT/KEY_n/VALUE_n: the run's pre-push check and GitHub credential helper) as one JSON line on stdin (--env-stdin; never on the command line, where other users could read
 the job token). Then it execs PROGRAM, which must be an absolute path to an executable file.
 
 --stop-job: SIGTERM, then SIGKILL, every process of the bots user whose environment carries
@@ -47,6 +47,8 @@ ALLOWED = frozenset({
     "BOT_OFFICE_GATE_FILE", "BOT_OFFICE_GUARD_SHIM", "BOT_OFFICE_WORKSPACE", "AGENTDESK_INBOX_DIR", "AGENTDESK_SLOT", "AGENTDESK_BOT_ID",
 })
 API_KEY = re.compile(r"^[A-Z][A-Z0-9_]{0,60}_API_KEY$")
+# 0.12.4 fix2: the run's git config (pre-push check, GitHub credential helper), set by the controller
+GIT_CONFIG = re.compile(r"^GIT_CONFIG_(?:COUNT|KEY_\d{1,2}|VALUE_\d{1,2})$")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 JOB_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -117,7 +119,7 @@ def build_env(sent, user, cwd, runtime_dir=False):
     for key, value in sent.items():
         if "\x00" in value:
             continue
-        if key in ALLOWED or API_KEY.match(key):
+        if key in ALLOWED or API_KEY.match(key) or GIT_CONFIG.match(key):
             env[key] = value
         elif key == "HOME" and cwd and os.path.isabs(value) and _inside(value, cwd):
             env["HOME"] = os.path.realpath(value)  # restricted runs confine HOME to the job workspace

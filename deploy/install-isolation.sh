@@ -119,7 +119,7 @@ checkout_check() {
   # Sec 7: the copy that will run as botoffice comes from this checkout; show exactly what it is
   local writable commit digest
   writable="$(find "$src" \( -path "$src/.git" -o -path "$src/.venv" -o -path "$src/data" \) -prune -o \
-    \( -perm -g+w -o -perm -o+w \) -print -quit 2>/dev/null)"
+    ! -type l \( -perm -g+w -o -perm -o+w \) -print -quit 2>/dev/null)"
   if [[ -n "$writable" ]]; then
     echo "REFUSED: $src is group- or other-writable (e.g. $writable); run chmod -R go-w $src first" >&2
     if applying; then

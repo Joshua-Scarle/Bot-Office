@@ -30,6 +30,22 @@ from .base import RunResult
 from .streams import SESSION_ID_RE, StreamParser, parser_for, session_id_from
 
 REPO_BIN = Path(__file__).resolve().parents[3] / "bin"
+
+
+def git_env(job: Job) -> dict[str, str]:
+    """0.12.4 fix2: git config for every Bot-Office run, through the environment (command scope: it
+    outranks the repo's and the user's config files): the pre-push check (bin/bot-office-git-hook)
+    and, when the controller holds a GitHub token, the credential helper for https://github.com
+    (an empty helper first clears any other). A command that changes these always asks (git_guard)."""
+    pairs = [("core.hooksPath", str(REPO_BIN / "git-hooks"))]
+    if job.github_credential:
+        helper = "credential.https://github.com.helper"
+        pairs += [(helper, ""), (helper, str(REPO_BIN / "bot-office-credential"))]
+    env = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for index, (key, value) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
 NEEDS_LOGIN_TERMS = ("not logged in", "signed out", "unauthorized", "not authenticated")
 MODEL_CACHE_SECONDS = 600
 MODEL_FAIL_BACKOFF = 60  # seconds before a failed model listing is tried again
@@ -281,6 +297,7 @@ class CliAdapter:
                 if job.assignment_id:
                     # bot-task's default assignment ("current")
                     env["BOT_OFFICE_ASSIGNMENT_ID"] = str(job.assignment_id)
+                env.update(git_env(job))
                 if job.gate_command:
                     # attended/unattended for bin/bot-office-gate, written by the controller
                     env["BOT_OFFICE_GATE_FILE"] = str(workspace / ".bot-office-gate.json")

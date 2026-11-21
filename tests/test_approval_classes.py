@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from guard_repo import clone_workspace
 
 from botoffice import approval_classes
 from botoffice.api import create_app
@@ -20,8 +21,11 @@ from botoffice.store import JobStore, now
 H = {"Authorization": "Bearer test-token"}
 
 
+WORK = clone_workspace()
+
+
 def bash(command):
-    return {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+    return {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "cwd": WORK}
 
 
 def tool(name, **arguments):
@@ -184,11 +188,14 @@ def test_settings_api(settings):
         got = client.get("/v1/settings", headers=H).json()["approvals"]
         assert {item["key"] for item in got["classes"]} >= set(approval_classes.BUILTIN_KEYS)
         assert set(got["gates"]) >= {"claude", "codex", "opencode"} and got["gates"]["opencode"] == "none"
+        # round 2 (A16): Sending is locked on; switching it off is refused
+        assert client.put("/v1/settings", headers=H, json={"approvals": {"enabled": {"send": False}}}).status_code == 422
         changed = client.put("/v1/settings", headers=H, json={"approvals": {
-            "enabled": {"send": False}, "timeout_min": 15,
+            "enabled": {"release": False}, "timeout_min": 15,
             "add": [{"label": "Deploys", "kind": "shell", "pattern": "deploy"}]}}).json()["approvals"]
         by_key = {item["key"]: item for item in changed["classes"]}
-        assert not by_key["send"]["enabled"] and by_key["custom-1"]["enabled"] and changed["timeout_min"] == 15
+        assert by_key["send"]["enabled"] and by_key["send"]["locked"] and not by_key["release"]["enabled"]
+        assert by_key["custom-1"]["enabled"] and changed["timeout_min"] == 15
         assert client.put("/v1/settings", headers=H, json={"approvals": {"remove": ["send"]}}).status_code == 422
         assert client.put("/v1/settings", headers=H, json={"approvals": {"timeout_min": -1}}).status_code == 422
         assert client.put("/v1/settings", json={"approvals": {"enabled": {"send": True}}}).status_code == 401
@@ -268,9 +275,12 @@ def test_engines_that_cannot_pause_are_named_and_told_not_to_act(tmp_path):
         extra, _, stable = self_extra(store, bot, job, "", now())
         assert expect in extra and "Sending email or messages" in extra and "Sending email" in stable
     for item in approval_classes.BUILTIN:
-        approval_classes.update(store, enabled={item.key: False})
-    note = approval_classes.self_note(store, "opencode", "full")  # only the always-on git guard is left
-    assert "Protected action" in note and "Sending email" not in note
+        if item.key not in approval_classes.LOCKED:
+            approval_classes.update(store, enabled={item.key: False})
+    with pytest.raises(approval_classes.ApprovalClassError):
+        approval_classes.update(store, enabled={"send": False})
+    note = approval_classes.self_note(store, "opencode", "full")  # the git guard and Sending are always on
+    assert "Protected action" in note and "Sending email" in note
 
 
 def test_settings_show_unpausable_bots_by_each_class_and_docs_say_checkpoint():
@@ -283,7 +293,7 @@ def test_settings_show_unpausable_bots_by_each_class_and_docs_say_checkpoint():
     body = html[start:html.index("\n}\n", start)]
     assert "c.enabled && loose.length" in body and "Advice only, can't pause: " in body
     docs = (root / "docs" / "APPROVALS.md").read_text()
-    assert "A checkpoint, not enforcement." in docs and "fails open" in docs and "s=sudo; $s" in docs
+    assert "A checkpoint, not enforcement." in docs and "fails closed" in docs and "s=sudo; $s" in docs
     readme = (root / "README.md").read_text()
     assert "Classes are a checkpoint and a tripwire, not enforcement" in readme
 

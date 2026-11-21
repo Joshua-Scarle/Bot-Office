@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from guard_repo import clone_workspace
 
 from botoffice import approval_classes, git_guard
 from botoffice import rules as rules_mod
@@ -21,7 +22,9 @@ from botoffice.rules import Rules
 from botoffice.store import JobStore
 
 BIN = Path(__file__).resolve().parents[1] / "bin"
-WORK = "/srv/bots/ada/work"  # a workspace that need not exist: nothing here reads the disk
+
+
+WORK = clone_workspace()
 
 
 def bash(command, cwd=None):
@@ -55,6 +58,16 @@ PUSH_TO_DEFAULT = [
     "git tag -d v1.0", "git tag --delete v1.0 && git push origin :refs/tags/v1.0", "git push origin :refs/tags/v1.0",
     "git push --delete origin v1.0",
     "git branch -D main", "git branch -d master", "git branch -D origin/main", "git update-ref -d refs/heads/main",
+    # fix2: any branch delete; skipping or switching off the pre-push check; reading the credential
+    "git branch -d feature", "git branch -D old-work", "git branch --delete x", "git push --no-verify origin feature",
+    "git -c core.hooksPath=/dev/null push origin feature", "git -c core.hookspath= push origin feature",
+    "GIT_CONFIG_COUNT=0 git push origin feature", "env -u GIT_CONFIG_COUNT git push origin feature",
+    "unset GIT_CONFIG_KEY_0; git push origin feature", "export GIT_CONFIG_COUNT=0", "env -i git push origin feature",
+    "git -c credential.helper= push origin feature", "git config --global core.hooksPath /tmp/h",
+    "git credential fill", "printf 'host=github.com\\n' | git credential fill", "git-credential-store get",
+    "GH_TOKEN=x gh pr list", "bot-office-credential get",
+    # fix2: the remote's own default branch, wherever it is not main/master
+    "git push origin HEAD", "git push origin HEAD:HEAD",
     "git send-pack origin main", "git http-push http://x/y.git main",
     # wrappers and prefixes
     "GIT_TERMINAL_PROMPT=0 git push origin main", "FOO=1 BAR=2 git push origin main", "env GIT_X=1 git push origin main",
@@ -137,11 +150,11 @@ SAFE = [
     "git push origin HEAD:feature", "git push origin HEAD:refs/heads/feature", "git push origin feature:feature2",
     "git push origin main:feature", "git push --set-upstream origin my-branch", "git push origin tag-v1", "git push -u origin ada/work-1",
     "git push origin refs/heads/feature", "git push --dry-run origin feature", "git push -n origin feature", "git push origin feature -v",
-    "git push --no-verify origin feature", "git push --porcelain origin feature", "git push -o ci.skip origin feature",
+    "git push --porcelain origin feature", "git push -o ci.skip origin feature",
     "git -C repo push origin feature", "git -c http.extraheader=x push origin feature", "FOO=1 git push origin feature",
     "git push origin feature && git status", "git status", "git log --oneline main", "git log --grep=push main", "git diff main",
     "git checkout main", "git checkout -b feature", "git merge main", "git pull origin main", "git pull", "git fetch origin main",
-    "git rebase main", "git branch feature", "git branch -d feature", "git branch -D old-work", "git branch -a", "git branch --list 'd*'",
+    "git rebase main", "git branch feature", "git branch -a", "git branch --list 'd*'",
     "git tag v1.0", "git tag -a v1 -m 'release notes: push main'", "git tag -l", "git commit -m 'git push origin main'",
     "git commit -m \"fix: gh pr merge flow\"", "git commit -am 'do not rm -rf /'", "git stash", "git show main:README.md",
     "git clone https://github.com/o/r.git", "git remote -v", "git diff origin/main...HEAD", "git reset --hard", "git clean -fd",
@@ -159,7 +172,7 @@ SAFE = [
     "curl -X PUT https://storage.example.com/bucket/x -T f", "curl http://127.0.0.1:8787/v1/status", "wget https://github.com/o/r/archive/main.zip",
     "wget -O x https://example.com", "curl -L https://github.com/o/r/raw/main/README.md",
     "rm -rf build", "rm file.txt", "rm -rf ./node_modules", "rm -rf dist/ .cache", "rm -f outbox/draft.txt", "rm -rf sub/../other",
-    "rm -rf $BUILD_DIR/x", "rm \"$f\"", "rm -rf /dev/null", "find . -name '*.pyc' -delete", "find build -type f -delete", "find /srv -name x",
+    "rm -rf /dev/null", "find . -name '*.pyc' -delete", "find build -type f -delete", "find /srv -name x",
     "ls /srv/x", "cat /etc/hosts", "cp a b", "mv a b", "mkdir -p /tmp/x", "docker rm c1", "git rm old.py", "npm rm lodash", "cd sub && rm x",
     "cd .. && ls", "rsync -a a/ b/", "rsync -a --delete ./a/ ./b/", "echo rm -rf", "python3 -c \"print('hello')\"", "python3 build.py",
     "pytest -q", "ls | grep push", "sudo -n true", "make deploy", "npm test",
@@ -200,6 +213,10 @@ def test_implicit_pushes_are_judged_from_the_repo(tmp_path):
     git("commit", "-q", "--allow-empty", "-m", "x", cwd=work)
     git("remote", "add", "origin", str(bare), cwd=work)
     root = str(work)
+    # fix2: origin's default branch is not known yet (no refs/remotes/origin/HEAD): every push asks
+    assert guarded("git push origin feature", root) and guarded("git push", root)
+    git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=work)
+    git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main", cwd=work)
     # on main: every implicit form goes to the default branch
     for command in ("git push", "git push origin", "git push -u origin HEAD", "git push origin HEAD", "git push origin @"):
         assert guarded(command, root), command
@@ -349,7 +366,8 @@ def test_nothing_the_owner_can_set_opens_the_guard(tmp_path):
     store, bot = make_store(tmp_path)
     rules = Rules(store)
     # every approval class off, the timeout off, an allow rule for each kind
-    approval_classes.update(store, enabled={item.key: False for item in approval_classes.BUILTIN}, timeout_min=0)
+    approval_classes.update(store, enabled={item.key: False for item in approval_classes.BUILTIN
+                                          if item.key not in approval_classes.LOCKED}, timeout_min=0)
     for kind, pattern in (("preset", "outbound"), ("preset", "destructive"), ("shell", r".*"), ("shell", r"\bgit\b"),
                           ("path", r".*"), ("tool", r".*")):
         rules.add_rule(bot_id=None, effect="allow", kind=kind, pattern=pattern, scope="all")
@@ -437,12 +455,12 @@ def test_the_hook_refuses_a_guarded_command_when_the_controller_cannot_be_asked(
         code, _, err = run_script("bot-office-gate", [provider, "--mode", "attended"], bash("git push origin main", WORK), dead)
         assert code == 2, provider
     code, _, err = run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("gh pr merge 5", WORK), dead)
-    assert code == 2 and "needs the owner's approval" in err
+    assert code == 2 and "unreachable" in err
     # with no token at all in an attended run: same
     assert run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("git push --force", WORK), {})[0] == 2
-    # everything else still fails open when attended
-    assert run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("git push origin feature", WORK), dead)[0] == 0
-    assert run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("ls", WORK), dead)[0] == 0
+    # round 2: nothing fails open any more, attended or not
+    assert run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("git push origin feature", WORK), dead)[0] == 2
+    assert run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("ls", WORK), dead)[0] == 2
     # the owner's own CLI (no token, no mode): untouched
     assert run_script("bot-office-gate", ["claude"], bash("git push origin main", WORK), {})[0] == 0
 
@@ -483,6 +501,8 @@ def test_the_shim_stops_a_guarded_command_until_the_card_is_approved(live, tmp_p
     origin = running(store, bot, source)
     real = fake_tools(tmp_path)
     ran = tmp_path / "ran.log"
+    (tmp_path / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True)  # a clone of a repo whose default is main
+    (tmp_path / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text("ref: refs/remotes/origin/main\n")
 
     def env_for(job):
         return {"PATH": f"{BIN}:{real}:/usr/bin:/bin", "BOT_OFFICE_GUARD_SHIM": "1", "BOT_OFFICE_API_URL": url,
@@ -507,7 +527,7 @@ def test_the_shim_stops_a_guarded_command_until_the_card_is_approved(live, tmp_p
     pending = [item for item in rules_for(store).list("pending")]
     assert len(pending) == 4 and all(item["preset"] == "git-guard" for item in pending)
     # approve the push: the resume turn can run exactly it, once
-    push = next(item for item in pending if item["summary"].endswith("git push origin main"))
+    push = next(item for item in pending if "git push origin main" in item["summary"])
     store.finish(origin.id, JobStatus.INCOMPLETE)
     resume_id = rules_for(store).approve(push["id"])["resume_job_id"]
     with closing(store._connect()) as db:

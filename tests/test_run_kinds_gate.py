@@ -144,12 +144,12 @@ def test_a_job_with_no_bot_still_runs_the_hook_and_its_fallback_refuses_guarded_
     asyncio.run(scheduler._execute(0, store.claim(["desktop-1"], {"codex"})))
     assert store.get(made.id).status == JobStatus.SUCCEEDED
     ran = adapter.jobs[-1]
-    assert "bot-office-gate" in ran.gate_command and "--mode attended" in ran.gate_command
+    assert "bot-office-gate" in ran.gate_command and "--mode local" in ran.gate_command
     gate_file = settings.data_dir / "workspaces" / str(made.id) / ".bot-office-gate.json"
-    assert json.loads(gate_file.read_text())["mode"] == "attended"
+    assert json.loads(gate_file.read_text())["mode"] == "local"
 
     def gate(command):
-        return subprocess.run([sys.executable, "-I", str(GATE), "codex", "--mode", "attended"],
+        return subprocess.run([sys.executable, "-I", str(GATE), "codex", "--mode", "local"],
                               input=json.dumps(event("Bash", {"command": command})).encode(),
                               env={"PATH": "/usr/bin:/bin", "BOT_OFFICE_GATE_FILE": str(gate_file)},
                               capture_output=True, timeout=60, check=False)

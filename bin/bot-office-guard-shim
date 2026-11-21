@@ -5,8 +5,13 @@ Bot-Office puts bin/ first on a bot's PATH. For an engine that bin/bot-office-ga
 (opencode, restricted Codex) the run's env has BOT_OFFICE_GUARD_SHIM=1: a push to the default branch, a
 merge, a force-push, a deletion or a repo-settings change is then sent to the controller as the same
 gate event a hook would send, and runs only when the owner has approved that card. Everything else
-runs the real program at once. Without BOT_OFFICE_GUARD_SHIM (hooked engines, the owner's own shell)
-this is a plain pass-through. Stdlib only; never prints the token.
+runs the real program at once. The variable stays set for the program's children (a git alias, a
+hook, a script it runs reach the shim again). Without BOT_OFFICE_GUARD_SHIM (hooked engines, the
+owner's own shell) this is a pass-through. It fails closed: a crash refuses the command.
+
+In every Bot-Office run, gh gets the GitHub token from the controller (POST /v1/agent/github-token,
+docs/APPROVALS.md "GitHub credentials") as GH_TOKEN in its own environment only, never in the bot's
+environment or files. Stdlib only; never prints the token.
 """
 import json
 import os
@@ -33,9 +38,31 @@ def real_program(name):
 
 
 def run(name, program, args):
-    # children of a command that is allowed to run (git hooks, an alias) are not asked again
-    os.environ.pop("BOT_OFFICE_GUARD_SHIM", None)
-    os.execv(program, [name, *args])
+    env = dict(os.environ)
+    if name == "gh":
+        token = github_token()
+        if token:
+            env["GH_TOKEN"] = token
+    os.execve(program, [name, *args], env)
+
+
+def github_token():
+    """The GitHub token the controller holds for bot runs, or None (none configured, not a run)."""
+    token = os.environ.get("BOT_OFFICE_AGENT_TOKEN", "")
+    url = os.environ.get("BOT_OFFICE_API_URL", "")
+    if not token or not url or not loopback(url):
+        return None
+    request = urllib.request.Request(url.rstrip("/") + "/v1/agent/github-token", method="POST",
+                                     data=json.dumps({"host": "github.com", "for": "gh"}).encode(),
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=TIMEOUT) as response:
+            answer = json.loads(response.read(65536).decode() or "{}")
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    value = answer.get("token") if isinstance(answer, dict) else None
+    return value if isinstance(value, str) and value and "\n" not in value else None
 
 
 def refuse(text):
@@ -67,12 +94,23 @@ def ask(command, cwd):
             answer = json.loads(response.read(65536).decode() or "{}")
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return False, f"controller unreachable ({type(exc).__name__}); action refused."
-    if answer.get("decision") == "allow":
+    if isinstance(answer, dict) and answer.get("decision") == "allow":
         return True, ""
-    return False, str(answer.get("reason") or "action refused.")
+    return False, str((answer.get("reason") if isinstance(answer, dict) else "") or "action refused.")
 
 
 def main():
+    try:
+        return _main()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # fail closed: a crash never runs the command
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        return refuse(f"the check failed ({type(exc).__name__}); action refused.")
+
+
+def _main():
     # bin/git, bin/gh, bin/curl, bin/wget are two-line stubs: `exec bot-office-guard-shim --as <name> "$@"`
     if len(sys.argv) > 2 and sys.argv[1] == "--as":
         name, args = os.path.basename(sys.argv[2]), sys.argv[3:]

@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from guard_repo import clone_workspace
 
 from botoffice import rules as rules_mod
 from botoffice.api import create_app
@@ -30,8 +31,11 @@ H = {"Authorization": "Bearer test-token"}
 GATE = Path(__file__).resolve().parents[1] / "bin" / "bot-office-gate"
 
 
+WORK = clone_workspace()
+
+
 def bash(command):
-    return {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+    return {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "cwd": WORK}
 
 
 def action(command):
@@ -294,8 +298,9 @@ def test_gate_script_fail_modes():
     code, _, err = run_gate(["claude", "--mode", "unattended"], bash("ls"), {})
     assert code == 2 and "no job token" in err
     assert run_gate(["claude", "--mode", "unattended"], bash("ls"), dead)[0] == 2
-    # attended: fail open, except protected paths
-    assert run_gate(["claude", "--mode", "attended"], bash("ls"), dead)[0] == 0
+    # attended with the controller unreachable: fail closed too (round 2: a hook that cannot ask denies)
+    code, _, err = run_gate(["claude", "--mode", "attended"], bash("ls"), dead)
+    assert code == 2 and "unreachable" in err
     assert run_gate(["codex", "--mode", "attended"], bash("cat /srv/bo/data/token"), dead)[0] == 2
     # a non-loopback controller URL is refused
     assert run_gate(["claude", "--mode", "attended"], bash("ls"),

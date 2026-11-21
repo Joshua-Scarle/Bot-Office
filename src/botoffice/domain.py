@@ -112,6 +112,8 @@ class Job(BaseModel):
     secret_paths: list[str] = Field(default_factory=list, exclude=True)
     allow_network: bool = Field(default=True, exclude=True)
     allow_sudo: bool = Field(default=False, exclude=True)
+    # 0.12.4 fix2: the controller holds a GitHub token, so the run's git asks for it (bin/bot-office-credential)
+    github_credential: bool = Field(default=False, exclude=True)
 
     @property
     def execution(self) -> int:

@@ -30,6 +30,8 @@ import json
 import re
 import shlex
 import sqlite3
+import threading
+import time
 import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -52,6 +54,7 @@ KINDS = ("shell", "path", "domain", "preset", "tool")
 SCOPES = ("attended", "unattended", "all")
 PRESETS = ("outbound", "destructive", "secrets", "network")
 GRANT_HOURS = 24
+PASS_SECONDS = 600
 PATTERN_LIMIT = 500
 SUMMARY_LIMIT = 300
 # 0.11.0 review Sec 4/5: the preset patterns scan at most this much of a command (longer ones
@@ -143,8 +146,11 @@ class Action:
 
     @property
     def detail(self) -> str:
-        """What the action does, whole (the approval card shows exactly this)."""
-        return self.command or " ".join(self.paths) or " ".join(self.urls) or self.text
+        """What the action does, whole (the approval card shows exactly this): the command, or for
+        a tool without one its canonical arguments, and where it runs."""
+        what = self.command or (_canonical(self.data) if self.data and not _is_shell(self) else "") or " ".join(
+            self.paths) or " ".join(self.urls) or self.text
+        return f"{what} (in {self.cwd})" if self.cwd else what
 
     @property
     def summary(self) -> str:
@@ -153,10 +159,32 @@ class Action:
 
     @property
     def fingerprint(self) -> str:
-        """Exact action identity (tool + the exact command, paths and urls); a grant covers only
-        this action. Whitespace is kept (Sec 10: `"a  b"` and `"a b"` are different arguments)."""
-        body = json.dumps([self.tool.lower(), self.command.strip(), sorted(self.paths), sorted(self.urls)])
+        """Exact action identity: tool, the exact command, paths and urls, the working directory
+        (repo) and the tool's canonical arguments (an MCP call's target and content; a shell call's
+        options besides its description); a grant covers only this action. Whitespace is kept
+        (Sec 10: `"a  b"` and `"a b"` are different arguments)."""
+        data = self.data
+        if _is_shell(self):
+            data = {key: value for key, value in data.items() if key not in _SHELL_COSMETIC}
+        body = json.dumps([self.tool.lower(), self.command.strip(), sorted(self.paths), sorted(self.urls),
+                           _norm_dir(self.cwd), _canonical(data)])
         return hashlib.sha256(body.encode()).hexdigest()
+
+
+# shell tool-input fields that do not change what runs (a retry may word them differently)
+_SHELL_COSMETIC = frozenset({"command", "description", "timeout", "run_in_background", "justification"})
+
+
+def _canonical(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    except (TypeError, ValueError, RecursionError):
+        return repr(value)
+
+
+def _norm_dir(path: str | None) -> str:
+    import posixpath
+    return posixpath.normpath(path) if path else ""
 
 
 def _strings(value: Any, out: list[str], depth: int = 0) -> None:
@@ -209,6 +237,11 @@ def parse_event(event: dict) -> Action:
 
 def _is_shell(action: Action) -> bool:
     return bool(action.command) or action.tool.lower() in ("bash", "shell", "exec_command", "run_shell_command")
+
+
+def readable(event: Any) -> bool:
+    """git_guard.readable_event: an event the gate can judge; anything else is denied."""
+    return git_guard.readable_event(event)
 
 
 def _non_loopback_hosts(text: str) -> list[str]:
@@ -346,11 +379,24 @@ def is_unattended(job: Job, scheduled_runs: str | None = "full") -> bool:
     return source in STRICT_SOURCES or (source in SCHEDULED_SOURCES and scheduled_runs == "gated")
 
 
+def _related(one: str, other: str) -> bool:
+    """One directory is the other or inside it (a repo and a directory in it), also through links."""
+    import os
+    for a, b in ((one, other), (os.path.realpath(one), os.path.realpath(other))):
+        a, b = a.rstrip("/") or "/", b.rstrip("/") or "/"
+        if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
+            return True
+    return False
+
+
 class Rules:
     def __init__(self, store: JobStore, approval_ttl_min: int = 30, extra_secrets: tuple[str, ...] = ()):
         self.store = store
         self.approval_ttl = timedelta(minutes=approval_ttl_min)
         self.extra_secrets = extra_secrets
+        # job id -> [(expiry, cwd, remote, branch names or None for any)]: see _give_pass
+        self._passes: dict[str, list[tuple[float, str | None, str | None, set[str] | None]]] = {}
+        self._lock = threading.Lock()
 
     # --- rules CRUD (master token only) ---
 
@@ -418,6 +464,10 @@ class Rules:
         guarded = git_guard.classify(action.tool, action.command, action.data, action.cwd)
         if guarded:
             return "ask", git_guard.PRESET, f"{guarded} always waits for your approval"
+        # A16: so does sending email or messages to people (the "send" class is locked on)
+        sending = git_guard.send_reason(action.tool, action.command)
+        if sending:
+            return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
         if "ask" in effects:
             return "ask", preset, "a rule asks first"
         if "allow" in effects and not (job.source in STRICT_SOURCES and hits):
@@ -431,17 +481,37 @@ class Rules:
         return "allow", preset, ""
 
     def decide(self, job: Job, event: dict, provider: str = "") -> Decision:
+        if not readable(event):
+            # fail closed: an event the gate cannot read is never allowed (garbage, truncated, unknown shape)
+            action = Action(tool="unknown", text=_short(repr(event), 200))
+            self._log(job, provider, "deny", "never", None, action, None)
+            return Decision("deny", "never", "Blocked by Bot-Office: the tool call could not be read, so it is refused.")
         action = parse_event(event)
         effect, preset, why = self.evaluate(job, action)
+        if action.tool == git_guard.PUSH_TOOL and isinstance(action.data, dict) and \
+                action.data.get("default_source") == "remote":
+            git_guard.learn_default(action.cwd, str(action.data.get("remote") or ""),
+                                    str(action.data.get("default_branch") or "") or None)
         if effect == "allow":
             return Decision("allow", "allow", why, preset)
         if effect == "never":
             reason = f"Blocked by Bot-Office: {why}. Do not retry this or work around it."
             self._log(job, provider, "deny", "never", preset, action, None)
             return Decision("deny", "never", reason, preset)
+        if not job.bot_id:
+            # A16: a job with no bot has no chat for a card: a guarded action is refused outright
+            self._log(job, provider, "deny", "never", preset, action, None)
+            return Decision("deny", "never", f"Blocked by Bot-Office: {why or 'this action needs approval'}, and a job "
+                                             "with no bot cannot ask for it. Not run.", preset)
+        if action.tool == git_guard.PUSH_TOOL and self._take_pass(job, action):
+            # the push the owner approved as a command (git push ...), now seen by the pre-push check
+            self._log(job, provider, "allow", "grant", preset, action, None)
+            return Decision("allow", "ask", "approved push", preset)
         grant = self.consume_grant(job, action)
         if grant is not None:
             self._log(job, provider, "allow", "grant", preset, action, grant)
+            if preset == git_guard.PRESET and action.command:
+                self._give_pass(job, action)
             return Decision("allow", "ask", f"approval #{grant} granted", preset, grant)
         if len(action.detail) > APPROVAL_LIMIT:
             # the card must show the whole command; one this long cannot be reviewed, so not asked
@@ -461,6 +531,43 @@ class Rules:
                   "Write any draft you need (e.g. to outbox/ in this workspace), then end the turn with "
                   "BOT-OFFICE-STATUS: waiting_on_user — approval #" + str(approval))
         return Decision("deny", "ask", reason, preset, approval)
+
+    # --- the pre-push check after an approved `git push` command ---
+
+    def _give_pass(self, job: Job, action: Action) -> None:
+        """An approved command that pushes: its own pre-push check (bin/bot-office-git-hook) may pass
+        once, within PASS_SECONDS, for the same job, directory, remote and refs."""
+        pushes = git_guard.push_commands(action.command)
+        if not pushes:
+            return
+        with self._lock:
+            self._passes.setdefault(str(job.id), []).extend(
+                (time.monotonic() + PASS_SECONDS, action.cwd, remote, refs) for remote, refs in pushes)
+
+    def _take_pass(self, job: Job, action: Action) -> bool:
+        data = action.data if isinstance(action.data, dict) else {}
+        updates = [u for u in data.get("updates") or [] if isinstance(u, dict)]
+        remote, url = str(data.get("remote") or ""), str(data.get("url") or "")
+        names = {re.sub(r"^refs/(?:heads|tags)/", "", str(u.get("remote_ref") or "")) for u in updates}
+        with self._lock:
+            passes = self._passes.get(str(job.id), [])
+            for index, (expires, cwd, wanted_remote, refs) in enumerate(passes):
+                if expires < time.monotonic():
+                    continue
+                if cwd and action.cwd and not _related(cwd, action.cwd):
+                    continue
+                if wanted_remote and wanted_remote not in (remote, url):
+                    continue
+                if refs is not None and not names <= refs:
+                    continue
+                del passes[index]
+                return True
+        return False
+
+    def log_credential(self, job: Job, purpose: str) -> None:
+        """A GitHub token handed to a run (never the token itself)."""
+        self._log(job, "credential", "allow", "allow", "github-token",
+                  Action(tool="github-token", text=f"GitHub credential for {purpose or 'git'}"), None)
 
     def _log(self, job: Job, provider: str, decision: str, effect: str, preset: str | None, action: Action,
              approval: int | None) -> None:
@@ -656,6 +763,32 @@ class Rules:
         with closing(self.store._connect()) as db:
             return db.execute("UPDATE gate_log SET dismissed_at=? WHERE id=? AND dismissed_at IS NULL",
                               (now().isoformat(), log_id)).rowcount > 0
+
+
+# --- GitHub credentials for bot runs (bin/bot-office-credential, the gh shim) ---
+
+GITHUB_TOKEN_NAME = "github-token"
+GITHUB_HOSTS = ("github.com",)
+
+
+def github_token_path(settings) -> Path:
+    """<control dir>/github-token (the private dir in the isolated layout), or BOT_OFFICE_GITHUB_TOKEN_FILE."""
+    import os
+    named = os.environ.get("BOT_OFFICE_GITHUB_TOKEN_FILE")
+    return Path(named) if named else settings.control_dir / GITHUB_TOKEN_NAME
+
+
+def github_token(settings) -> str | None:
+    """The GitHub token the controller hands to bot runs, or None: no file, a file others can read
+    (group or world bits: not served, fail closed), or not one token on one line."""
+    path = github_token_path(settings)
+    try:
+        if path.is_symlink() or path.stat().st_mode & 0o077:
+            return None
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return value if value and len(value) <= 512 and re.fullmatch(r"[\x21-\x7e]+", value) else None
 
 
 # --- per-provider capability (scripts/probe_gate.sh records it) ---

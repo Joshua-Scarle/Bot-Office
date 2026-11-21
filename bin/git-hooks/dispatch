@@ -1,0 +1,15 @@
+#!/bin/sh
+# Bot-Office runs set core.hooksPath to this directory (bin/bot-office-git-hook); every hook here but
+# pre-push only runs the repo's own hook: its local core.hooksPath, else <common git dir>/hooks.
+name=${0##*/}
+here=$(cd "${0%/*}" && pwd -P)
+dir=$(git config --local --get core.hooksPath 2>/dev/null)
+if [ -z "$dir" ]; then
+    common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+    dir="$common/hooks"
+fi
+case "$dir" in "~/"*) dir="$HOME/${dir#"~/"}" ;; esac
+[ -d "$dir" ] || exit 0
+[ "$(cd "$dir" && pwd -P)" = "$here" ] && exit 0
+[ -f "$dir/$name" ] && [ -x "$dir/$name" ] || exit 0
+exec "$dir/$name" "$@"

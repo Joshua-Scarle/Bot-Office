@@ -80,7 +80,7 @@ def test_exec_uses_confined_flags_stdin_and_never_falls_back(monkeypatch, tmp_pa
         assert exec_kwargs["env"]["CODEX_HOME"] == os.path.expanduser("~/.codex")
         assert "--sandbox" not in exec_args
         env = exec_kwargs["env"]
-        assert set(env) <= {
+        assert {key for key in env if not key.startswith("GIT_CONFIG_")} <= {  # + core.hooksPath (pre-push check)
             "PATH", "LANG", "TERM", "HOME", "CODEX_HOME",
             "BOT_OFFICE_INBOX_DIR", "AGENTDESK_INBOX_DIR",
             "BOT_OFFICE_SLOT", "AGENTDESK_SLOT", "BOT_OFFICE_JOB_ID",

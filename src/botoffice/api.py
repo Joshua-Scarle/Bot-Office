@@ -2537,6 +2537,26 @@ def create_app(
             raise HTTPException(status_code=422, detail="invalid gate event") from exc
         return (await asyncio.to_thread(rules.decide, job, body.event, body.provider[:32])).as_dict()
 
+    @app.post("/v1/agent/github-token")
+    async def agent_github_token(request: Request, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        """0.12.4 fix2: the GitHub token for a running job's git (bin/bot-office-credential) and gh (the
+        shim), so no token sits in the bots user's home or a bot's environment. 404 when the controller
+        holds none (docs/APPROVALS.md "GitHub credentials"). Each hand-out is logged, never the token."""
+        raw = await _read_capped(request, 4096, "credential request")
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            body = {}
+        host = str(body.get("host") or "github.com").lower() if isinstance(body, dict) else ""
+        if host not in action_rules.GITHUB_HOSTS:
+            raise HTTPException(status_code=404, detail="no credential for this host")
+        token = action_rules.github_token(settings)
+        if token is None:
+            raise HTTPException(status_code=404, detail="no GitHub token configured")
+        purpose = str(body.get("for") or "")[:8] if isinstance(body, dict) else ""
+        await asyncio.to_thread(rules.log_credential, job, purpose)
+        return {"token": token}
+
     @app.get("/v1/rules", dependencies=[Depends(auth)])
     async def list_rules(bot_id: UUID | None = None) -> dict:
         return {"rules": rules.list_rules(bot_id), "presets": {

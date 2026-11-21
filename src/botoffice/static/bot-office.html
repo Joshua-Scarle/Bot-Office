@@ -4394,7 +4394,7 @@ function showApprovals(data) {
   box.replaceChildren(...data.classes.map((c) => {
     const row = el("label", "approval-row");
     const box2 = el("input");
-    box2.type = "checkbox"; box2.checked = !!c.enabled; box2.dataset.key = c.key;
+    box2.type = "checkbox"; box2.checked = !!c.enabled; box2.dataset.key = c.key; box2.disabled = !!c.locked;
     const text = el("div");
     text.append(el("div", "", c.label), el("div", "muted", c.builtin ? c.description : (c.kind === "tool" ? "Tool name matches " : "Command matches ") + c.pattern));
     // a checkpoint, not enforcement: next to each class that is on, the bots it can only advise

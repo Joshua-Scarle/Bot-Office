@@ -96,11 +96,14 @@ def _run_exec(monkeypatch, tmp_path, adapter, exe):
 
 
 def _assert_env(env, tmp_path):
-    assert set(env) <= {
+    git = {key for key in env if key.startswith("GIT_CONFIG_")}  # core.hooksPath for the pre-push check
+    assert set(env) - git <= {
         "PATH", "LANG", "TERM", "HOME",
         "BOT_OFFICE_SLOT", "AGENTDESK_SLOT", "BOT_OFFICE_JOB_ID",
         "BOT_OFFICE_INBOX_DIR", "AGENTDESK_INBOX_DIR",
     }
+    assert env["GIT_CONFIG_KEY_0"] == "core.hooksPath" and env["GIT_CONFIG_VALUE_0"].endswith("/bin/git-hooks")
+    env = {key: value for key, value in env.items() if key not in git}
     assert env["BOT_OFFICE_SLOT"] == env["AGENTDESK_SLOT"] == "desktop-2"
     assert env["BOT_OFFICE_INBOX_DIR"] == env["AGENTDESK_INBOX_DIR"]
     assert env["PATH"].split(":")[0].endswith("/bin") and "bin" in env["PATH"].split(":")[0]

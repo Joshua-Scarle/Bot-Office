@@ -30,7 +30,7 @@ from .domain import Bot, Job, JobStatus, Routine
 from .memory import MAX_MEMORY_BYTES, Memory, Merge
 from .providers.base import ProviderAdapter, RunResult
 from .providers.cli import REPO_BIN, SESSION_ENGINES, CliAdapter, archive_session
-from .rules import Rules, gate_state, helpers_reachable, is_unattended
+from .rules import Rules, gate_state, github_token, github_token_path, helpers_reachable, is_unattended
 from .store import JobStore, RoutineChanged, now
 from .streaming import EventSink
 from .turns import InboxLimitError, TurnError, Turns
@@ -279,6 +279,7 @@ class Scheduler:
                  control / "grok_webhook.json", self.store.path]
         if self.settings.token_file:
             paths.append(self.settings.token_file)
+        paths.append(github_token_path(self.settings))
         if self.settings.private_dir:
             paths.append(self.settings.private_dir)
         return tuple(dict.fromkeys(str(path) for path in paths))
@@ -318,6 +319,7 @@ class Scheduler:
             "secret_paths": list(self.protected_paths()),
             "allow_network": self.rules.network_allowed(bot.id, unattended),
             "allow_sudo": bot.allow_sudo,
+            "github_credential": github_token(self.settings) is not None,
         }
         # isolated: readable, not writable, by the bot; a retried job's workspace may hold a link
         # the bot planted, which the atomic write replaces instead of following
@@ -663,13 +665,13 @@ class Scheduler:
             else:
                 safefs.write_text(workspace / "prompt.txt", job.prompt, isolation.file_mode())
                 # A16: a job with no bot (POST /v1/jobs) has no agent token and no chat for an approval
-                # card, but the git guard must still stop it: the hook runs, and with no controller to ask
-                # its local fallback refuses every guarded command
+                # card, so the hook runs in "local" mode: the git guard and sending to people are refused
+                # outright (never run unchecked), and so is a guarded push at the pre-push check
                 safefs.write_text(workspace / ".bot-office-gate.json",
-                                  json.dumps({"mode": "attended", "job_id": str(job.id), "provider": job.provider}),
+                                  json.dumps({"mode": "local", "job_id": str(job.id), "provider": job.provider}),
                                   isolation.locked_file_mode())
                 run_job = job.model_copy(update={
-                    "gate_command": f"{REPO_BIN / 'bot-office-gate'} {job.provider} --mode attended",
+                    "gate_command": f"{REPO_BIN / 'bot-office-gate'} {job.provider} --mode local",
                     "unattended": False})
             result: RunResult = await asyncio.wait_for(
                 adapter.run(run_job, workspace, log_path, timeout),

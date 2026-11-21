@@ -110,11 +110,8 @@ BUILTIN: tuple[ApprovalClass, ...] = (
     ApprovalClass(
         "send", "Sending email or messages",
         "Email, texts, DMs and chat messages to people, from the command line or a connector. Messages to other bots never ask.", True,
-        # not `desk grok send` or bot-msg: those message bots, not people
-        shell=_shell(r"\b(?:sendmail|mutt|msmtp|swaks|mailx)\b|(?:^|[;&|]\s*)mail\s"),
-        tools=_tool_re(r"send(?:_\w+)?", "reply", "reply_all", "forward", "tweet", "dm", "sms",
-                       r"post_(?:message|comment|reply|tweet|status)"),
-        mcp_only=True),
+        # git_guard.SEND_*: also what the gate script refuses on its own; locked on (LOCKED)
+        shell=(git_guard.SEND_SHELL,), tools=git_guard.SEND_TOOLS, mcp_only=True),
     ApprovalClass(
         "purchase", "Purchases and payments",
         "Buying, paying, ordering, refunding or moving money through a connector or CLI.", True,
@@ -164,6 +161,8 @@ BUILTIN: tuple[ApprovalClass, ...] = (
         tools=re.compile(r".*"), mcp_only=True),
 )
 BUILTIN_KEYS = tuple(item.key for item in BUILTIN)
+# A16: always on, like the git guard; rules.py checks it before any allow rule
+LOCKED = (git_guard.SEND_KEY,)
 
 
 class ApprovalClassError(ValueError):
@@ -207,7 +206,8 @@ def settings(store: JobStore) -> dict:
     saved = _load(store)
     enabled = saved.get("enabled") if isinstance(saved.get("enabled"), dict) else {}
     classes = [{"key": item.key, "label": item.label, "description": item.description, "builtin": True,
-                "default": item.default, "enabled": bool(enabled.get(item.key, item.default))} for item in BUILTIN]
+                "default": item.default, "locked": item.key in LOCKED,
+                "enabled": item.key in LOCKED or bool(enabled.get(item.key, item.default))} for item in BUILTIN]
     for item in saved.get("custom") or []:
         if isinstance(item, dict) and _custom_class(item) is not None:
             classes.append({"key": item["key"], "label": item["label"], "description": "", "builtin": False,
@@ -264,6 +264,9 @@ def update(store: JobStore, *, enabled: dict[str, bool] | None = None, add: list
     for key, value in (enabled or {}).items():
         if key not in known:
             raise ApprovalClassError(f"no approval class {key!r}")
+        if key in LOCKED and not value:
+            raise ApprovalClassError("sending email or messages always waits for your approval; it cannot be "
+                                     "switched off")
         flags[key] = bool(value)
     if timeout_min is not None:
         if not 0 <= timeout_min <= TIMEOUT_MAX:
@@ -278,7 +281,7 @@ def update(store: JobStore, *, enabled: dict[str, bool] | None = None, add: list
 def active(store: JobStore) -> list[ApprovalClass]:
     saved = _load(store)
     enabled = saved.get("enabled") if isinstance(saved.get("enabled"), dict) else {}
-    result = [item for item in BUILTIN if enabled.get(item.key, item.default)]
+    result = [item for item in BUILTIN if item.key in LOCKED or enabled.get(item.key, item.default)]
     for item in saved.get("custom") or []:
         built = _custom_class(item) if isinstance(item, dict) else None
         if built is not None and enabled.get(built.key, True):

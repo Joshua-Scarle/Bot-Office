@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Bot-Office pre-push check: git's own hook, so it sees the refs a push really updates.
+
+Every Bot-Office run gets core.hooksPath = bin/git-hooks through its environment (GIT_CONFIG_COUNT,
+set by the adapters; a command that changes it, `git -c core.hooksPath=...` or `git push --no-verify`
+always asks). bin/git-hooks/pre-push runs this file with git's arguments (remote name, url) and the
+ref lines on stdin. It reports to the controller, as a "GitPush" gate event:
+- every update (local ref and sha, remote ref and sha) and whether it is a fast-forward
+  (`git merge-base --is-ancestor`; unknown when the old commit is not here);
+- the remote's default branch, from the remote itself (`git ls-remote --symref <remote> HEAD`),
+  else refs/remotes/<remote>/HEAD, else unknown.
+The controller (git_guard.classify_push) asks for a card when the push deletes a ref, is not a
+fast-forward, overwrites a tag, or goes to the default branch (or to any branch while that is
+unknown); a push the owner approved as a command passes once. The push runs only on an explicit
+allow: an unreachable controller, an answer it cannot read, a crash or running out of time stop it
+(exit 1). A job with no bot (no token, gate mode "local") is judged here with the same rules and a
+guarded push is refused. Then the repo's own pre-push hook runs, with the same input.
+
+Not a Bot-Office run (no BOT_OFFICE_JOB_ID): only the repo's own hook runs. Stdlib only; never
+prints the token.
+"""
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+HOOKS = HERE / "git-hooks"
+TIMEOUT = 20
+DEADLINE = 60
+LS_REMOTE_TIMEOUT = 15
+ZERO = "0" * 40
+
+
+def git(*args, timeout=10):
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+    try:
+        done = subprocess.run(["git", *args], capture_output=True, text=True, timeout=timeout, env=env,
+                              stdin=subprocess.DEVNULL, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    return done.returncode, done.stdout
+
+
+def default_branch(remote):
+    code, out = git("ls-remote", "--symref", remote, "HEAD", timeout=LS_REMOTE_TIMEOUT)
+    if code == 0 and out:
+        found = re.search(r"^ref: refs/heads/(\S+)\tHEAD$", out, re.MULTILINE)
+        if found:
+            return found.group(1), "remote"
+    if re.fullmatch(r"[A-Za-z0-9][\w.-]*", remote):
+        code, out = git("symbolic-ref", "-q", f"refs/remotes/{remote}/HEAD")
+        prefix = f"refs/remotes/{remote}/"
+        if code == 0 and out.strip().startswith(prefix):
+            return out.strip()[len(prefix):], "local"
+    return None, None
+
+
+def updates(text):
+    found = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 4:
+            raise ValueError("unexpected pre-push input")
+        local_ref, local_sha, remote_ref, remote_sha = parts
+        update = {"local_ref": local_ref, "local_sha": local_sha, "remote_ref": remote_ref, "remote_sha": remote_sha}
+        if set(local_sha) != {"0"} and set(remote_sha) != {"0"}:
+            code, _ = git("merge-base", "--is-ancestor", remote_sha, local_sha)
+            update["fast_forward"] = True if code == 0 else False if code == 1 else None
+        found.append(update)
+    return found
+
+
+def clean_url(url):
+    """The remote url without a user or password in it (the card shows it)."""
+    return re.sub(r"^([a-z][a-z0-9+.-]*://)[^/@]*@", r"\1", url, flags=re.IGNORECASE)
+
+
+def loopback(url):
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        return (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost")
+                and parsed.port is not None and not parsed.username and not parsed.password)
+    except ValueError:
+        return False
+
+
+def ask(event):
+    """(allowed, reason) from the controller; never allowed without its explicit yes."""
+    token = os.environ.get("BOT_OFFICE_AGENT_TOKEN", "")
+    url = os.environ.get("BOT_OFFICE_API_URL", "")
+    if not url or not loopback(url):
+        return False, "the controller cannot be asked from here"
+    body = json.dumps({"provider": "git-hook", "event": event}).encode()
+    request = urllib.request.Request(url.rstrip("/") + "/v1/agent/gate", data=body, method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=TIMEOUT) as response:
+            answer = json.loads(response.read(65536).decode())
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return False, f"controller unreachable ({type(exc).__name__})"
+    if isinstance(answer, dict) and answer.get("decision") == "allow":
+        return True, ""
+    return False, str((answer.get("reason") if isinstance(answer, dict) else "") or "refused")
+
+
+def gate_mode():
+    path = os.environ.get("BOT_OFFICE_GATE_FILE")
+    try:
+        with open(path or "", encoding="utf-8") as handle:
+            return json.load(handle).get("mode")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def check(remote, url, text):
+    """None when the push may go on, else why not."""
+    report = {"remote": remote, "url": clean_url(url), "updates": updates(text)}
+    report["default_branch"], report["default_source"] = default_branch(remote)
+    event = {"hook_event_name": "PrePush", "tool_name": "GitPush", "tool_input": report, "cwd": os.getcwd()}
+    if os.environ.get("BOT_OFFICE_AGENT_TOKEN"):
+        allowed, why = ask(event)
+        return None if allowed else why
+    if gate_mode() == "local":
+        sys.path.insert(0, str(HERE.parent / "src"))
+        from botoffice import git_guard  # stdlib only
+        reason = git_guard.classify_push(report)
+        return f"{reason} needs the owner's approval, and a job with no bot cannot ask for it" if reason else None
+    return "no job token in this run"
+
+
+def own_hook(name):
+    """The repo's own hook: its local core.hooksPath, else <common git dir>/hooks."""
+    code, out = git("config", "--local", "--get", "core.hooksPath")
+    directory = out.strip() if code == 0 and out and out.strip() else None
+    if directory is None:
+        code, out = git("rev-parse", "--git-common-dir")
+        if code != 0 or not out.strip():
+            return None
+        directory = os.path.join(out.strip(), "hooks")
+    directory = os.path.expanduser(directory)
+    if os.path.realpath(directory) == os.path.realpath(HOOKS):
+        return None
+    path = os.path.join(directory, name)
+    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+
+def run_own(name, args, text):
+    path = own_hook(name)
+    if path is None:
+        return 0
+    return subprocess.run([path, *args], input=text.encode(), check=False).returncode
+
+
+class OutOfTime(Exception):
+    pass
+
+
+def out_of_time(signum, frame):
+    raise OutOfTime()
+
+
+def main(argv):
+    args = argv[1:]
+    text = sys.stdin.read()
+    if os.environ.get("BOT_OFFICE_JOB_ID"):
+        try:
+            signal.signal(signal.SIGALRM, out_of_time)
+            signal.setitimer(signal.ITIMER_REAL, DEADLINE)
+            why = check(args[0] if args else "", args[1] if len(args) > 1 else "", text)
+        except OutOfTime:
+            why = "no answer in time"
+        except Exception as exc:  # noqa: BLE001 — fail closed: a crash stops the push
+            why = f"the check failed ({type(exc).__name__})"
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        if why:
+            sys.stderr.write(f"Bot-Office push check: {why}. Push stopped.\n")
+            return 1
+    return run_own("pre-push", args, text)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

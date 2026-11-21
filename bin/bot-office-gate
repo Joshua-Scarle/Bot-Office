@@ -2,19 +2,23 @@
 """Bot-Office action gate: a CLI hook that asks the controller before a tool runs.
 
 Usage (set by Bot-Office per invocation, never globally):
-    bot-office-gate <claude|codex|cursor|antigravity|opencode> [--mode attended|unattended]
+    bot-office-gate <claude|codex|cursor|antigravity|opencode> [--mode attended|unattended|local]
 
 Reads the hook JSON on stdin, POSTs it to $BOT_OFFICE_API_URL/v1/agent/gate with the job's
-$BOT_OFFICE_AGENT_TOKEN and answers in the CLI's own hook format. The controller decides; the
-mode (written by the controller before launch) only says how to fail when it cannot be asked:
-- unattended: no token or controller unreachable -> deny (fail closed);
-- attended: protected paths are still denied locally; anything else is allowed (fail open);
+$BOT_OFFICE_AGENT_TOKEN and answers in the CLI's own hook format. The controller decides. It fails
+closed (0.12.4 fix2): an event it cannot read (garbage, truncated, an unknown shape), a controller
+it cannot reach or whose answer it cannot read, a crash of this script and running out of time
+(DEADLINE, under the 30 s hook timeout the adapters set) all deny.
+- local (a job with no bot: no token, no chat for a card): protected paths, the git guard and
+  sending to people are refused here; anything else is allowed;
+- unattended or attended with no token: deny;
 - no token and no mode (Joshua's own CLI): no-op.
 Stdlib only. Never prints the token.
 """
 import json
 import os
 import re
+import signal
 import sys
 import urllib.error
 import urllib.parse
@@ -29,7 +33,19 @@ CONTENT_KEYS = frozenset({"content", "contents", "new_string", "old_string", "ne
                           "prompt", "description", "query", "message", "body", "edits", "todos"})
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
 STDIN_LIMIT = 1024 * 1024
-TIMEOUT = 20
+MODES = ("attended", "unattended", "local")
+
+
+def _seconds(name, default, low, high):
+    try:
+        return max(low, min(high, float(os.environ.get(name) or default)))
+    except ValueError:
+        return default
+
+
+# the hook timeout in the adapters is 30 s: answer (deny) well before the CLI gives up on the hook
+TIMEOUT = _seconds("BOT_OFFICE_GATE_TIMEOUT", 20, 0.5, 20)
+DEADLINE = TIMEOUT + 4
 
 
 def _answer(provider, allow, reason=""):
@@ -95,25 +111,31 @@ def _loopback(url):
 def _mode(argv):
     if "--mode" in argv:
         index = argv.index("--mode")
-        if index + 1 < len(argv) and argv[index + 1] in ("attended", "unattended"):
+        if index + 1 < len(argv) and argv[index + 1] in MODES:
             return argv[index + 1]
     path = os.environ.get("BOT_OFFICE_GATE_FILE")
     if path:
         try:
             with open(path, encoding="utf-8") as handle:
                 value = json.load(handle).get("mode")
-            if value in ("attended", "unattended"):
+            if value in MODES:
                 return value
         except (OSError, ValueError, AttributeError):
-            return "unattended"
+            pass
+        return "unattended"  # a gate file we cannot read: the strictest mode
     return None
 
 
+def _guard():
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "src"))
+    from botoffice import git_guard  # stdlib only
+    return git_guard
+
+
 def _local_guard(event):
-    """The git guard without the controller (src/botoffice/git_guard.py): a reason to refuse, or None.
-    A guarded action is never allowed just because the controller cannot be asked."""
-    if not isinstance(event, dict):
-        return None
+    """The git guard and the send class without the controller (src/botoffice/git_guard.py): a
+    reason to refuse, or None. Never allowed just because the controller cannot be asked."""
+    git_guard = _guard()
     data = event.get("tool_input") or event.get("input") or event.get("toolInput") or {}
     if not isinstance(data, dict):
         data = {}
@@ -122,36 +144,58 @@ def _local_guard(event):
         command = " ".join(str(part) for part in command)
     tool = str(event.get("tool_name") or event.get("tool") or event.get("toolName") or "")
     cwd = event.get("cwd") if isinstance(event.get("cwd"), str) else None
-    try:
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "src"))
-        from botoffice import git_guard
-    except ImportError:
-        return "the guard module is missing" if command else None
-    return git_guard.classify(tool, str(command or ""), data, cwd)
+    return git_guard.classify(tool, str(command or ""), data, cwd) or git_guard.send_reason(tool, str(command or ""))
+
+
+class _OutOfTime(Exception):
+    pass
+
+
+def _out_of_time(signum, frame):
+    raise _OutOfTime()
 
 
 def main(argv):
     provider = argv[1] if len(argv) > 1 and argv[1] in PROVIDERS else "claude"
-    mode = _mode(argv)
-    raw = sys.stdin.buffer.read(STDIN_LIMIT + 1)
     try:
-        event = json.loads(raw[:STDIN_LIMIT].decode("utf-8", "replace") or "{}")
-    except ValueError:
-        event = {"unparsed": raw[:STDIN_LIMIT].decode("utf-8", "replace")}
+        signal.signal(signal.SIGALRM, _out_of_time)
+        signal.setitimer(signal.ITIMER_REAL, DEADLINE)
+        return _decide(provider, argv)
+    except _OutOfTime:
+        return _answer(provider, False, "Bot-Office gate: no answer in time; action refused.")
+    except BaseException as exc:  # fail closed: a crash never lets the call through
+        if isinstance(exc, KeyboardInterrupt):
+            raise
+        return _answer(provider, False, f"Bot-Office gate: the check failed ({type(exc).__name__}); action refused.")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+
+
+def _decide(provider, argv):
+    mode = _mode(argv)
     token = os.environ.get("BOT_OFFICE_AGENT_TOKEN", "")
     url = os.environ.get("BOT_OFFICE_API_URL", "")
+    if mode is None and not token:
+        return 0  # not a Bot-Office job (e.g. the owner's own CLI): no-op
+    raw = sys.stdin.buffer.read(STDIN_LIMIT + 1)
+    if len(raw) > STDIN_LIMIT:
+        return _answer(provider, False, "Bot-Office gate: the tool call is too large to check; action refused.")
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        event = None
+    if not _guard().readable_event(event):
+        return _answer(provider, False, "Bot-Office gate: the tool call could not be read; action refused.")
     marker = _secret(event)
     if not token or not url:
-        if mode is None:
-            return 0  # not a Bot-Office job (e.g. Joshua's own CLI): no-op
-        if mode == "unattended":
-            return _answer(provider, False, "Bot-Office gate: no job token in an unattended run; action refused.")
+        if mode != "local":
+            return _answer(provider, False, "Bot-Office gate: no job token in this run; action refused.")
         if marker:
             return _answer(provider, False, f"Bot-Office gate: protected path ({marker}); action refused.")
         guarded = _local_guard(event)
         if guarded:
-            return _answer(provider, False, f"Bot-Office gate: {guarded} needs the owner's approval and the "
-                                            "controller cannot be asked; action refused.")
+            return _answer(provider, False, f"Bot-Office gate: {guarded} needs the owner's approval, and a job "
+                                            "with no bot cannot ask for it; action refused.")
         return _answer(provider, True)
     if not _loopback(url):
         return _answer(provider, False, "Bot-Office gate: the controller URL is not loopback; action refused.")
@@ -161,19 +205,14 @@ def main(argv):
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(request, timeout=TIMEOUT) as response:
-            answer = json.loads(response.read(65536).decode() or "{}")
+            answer = json.loads(response.read(65536).decode())
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        if mode != "attended" or marker:
-            why = f"protected path ({marker})" if marker else f"controller unreachable ({type(exc).__name__})"
-            return _answer(provider, False, f"Bot-Office gate: {why}; action refused.")
-        guarded = _local_guard(event)
-        if guarded:
-            return _answer(provider, False, f"Bot-Office gate: controller unreachable and {guarded} needs the "
-                                            "owner's approval; action refused.")
+        why = f"protected path ({marker})" if marker else f"controller unreachable ({type(exc).__name__})"
+        return _answer(provider, False, f"Bot-Office gate: {why}; action refused.")
+    if isinstance(answer, dict) and answer.get("decision") == "allow":
         return _answer(provider, True)
-    if answer.get("decision") == "allow":
-        return _answer(provider, True)
-    return _answer(provider, False, str(answer.get("reason") or "Bot-Office gate: action refused."))
+    reason = answer.get("reason") if isinstance(answer, dict) else None
+    return _answer(provider, False, str(reason or "Bot-Office gate: action refused."))
 
 
 if __name__ == "__main__":
