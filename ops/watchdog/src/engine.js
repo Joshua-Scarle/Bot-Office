@@ -83,6 +83,12 @@ export function outageStart(s, kind, now) {
   return typeof at === "number" && at <= now ? at : now;
 }
 
+/** When an outage ended: the first heartbeat that cleared it (never before it began or after now), else now. */
+export function outageEnd(inc, now) {
+  const from = inc.started ?? inc.since ?? 0;
+  return typeof inc.ended === "number" && inc.ended >= from && inc.ended <= now ? inc.ended : now;
+}
+
 export class Engine {
   #chain = Promise.resolve();
   #draining = false;
@@ -110,7 +116,14 @@ export class Engine {
       const s = await this.#load(), now = this.clock();
       s.first_seen ??= now;
       s.hb = { received_at: now, data };
-      if (data && data.controller_reachable && data.ok) s.last_good_hb = now; // the controller answered healthy
+      const healthy = !!(data && data.controller_reachable && data.ok);
+      if (healthy) s.last_good_hb = now; // the controller answered healthy
+      for (const [kind, inc] of Object.entries(s.incidents)) {
+        // the first heartbeat that clears an open incident is where its outage ended, not the later tick
+        // that notices; a later heartbeat that fails again reopens it
+        if (kind === "heartbeat_missing" || ((kind === "controller_down" || kind === "unhealthy") && healthy)) inc.ended ??= now;
+        else if (kind === "controller_down" || kind === "unhealthy") delete inc.ended;
+      }
       await this.#save(s);
     });
   }
@@ -182,8 +195,8 @@ export class Engine {
       delete s.incidents[kind];
       if (inc.muted || !s.prefs[inc.cls]) continue;
       const open = s.pending.find((e) => e.type === "alert" && e.key === kind && !e.resolved_at);
-      if (open) open.resolved_at = now; // not mailed yet: the one mail says it is already over
-      else s.pending.push({ id: `rec:${kind}:${now}`, cls: inc.cls, type: "recovery", key: kind, text: inc.text.split(" Reason code:")[0].replace(/\.$/, "") + ` (lasted about ${Math.max(1, Math.round((now - (inc.started ?? inc.since)) / 60000))} min)`, at: now });
+      if (open) { open.resolved_at = outageEnd(inc, now); } // not mailed yet: the one mail says it is already over
+      else s.pending.push({ id: `rec:${kind}:${now}`, cls: inc.cls, type: "recovery", key: kind, text: inc.text.split(" Reason code:")[0].replace(/\.$/, "") + ` (lasted about ${Math.max(1, Math.round((outageEnd(inc, now) - (inc.started ?? inc.since)) / 60000))} min)`, at: now });
     }
   }
 

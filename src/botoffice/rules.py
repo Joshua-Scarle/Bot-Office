@@ -300,8 +300,9 @@ def presets_hit(action: Action) -> list[str]:
     hits: list[str] = []
     command = action.command
     tool = action.tool.lower()
-    if command and len(command) <= COMMAND_LIMIT and nested_agents.bypass_launch(command):
-        # B8: another agent CLI with its permission checks off; first, so the card names it
+    if command and nested_agents.bypass_launch(command, action.cwd):
+        # B8: another agent CLI with its permission checks off (or the guard environment stripped);
+        # first, so the card names it. Too long to parse, it fails closed (nested_agents._coarse).
         hits.append(nested_agents.PRESET)
     if len(command) > COMMAND_LIMIT:
         # too long to scan in bounded time: treated as both (asks under the strict profile)
