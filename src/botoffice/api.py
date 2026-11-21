@@ -1904,10 +1904,10 @@ def create_app(
     async def message_agent(bot_ref: str, body: AgentMessageCreate, binding: Job | None = Depends(agent_auth)) -> dict:  # noqa: B008
         return await _deliver(bot_ref, body, binding, "message")
 
-    def _send_gate(binding: Job, sender, target, kind: str) -> bool:
+    def _send_gate(binding: Job, target, kind: str, ref: str, text: str) -> int:
         """B12: every job send goes through team.send_gate (here, and for the inbox-file path in the scheduler)."""
         try:
-            return team.send_gate(store, scheduler.rules, binding, str(target.id), kind)
+            return team.send_gate(store, scheduler.rules, binding, str(target.id), kind, ref, text)
         except team.TeamError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
@@ -1918,17 +1918,19 @@ def create_app(
             raise HTTPException(status_code=404, detail="bot not found")
         if binding and binding.bot_id != sender.id:
             raise HTTPException(status_code=403, detail="token is bound to another bot")
-        card = _send_gate(binding, sender, target, kind) if binding and sender.id != target.id else False
+        slot = _send_gate(binding, target, kind, body.to, body.body) if binding and sender.id != target.id else 0
         blocked = _steer_blocked(target)
         try:
             _, _, item = scheduler.turns.post_agent_message(
                 sender, target, body.body, str(binding.id) if binding else None, mode=body.mode,
                 can_steer=lambda job: blocked(job) is None)
-        except TurnError as exc:
-            status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
-            raise HTTPException(status_code=status, detail=str(exc)) from exc
-        if binding:
-            team.log_send(store, binding, str(target.id), kind, card)
+        except BaseException as exc:
+            if slot:
+                team.settle_send(store, slot, False)  # it did not go out: it stops counting
+            if isinstance(exc, TurnError):
+                status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
+                raise HTTPException(status_code=status, detail=str(exc)) from exc
+            raise
         if item.get("delivery") == "steer":
             item["note"] = (f"Delivered to {target.name} while it works; it reads it within its current task and "
                             "answers with a message to you if you asked something (it appears in your chat).")
