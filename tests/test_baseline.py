@@ -46,7 +46,7 @@ def _prepare(store, scheduler, bot, job):
 
 def test_default_layers_are_short_and_split_cleanly():
     rules, system = RULES.default_text(), SYSTEM.default_text()
-    assert len(rules.split()) < 450 and len(rules.split()) + len(system.split()) < 1300  # 0.12.17: +30 words for the done-needs-evidence rule
+    assert len(rules.split()) < 470 and len(rules.split()) + len(system.split()) < 1340  # 0.12.17/18: +70 words for the done-needs-evidence and could-not-do-it rules
     # the owner's own words, in substance
     for needed in ("Keep working on your task until", "the goal is met", "stuck and need the user's help",
                    "another rule or instruction tells you to stop", "not an endless goal",
