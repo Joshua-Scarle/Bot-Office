@@ -1,4 +1,4 @@
-"""Device companion, server side: pairing, device tokens, grants and the approval binding."""
+"""Device companion, server side: pairing, device tokens, session grants, prompt modes, audit."""
 import json
 from contextlib import closing
 from datetime import timedelta
@@ -128,165 +128,207 @@ def test_rotation_overlap_then_old_token_dies(tmp_path):
     assert machines.needs_rotation({**machine, "token_issued_at": (now() - timedelta(days=31)).isoformat()})
 
 
-def test_revoke_kills_tokens_grants_and_pending_requests(tmp_path):
+
+LS = {"path": "/srv/work", "depth": 1}
+READ = {"path": "/srv/work/a.txt", "offset": 0, "length": 10, "b64": False, "file_size": 10}
+RUN = {"argv": ["make", "test"], "sh": None, "cwd": "/srv/work", "timeout": 30}
+PUSH = {"path": "/srv/work/a.bin", "source": "a.bin", "size": 3, "sha256": "a" * 64, "overwrite": False,
+        "requested": "~/a.bin", "exists": False}
+
+
+def setup(tmp_path, mode=None):
     store, bot = make_store(tmp_path)
-    reply = paired(store)
-    machine = machines.get_machine(store, reply["machine_id"])
-    job = running(store, bot)
-    item = machines.record_request(store, job, machine, "ls", {"path": "/srv/work", "depth": 1})
-    machines.approve_always(store, item["approval_id"], "/srv/work/**", confirm_broad=True)
-    other = machines.record_request(store, job, machine, "read",
-                                    {"path": "/etc/hosts", "offset": 0, "length": 10, "b64": False, "file_size": 10})
-    machines.revoke(store, reply["machine_id"])
-    assert machines.authenticate(store, reply["token"])[0] is None
+    machine = machines.get_machine(store, paired(store)["machine_id"])
+    if mode:
+        machines.update_machine(store, machine["id"], mode=mode)
+        machine = machines.get_machine(store, machine["id"])
+    return store, bot, machine, running(store, bot)
+
+
+def cards(store):
+    return sql(store, "SELECT id, status FROM approvals WHERE source='machine' ORDER BY id")
+
+
+def test_revoke_kills_tokens_grants_and_pending_requests(tmp_path):
+    store, bot, machine, job = setup(tmp_path)
+    item = machines.record_request(store, job, machine, "ls", LS)
+    machines.approve(store, item["approval_id"])
+    assert len(machines.list_grants(store)) == 1
+    other_job = running(store, bot)
+    other = machines.record_request(store, other_job, machine, "read", READ)
+    machines.revoke(store, machine["id"])
+    assert machines.get_machine(store, machine["id"])["status"] == "revoked"
     assert machines.list_grants(store) == []
+    assert machines.get_request(store, item["id"])["status"] == "cancelled"
     assert machines.get_request(store, other["id"])["status"] == "cancelled"
     assert machines.approval_dict(store, other["approval_id"])["status"] == "denied"
     with pytest.raises(machines.MachineError):
-        machines.rotate(store, reply["machine_id"])
+        machines.rotate(store, machine["id"])
 
 
-# --- grants ---
+# --- session grants (one card per task) ---
 
-@pytest.mark.parametrize("pattern,path,hit", [
-    ("/srv/work/**", "/srv/work", True),
-    ("/srv/work/**", "/srv/work/a/b/c.txt", True),
-    ("/srv/work/**", "/srv/workshop/x", False),
-    ("/srv/work/*.txt", "/srv/work/a.txt", True),
-    ("/srv/work/*.txt", "/srv/work/sub/a.txt", False),
-    ("/srv/work/a?.log", "/srv/work/ab.log", True),
-    ("/srv/work/a?.log", "/srv/work/a/.log", False),
-    ("/srv/work/a.txt", "/srv/work/a.txt", True),
-    ("/srv/work/a.txt", "/srv/work/aXtxt", False),
-    ("/srv/work/[ab].txt", "/srv/work/a.txt", False),  # brackets are literal
-])
-def test_glob_grants(pattern, path, hit):
-    assert machines.grant_matches("read", pattern, {"path": path}) is hit
-
-
-def test_grant_patterns_are_checked():
-    for bad in ("relative/*", "/*", "**", "/srv/../etc/**", "/srv//x", "/srv/x/", 5, "/a\nb"):
-        with pytest.raises(machines.MachineError):
-            machines.check_pattern(bad)
-    with pytest.raises(machines.MachineError) as err:
-        machines.check_pattern("/home/**")
-    assert err.value.status == 428
-    assert machines.check_pattern("/srv/**", confirm_broad=True) == "/srv/**"
-    assert machines.check_pattern("/srv/work/proj/**") == "/srv/work/proj/**"
-
-
-def test_push_grant_is_a_destination_folder_and_never_overwrites():
-    args = {"path": "/srv/work/out/a.bin", "overwrite": False}
-    assert machines.grant_matches("push", "/srv/work/out/**", args)
-    assert not machines.grant_matches("push", "/srv/work/out/**", {**args, "overwrite": True})
-    assert not machines.grant_matches("push", "/srv/work/other/**", args)
-
-
-def test_run_grant_is_the_exact_argv_and_cwd():
-    args = {"argv": ["make", "test"], "sh": None, "cwd": "/srv/work"}
-    pattern = machines.run_pattern(args)
-    assert machines.grant_matches("run", pattern, args)
-    assert not machines.grant_matches("run", pattern, {**args, "argv": ["make", "test", "-j8"]})
-    assert not machines.grant_matches("run", pattern, {**args, "cwd": "/srv"})
-    assert not machines.grant_matches("run", pattern, {"argv": None, "sh": "make test", "cwd": "/srv/work"})
-    for unsafe in (["bash", "-c", "x"], ["/usr/bin/env", "rm"], ["sudo", "ls"], ["python3", "-c", "1"],
-                   ["make", "a;b"], ["ls", "$(id)"], ["ls", "*"]):
-        with pytest.raises(machines.MachineError):
-            machines.run_pattern({"argv": unsafe, "cwd": "/srv"})
-    with pytest.raises(machines.MachineError):
-        machines.run_pattern({"argv": None, "sh": "ls", "cwd": "/srv"})
-
-
-def test_grant_skips_the_card_then_expires_and_revokes(tmp_path):
-    store, bot = make_store(tmp_path)
-    machine = machines.get_machine(store, paired(store)["machine_id"])
-    job = running(store, bot)
-    first = machines.record_request(store, job, machine, "ls", {"path": "/srv/work/a", "depth": 1})
+def test_one_card_per_task_then_calls_run_without_cards(tmp_path):
+    store, bot, machine, job = setup(tmp_path)
+    first = machines.record_request(store, job, machine, "ls", LS)
     assert first["status"] == "pending" and first["approval_id"]
-    machines.approve_always(store, first["approval_id"], "/srv/work/**", confirm_broad=True)
-    second = machines.record_request(store, job, machine, "ls", {"path": "/srv/work/b", "depth": 1})
-    assert second["status"] == "approved" and second["grant_id"] and second["approval_id"] is None
-    outside = machines.record_request(store, job, machine, "ls", {"path": "/srv/other", "depth": 1})
-    assert outside["status"] == "pending"
-    # another bot does not inherit the grant
-    other_bot = store.create_bot("Bo", "", "codex", None)
-    assert machines.record_request(store, running(store, other_bot), machine, "ls",
-                                   {"path": "/srv/work/b", "depth": 1})["status"] == "pending"
+    # more calls while the card waits join the same card
+    second = machines.record_request(store, job, machine, "read", READ)
+    assert second["approval_id"] == first["approval_id"] and len(cards(store)) == 1
+    card = approval_card(store, machines.approval_dict(store, first["approval_id"]))["machine"]
+    assert card["scope"] == "read" and card["task"] == "chat turn: work" and card["cap_minutes"] == 240
+    assert len(card["calls"]) == 2 and card["grant"] is None and not card["full_access"]
+    machines.approve(store, first["approval_id"])
+    assert {machines.get_request(store, r["id"])["status"] for r in (first, second)} == {"approved"}
     grant = machines.list_grants(store)[0]
-    assert grant["expires_at"] > (now() + timedelta(days=29)).isoformat()
+    assert (grant["kind"], grant["scope"], grant["job_id"], grant["task"]) == ("task", "read", str(job.id),
+                                                                             "chat turn: work")
+    # inside the grant: no card, at once
+    for _ in range(5):
+        item = machines.record_request(store, job, machine, "ls", LS)
+        assert item["status"] == "approved" and item["approval_id"] is None and item["grant_id"] == grant["id"]
+    assert len(cards(store)) == 1
+    claimed = machines.begin_execute(store, item["id"], job)
+    assert claimed["grant"]["id"] == grant["id"] and claimed["args"] == LS
+    with pytest.raises(machines.MachineError):
+        machines.begin_execute(store, item["id"], job)  # each call row is used once
+    # the grant is this job's: a new job (a new chat turn or task) asks again, another bot too
+    again = machines.record_request(store, running(store, bot), machine, "ls", LS)
+    assert again["status"] == "pending" and again["approval_id"] != first["approval_id"]
+    other_bot = store.create_bot("Bo", "", "codex", None)
+    assert machines.record_request(store, running(store, other_bot), machine, "ls", LS)["status"] == "pending"
+    # and another job cannot run this job's call
+    with pytest.raises(machines.MachineError):
+        machines.begin_execute(store, machines.record_request(store, job, machine, "ls", LS)["id"], running(store, bot))
+
+
+def test_a_wider_call_raises_one_widen_card(tmp_path):
+    store, _, machine, job = setup(tmp_path)
+    first = machines.record_request(store, job, machine, "read", READ)
+    machines.approve(store, first["approval_id"])
+    push = machines.record_request(store, job, machine, "push", PUSH)
+    assert push["status"] == "pending"
+    run = machines.record_request(store, job, machine, "run", RUN)
+    assert run["approval_id"] == push["approval_id"]  # widened in place to shell: still one card
+    card = approval_card(store, machines.approval_dict(store, push["approval_id"]))["machine"]
+    assert card["scope"] == "shell" and card["widen_from"] == "read" and card["full_access"]
+    assert "widen its access from read to shell" in machines.approval_dict(store, push["approval_id"])["summary"]
+    # the read grant keeps working while the widen card waits
+    assert machines.record_request(store, job, machine, "ls", LS)["status"] == "approved"
+    machines.approve(store, push["approval_id"])
+    grants = machines.list_grants(store)
+    assert len(grants) == 1 and grants[0]["scope"] == "shell"  # the same grant, widened; its end did not move
+    assert machines.record_request(store, job, machine, "run", RUN)["status"] == "approved"
+    assert machines.get_request(store, push["id"])["status"] == "approved"
+
+
+def test_request_scope_up_front(tmp_path):
+    store, _, machine, job = setup(tmp_path)
+    ask = machines.record_request(store, job, machine, "grant", {"scope": "files"}, "files")
+    assert ask["status"] == "pending"
+    machines.approve(store, ask["approval_id"])
+    assert machines.get_request(store, ask["id"])["status"] == "done"
+    assert machines.record_request(store, job, machine, "push", PUSH)["status"] == "approved"
+    assert machines.record_request(store, job, machine, "grant", {"scope": "read"}, "read")["status"] == "done"
+    assert machines.record_request(store, job, machine, "run", RUN)["status"] == "pending"
+    assert machines.check_scope("shell") == "shell"
+    with pytest.raises(machines.MachineError):
+        machines.check_scope("root")
+
+
+def test_grant_ends_with_the_job_at_the_cap_and_by_the_owner(tmp_path):
+    store, bot, machine, job = setup(tmp_path)
+    machines.set_grant_cap(store, 30)
+    first = machines.record_request(store, job, machine, "ls", LS)
+    machines.approve(store, first["approval_id"])
+    grant = machines.list_grants(store)[0]
+    assert grant["expires_at"] < (now() + timedelta(minutes=31)).isoformat()
+    assert machines.grant_live(store, grant["id"], str(job.id))
+    queued = machines.record_request(store, job, machine, "ls", LS)
+    # the cap
     with closing(store._connect()) as db:
         db.execute("UPDATE machine_grants SET expires_at=?", ((now() - timedelta(seconds=1)).isoformat(),))
-    assert machines.record_request(store, job, machine, "ls", {"path": "/srv/work/c", "depth": 1})["status"] == "pending"
-    with pytest.raises(machines.MachineError):
-        machines.begin_execute(store, second["id"], job)  # its grant is gone now
-    with closing(store._connect()) as db:
-        db.execute("UPDATE machine_grants SET expires_at=?", ((now() + timedelta(days=1)).isoformat(),))
-    machines.revoke_grant(store, grant["id"])
-    assert machines.record_request(store, job, machine, "ls", {"path": "/srv/work/d", "depth": 1})["status"] == "pending"
-
-
-# --- binding ---
-
-def test_approval_is_single_use_and_bound_to_the_arguments(tmp_path):
-    store, bot = make_store(tmp_path)
-    machine = machines.get_machine(store, paired(store)["machine_id"])
-    job = running(store, bot)
-    args = {"path": "/srv/work/a.txt", "offset": 0, "length": 100, "b64": False, "file_size": 100}
-    item = machines.record_request(store, job, machine, "read", args)
-    with pytest.raises(machines.MachineError):
-        machines.begin_execute(store, item["id"], job)  # not approved yet
-    machines.approve(store, item["approval_id"])
-    # the stored arguments changed after the approval (a tampered row): refused
-    with closing(store._connect()) as db:
-        db.execute("UPDATE machine_requests SET args_json=? WHERE id=?",
-                   (json.dumps({**args, "path": "/srv/work/b.txt"}, sort_keys=True), item["id"]))
+    assert not machines.grant_live(store, grant["id"], str(job.id))
     with pytest.raises(machines.MachineError) as err:
-        machines.begin_execute(store, item["id"], job)
+        machines.begin_execute(store, queued["id"], job)
     assert err.value.status == 403
-    with closing(store._connect()) as db:
-        db.execute("UPDATE machine_requests SET args_json=? WHERE id=?", (json.dumps(args, sort_keys=True), item["id"]))
-    claimed = machines.begin_execute(store, item["id"], job)
-    assert claimed["args"]["path"] == "/srv/work/a.txt"
-    assert machines.approval_dict(store, item["approval_id"])["status"] == "consumed"
-    with pytest.raises(machines.MachineError):
-        machines.begin_execute(store, item["id"], job)  # single use
-    # another job of the same bot cannot use it either
-    other = machines.record_request(store, job, machine, "read", args)
-    machines.approve(store, other["approval_id"])
-    with pytest.raises(machines.MachineError):
-        machines.begin_execute(store, other["id"], running(store, bot))
-
-
-def test_push_binding_includes_the_sha256(tmp_path):
-    store, bot = make_store(tmp_path)
-    machine = machines.get_machine(store, paired(store)["machine_id"])
-    job = running(store, bot)
-    args = {"path": "/srv/work/a.bin", "source": "a.bin", "size": 3, "sha256": "a" * 64, "overwrite": False,
-            "requested": "~/a.bin", "exists": False}
-    item = machines.record_request(store, job, machine, "push", args)
-    base = machines.binding_hash(machine["id"], str(bot.id), str(job.id), "push", args)
-    assert item["binding_hash"] == base
-    assert machines.binding_hash(machine["id"], str(bot.id), str(job.id), "push", {**args, "sha256": "b" * 64}) != base
+    assert machines.sweep(store) == [grant["id"]]
+    assert machines.get_grant(store, grant["id"])["end_reason"] == "expired"
+    assert machines.get_request(store, queued["id"])["status"] == "cancelled"
+    assert machines.record_request(store, job, machine, "ls", LS)["status"] == "pending"  # asks again
+    # the owner's End grant
+    job2 = running(store, bot)
+    item = machines.record_request(store, job2, machine, "ls", LS)
     machines.approve(store, item["approval_id"])
-    machines.fail_unexecuted(store, item["id"], job, "the file differs from the approved sha256")
-    assert machines.get_request(store, item["id"])["status"] == "failed"
-    assert machines.approval_dict(store, item["approval_id"])["status"] == "consumed"
+    live = [g for g in machines.list_grants(store) if g["job_id"] == str(job2.id)][0]
+    machines.end_grant(store, live["id"])
+    assert not machines.grant_live(store, live["id"], str(job2.id))
     with pytest.raises(machines.MachineError):
-        machines.begin_execute(store, item["id"], job)
+        machines.begin_execute(store, item["id"], job2)
+    assert machines.record_request(store, job2, machine, "ls", LS)["status"] == "pending"
+    # the job's end
+    job3 = running(store, bot)
+    item = machines.record_request(store, job3, machine, "ls", LS)
+    machines.approve(store, item["approval_id"])
+    store.finish(job3.id, JobStatus.SUCCEEDED)
+    ended = machines.sweep(store)
+    assert len(ended) == 1 and machines.get_grant(store, ended[0])["end_reason"] == "task ended"
+    with pytest.raises(machines.MachineError):
+        machines.set_grant_cap(store, 0)
+    with pytest.raises(machines.MachineError):
+        machines.set_grant_cap(store, 24 * 60 + 1)
+    assert machines.grant_cap_minutes(store) == 30
+
+
+def test_prompt_modes(tmp_path):
+    store, bot, machine, job = setup(tmp_path)
+    assert machines.PROMPT_MODE_DEFAULT == "ask" and machine["prompt_mode"] in (None, "ask")
+    assert machines.REMEMBER_TTL == timedelta(days=30) and machines.GRANT_CAP_DEFAULT_MIN == 240
+    # remember for this bot: one card, then the next tasks of this bot start without one
+    machines.update_machine(store, machine["id"], mode="remember")
+    machine = machines.get_machine(store, machine["id"])
+    first = machines.record_request(store, job, machine, "read", READ)
+    machines.approve(store, first["approval_id"])
+    remembered = [g for g in machines.list_grants(store) if g["kind"] == "remember"]
+    assert len(remembered) == 1 and remembered[0]["scope"] == "read"
+    assert remembered[0]["expires_at"] > (now() + timedelta(days=29)).isoformat()
+    job2 = running(store, bot)
+    assert machines.record_request(store, job2, machine, "ls", LS)["status"] == "approved"
+    assert machines.record_request(store, job2, machine, "run", RUN)["status"] == "pending"  # wider: a card
+    other_bot = store.create_bot("Bo", "", "codex", None)
+    assert machines.record_request(store, running(store, other_bot), machine, "ls", LS)["status"] == "pending"
+    # back to ask: remembered grants end
+    machines.update_machine(store, machine["id"], mode="ask")
+    machine = machines.get_machine(store, machine["id"])
+    assert not [g for g in machines.list_grants(store) if g["kind"] == "remember"]
+    assert machines.record_request(store, running(store, bot), machine, "ls", LS)["status"] == "pending"
+    # always allow: no card at all, still a task grant with the cap, still in the audit
+    machines.update_machine(store, machine["id"], mode="allow")
+    machine = machines.get_machine(store, machine["id"])
+    job4 = running(store, bot)
+    item = machines.record_request(store, job4, machine, "run", RUN)
+    assert item["status"] == "approved"
+    grant = machines.get_grant(store, item["grant_id"])
+    assert grant["kind"] == "task" and grant["source"] == "always allow" and grant["scope"] == "shell"
+    # End grant by the owner wins over always allow for the rest of that task
+    machines.end_grant(store, grant["id"])
+    assert machines.record_request(store, job4, machine, "ls", LS)["status"] == "pending"
+    assert {"grant_started", "allowed"} <= {row["event"] for row in machines.audit_log(store, job_id=str(job4.id))}
+    with pytest.raises(machines.MachineError):
+        machines.update_machine(store, machine["id"], mode="sometimes")
 
 
 def test_deny_timeout_and_ended_job_are_denials(tmp_path):
-    store, bot = make_store(tmp_path)
-    machine = machines.get_machine(store, paired(store)["machine_id"])
-    job = running(store, bot)
-    args = {"path": "/srv/work", "depth": 1}
-    denied = machines.record_request(store, job, machine, "ls", args)
+    store, bot, machine, job = setup(tmp_path)
+    denied = machines.record_request(store, job, machine, "ls", LS)
     machines.deny(store, denied["approval_id"])
+    assert machines.get_request(store, denied["id"])["status"] == "denied"
     with pytest.raises(machines.MachineError):
         machines.begin_execute(store, denied["id"], job)
-    late = machines.record_request(store, job, machine, "ls", args)
+    late = machines.record_request(store, job, machine, "ls", LS)
     with closing(store._connect()) as db:
-        db.execute("UPDATE machine_requests SET expires_at=? WHERE id=?", ((now() - timedelta(seconds=1)).isoformat(), late["id"]))
+        db.execute("UPDATE approvals SET expires_at=? WHERE id=?", ((now() - timedelta(seconds=1)).isoformat(),
+                                                                   late["approval_id"]))
     assert machines.expire(store) == 1
     assert machines.get_request(store, late["id"])["status"] == "expired"
     assert machines.approval_dict(store, late["approval_id"])["status"] == "expired"
@@ -294,30 +336,62 @@ def test_deny_timeout_and_ended_job_are_denials(tmp_path):
         machines.approve(store, late["approval_id"])
     # an expired machine approval offers no Re-run in Needs-you
     assert all(late["approval_id"] not in (item.get("approval_id"), item.get("id")) for item in needs_you.needs_you(store))
-    cancelled = machines.record_request(store, job, machine, "ls", args)
-    machines.cancel(store, cancelled["id"], job)
-    with pytest.raises(machines.MachineError):
-        machines.approve(store, cancelled["approval_id"])
-    ended = machines.record_request(store, job, machine, "ls", args)
+    ended = machines.record_request(store, job, machine, "ls", LS)
     store.finish(job.id, JobStatus.SUCCEEDED)
     with pytest.raises(machines.MachineError):
         machines.approve(store, ended["approval_id"])
+    with pytest.raises(machines.MachineError):
+        machines.record_request(store, job, machine, "ls", LS)  # the job is not running
 
 
-def test_class_off_refuses_everything(tmp_path):
-    store, bot = make_store(tmp_path)
-    machine = machines.get_machine(store, paired(store)["machine_id"])
-    job = running(store, bot)
-    assert machines.class_enabled(store)  # "Controlling a computer" is on by default
-    item = machines.record_request(store, job, machine, "ls", {"path": "/srv/work", "depth": 1})
+def test_stop_all_ends_grants_denies_cards_and_refuses(tmp_path):
+    store, bot, machine, job = setup(tmp_path)
+    item = machines.record_request(store, job, machine, "ls", LS)
     machines.approve(store, item["approval_id"])
-    approval_classes.update(store, enabled={machines.CLASS_KEY: False})
+    waiting = machines.record_request(store, running(store, bot), machine, "ls", LS)
+    grant_id = machines.list_grants(store)[0]["id"]
+    assert machines.stop_all(store) == [grant_id]
     assert not machines.class_enabled(store)
+    assert machines.get_grant(store, grant_id)["end_reason"] == "computer access stopped"
+    assert machines.approval_dict(store, waiting["approval_id"])["status"] == "denied"
+    assert machines.get_request(store, item["id"])["status"] == "cancelled"
     with pytest.raises(machines.MachineError) as err:
         machines.begin_execute(store, item["id"], job)
     assert err.value.status == 403
     # the gate never matches the computer class: it only covers bin/machine requests
     assert approval_classes.match(store, "Bash", "machine ls /") is None
+    machines.resume_all(store)
+    assert machines.class_enabled(store)
+    assert machines.record_request(store, job, machine, "ls", LS)["status"] == "pending"
+
+
+def test_audit_has_every_call_and_no_contents(tmp_path):
+    store, bot, machine, job = setup(tmp_path)
+    item = machines.record_request(store, job, machine, "ls", LS)
+    machines.approve(store, item["approval_id"])
+    run = machines.record_request(store, job, machine, "grant", {"scope": "shell"}, "shell")
+    machines.approve(store, run["approval_id"])
+    call = machines.record_request(store, job, machine, "run", RUN)
+    machines.begin_execute(store, call["id"], job)
+    machines.finish(store, call["id"], ok=True, result={"exit": 0, "stdout": "SECRET-OUTPUT", "stderr": "",
+                                                         "sha256": "f" * 64})
+    blocked = machines.record_request(store, job, machine, "run", {**RUN, "argv": ["rm", "-rf", "/"]})
+    machines.begin_execute(store, blocked["id"], job)
+    machines.finish(store, blocked["id"], ok=False, error="refused by this computer's command deny-list", blocked=True)
+    assert machines.get_request(store, blocked["id"])["status"] == "blocked"
+    machines.refused(store, job, machine, "read", {**READ, "path": "~/.ssh/id_ed25519"}, blocked=True,
+                     why="on this computer's deny-list")
+    log = machines.audit_log(store, machine_id=machine["id"], bot_id=str(bot.id), job_id=str(job.id))
+    events = [row["event"] for row in log]
+    assert {"card", "grant_allowed", "grant_widened", "allowed", "done", "blocked"} <= set(events)
+    done = next(row for row in log if row["event"] == "done")
+    detail = json.loads(done["detail"])
+    assert detail["argv"] == ["make", "test"] and detail["exit"] == 0 and detail["stdout_bytes"] == 13
+    assert done["grant_id"] and done["bot_name"] == "Ada" and done["machine_name"] == "laptop"
+    assert "SECRET-OUTPUT" not in json.dumps(log) and "SECRET-OUTPUT" not in json.dumps(
+        sql(store, "SELECT result_json FROM machine_requests")[0][0])
+    assert sum(1 for row in log if row["event"] == "blocked") == 2
+    assert machines.audit_log(store, job_id="nope") == []
 
 
 def test_argument_validation_and_limits():
@@ -340,6 +414,15 @@ def test_argument_validation_and_limits():
     assert err.value.status == 409
     with pytest.raises(machines.MachineError):
         machines.canonical_args("ls", {"path": "x", "depth": 1}, {"canonical": "relative"})
+    assert [machines.TOOL_SCOPE[t] for t in ("ls", "read", "pull", "shot", "push", "run")] == \
+        ["read", "read", "read", "read", "files", "shell"]
+    assert machines.scope_covers("shell", "read") and not machines.scope_covers("read", "files")
+    assert not machines.scope_covers(None, "read") and machines.wider("files", "read") == "files"
+
+
+def test_no_pattern_grants_left():
+    for gone in ("approve_always", "grant_matches", "check_pattern", "run_pattern", "binding_hash", "revoke_grant"):
+        assert not hasattr(machines, gone)
 
 
 def test_device_flags_default_off(tmp_path):
@@ -362,8 +445,11 @@ def test_owner_api_and_agent_token_scope(settings):
         listed = client.get("/v1/machines", headers=H).json()
         shown = listed["machines"][0]
         assert shown["status"] == "pending" and shown["fingerprint"] == reply["fingerprint"]
+        assert shown["prompt_mode"] == "ask"
         assert "token" not in json.dumps(listed).replace("token_issued_at", "")
-        assert listed["defaults"] == {"sandbox": False, "confirm_local": False}
+        assert listed["defaults"]["sandbox"] is False and listed["defaults"]["confirm_local"] is False
+        assert listed["defaults"]["prompt_mode"] == "ask" and listed["grant_cap_min"] == 240
+        assert listed["computer_access"] is True
         # a device token is not a master token
         assert client.get("/v1/machines", headers={"Authorization": "Bearer " + reply["token"]}).status_code == 401
         assert client.post(f"/v1/machines/{reply['machine_id']}/activate", headers=H,
@@ -372,61 +458,65 @@ def test_owner_api_and_agent_token_scope(settings):
                            json={"fingerprint": reply["fingerprint"]}).status_code == 200
         assert client.patch(f"/v1/machines/{reply['machine_id']}", headers=H,
                             json={"sandbox": True}).json()["flags"]["sandbox"] is True
+        assert client.patch(f"/v1/machines/{reply['machine_id']}", headers=H,
+                            json={"prompt_mode": "remember"}).json()["prompt_mode"] == "remember"
+        assert client.patch(f"/v1/machines/{reply['machine_id']}", headers=H,
+                            json={"prompt_mode": "yolo"}).status_code in (400, 409, 422)
+        assert client.patch("/v1/machine-settings", headers=H, json={"grant_cap_min": 60}).status_code == 200
+        assert client.patch("/v1/machine-settings", headers=H, json={"grant_cap_min": 0}).status_code in (400, 422)
         bot = store.create_bot("Ada", "", "codex", None)
         job = running(store, bot)
         agent = {"Authorization": "Bearer " + store.issue_agent_token(job)}
         assert client.get("/v1/agent/machines", headers=agent).json()[0]["name"] == "laptop"
         assert client.get("/v1/machines", headers=agent).status_code == 401
+        assert client.get("/v1/machines/audit", headers=agent).status_code == 401
+        assert client.post("/v1/machines/stop-all", headers=agent).status_code == 401
         # offline: refused before any approval is asked
         answer = client.post("/v1/agent/machines/requests", headers=agent,
                              json={"tool": "ls", "args": {"path": "/srv"}})
         assert answer.status_code == 409 and sql(store, "SELECT COUNT(*) FROM approvals")[0][0] == 0
         assert client.post("/v1/agent/machines/requests", headers=agent,
+                           json={"tool": "grant", "scope": "shell"}).status_code == 409
+        assert client.post("/v1/agent/machines/requests", headers=agent,
+                           json={"tool": "grant", "scope": "root"}).status_code == 400
+        assert client.post("/v1/agent/machines/requests", headers=agent,
                            json={"tool": "nope", "args": {}}).status_code == 400
         audit = client.get(f"/v1/machines/{reply['machine_id']}/audit", headers=H).json()
         assert {"paired", "activated"} <= {item["event"] for item in audit}
+        everything = client.get("/v1/machines/audit", headers=H, params={"machine_id": reply["machine_id"]}).json()
+        assert {"paired", "activated"} <= {item["event"] for item in everything}
         assert client.post(f"/v1/machines/{reply['machine_id']}/revoke", headers=H).json()["status"] == "revoked"
         assert client.get("/v1/agent/machines", headers=agent).json() == []
 
 
-def test_machine_approval_card_and_approve_route(settings):
+def test_machine_card_end_grant_and_stop_all_routes(settings):
     with TestClient(create_app(settings, {"codex": FakeAdapter(enabled=False)})) as client:
         store = client.app.state.store
         machine = machines.get_machine(store, paired(store)["machine_id"])
         bot = store.create_bot("Ada", "", "codex", None)
         job = running(store, bot)
-        item = machines.record_request(store, job, machine, "run",
-                                       {"argv": ["make", "test"], "sh": None, "cwd": "/srv/work", "timeout": 30})
+        item = machines.record_request(store, job, machine, "run", RUN)
         card = approval_card(store, machines.approval_dict(store, item["approval_id"]))
-        assert card["machine"]["tool"] == "run" and card["machine"]["args"]["argv"] == ["make", "test"]
-        assert card["machine"]["full_access"] and card["machine"]["can_always"]
+        assert card["machine"]["scope"] == "shell" and card["machine"]["full_access"]
+        assert card["machine"]["calls"] == [item["summary"]]
+        assert "can_always" not in card["machine"]
         assert client.post(f"/v1/approvals/{item['approval_id']}/approve", headers=H).status_code == 200
         assert machines.get_request(store, item["id"])["status"] == "approved"
         # approving twice is refused, and no resume turn was queued for a machine approval
         assert client.post(f"/v1/approvals/{item['approval_id']}/approve", headers=H).status_code == 409
-        broad = machines.record_request(store, job, machine, "read",
-                                        {"path": "/srv/a.txt", "offset": 0, "length": 1, "b64": False, "file_size": 1})
-        answer = client.post(f"/v1/machines/approvals/{broad['approval_id']}/always", headers=H,
-                             json={"pattern": "/srv/**"})
-        assert answer.status_code == 428
-        assert client.post(f"/v1/machines/approvals/{broad['approval_id']}/always", headers=H,
-                           json={"pattern": "/srv/**", "confirm_broad": True}).status_code == 200
-        assert client.get("/v1/machine-grants", headers=H).json()[0]["pattern"] == "/srv/**"
-
-
-def test_card_sizes_and_no_screenshot_grants(tmp_path):
-    assert machines._size(500) == "500 bytes"
-    assert machines._size(2048) == "2.0 KiB"
-    assert machines._size(100 * 1024 * 1024) == "100.0 MiB"
-    store, bot = make_store(tmp_path)
-    machine = machines.get_machine(store, paired(store)["machine_id"])
-    job = running(store, bot)
-    item = machines.record_request(store, job, machine, "shot", {"dest": "shot.png"})
-    assert approval_card(store, machines.approval_dict(store, item["approval_id"]))["machine"]["can_always"] is False
-    with pytest.raises(machines.MachineError):
-        machines.approve_always(store, item["approval_id"])
-    assert not machines.grant_matches("shot", "screen", {"dest": "x.png"})
-
+        card = approval_card(store, machines.approval_dict(store, item["approval_id"]))
+        assert card["machine"]["grant"]["live"] is True
+        grants = client.get("/v1/machine-grants", headers=H).json()
+        assert grants[0]["scope"] == "shell" and grants[0]["task"] == "chat turn: work"
+        assert client.post(f"/v1/machine-grants/{grants[0]['id']}/end", headers=H).status_code == 200
+        assert client.get("/v1/machine-grants", headers=H).json() == []
+        assert client.post("/v1/machine-grants/99999/end", headers=H).status_code == 404
+        assert client.post(f"/v1/machines/approvals/{item['approval_id']}/always", headers=H,
+                           json={"pattern": "/srv/**"}).status_code in (404, 405)
+        assert client.post("/v1/machines/stop-all", headers=H).status_code == 200
+        assert client.get("/v1/machines", headers=H).json()["computer_access"] is False
+        assert client.post("/v1/machines/resume-all", headers=H).status_code == 200
+        assert client.get("/v1/machines", headers=H).json()["computer_access"] is True
 
 def test_hub_sends_a_push_only_as_far_as_the_agent_granted():
     import asyncio

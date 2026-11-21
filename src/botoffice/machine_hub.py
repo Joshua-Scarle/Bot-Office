@@ -8,6 +8,12 @@ CHUNK bytes before the result (pull, shot) or after the call (push, closed by ``
 sends one chunk (or the ``chunk_end``) per credit the agent grants with ``{"type": "credit", "id",
 "n"}``, so the agent never has to stall its receive loop for a slow disk or an open question.
 
+Every call except ``resolve`` runs under a task grant (machines.py). While it is in flight the hub
+checks every GRANT_CHECK seconds that the grant is still live (not ended, before its cap, its job
+running, computer access on); if not, or at once when the owner presses End grant, it fails the
+call and sends ``cancel`` (the agent kills the command's process group) plus ``{"type":
+"end_grant", "grant"}`` so the agent drops every other call of that grant too.
+
 A new connection for the same computer replaces the old one. Revoke closes the socket with 4401 and
 every call in flight fails at once. Close codes the agent acts on: 4401 revoked or invalid token
 (it exits), 4403 not activated yet (it waits and retries), 4000 replaced.
@@ -21,6 +27,7 @@ import contextlib
 import json
 import logging
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import IO
 
@@ -38,14 +45,16 @@ CREDIT_MAX = 64  # push chunks the agent may have asked for and not received yet
 CANCEL_SEND_TIMEOUT = 5.0
 INFLIGHT_MAX = 4
 SEEN_EVERY = 60.0
+GRANT_CHECK = 2.0  # seconds between liveness checks of the grant behind a call in flight
 CLOSE_REPLACED, CLOSE_REVOKED, CLOSE_PENDING = 4000, 4401, 4403
 
 
 class HubError(Exception):
-    def __init__(self, detail: str, status: int = 502):
+    def __init__(self, detail: str, status: int = 502, code: str = ""):
         super().__init__(detail)
         self.detail = detail
         self.status = status
+        self.code = code  # the agent's error code (denied_local: its deny-list refused the call)
 
 
 @dataclass
@@ -56,6 +65,7 @@ class _Call:
     received: int = 0
     credits: int = 0
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    grant_id: int | None = None
 
 
 @dataclass
@@ -75,6 +85,10 @@ class _Connection:
             if not call.future.done():
                 call.future.set_exception(HubError(detail, status))
         self.calls.clear()
+
+
+class _GrantEnded(Exception):
+    pass
 
 
 class Hub:
@@ -184,32 +198,50 @@ class Hub:
         call.sink.write(data)
 
     async def call(self, machine_id: str, op: str, args: dict, *, timeout: float, upload: IO[bytes] | None = None,
-                   sink: IO[bytes] | None = None, limit: int = 0) -> dict:
-        """Send one call and wait for its result (HubError on offline, timeout, error or disconnect)."""
+                   sink: IO[bytes] | None = None, limit: int = 0, grant_id: int | None = None,
+                   alive: Callable[[], bool] | None = None) -> dict:
+        """Send one call and wait for its result (HubError on offline, timeout, error, disconnect,
+        or the grant behind it ending: *alive* is polled every GRANT_CHECK seconds)."""
         conn = self.connections.get(machine_id)
         if conn is None or conn.closed:
             raise HubError("the computer is offline", 409)
         if len(conn.calls) >= INFLIGHT_MAX:
             raise HubError("the computer is busy with other calls; try again shortly", 429)
         call_id = secrets.token_hex(8)
-        call = _Call(asyncio.get_running_loop().create_future(), sink, limit)
+        call = _Call(asyncio.get_running_loop().create_future(), sink, limit, grant_id=grant_id)
         conn.calls[call_id] = call
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
-        async def send_all() -> None:
+        async def exchange() -> dict:
             await conn.send({"type": "call", "id": call_id, "op": op, "args": args})
             if upload is not None:
                 await self._send_upload(conn, call_id, call, upload, deadline)
+            return await asyncio.shield(call.future)
 
+        task = loop.create_task(exchange())
         try:
             try:  # one deadline for everything: the call, every chunk (disk and socket) and the result
-                await asyncio.wait_for(send_all(), max(0.0, deadline - loop.time()))
-                result = await asyncio.wait_for(asyncio.shield(call.future), max(0.0, deadline - loop.time()))
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    done, _ = await asyncio.wait({task}, timeout=min(remaining, GRANT_CHECK))
+                    if done:
+                        result = task.result()
+                        break
+                    if alive is not None and not await asyncio.to_thread(alive):
+                        raise _GrantEnded
             except asyncio.TimeoutError:
+                await self._stop(task)
                 await self._send_cancel(conn, call_id)
                 raise HubError("the computer did not answer in time", 504) from None
+            except _GrantEnded:
+                await self._stop(task)
+                await self._send_cancel(conn, call_id)
+                raise HubError("the grant for this task ended; the call was stopped", 403) from None
             except asyncio.CancelledError:
+                await asyncio.shield(self._stop(task))
                 await asyncio.shield(self._send_cancel(conn, call_id))
                 raise
         except (WebSocketDisconnect, RuntimeError, ConnectionError) as exc:
@@ -219,14 +251,44 @@ class Hub:
         if not result.get("ok"):
             code = str(result.get("code") or "error")[:40]
             detail = machines._clean(result.get("error") or "failed", 500)
-            raise HubError(f"{code}: {detail}", 403 if code in ("denied_local", "declined_local") else 422)
+            raise HubError(f"{code}: {detail}", 403 if code in ("denied_local", "declined_local") else 422, code)
         data = result.get("data")
         return data if isinstance(data, dict) else {}
 
     @staticmethod
+    async def _stop(task: asyncio.Task) -> None:
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+    async def end_grant(self, grant_id: int, machine_id: str | None = None) -> int:
+        """End grant: every call in flight under *grant_id* fails now and is cancelled on its computer,
+        which also gets ``end_grant`` (it kills the process groups of that grant's commands)."""
+        stopped = 0
+        for key, conn in list(self.connections.items()):
+            if machine_id is not None and key != machine_id:
+                continue
+            hit = [(call_id, call) for call_id, call in list(conn.calls.items()) if call.grant_id == grant_id]
+            for call_id, call in hit:
+                if not call.future.done():
+                    call.future.set_exception(HubError("the grant for this task was ended; the call was stopped", 403))
+                await self._send_cancel(conn, call_id)
+                stopped += 1
+            if hit or not conn.closed:
+                await self._send_cancel_message(conn, {"type": "end_grant", "grant": grant_id})
+        return stopped
+
+    @staticmethod
     async def _send_cancel(conn: _Connection, call_id: str) -> None:
+        await Hub._send_cancel_message(conn, {"type": "cancel", "id": call_id})
+
+    @staticmethod
+    async def _send_cancel_message(conn: _Connection, message: dict) -> None:
+        if conn.closed:
+            return
         with contextlib.suppress(Exception):
-            await asyncio.wait_for(conn.send({"type": "cancel", "id": call_id}), CANCEL_SEND_TIMEOUT)
+            await asyncio.wait_for(conn.send(message), CANCEL_SEND_TIMEOUT)
 
     @staticmethod
     async def _send_upload(conn: _Connection, call_id: str, call: _Call, upload: IO[bytes], deadline: float) -> None:

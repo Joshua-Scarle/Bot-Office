@@ -1,4 +1,4 @@
-"""botoffice-agent pair | run | status | unpair."""
+"""botoffice-agent pair | run | status | audit | check | unpair."""
 from __future__ import annotations
 
 import argparse
@@ -102,7 +102,38 @@ def cmd_status(args, cfg) -> int:
     for name in FLAGS:
         value = getattr(cfg, name)
         print(f"{name}: {value}" + (" (follows Bot Office)" if value == "server" else " (this computer decides)"))
-    print(f"deny-list: {len(cfg.deny_entries())} entries")
+    print(f"deny-list: {len(cfg.deny_entries())} paths, built-in catastrophic commands + {len(cfg.deny_commands)} "
+          f"pattern(s) from {cfg.config_dir / 'deny.toml'}")
+    return 0
+
+
+def cmd_audit(args, cfg) -> int:
+    """The last entries of this computer's audit log (what ran, for which bot and grant; no contents)."""
+    try:
+        lines = cfg.audit_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        print("no audit entries yet")
+        return 0
+    for line in lines[-args.n:]:
+        print(line)
+    return 0
+
+
+def cmd_check(args, cfg) -> int:
+    """Would this computer refuse the command? (the deny-list only; nothing runs)"""
+    from .denycmd import Checker
+    from .paths import LocalDenied, deny_roots
+    roots = deny_roots(cfg.deny_entries(), str(cfg.home))
+    command = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+    if bool(command) == bool(args.sh):
+        print("check takes a command after -- or --sh STRING", file=sys.stderr)
+        return 2
+    try:
+        Checker(str(cfg.home), roots, cfg.deny_commands).check(command or None, args.sh, args.cwd or str(cfg.home))
+    except LocalDenied as exc:
+        print(f"refused: {exc}")
+        return 1
+    print("allowed by the deny-list (Bot Office still needs a grant)")
     return 0
 
 
@@ -127,11 +158,18 @@ def main(argv: list[str] | None = None) -> int:
     pair.add_argument("--force", action="store_true")
     sub.add_parser("run", help="connect and serve approved calls (the service)")
     sub.add_parser("status")
+    audit = sub.add_parser("audit", help="the last entries of the local audit log")
+    audit.add_argument("-n", type=int, default=20)
+    check = sub.add_parser("check", help="test a command against this computer's deny-list (runs nothing)")
+    check.add_argument("--sh")
+    check.add_argument("--cwd")
+    check.add_argument("argv", nargs="*")
     sub.add_parser("unpair")
     args = parser.parse_args(argv)
     try:
         cfg = load()
-        return {"pair": cmd_pair, "run": cmd_run, "status": cmd_status, "unpair": cmd_unpair}[args.command](args, cfg)
+        return {"pair": cmd_pair, "run": cmd_run, "status": cmd_status, "audit": cmd_audit, "check": cmd_check,
+                "unpair": cmd_unpair}[args.command](args, cfg)
     except (ConfigError, tunnel.TunnelNotOurs) as exc:
         print(f"botoffice-agent: {exc}", file=sys.stderr)
         return 2

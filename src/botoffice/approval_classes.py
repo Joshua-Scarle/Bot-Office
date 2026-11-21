@@ -160,7 +160,8 @@ BUILTIN: tuple[ApprovalClass, ...] = (
     ApprovalClass(
         "computer", "Controlling a computer",
         "Listing, reading, copying and running commands on your paired computers (Settings > Computers). "
-        "Each call waits for your yes unless you saved an Always grant. Off: bots cannot use them at all.", True),
+        "One card per task asks for read, files or shell access; the calls inside run until the task ends. "
+        "Off: bots cannot use them at all.", True),
     ApprovalClass(
         "connectors", "Any connector action",
         "Every tool call through a connector (MCP server), including ones that only read.", False,

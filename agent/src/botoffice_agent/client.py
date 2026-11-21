@@ -2,8 +2,10 @@
 
 One WebSocket to ``<server>/v1/machines/ws``; reconnects with backoff (1 s doubling to 60 s).
 Close 4401 (revoked or bad token) ends the agent with exit 3; 4403 (not activated yet) waits.
-Each call runs in a worker thread with every path checked again here, then is written to the
-local audit log.
+Each call runs in a worker thread with every path (and a command against the command deny-list)
+checked again here, then is written to the local audit log. Calls come under a session grant: the
+local confirm pop-up, when on, asks once per grant (and again only when the grant is widened), and
+an ``end_grant`` message stops every call of that grant at once (whole process groups).
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidSta
 
 from . import __version__, ops, tunnel
 from .config import Config, TokenStore, effective
+from .denycmd import Checker
 from .paths import deny_roots
 
 WS_PATH = "/v1/machines/ws"
@@ -85,8 +88,22 @@ def _error_code(exc: BaseException) -> str:
     return "error"
 
 
+SCOPE_WORDS = {"read": "look at files (list, read, copy to Bot Office, screenshot)",
+               "files": "look at files and write files", "shell": "run commands and use files"}
+
+
+def grant_question(meta: dict) -> str:
+    """The question for the confirm pop-up: once per grant (and again when it is widened)."""
+    who = meta.get("bot") or "a bot"
+    scope = str(meta.get("scope") or "")
+    words = SCOPE_WORDS.get(scope, scope)
+    task = f" for: {meta['task']}" if meta.get("task") else ""
+    until = f"\nuntil {meta['until']} at the latest (or when the task ends)" if meta.get("until") else ""
+    return f"{who} may {words} on this computer{task}{until}.\nAllow for this task?"
+
+
 def describe(op: str, args: dict, meta: dict) -> str:
-    """The question for the confirm pop-up."""
+    """The question for the confirm pop-up when Bot Office sent no grant (one call)."""
     who = meta.get("bot") or "a bot"
     if op == "run":
         what = " ".join(args.get("argv") or []) if args.get("argv") else f"sh -c {args.get('sh')}"
@@ -115,6 +132,7 @@ class Agent:
         self.tokens = tokens
         self.audit = Audit(cfg.audit_path)
         self.roots = deny_roots(cfg.deny_entries(), str(cfg.home))
+        self.commands = Checker(str(cfg.home), self.roots, cfg.deny_commands)
         self.server_flags: dict = {}
         self.confirm = confirm or ops.confirm_with(cfg.confirm_command, cfg.confirm_timeout)
         self.token = tokens.load()
@@ -124,6 +142,10 @@ class Agent:
         self.cancels: dict[str, threading.Event] = {}
         self.tasks: set[asyncio.Task] = set()
         self.connected = asyncio.Event()
+        self.call_grants: dict[str, str] = {}  # call id -> grant id
+        self.answers: dict[tuple[str, str], bool] = {}  # (grant, scope) -> the local answer
+        self.asking: dict[tuple[str, str], asyncio.Lock] = {}
+        self.ended: set[str] = set()  # grants Bot Office ended: their calls are refused here
 
     # --- flags ---
 
@@ -131,7 +153,8 @@ class Agent:
         return effective(getattr(self.cfg, name), self.server_flags.get(name))
 
     def context(self) -> ops.Context:
-        return ops.Context(home=str(self.cfg.home), roots=self.roots, sandbox=self.flag("sandbox"))
+        return ops.Context(home=str(self.cfg.home), roots=self.roots, sandbox=self.flag("sandbox"),
+                           commands=self.commands)
 
     # --- connection ---
 
@@ -217,6 +240,9 @@ class Agent:
                 return
             # before the task first runs: the upload chunks follow this frame at once
             self.cancels[call_id] = threading.Event()
+            meta = (message.get("args") or {}).get("meta") if isinstance(message.get("args"), dict) else None
+            if isinstance(meta, dict) and isinstance(meta.get("grant"), (str, int)):
+                self.call_grants[call_id] = str(meta["grant"])
             if message.get("op") == "push":
                 self.uploads[call_id] = asyncio.Queue(UPLOAD_QUEUE)
             task = asyncio.get_running_loop().create_task(self.call(call_id, message.get("op"),
@@ -232,6 +258,38 @@ class Agent:
                 self.uploads.pop(call_id, None)
         elif kind == "cancel" and call_id in self.cancels:
             self.cancels[call_id].set()
+        elif kind == "end_grant" and isinstance(message.get("grant"), (str, int)):
+            self.end_grant(str(message["grant"]))
+
+    def end_grant(self, grant: str) -> None:
+        """End grant / Stop all in Bot Office: stop every call of the grant now; running commands
+        get TERM then KILL on their whole process group (op_run watches the cancel event)."""
+        self.ended.add(grant)
+        for call_id, owner in list(self.call_grants.items()):
+            if owner == grant and call_id in self.cancels:
+                self.cancels[call_id].set()
+        for key in [key for key in self.answers if key[0] == grant]:
+            self.answers.pop(key, None)
+        with contextlib.suppress(OSError):
+            self.audit.write({"op": "end_grant", "grant": grant, "ok": True})
+
+    async def confirm_grant(self, op: str, args: dict, meta: dict, cancel: threading.Event) -> None:
+        """The local pop-up: once per grant and scope; a no (or no answer) holds for the grant."""
+        grant = meta.get("grant")
+        if grant is None:  # an older Bot Office: one question per call
+            if not await asyncio.to_thread(self.confirm, describe(op, args, meta)):
+                raise ops.Declined("declined on this computer (or no answer)")
+            return
+        key = (str(grant), str(meta.get("scope") or ""))
+        lock = self.asking.setdefault(key, asyncio.Lock())
+        async with lock:
+            if key not in self.answers:
+                answer = await asyncio.to_thread(self.confirm, grant_question(meta))
+                if str(grant) in self.ended:
+                    raise ops.Declined("the grant ended while waiting for the answer here")
+                self.answers[key] = answer
+        if not self.answers[key]:
+            raise ops.Declined("declined on this computer for this task (or no answer)")
 
     async def rotate(self, token: str) -> None:
         await asyncio.to_thread(self.tokens.save, token)
@@ -245,20 +303,22 @@ class Agent:
     async def call(self, call_id: str, op: object, args: dict) -> None:
         meta = args.pop("meta", None) if isinstance(args, dict) else None
         meta = meta if isinstance(meta, dict) else {}
-        entry = {"op": op, "request": meta.get("request"), "bot": meta.get("bot"),
+        entry = {"op": op, "request": meta.get("request"), "bot": meta.get("bot"), "grant": meta.get("grant"),
+                 "job": meta.get("job"), "scope": meta.get("scope"),
                  "args": _audit_args(str(op), args) if isinstance(args, dict) else {}}
         cancel = self.cancels.setdefault(call_id, threading.Event())
-        if op == "push":
+        if op == "push" and not cancel.is_set():  # (a flood already dropped its queue and cancelled it)
             self.uploads.setdefault(call_id, asyncio.Queue(UPLOAD_QUEUE))
         try:
             if op not in OPS or not isinstance(args, dict):
                 raise ValueError("unknown call")
             ctx = self.context()
             entry["sandbox"] = ctx.sandbox
+            if op != "resolve" and meta.get("grant") is not None and str(meta["grant"]) in self.ended:
+                raise ops.Declined("the grant for this call was ended")
             if op != "resolve" and self.flag("confirm_local"):
                 entry["confirmed_local"] = True
-                if not await asyncio.to_thread(self.confirm, describe(op, args, meta)):
-                    raise ops.Declined("declined on this computer (or no answer)")
+                await self.confirm_grant(str(op), args, meta, cancel)
                 if cancel.is_set():  # Bot Office gave up while the question was open: a late yes is void
                     raise ops.Declined("cancelled by Bot Office while waiting for the answer here")
             data = await getattr(self, "_" + op)(call_id, args, ctx, cancel)
@@ -274,6 +334,7 @@ class Agent:
                 await self.send({"type": "result", "id": call_id, "ok": False, "code": code, "error": str(exc)[:500]})
         finally:
             self.cancels.pop(call_id, None)
+            self.call_grants.pop(call_id, None)
             queue = self.uploads.pop(call_id, None)
             while queue is not None and not queue.empty():
                 queue.get_nowait()  # frees a handler waiting to put a chunk for a call that ended
@@ -317,13 +378,28 @@ class Agent:
         png = await asyncio.to_thread(ops.take_shot)
         return await self._send_bytes(call_id, io.BytesIO(png).read, cancel)
 
+    @staticmethod
+    async def _next_chunk(queue: asyncio.Queue, cancel: threading.Event) -> dict:
+        """The next upload frame; a cancel (or 120 s without one) ends the wait."""
+        waited = 0.0
+        while True:
+            try:
+                return await asyncio.wait_for(queue.get(), 0.5)
+            except TimeoutError:
+                waited += 0.5
+                if cancel.is_set():
+                    raise ValueError("cancelled") from None
+                if waited >= 120:
+                    raise
     async def _push(self, call_id, args, ctx, cancel) -> dict:
-        queue = self.uploads[call_id]
+        queue = self.uploads.get(call_id)
+        if queue is None or cancel.is_set():
+            raise ValueError("cancelled")
         writer = await asyncio.to_thread(ops.PushWriter, args, ctx)
         try:
             await self.send({"type": "credit", "id": call_id, "n": UPLOAD_QUEUE})
             while True:
-                message = await asyncio.wait_for(queue.get(), 120)
+                message = await self._next_chunk(queue, cancel)
                 if cancel.is_set():
                     raise ValueError("cancelled")
                 if message["type"] == "chunk":
