@@ -61,6 +61,8 @@ class Job(BaseModel):
     provider: str = "codex"
     created_at: datetime
     started_at: datetime | None = None
+    # first start ever: started_at moves on with each retry, so use this for created -> started waits
+    first_started_at: datetime | None = None
     finished_at: datetime | None = None
     exit_code: int | None = None
     log_path: str | None = None
