@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import attachments, baseline as baseline_mod, continuation, failures, isolation, safefs
+from . import attachments, baseline as baseline_mod, context, continuation, failures, isolation, safefs
 from .assignments import BOT_ASSIGNMENTS_PER_DAY, BOT_BUDGET_MINUTES, BOT_BUDGET_TURNS, Assignments, _limit, drop_rule
 from .cron import _matches, parse_cron, to_cron_time
 from .catalog import ENGINE_LABELS
@@ -403,7 +403,7 @@ messages will arrive in this same session.
 {intro}
 Read SELF.md (who and where you are), instructions.md (your profile) and memory.md (your memory) in the current \
 directory now. Also available if needed: shared-memory.md (memory shared by all bots), worklog.md (your recent \
-turns), {history_hint}, DESKTOP.md (desktop helper).
+turns), {history_hint}, DESKTOP.md (desktop helper). Before interpreting a short or pronoun-led ask, read CONTEXT.md; use context_recall for anything older.
 {layers_block(layers or {})}
 {STANDING_RULES_NOTICE}
 
@@ -427,7 +427,8 @@ def build_resume_prompt(job: Job) -> str:
     return f"""New turn ({_source_label(job)}). This turn runs in a new job directory \
 (the current directory). {_reply_rule(job)} Update WORKING.md there only if your tasks changed \
 (it is pre-filled with your saved copy), and memory.md only for durable facts. Rules from the start of this \
-session still apply (unfinished: end with BOT-OFFICE-STATUS: not_done|blocked|waiting_on_user — <reason>).
+session still apply (unfinished: end with BOT-OFFICE-STATUS: not_done|blocked|waiting_on_user — <reason>). \
+Before interpreting a short or pronoun-led ask, read CONTEXT.md; use context_recall for anything older.
 
 Current message:
 {job.prompt}
@@ -857,6 +858,7 @@ def prepare_bot_workspace(
         "DESKTOP.md": DESKTOP_MD.format(slot=job.slot) if job.slot else NO_DESKTOP_MD,
         "SELF.md": build_self(bot, job, timeout, extra=extra),
         "worklog.md": memory.read_worklog(bot.id),
+        "CONTEXT.md": context.build_file(store, bot.id, job.id),
         "prompt.txt": prompt,
         "prompt-resume.txt": resume_prompt,
         WORKING_FILE: working,

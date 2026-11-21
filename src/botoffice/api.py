@@ -28,7 +28,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
-from . import grouping, isolation, needs_you, notify, safefs, team, vnc
+from . import grouping, isolation, needs_you, notify, recall, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -2067,6 +2067,15 @@ def create_app(
         finally:
             if reserved:
                 team.release_wait(store, job)
+
+    @app.get("/v1/agent/recall")
+    async def agent_recall(q: str = Query(min_length=1, max_length=recall.QUERY_CHARS), scope: str = Query(default="self"),
+                           limit: int = Query(default=10, ge=1, le=recall.MAX_HITS),
+                           job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        try:
+            return recall.run(store, job, q, scope, limit)
+        except recall.RecallError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
     @app.post(
         "/v1/bots/{bot_id}/messages",

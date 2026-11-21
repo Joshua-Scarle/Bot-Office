@@ -25,7 +25,7 @@ TEAM_READ_MODES = ("section", "all", "none")
 KILL_SWITCH = "BOT_OFFICE_TEAM_MCP"  # "0" turns the MCP server and its tool allowance off
 SERVER_NAME = "botoffice"
 TOOL_PREFIX = f"mcp__{SERVER_NAME}__"
-READ_TOOLS = ("team_list", "team_status", "team_read")
+READ_TOOLS = ("team_list", "team_status", "team_read", "context_recall")
 SEND_TOOLS = ("team_message", "team_ask")
 TOOLS = READ_TOOLS + SEND_TOOLS
 

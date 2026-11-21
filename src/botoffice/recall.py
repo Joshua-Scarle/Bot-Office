@@ -1,0 +1,130 @@
+"""context_recall (E7-1 S5): full-text search over a bot's own retained chat, and over teammates it may read.
+
+One caller path for the HTTP route (``/v1/agent/recall``, job token only) and the MCP tool. The query is never
+passed to FTS5 as typed: it is cut to words (``history.tokens``) and every word is quoted, so no operator
+(NEAR, column filters, ``*``, quotes) can be written. Rows are only the reader's own and, for ``team``, those of
+bots ``team.can_read`` allows: never archived (rewound) or hidden messages, never a private bot. Results are
+untrusted data (``untrusted: true``; the client fences the text), at most 20 hits and 8000 characters.
+"""
+from __future__ import annotations
+
+import sqlite3
+import time
+from contextlib import closing
+from urllib.parse import urlencode
+
+from . import history, team
+
+SCOPES = ("self", "team")
+MAX_HITS = 20
+MAX_CHARS = 8_000
+HIT_CHARS = 600
+QUERY_CHARS = 200
+SECONDS = 2.0  # one search is cut off after this long (a progress handler), whatever the index holds
+SNIPPET_TOKENS = 40
+
+
+class RecallError(Exception):
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status, self.detail = status, detail
+
+
+def _fts_or(words: list[str]) -> str:
+    quoted = ['"' + w.replace('"', '""') + '"' for w in words]
+    if len(words[-1]) > 1:
+        quoted[-1] += "*"
+    return " OR ".join(quoted)
+
+
+def _fts_and(words: list[str]) -> str:
+    return _fts_or(words).replace(" OR ", " ")
+
+
+def readable_bots(db: sqlite3.Connection, reader_id: str, scope: str) -> dict[str, str]:
+    """bot id -> name of the bots a recall may search: the reader, and with scope team the readable others."""
+    reader = db.execute("SELECT * FROM bots WHERE id=?", (str(reader_id),)).fetchone()
+    if reader is None:
+        raise RecallError(404, "bot not found")
+    allowed = {reader["id"]: reader["name"]}
+    if scope == "team":
+        sections = team.section_map(db)
+        for row in db.execute("SELECT * FROM bots WHERE id<>?", (reader["id"],)):
+            if team.can_read(dict(reader), dict(row), sections):
+                allowed[row["id"]] = row["name"]
+    return allowed
+
+
+def search(db: sqlite3.Connection, bots: dict[str, str], query: str, limit: int = 10,
+           exclude_job: str | None = None) -> list[dict]:
+    words = history.tokens((query or "")[:QUERY_CHARS])
+    if not words or not bots:
+        return []
+    limit = max(1, min(int(limit), MAX_HITS))
+    marks = ",".join("?" * len(bots))
+    where = (f"m.bot_id IN ({marks}) AND m.archived_at IS NULL AND m.hidden=0 AND m.role IN ('user','assistant')"
+             + (" AND (m.job_id IS NULL OR m.job_id<>?)" if exclude_job else ""))
+    args = [*bots, *([exclude_job] if exclude_job else [])]
+    deadline = time.monotonic() + SECONDS
+    db.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
+    try:
+        rows: list = []
+        if history.has_fts(db):
+            sql = (f"SELECT m.id, m.bot_id, m.role, m.created_at, snippet({history.TABLE}, -1, '', '', '…', {SNIPPET_TOKENS}) "
+                   f"AS snippet FROM {history.TABLE} JOIN messages m ON m.id={history.TABLE}.rowid "
+                   f"WHERE {history.TABLE} MATCH ? AND {where} ORDER BY bm25({history.TABLE}), m.id DESC LIMIT ?")
+            for expression in ((_fts_and(words), _fts_or(words)) if len(words) > 1 else (_fts_and(words),)):
+                rows = db.execute(sql, [expression, *args, limit]).fetchall()
+                if rows:
+                    break
+        else:
+            esc = lambda w: "%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"  # noqa: E731
+            like = " AND ".join("m.text LIKE ? ESCAPE '\\'" for _ in words)
+            rows = db.execute(f"SELECT m.id, m.bot_id, m.role, m.created_at, substr(m.text, 1, {HIT_CHARS}) AS snippet "
+                              f"FROM messages m WHERE {like} AND {where} ORDER BY m.id DESC LIMIT ?",
+                              [*[esc(w) for w in words], *args, limit]).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise RecallError(503 if "interrupt" in str(exc).lower() else 400, "search failed or took too long") from None
+    finally:
+        db.set_progress_handler(None, 0)
+    hits, used = [], 0
+    for row in rows:
+        text = " ".join((row["snippet"] or "").split())
+        text = text if len(text) <= HIT_CHARS else text[: HIT_CHARS - 1] + "…"
+        if used + len(text) > MAX_CHARS and hits:
+            break
+        used += len(text)
+        hits.append({"id": row["id"], "bot": bots[row["bot_id"]], "role": row["role"], "at": row["created_at"], "text": text})
+    return hits
+
+
+def run(store, job, query: str, scope: str = "self", limit: int = 10) -> dict:
+    """The recall for a running *job*: its bot's own chat, plus readable teammates for scope team. Audited."""
+    if scope not in SCOPES:
+        raise RecallError(400, "scope must be self or team")
+    with closing(store._connect()) as db:
+        bots = readable_bots(db, str(job.bot_id), scope)
+        hits = search(db, bots, query, limit, exclude_job=str(job.id))
+    ids = {name: bot_id for bot_id, name in bots.items()}
+    for name in sorted({h["bot"] for h in hits}) or [bots[str(job.bot_id)]]:
+        team.log_read(store, job, "context_recall", ids[name], sum(1 for h in hits if h["bot"] == name))
+    return {"untrusted": True, "query": (query or "")[:QUERY_CHARS], "scope": scope, "count": len(hits), "hits": hits}
+
+
+# ---- client side (the MCP server) -----------------------------------------------------------------------------
+
+def fetch(client, args: dict) -> dict:
+    from .team_client import TeamClientError
+    query, scope, limit = args.get("query"), args.get("scope", "self"), args.get("limit", 10)
+    if not isinstance(query, str) or not query.strip():
+        raise TeamClientError("query is required")
+    if scope not in SCOPES or isinstance(limit, bool) or not isinstance(limit, int):
+        raise TeamClientError("scope must be self or team and limit an integer")
+    return client.call("GET", "/v1/agent/recall?" + urlencode({"q": query[:QUERY_CHARS], "scope": scope,
+                                                              "limit": max(1, min(limit, MAX_HITS))}))
+
+
+def render(data: dict) -> str:
+    from .team_client import wrap_untrusted
+    lines = [f'#{h["id"]} {h["at"]} {h["bot"]} ({h["role"]}): {h["text"]}' for h in data.get("hits", [])]
+    return wrap_untrusted(f'context_recall:{data.get("scope", "self")}', "\n".join(lines) or "(no matching retained messages)")
