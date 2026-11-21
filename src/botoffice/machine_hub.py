@@ -217,11 +217,14 @@ class Hub:
             raise HubError("the computer is offline", 409)
         if len(conn.calls) >= INFLIGHT_MAX:
             raise HubError("the computer is busy with other calls; try again shortly", 429)
-        if alive is not None and not await asyncio.to_thread(alive):  # nothing is sent under a dead grant
-            raise HubError("the grant for this task ended; the call was not sent", 403)
         call_id = secrets.token_hex(8)
         call = _Call(asyncio.get_running_loop().create_future(), sink, limit, grant_id=grant_id)
+        # tracked before the check: an End grant after the check finds this call (and the agent
+        # gets end_grant before the call frame can run), one before it fails the check
         conn.calls[call_id] = call
+        if not await self._alive(alive):  # nothing is sent under a dead grant
+            conn.calls.pop(call_id, None)
+            raise HubError("the grant for this task ended; the call was not sent", 403)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
@@ -242,7 +245,7 @@ class Hub:
                     if done:
                         result = task.result()
                         break
-                    if alive is not None and not await asyncio.to_thread(alive):
+                    if not await self._alive(alive):
                         raise _GrantEnded
             except asyncio.TimeoutError:
                 await self._stop(task)
@@ -260,7 +263,7 @@ class Hub:
             raise HubError("the computer disconnected") from exc
         finally:
             conn.calls.pop(call_id, None)
-        if alive is not None and not await asyncio.to_thread(alive):
+        if not await self._alive(alive):
             # a quick call that crossed End grant (or the job's end): its result is not handed over
             raise HubError("the grant for this task ended while the call ran; its result was dropped", 403)
         if not result.get("ok"):
@@ -269,6 +272,16 @@ class Hub:
             raise HubError(f"{code}: {detail}", 403 if code in ("denied_local", "declined_local") else 422, code)
         data = result.get("data")
         return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    async def _alive(alive: Callable[[], bool] | None) -> bool:
+        """The grant check; one that fails (a locked database, ...) counts as an ended grant."""
+        if alive is None:
+            return True
+        try:
+            return bool(await asyncio.to_thread(alive))
+        except Exception:  # noqa: BLE001 - fail closed
+            return False
 
     @staticmethod
     async def _stop(task: asyncio.Task) -> None:

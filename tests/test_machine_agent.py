@@ -618,6 +618,8 @@ CATASTROPHIC_SH = [
     "chown --rec me ~", "alias x='rm -rf /'\nx", "nohup setsid stdbuf -o0 rm -rf / &", "busybox rm -rf /",
     "command rm -rf ~", "builtin eval 'rm -rf /'", "exec rm -rf /", "find / -exec rm -rf {} +",
     "rm -rf /proc/self/root/", "rm -rf $'\\x2f'",
+    # review round 2
+    'rm${IFS%?}-rf${IFS%?}"$HOME"', "rm${X:-}-rf /", "r${X}m -rf /",
 ]
 CATASTROPHIC_ARGV += [["rm", "--recurs", "-f", "/"], ["rm", "--no-pres", "-r", "x", "/"], ["chown", "--rec", "me", "~"],
                       ["rm", "-rf", "/proc/self/root"]]
@@ -857,3 +859,56 @@ def test_a_read_cancelled_while_on_disk_sends_nothing_back(home, tmp_path, monke
 def test_the_hello_says_what_this_agent_does():
     from botoffice_agent import client
     assert {"grants", "end_grant", "deny_commands"} <= set(client.CAPS)
+
+
+def test_a_late_local_yes_after_a_cancel_is_not_kept(home, tmp_path):
+    pytest.importorskip("websockets")
+    asked = []
+
+    async def scenario():
+        agent, sent, _ = _agent(home, tmp_path)
+        cancel = threading.Event()
+
+        def confirm(text):
+            asked.append(text)
+            cancel.set()  # Bot Office gave up while the question was open
+            return True
+
+        agent.confirm = confirm
+        agent.cancels["a"] = cancel
+        read = {"path": canonical(home / "work" / "a.txt")}
+        await agent.call("a", "read", {**read, "meta": {"grant": 4, "scope": "read"}})
+        agent.confirm = lambda text: asked.append(text) or False
+        await agent.call("b", "read", {**read, "meta": {"grant": 4, "scope": "read"}})
+        return sent
+
+    sent = asyncio.run(scenario())
+    assert len(asked) == 2 and [m["ok"] for m in sent] == [False, False]
+
+
+def test_a_call_past_its_grant_end_is_refused_here(home, tmp_path):
+    pytest.importorskip("websockets")
+
+    async def scenario():
+        agent, sent, _ = _agent(home, tmp_path, confirm_local="off")
+        read = {"path": canonical(home / "work" / "a.txt")}
+        await agent.call("a", "read", {**read, "meta": {"grant": 2, "until": "2000-01-01T00:00:00+00:00"}})
+        await agent.call("b", "read", {**read, "meta": {"grant": 2, "until": "2999-01-01T00:00:00+00:00"}})
+        return sent
+
+    sent = asyncio.run(scenario())
+    assert [m["ok"] for m in sent] == [False, True]
+
+
+def test_push_cancelled_before_the_rename_leaves_nothing(home):
+    cancel = threading.Event()
+    target = home / "work" / "new.bin"
+    writer = ops.PushWriter({"path": canonical(target), "size": 3, "sha256": hashlib.sha256(b"abc").hexdigest(),
+                             "overwrite": False}, ops.Context(home=str(home), roots=deny_roots([*config.DEFAULT_DENY],
+                                                                                              str(home))))
+    writer.write(b"abc")
+    cancel.set()
+    with pytest.raises(ValueError):
+        writer.commit(cancel)
+    writer.close()
+    assert not target.exists() and [p.name for p in target.parent.iterdir() if p.name.startswith(".")] == []

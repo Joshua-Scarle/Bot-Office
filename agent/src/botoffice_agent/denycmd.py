@@ -60,8 +60,8 @@ GLOB = re.compile(r"[*?\[]")
 NESTING_MAX = 4
 # what the shell itself would turn into other words: $IFS (a space), other variables (maybe empty)
 # and brace lists ({rm,-rf,/} is "rm -rf /"); the string is checked again with them spelled out
-IFS_WORD = re.compile(r"\$\{IFS\}|\$IFS(?![A-Za-z0-9_])")
-VARIABLE = re.compile(r"\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])")
+# (${IFS%?} and friends: any ${...} may be a space or nothing, so both spellings are checked)
+VARIABLE = re.compile(r"\$(\{[^{}]*\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])")
 BRACE_LIST = re.compile(r"\{([^{}\s]*,[^{}\s]*)\}")
 
 
@@ -213,11 +213,11 @@ class Checker:
         if depth > NESTING_MAX:
             self._deny("too deeply nested shell strings")
         text = text.replace("\\\n", "")  # a line continuation joins the two lines
-        spelled = re.sub(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])", self.home, text)
-        spelled = VARIABLE.sub("", IFS_WORD.sub(" ", spelled))
-        spelled = BRACE_LIST.sub(lambda match: " ".join(match.group(1).split(",")), spelled)
-        if spelled != text:
-            self._script(spelled, bases, depth + 1)
+        homed = re.sub(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])", self.home, text)
+        for blank in ("", " "):
+            spelled = BRACE_LIST.sub(lambda match: " ".join(match.group(1).split(",")), VARIABLE.sub(blank, homed))
+            if spelled != text:
+                self._script(spelled, bases, depth + 1)
         self._raw_paths(text)
         compact = re.sub(r"\s+", "", text)
         if FORK_BOMB.search(compact) or ":(){" in compact:

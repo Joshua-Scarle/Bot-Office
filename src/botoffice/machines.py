@@ -779,8 +779,8 @@ def end_grant(store: JobStore, grant_id: int, reason: str = "ended by you") -> d
                        (_stamp(), reason, grant_id))
             audit(db, "grant_ended", machine_id=row["machine_id"], bot_id=row["bot_id"], job_id=row["job_id"],
                   grant_id=grant_id, detail=reason)
+            _drop_cards(db, row, "the grant was ended")
         _drop_approved(db, "the grant was ended", grant_id=grant_id)
-        _drop_cards(db, row, "the grant was ended")
         return dict(db.execute("SELECT * FROM machine_grants WHERE id=?", (grant_id,)).fetchone())
 
 
@@ -798,19 +798,23 @@ def grant_live(store: JobStore, grant_id: int, job_id: str) -> bool:
 
 
 def _drop_cards(db: sqlite3.Connection, grant: sqlite3.Row, why: str) -> None:
-    """A task grant ended: the task's waiting card (a widening, or one raised alongside) is denied
-    with it, so a late Allow cannot open a fresh grant. The bot can ask again."""
+    """A task grant ended: its waiting widen card is denied with it, so a late Allow cannot open a
+    fresh grant. The bot can ask again (a new card)."""
     if grant["kind"] != "task":
         return
     stamp = _stamp()
-    rows = db.execute("SELECT a.id FROM machine_cards c JOIN approvals a ON a.id=c.approval_id WHERE c.machine_id=? "
-                      "AND c.bot_id=? AND c.job_id=? AND a.status='pending'",
-                      (grant["machine_id"], grant["bot_id"], grant["job_id"])).fetchall()
+    rows = db.execute("SELECT a.id FROM machine_cards c JOIN approvals a ON a.id=c.approval_id WHERE c.widens=? "
+                      "AND a.status='pending'", (grant["id"],)).fetchall()
     for row in rows:
         db.execute("UPDATE approvals SET status='denied', decided_at=? WHERE id=? AND status='pending'",
                    (stamp, row["id"]))
-        db.execute("UPDATE machine_requests SET status='denied', error=?, decided_at=?, finished_at=? "
-                   "WHERE approval_id=? AND status='pending'", (why, stamp, stamp, row["id"]))
+        for item in db.execute("SELECT * FROM machine_requests WHERE approval_id=? AND status='pending'",
+                               (row["id"],)).fetchall():
+            db.execute("UPDATE machine_requests SET status='denied', error=?, decided_at=?, finished_at=? WHERE id=?",
+                       (why, stamp, stamp, item["id"]))
+            if item["tool"] != "grant":
+                audit(db, "refused", machine_id=item["machine_id"], bot_id=item["bot_id"], job_id=item["job_id"],
+                      request_id=item["id"], detail=why)
         audit(db, "grant_denied", machine_id=grant["machine_id"], bot_id=grant["bot_id"], job_id=grant["job_id"],
               grant_id=grant["id"], detail=json.dumps({"approval": row["id"], "why": why}))
 
