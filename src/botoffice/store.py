@@ -332,31 +332,57 @@ def _init_notify_triggers(db: sqlite3.Connection) -> None:
 
 
 def _backfill_notify(db: sqlite3.Connection) -> None:
-    """Once, at upgrade: needs-you states already open are logged (same keys as the triggers, so idempotent)."""
-    if db.execute("SELECT 1 FROM meta WHERE key='notify-backfill'").fetchone():
-        return
+    """Needs-you states already open are logged once per type (marker notify-backfill-<type>), so a database
+    initialised by an earlier revision still runs the types it lacks. Same keys as the triggers, so a repeat
+    adds nothing; the counter-keyed types skip a row that already has any event of its own."""
     stamp = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
     insert = "INSERT OR IGNORE INTO notify_events (key, cls, bot_id, ref, kind, created_at)"
     state = ("CASE WHEN stalled_at IS NOT NULL THEN 'stalled' WHEN status='waiting_on_user' THEN 'waiting_on_user' "
              "WHEN status='blocked' AND escalate IS NOT 'never' THEN 'blocked' "
              "WHEN status='waiting_on_bot' AND escalate IS 'always' THEN 'waiting_on_bot' END")
-    db.execute(f"{insert} SELECT 'a:' || id || ':' || {state} || ':' || COALESCE(stalled_at, updated_at), 'needs_you', "
-               f"bot_id, NULL, 'assignment_' || {state}, {stamp} FROM assignments "
-               f"WHERE status NOT IN ('done','dropped') AND dismissed_at IS NULL AND {state} IS NOT NULL")
-    db.execute(f"{insert} SELECT 'p:' || id || ':pending', 'needs_you', bot_id, job_id, 'approval_pending', {stamp} "
-               "FROM approvals WHERE status='pending'")
-    db.execute(f"{insert} SELECT 'q:' || id || ':open', 'needs_you', bot_id, NULL, 'question_open', {stamp} "
-               "FROM questions WHERE status='open'")
-    # keys of the counter-keyed triggers cannot be recomputed: one fixed "open" key per row, once
-    db.execute(f"{insert} SELECT 'a:' || id || ':dropped_by_bot:open', 'needs_you', bot_id, NULL, 'assignment_dropped_by_bot', {stamp} "
-               "FROM assignments WHERE status='dropped' AND created_by='user' AND updated_by LIKE 'bot:%' AND dismissed_at IS NULL")
-    db.execute(f"{insert} SELECT 'h:' || id || ':' || failure_kind || ':open', 'needs_you', bot_id, NULL, failure_kind || '_held', {stamp} "
-               "FROM jobs WHERE status='queued' AND failure_kind IN ('budget','auto_cap') AND bot_id IS NOT NULL")
-    db.execute(f"{insert} SELECT 'w:' || id || ':open', 'needs_you', bot_id, NULL, 'watcher_paused', {stamp} "
-               "FROM watchers WHERE enabled=0 AND paused_reason IS NOT NULL")
-    db.execute(f"{insert} SELECT 'u:' || job_id || ':' || attempt, 'needs_you', bot_id, job_id, 'usage_limit_parked', {stamp} "
-               "FROM usage_notices WHERE dismissed_at IS NULL")
-    db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('notify-backfill', '1')")
+    # the same windows and filters as needs_you.py (FAILED_WINDOW, actionable failures, no later success)
+    # (store cannot import needs_you; keep these in step with needs_you.FAILED_WINDOW / ACTION_KINDS / UNATTENDED)
+    since = "strftime('%Y-%m-%dT%H:%M:%S','now','-72 hours')"
+    kinds = "'auth','usage_limit','gate','budget'"
+    sources = "'routine','wakeup','inbox','api','trigger'"
+
+    def unlogged(prefix: str) -> str:  # no event yet for this row (counter-keyed triggers)
+        return f"AND NOT EXISTS (SELECT 1 FROM notify_events e WHERE e.key LIKE {prefix} || '%')"
+
+    steps = {
+        "assignments": f"{insert} SELECT 'a:' || id || ':' || {state} || ':' || COALESCE(stalled_at, updated_at), 'needs_you', "
+                       f"bot_id, NULL, 'assignment_' || {state}, {stamp} FROM assignments "
+                       f"WHERE status NOT IN ('done','dropped') AND dismissed_at IS NULL AND {state} IS NOT NULL",
+        "approvals": f"{insert} SELECT 'p:' || id || ':pending', 'needs_you', bot_id, job_id, 'approval_pending', {stamp} "
+                     "FROM approvals WHERE status='pending'",
+        "questions": f"{insert} SELECT 'q:' || id || ':open', 'needs_you', bot_id, NULL, 'question_open', {stamp} "
+                     "FROM questions WHERE status='open'",
+        "drops": f"{insert} SELECT 'a:' || id || ':dropped_by_bot:open', 'needs_you', bot_id, NULL, 'assignment_dropped_by_bot', {stamp} "
+                 "FROM assignments WHERE status='dropped' AND created_by='user' AND updated_by LIKE 'bot:%' AND dismissed_at IS NULL "
+                 + unlogged("'a:' || assignments.id || ':dropped_by_bot:'"),
+        "holds": f"{insert} SELECT 'h:' || id || ':' || failure_kind || ':open', 'needs_you', bot_id, NULL, failure_kind || '_held', {stamp} "
+                 "FROM jobs WHERE status='queued' AND failure_kind IN ('budget','auto_cap') AND bot_id IS NOT NULL "
+                 + unlogged("'h:' || jobs.id || ':' || jobs.failure_kind || ':'"),
+        "watchers": f"{insert} SELECT 'w:' || id || ':open', 'needs_you', bot_id, NULL, 'watcher_paused', {stamp} "
+                    "FROM watchers WHERE enabled=0 AND paused_reason IS NOT NULL " + unlogged("'w:' || watchers.id || ':'"),
+        "usage": f"{insert} SELECT 'u:' || job_id || ':' || attempt, 'needs_you', bot_id, job_id, 'usage_limit_parked', {stamp} "
+                 "FROM usage_notices WHERE dismissed_at IS NULL",
+        "failed": f"{insert} SELECT 'j:' || j.id || ':' || j.attempts, 'failed', j.bot_id, j.id, COALESCE(j.failure_kind, j.status), {stamp} "
+                  f"FROM jobs j WHERE j.status IN ('failed','needs_login') AND j.finished_at>={since} "
+                  "AND j.dismissed_at IS NULL AND j.bot_id IS NOT NULL "
+                  f"AND (j.status='needs_login' OR j.failure_kind IN ({kinds}) OR (j.assignment_id IS NULL AND j.source IN ({sources}))) "
+                  "AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.bot_id=j.bot_id AND k.status='succeeded' AND k.finished_at>j.finished_at)",
+        "expired": f"{insert} SELECT 'p:' || id || ':expired', 'needs_you', bot_id, job_id, 'approval_expired', {stamp} "
+                   f"FROM approvals WHERE status='expired' AND resume_job_id IS NULL AND created_at>={since}",
+        "tripwires": f"{insert} SELECT 'g:' || id, 'needs_you', bot_id, job_id, 'alert_tripwire', {stamp} "
+                     f"FROM gate_log WHERE preset='secrets' AND effect='never' AND dismissed_at IS NULL AND bot_id IS NOT NULL AND created_at>={since}",
+    }
+    for name, sql in steps.items():
+        marker = f"notify-backfill-{name}"
+        if db.execute("SELECT 1 FROM meta WHERE key=?", (marker,)).fetchone():
+            continue
+        db.execute(sql)
+        db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, '1')", (marker,))
 
 
 class BridgeHopConflict(Exception):

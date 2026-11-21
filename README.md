@@ -237,13 +237,12 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
 
     **First deployment only: the live master has no pause and no `/healthz`, so it ignores `PAUSE`. Order the steps so nothing can start after the last check and the old process is stopped, not restarted.** Choose a quiet window (no chat open, no routine, inbox, wake-up or watcher due in the next few minutes: check the schedule), then:
     ```sh
-    touch "$BOT_OFFICE_DATA_DIR/PAUSE"      # ignored by the old code; the NEW process reads it before its first claim, so it starts paused
-    until [ "$(running)" = 0 ] && [ "$(queued)" = 0 ]; do sleep 1; done
-    sleep 5; [ "$(running)" = 0 ] && [ "$(queued)" = 0 ] && systemctl --user stop bot-office   # checked twice, 5 s apart
-    systemctl --user start bot-office
+    BOT_OFFICE_DATA_DIR="$BOT_OFFICE_DATA_DIR" "$D/scripts/first_deploy_pause.sh"
     sleep 5; curl -s http://127.0.0.1:8787/healthz   # expect "ok": true, the new version, "paused": true
     ```
-    `stop` (not `restart`) lets the old controller's existing graceful shutdown run, and the new process cannot claim anything because it starts paused. The old process can still claim a job in the sub-second window between the last check and the stop. If the existing stop path meets a job mid-turn it can kill that turn (it does not wait for it), which is why the check is made twice, 5 s apart: a claim made in the first window shows up in the second. A job claimed in the remaining sliver is recovered by restart recovery at the next start: replayed when its provider process is proven gone, otherwise failed with kind `interrupted` (a failed-turn mail and a Needs-you item). Then lift the pause: `rm "$BOT_OFFICE_DATA_DIR/PAUSE"` and confirm `"paused": false`.
+    The script (python3 sqlite3, data dir pinned, `set -e`) creates `PAUSE` (ignored by the old code; the NEW process reads it before its first claim, so it starts paused), waits for no running or queued job, checks again 5 s later, and **exits non-zero without stopping or starting anything** if either check finds a job (or the database cannot be read). It runs `systemctl --user start` only after `stop` succeeded. After an abort, `PAUSE` stays in place: wait for a quieter moment and run it again (or `rm` the file to abandon).
+
+    `stop` (not `restart`) lets the old controller's existing graceful shutdown run, and the new process cannot claim anything because it starts paused. The old process can still claim a job in the sub-second window between the last check and the stop. If the existing stop path meets a job mid-turn it can kill that turn (it does not wait for it), which is why the check is made twice, 5 s apart (a non-empty second check aborts): a claim made in the first window shows up in the second. A job claimed in the remaining sliver is recovered by restart recovery at the next start: replayed when its provider process is proven gone, otherwise failed with kind `interrupted` (a failed-turn mail and a Needs-you item). Then lift the pause: `rm "$BOT_OFFICE_DATA_DIR/PAUSE"` and confirm `"paused": false`.
 
     **Every later restart (outage test, rollback of the Worker side, secret rotation) runs on code that has the acknowledged pause: pause first, wait for the acknowledgement and an empty count, then restart.**
     ```sh
@@ -252,7 +251,7 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
     systemctl --user restart bot-office      # the pause file survives and holds the new process paused
     sleep 5; curl -s http://127.0.0.1:8787/healthz && rm "$BOT_OFFICE_DATA_DIR/PAUSE"
     ```
-    The restart creates the `notify_events` table and its triggers (idempotent), logs once the needs-you states already open at that moment (a one-time backfill, marker `notify-backfill`; the first mail may therefore be a digest of what is open now) and starts the event push.
+    The restart creates the `notify_events` table and its triggers (idempotent), logs once the needs-you states already open at that moment (a one-time backfill per type, markers `notify-backfill-<type>`: questions, assignments, approvals, failed jobs, expired approvals, tripwire alerts, holds, watchers, usage notices, bot drops; the first mail may therefore be a digest of what is open now) and starts the event push.
 11. Start the timer, push once, and let it survive logout:
     ```sh
     systemctl --user enable --now bot-office-heartbeat.timer
@@ -275,13 +274,17 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
 Use the same shell as the setup (`$D`, `$B`, `$STAMP`, `$DB`, `$BOT_OFFICE_DATA_DIR`, `sq`; re-derive the data directory as in step 5).
 
 1. Pause and drain the controller (the new code is still running, so the acknowledged pause works): `touch "$BOT_OFFICE_DATA_DIR/PAUSE"`, wait until `/healthz` shows `"paused": true, "running_jobs": 0`.
-2. **Stop the controller's notify pusher first.** `touch "$BOT_OFFICE_DATA_DIR/NOTIFY_OFF"` (the running controller sees it within a minute; no restart). From then on it detects nothing new and pushes nothing past the highest event number logged when it first saw the flag (`sq "SELECT value FROM meta WHERE key='notify-freeze'"`). Wait about 30 s so a push in flight finishes. (Without the flag, the alternative is to unset `WATCHDOG_URL` as in step 5 and restart the paused-and-drained way.)
+2. **Stop the controller's notify pusher first.** `touch "$BOT_OFFICE_DATA_DIR/NOTIFY_OFF"` (the running controller sees it within a minute; no restart). From then on it detects nothing new and pushes nothing past the highest event number logged when it first saw the flag (`sq "SELECT value FROM meta WHERE key='notify-freeze'"`). Do not trust any count until the notifier has seen the flag: step 3 waits for the `notify-freeze` marker (the notifier's interval is 60 s, so up to ~90 s) and treats a missing marker as NOT drained. (Without the flag, the alternative is to unset `WATCHDOG_URL` as in step 5 and restart the paused-and-drained way.)
 3. **Then drain the mail before the Worker is deleted.** Deleting the Worker deletes its Durable Object, and anything it already acknowledged but has not mailed (pending, or retrying) cannot be replayed from the controller. Wait until the controller has nothing unacknowledged up to the freeze and the Worker is empty (the Worker mails at least 10 minutes apart per class, so this can take 10 minutes or, after a flapping day, an hour):
    ```sh
    WURL=<https://worker-host>          # the Worker origin, without /heartbeat
    wstatus() { curl -s -X POST -H @<(printf 'Authorization: Bearer %s\n' "$(cat ~/.config/bot-office/watchdog-secret)") "$WURL/status"; }
-   unacked() { sq "SELECT COUNT(*) FROM notify_events WHERE seq > COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='notify-cursor'),0) AND seq <= COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='notify-freeze'),0)"; }
-   until [ "$(unacked)" = 0 ] && [ "$(wstatus)" = '{"pending":0,"outbox":0}' ]; do sleep 30; done; echo drained
+   # 1) the notifier must have seen NOTIFY_OFF (marker notify-freeze exists); up to ~90 s, a missing marker is NOT drained
+   for i in $(seq 45); do [ -n "$(sq "SELECT value FROM meta WHERE key='notify-freeze'")" ] && break; sleep 2; done
+   [ -n "$(sq "SELECT value FROM meta WHERE key='notify-freeze'")" ] || { echo "NOT drained: notifier never saw NOTIFY_OFF"; false; }
+   sleep 30                             # a push in flight when it froze finishes
+   # 2) only now are the counts meaningful
+   until "$D/scripts/notify_drained.py" "$DB" >/dev/null && [ "$(wstatus)" = '{"pending":0,"outbox":0}' ]; do sleep 30; done; echo drained
    ```
    (`/status` needs the secret and returns two counts only; the secret goes through a file descriptor, not the command line.) Events created after the pusher stopped (a newly overdue task, a failed turn) stay in the controller database, unsent: nothing is lost, they simply are not mailed, and no Worker holds anything. If the counts never reach 0 (for example the mail is being rejected), do not delete yet: fix the mail path, or decide consciously that those messages are expendable and say so in the rollback note.
 4. Stop the sources: `systemctl --user disable --now bot-office-heartbeat.timer`, then in `ops/watchdog` `npx wrangler delete` (removes the Worker, its Durable Object and state).
@@ -289,7 +292,7 @@ Use the same shell as the setup (`$D`, `$B`, `$STAMP`, `$DB`, `$BOT_OFFICE_DATA_
 6. Controller code (still paused and drained; re-check `running` is 0): `systemctl --user stop bot-office`, `cd "$D" && git checkout backup/pre-0.12.11-$STAMP && .venv/bin/pip install -e .`, `systemctl --user start bot-office`, check it answers, and `rm "$BOT_OFFICE_DATA_DIR/PAUSE" "$BOT_OFFICE_DATA_DIR/NOTIFY_OFF"` (the old code ignores the files; they are removed so a later upgrade does not start paused or silent).
 7. Database: nothing has to be restored. The new table and triggers are ignored by older versions (the triggers keep adding small rows). To remove them, with the controller stopped or idle:
    ```sh
-   python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); [c.execute("DROP TRIGGER IF EXISTS "+t) for t in sys.argv[2:]]; c.execute("DROP TABLE IF EXISTS notify_events"); c.execute("DELETE FROM meta WHERE key IN (\"notify-email\",\"notify-cursor\",\"notify-epoch\",\"notify-backfill\",\"notify-freeze\")"); c.commit()' "$DB" notify_job_failed notify_job_done notify_question_open notify_asg_new notify_asg_state notify_asg_dropped notify_asg_overdue_close notify_approval_new notify_approval_expired notify_tripwire notify_usage_parked notify_watcher_paused notify_held_new notify_held_kind
+   python3 -c 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); [c.execute("DROP TRIGGER IF EXISTS "+t) for t in sys.argv[2:]]; c.execute("DROP TABLE IF EXISTS notify_events"); c.execute("DELETE FROM meta WHERE key LIKE \"notify-backfill%\" OR key IN (\"notify-email\",\"notify-cursor\",\"notify-epoch\",\"notify-freeze\")"); c.commit()' "$DB" notify_job_failed notify_job_done notify_question_open notify_asg_new notify_asg_state notify_asg_dropped notify_asg_overdue_close notify_approval_new notify_approval_expired notify_tripwire notify_usage_parked notify_watcher_paused notify_held_new notify_held_kind
    ```
    The pre-deploy copy `$B/agentdesk.sqlite3` is only for a real corruption.
 8. Rotate the secret if it may have been exposed: write a new file, `wrangler secret put` it (if the Worker still exists), restart the controller the paused-and-drained way.

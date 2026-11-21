@@ -512,7 +512,7 @@ def test_needs_you_states_already_open_at_upgrade_are_logged_once(settings):
         _assignment(store, bot, "closed", status="done")
         _question(store, bot, "q9")
         _sql(store, "DELETE FROM notify_events")  # as if they predate the feature
-        _sql(store, "DELETE FROM meta WHERE key='notify-backfill'")
+        _sql(store, "DELETE FROM meta WHERE key LIKE 'notify-backfill%'")
         JobStore(store.path)  # the upgrade start
         first = sorted(r["kind"] for r in _rows(store))
         JobStore(store.path)  # a later start: nothing again
@@ -558,13 +558,76 @@ def test_upgrade_backfill_covers_holds_paused_watchers_usage_notices_and_bot_dro
         _sql(store, "INSERT INTO usage_notices (job_id, attempt, bot_id, provider, created_at, dismissed_at) "
                     "VALUES ('j2',1,?,?,'t','t')", str(bot.id), "codex")
         _sql(store, "DELETE FROM notify_events")
-        _sql(store, "DELETE FROM meta WHERE key='notify-backfill'")
+        _sql(store, "DELETE FROM meta WHERE key LIKE 'notify-backfill%'")
         JobStore(store.path)
         first = sorted(r["kind"] for r in _rows(store))
         JobStore(store.path)  # idempotent
         again = sorted(r["kind"] for r in _rows(store))
     assert first == sorted(["assignment_dropped_by_bot", "watcher_paused", "budget_held", "auto_cap_held", "usage_limit_parked"])
     assert again == first
+
+
+def _pending_everything(store, bot):
+    """Failed (actionable), expired approval and undismissed tripwire, plus a dismissed and a stale one of each."""
+    stale = (now() - timedelta(days=10)).isoformat()
+    _job(store, bot, "failed", error="x", kind="auth")
+    old = _job(store, bot, "failed", error="x", kind="auth")
+    _set(store, "jobs", old.id, finished_at=stale)
+    gone = _job(store, bot, "failed", error="x", kind="auth")
+    _set(store, "jobs", gone.id, dismissed_at="t")
+    for status, created in (("expired", now().isoformat()), ("expired", stale)):
+        _sql(store, "INSERT INTO approvals (bot_id, job_id, tool, summary, input_hash, scope, source, status, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)", str(bot.id), "j", "t", "s", "h", "once", "api", status, created)
+    for dismissed, created in ((None, now().isoformat()), ("t", now().isoformat()), (None, stale)):
+        _sql(store, "INSERT INTO gate_log (bot_id, job_id, decision, effect, preset, summary, created_at, dismissed_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)", str(bot.id), "j", "deny", "never", "secrets", "s", created, dismissed)
+
+
+def _reset_events(store, keep_markers=()):
+    _sql(store, "DELETE FROM notify_events")
+    _sql(store, "DELETE FROM sqlite_sequence WHERE name='notify_events'")
+    _sql(store, "DELETE FROM meta WHERE key LIKE 'notify-backfill%'")
+    for key in keep_markers:
+        _sql(store, "INSERT INTO meta (key, value) VALUES (?, '1')", key)
+
+
+def test_upgrade_backfill_covers_failed_jobs_expired_approvals_and_tripwires(settings):
+    from botoffice.store import JobStore
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Pnd", "", "codex", None)
+        _pending_everything(store, bot)
+        _reset_events(store)
+        JobStore(store.path)
+        first = sorted((r["cls"], r["kind"]) for r in _rows(store))
+        JobStore(store.path)
+        again = sorted((r["cls"], r["kind"]) for r in _rows(store))
+    assert first == [("failed", "auth"), ("needs_you", "alert_tripwire"), ("needs_you", "approval_expired")]
+    assert again == first
+
+
+def test_a_database_with_the_old_marker_still_runs_the_new_backfills_without_duplicates(settings):
+    from botoffice.store import JobStore
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Old", "", "codex", None)
+        _assignment(store, bot, "w", status="waiting_on_user")
+        _assignment(store, bot, "d1", status="dropped", created_by="user", updated_by="bot:old")
+        _pending_everything(store, bot)
+        _reset_events(store)
+        JobStore(store.path)  # complete state, as the earlier revision would have logged part of it
+        complete = sorted(r["kind"] for r in _rows(store))
+        # the earlier revision: one global marker, no failed/expired/tripwire rows, a trigger-keyed drop event
+        _sql(store, "DELETE FROM notify_events WHERE cls='failed' OR kind IN ('approval_expired','alert_tripwire')")
+        _sql(store, "UPDATE notify_events SET key='a:d1:dropped_by_bot:1' WHERE kind='assignment_dropped_by_bot'")
+        _sql(store, "DELETE FROM meta WHERE key LIKE 'notify-backfill%'")
+        _sql(store, "INSERT INTO meta (key, value) VALUES ('notify-backfill', '1')")
+        JobStore(store.path)
+        after = sorted(r["kind"] for r in _rows(store))
+        JobStore(store.path)
+        again = sorted(r["kind"] for r in _rows(store))
+    assert after == complete and again == complete  # the missing types arrive, the drop is not duplicated
+    assert after.count("assignment_dropped_by_bot") == 1
 
 
 def test_notify_off_freezes_detection_and_pushes_only_up_to_the_sequence_seen_first(settings, tmp_path, monkeypatch):
@@ -588,3 +651,57 @@ def test_notify_off_freezes_detection_and_pushes_only_up_to_the_sequence_seen_fi
         assert notify.backlog(store) == 1 and [r["seq"] for r in _rows(store)] == [1, 2]  # kept, not lost
         (store.path.parent / notify.OFF_FILE).unlink()
         assert notifier.push_once()[0] and sent[:2] == [1, 2] and notify.backlog(store) == 0
+
+
+def _script(name):
+    from pathlib import Path
+    return str(Path(__file__).resolve().parent.parent / "scripts" / name)
+
+
+def test_drain_check_reports_not_drained_while_the_freeze_marker_is_missing(settings):
+    import subprocess
+    import sys
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Drn", "", "codex", None)
+        _job(store, bot, "failed", error="x", kind="auth")
+        run = lambda: subprocess.run([sys.executable, _script("notify_drained.py"), str(store.path)],  # noqa: E731
+                                     capture_output=True, text=True)
+        assert backlog_is_unseen(store) and run().returncode == 1 and "no notify-freeze" in run().stdout
+        _sql(store, "INSERT INTO meta (key, value) VALUES ('notify-freeze', '0')")  # frozen before any event: nothing owed
+        assert run().returncode == 0
+        _sql(store, "UPDATE meta SET value='1' WHERE key='notify-freeze'")  # one event up to the freeze, unacked
+        assert run().returncode == 1 and "1 unacknowledged" in run().stdout
+        _sql(store, "INSERT INTO meta (key, value) VALUES ('notify-cursor', '1')")
+        assert run().returncode == 0
+    assert subprocess.run([sys.executable, _script("notify_drained.py"), "/nonexistent/db"]).returncode == 1
+
+
+def backlog_is_unseen(store):
+    return notify.backlog(store) == 1
+
+
+def test_first_deploy_pause_aborts_without_stop_or_start_when_a_job_appears(settings, tmp_path):
+    import os
+    import subprocess
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Fdp", "", "codex", None)
+        job = store.create("p", "codex", bot_id=bot.id)
+        _set(store, "jobs", job.id, status="failed", finished_at=now().isoformat())
+        fake = tmp_path / "bin"
+        fake.mkdir()
+        calls = tmp_path / "calls"
+        (fake / "systemctl").write_text(f'#!/bin/sh\necho "$@" >> {calls}\n')
+        (fake / "systemctl").chmod(0o755)
+        env = {**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "BOT_OFFICE_DATA_DIR": str(store.path.parent),
+               "BOT_OFFICE_RECHECK_SECONDS": "0", "BOT_OFFICE_QUIESCE_SECONDS": "1"}
+        run = lambda: subprocess.run(["bash", _script("first_deploy_pause.sh")], env=env, capture_output=True, text=True)  # noqa: E731
+        ok = run()
+        assert ok.returncode == 0 and calls.read_text().split("\n")[:2] == ["--user stop bot-office", "--user start bot-office"]
+        calls.unlink()
+        _set(store, "jobs", job.id, status="queued")  # busy: never quiesces
+        bad = run()
+        assert bad.returncode == 1 and not calls.exists()  # neither stop nor start
+        env["BOT_OFFICE_DATA_DIR"] = str(tmp_path / "elsewhere")  # a wrong data dir fails closed too
+        assert run().returncode != 0 and not calls.exists()
