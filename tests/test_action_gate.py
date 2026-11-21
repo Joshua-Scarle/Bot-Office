@@ -113,7 +113,9 @@ def test_attended_allows_unattended_asks_and_secrets_never(tmp_path):
     store, bot = make_store(tmp_path)
     rules = Rules(store)
     chat, routine, trigger = (running(store, bot, s) for s in ("chat", "routine", "trigger"))
-    assert rules.decide(chat, bash("git push origin feature")).decision == "allow"
+    # e8-rules-s1: any git push asks, attended or not (safety_tripwires); a command with no tripwire is allowed
+    assert rules.decide(chat, bash("git push origin feature")).effect == "ask"
+    assert rules.decide(chat, bash("git status")).decision == "allow"
     asked = rules.decide(routine, bash("git push origin feature"))
     assert asked.decision == "deny" and asked.effect == "ask" and asked.approval_id
     assert "waiting_on_user" in asked.reason
@@ -144,7 +146,8 @@ def test_scheduled_runs_full_keeps_0_10_behaviour_and_triggers_stay_strict(tmp_p
     for source in ("routine", "wakeup", "assignment", "inbox", "chat"):
         job = running(store, bot, source)
         assert not rules_mod.is_unattended(job, "full") and not rules.strict(job)
-        assert rules.decide(job, bash("git push origin feature")).decision == "allow"
+        assert rules.decide(job, bash("git push origin feature")).preset == "push"  # e8-rules-s1: any push asks
+        assert rules.decide(job, bash("git status")).decision == "allow"
         assert rules.decide(job, bash("rm -rf build")).decision == "allow"
         # 0.11.10: the owner's approval classes (on by default: release, system...) ask in every run
         assert rules.decide(job, bash("git push origin main")).preset == "git-guard"

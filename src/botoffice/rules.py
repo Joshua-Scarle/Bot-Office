@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from . import git_guard, github_access, nested_agents, team
+from . import git_guard, github_access, nested_agents, safety_tripwires, team
 from .domain import Job
 from .store import JobStore, now
 
@@ -159,7 +159,7 @@ class Action:
     @property
     def summary(self) -> str:
         """A one-line, shortened form for logs and chat lines (never what Joshua approves)."""
-        return f"{self.tool}: {' '.join(self.detail.split())}"[:SUMMARY_LIMIT]
+        return safety_tripwires.redact_secrets(f"{self.tool}: {' '.join(self.detail.split())}")[:SUMMARY_LIMIT]
 
     @property
     def fingerprint(self) -> str:
@@ -494,10 +494,19 @@ class Rules:
         sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
+        # standing rules (safety_tripwires): phone calls are refused and starting a print always asks,
+        # above every rule and class; any other git push asks unless a narrow owner allow rule opens it
+        tripped = None if first_party else safety_tripwires.judge(action.tool, action.command)
+        if tripped and tripped.key == safety_tripwires.PHONE_KEY:
+            return "never", tripped.key, f"{tripped.why} is not allowed"
+        if tripped and tripped.key == safety_tripwires.PRINT_KEY:
+            return "ask", tripped.key, f"{tripped.why} always waits for your approval"
         if "ask" in effects:
             return "ask", preset, "a rule asks first"
         if "allow" in effects and not (job.source in STRICT_SOURCES and hits):
             return "allow", preset, "a rule allows it"
+        if tripped:
+            return "ask", tripped.key, f"{tripped.why} waits for your approval"
         if first_party:
             return "allow", None, "first-party teammate tool"
         from . import approval_classes
@@ -719,7 +728,7 @@ class Rules:
         whole command (at most APPROVAL_LIMIT characters), never a shortened form."""
         stamp = now()
         unattended = self.strict(job)
-        summary = f"{action.tool}: {action.detail}"
+        summary = safety_tripwires.redact_secrets(f"{action.tool}: {action.detail}")  # cards show no credential
         plan = self._push_plan(action, preset)
         with closing(self.store._connect()) as db:
             db.execute("BEGIN IMMEDIATE")

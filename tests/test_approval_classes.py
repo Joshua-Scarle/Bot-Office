@@ -61,8 +61,8 @@ def running(store, bot, source="chat"):
     (bash("npm publish"), "release"),
     (bash("git push origin main"), "git-guard"),
     (bash("git push --force origin feature"), "git-guard"),
-    (bash("git push origin feature"), None),
-    (bash("git push origin maintenance"), None),
+    (bash("git push origin feature"), "push"),  # e8-rules-s1: any git push asks (safety_tripwires)
+    (bash("git push origin maintenance"), "push"),
     (bash("sudo apt-get install x"), "system"),
     (bash("crontab -l"), "system"),
     (bash("rm -rf /srv/shared/project"), "git-guard"),
