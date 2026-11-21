@@ -386,8 +386,9 @@ def _raw_code(text: str) -> None:
 
 # --- file deletion ----------------------------------------------------------------------------------
 
-def _outside(path: str, ctx: Ctx) -> bool:
-    """Whether *path* may lie outside the bot's workspace (the CLI's working directory)."""
+def _outside(path: str, ctx: Ctx, root_counts: bool = False) -> bool:
+    """Whether *path* may lie outside the bot's workspace (the CLI's working directory).
+    With *root_counts*, the workspace directory itself is outside too (deleting it takes the workspace)."""
     if not path:
         return False
     if path.startswith("~") or "$(" in path or "`" in path:
@@ -407,6 +408,8 @@ def _outside(path: str, ctx: Ctx) -> bool:
         return True
     full = posixpath.normpath(path if os.path.isabs(path) else posixpath.join(ctx.cwd, path))
     root = posixpath.normpath(ctx.root)
+    if root_counts and full == root:
+        return True
     return not (full == root or full.startswith(root.rstrip("/") + "/"))
 
 
@@ -455,7 +458,7 @@ def _delete(program: str, args: list[str], ctx: Ctx) -> None:
                 _hit("moving files outside the workspace to /dev/null")
         return
     for target in _positionals(args):
-        if _outside(target, ctx) or (program == "rsync" and re.match(r"^[^/]*:", target)):
+        if _outside(target, ctx, root_counts=True) or (program == "rsync" and re.match(r"^[^/]*:", target)):
             _hit(f"deleting files outside the workspace ({program})")
 
 

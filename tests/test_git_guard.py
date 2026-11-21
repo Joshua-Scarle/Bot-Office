@@ -556,3 +556,11 @@ def test_the_hook_script_end_to_end_denies_before_the_command_and_a_grant_lets_t
     env = {**env, "BOT_OFFICE_AGENT_TOKEN": store.issue_agent_token(store.get(resume_id))}
     assert run_script("bot-office-gate", gate, bash("git push origin main", WORK), env)[0] == 0
     assert run_script("bot-office-gate", gate, bash("git push origin main", WORK), env)[0] == 2
+
+
+def test_deleting_the_workspace_itself_is_guarded():
+    # from inside the workspace, `cd ..` then naming the workspace directory takes the whole workspace
+    assert guarded("cd .. && rm -rf work", WORK)
+    assert guarded("rm -rf .", WORK)
+    assert guarded("rm -rf build", WORK) is None
+    assert guarded("echo git push origin main", WORK) is None
