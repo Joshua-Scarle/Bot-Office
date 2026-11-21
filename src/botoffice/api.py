@@ -1227,7 +1227,8 @@ def create_app(
             return Response("Scripts run only inside the Bot Office viewer. Open the file there and switch on Run scripts.\n",
                             status_code=403, media_type="text/plain", headers={
                                 "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
-                                "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; sandbox"})
+                                "Referrer-Policy": "no-referrer", "Vary": "Sec-Fetch-Dest",
+                                "Content-Security-Policy": "default-src 'none'; sandbox"})
         served, preview = attachments.serve_type(attachment_id)
         if not attachments.is_file_id(attachment_id) or preview not in ("html", "svg"):
             raise HTTPException(status_code=404, detail="attachment not found")
@@ -1241,6 +1242,7 @@ def create_app(
             "Content-Disposition": f'inline; filename="{attachments.display_name(attachment_id)}"'}
         if run:
             headers["X-Frame-Options"] = "SAMEORIGIN"
+            headers["Vary"] = "Sec-Fetch-Dest"
         return Response(data, media_type=served, headers=headers)
 
     def _png_response(request: Request, data: bytes, mime: str, versioned: bool) -> Response:

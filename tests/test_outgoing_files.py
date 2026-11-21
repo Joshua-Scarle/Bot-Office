@@ -409,6 +409,7 @@ def test_scripts_link_in_a_frame_is_served_with_frame_ancestors_and_xfo(client_b
     got = client.get(url, headers={"Sec-Fetch-Dest": dest})
     assert got.status_code == 200 and got.content == PAGE and got.headers["content-type"].startswith("text/html")
     assert "frame-ancestors 'self'" in _csp_parts(got) and got.headers["x-frame-options"] == "SAMEORIGIN"
+    assert got.headers["vary"] == "Sec-Fetch-Dest"
     assert _csp_parts(got)[0].split() == ["sandbox", "allow-scripts"]
 
 
