@@ -70,3 +70,38 @@ def test_three_lanes_run_parallel_and_each_desktop_has_one_job(settings):
         assert adapter.seen_slots == {Slot.DESKTOP_1, Slot.DESKTOP_2, None}
 
     asyncio.run(scenario())
+
+
+def test_the_pause_file_stops_claims_and_firing_and_lifts_without_a_restart(settings):
+    """Maintenance pause (deploy runbook): with <data_dir>/PAUSE nothing new starts and no tick fires,
+    a running turn finishes, queued work waits and runs once the file is removed."""
+    pause = settings.data_dir / "PAUSE"
+
+    async def scenario():
+        store = JobStore(settings.data_dir / "jobs.sqlite3")
+        scheduler = Scheduler(store, settings, {"codex": FakeAdapter(delay=0.05)})
+        running = store.create("already running")
+        await scheduler.start()
+        deadline = time.monotonic() + 4
+        while store.get(running.id).status != JobStatus.SUCCEEDED and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        pause.write_text("")
+        assert scheduler.paused() is True
+        waiting = store.create("queued while paused")
+        fired = []
+        scheduler._fire_routines = lambda: fired.append(1)
+        await asyncio.sleep(0.6)  # many loop passes and at least one tick
+        assert store.get(waiting.id).status == JobStatus.QUEUED and fired == []
+        scheduler.tick()
+        assert fired == []
+        pause.unlink()
+        assert scheduler.paused() is False
+        deadline = time.monotonic() + 4
+        while store.get(waiting.id).status != JobStatus.SUCCEEDED and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        while not fired and time.monotonic() < deadline + 2:
+            await asyncio.sleep(0.05)
+        await scheduler.stop()
+        assert store.get(waiting.id).status == JobStatus.SUCCEEDED and fired
+
+    asyncio.run(scenario())

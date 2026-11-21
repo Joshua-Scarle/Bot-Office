@@ -1,7 +1,10 @@
 """Email notifications (controller side): the secret-free event summary, the per-class toggles and the
 authenticated push to the watchdog Worker."""
+import asyncio
+import hashlib
 import http.server
 import json
+import re
 import threading
 from contextlib import closing
 from datetime import timedelta
@@ -96,9 +99,9 @@ def test_events_are_appended_when_they_happen_and_carry_codes_never_text(setting
         assert leak not in text
     by = {e["cls"]: e for e in payload["events"]}
     assert set(by) == {"failed", "needs_you"}  # done is off by default
-    assert by["failed"]["bot"] == "Ada" and by["failed"]["job"] == str(failed.id) and by["failed"]["kind"] == "provider_error"
-    assert by["failed"]["id"] == f"j:{failed.id}:{store.get(failed.id).attempts}"
-    assert by["needs_you"]["kind"] == "question_open" and by["needs_you"]["id"] == "q:q1:open"
+    assert by["failed"]["bot"] == notify.bot_label(bot.id) and "Ada" not in text and by["failed"]["job"] == str(failed.id) and by["failed"]["kind"] == "provider_error"
+    assert by["failed"]["id"] == notify.event_id(f"j:{failed.id}:{store.get(failed.id).attempts}")
+    assert by["needs_you"]["kind"] == "question_open" and by["needs_you"]["id"] == notify.event_id("q:q1:open")
     assert payload["backup_reason"] == "stage_upload"
     assert payload["prefs"]["needs_you"] is True and more is False and upto == 3
     assert not any("reason" in e for e in payload["events"])
@@ -117,13 +120,26 @@ def test_free_text_never_leaves_even_in_names_kinds_and_backup_errors(settings, 
         _job(store, plain, "failed", error="x", kind="auth")
         payload, _, _ = notify.build_batch(store)
     text = json.dumps(payload)
-    for leak in ("hunter2", "555", "password", "sentence", "alice", "private content"):
+    for leak in ("hunter2", "555-0100", "password", "sentence", "alice", "private content"):
         assert leak not in text
-    bots = {e["bot"] for e in payload["events"]}
-    assert "Ada-2" in bots and sum(b.startswith("bot-") for b in bots) == 2
+    assert {e["bot"] for e in payload["events"]} == {notify.bot_label(b.id) for b in (sentence, pw, plain)}
     assert {e["kind"] for e in payload["events"]} == {"other", "auth"}
     assert payload["backup_reason"] == "failed"
-    assert notify.bot_label("id-1", "x" * 40).startswith("bot-") and notify.bot_label("id-1", "Ann") == "Ann"
+    assert "Ada-2" not in text
+    assert notify.bot_label("id-1") == "bot-" + hashlib.sha256(b"id-1").hexdigest()[:6]
+
+
+@pytest.mark.parametrize("name", ["Alice", "passwordABC123", "Ada", "bot-abcdef"])
+def test_a_bot_name_never_leaves_however_harmless_it_looks(settings, name):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot(name, "", "codex", None)
+        _job(store, bot, "failed", error="x", kind="auth")
+        _question(store, bot)
+        payload, _, _ = notify.build_batch(store)
+    assert {e["bot"] for e in payload["events"]} == {notify.bot_label(bot.id)}
+    assert re.fullmatch(r"bot-[0-9a-f]{6}", payload["events"][0]["bot"])
+    assert name not in json.dumps(payload)
 
 
 def test_a_job_that_failed_and_was_dismissed_within_a_minute_is_still_logged(settings):
@@ -194,8 +210,8 @@ def test_events_survive_a_long_push_outage_and_are_delivered_in_order(settings, 
         notifier = notify.Notifier(store, url="https://w.example/heartbeat", secret_file=_secret(tmp_path))
         for _ in range(3):
             assert notifier.push_once() == (False, False)
-        total = len(_rows(store))  # 500 failures, plus the "failed three times in a row" needs-you item
-        assert total == 501 and notify._cursor(store) == 0
+        total = len(_rows(store))
+        assert total == 500 and notify._cursor(store) == 0
         received, caps = [], iter([60] + [100] * 20)
 
         def worker(url, json=None, **kw):
@@ -213,16 +229,49 @@ def test_events_survive_a_long_push_outage_and_are_delivered_in_order(settings, 
     assert received == list(range(1, total + 1)) and notify._cursor(store) == total
 
 
-def test_old_events_are_pruned_and_an_unconfigured_notifier_keeps_one_day(settings):
+def test_unacknowledged_events_are_never_deleted_by_age_only_acked_ones_are_pruned(settings):
     with _client(settings) as client:
         store = client.app.state.store
         bot = store.create_bot("Hal", "", "codex", None)
-        old = _job(store, bot, "failed", error="x", kind="auth")
+        _job(store, bot, "failed", error="x", kind="auth")
+        second = _job(store, bot, "failed", error="x", kind="auth")
+        with closing(store._connect()) as db:
+            db.execute("UPDATE notify_events SET created_at=?", ("2020-01-01T00:00:00Z",))  # years old, unacked
+        notify.prune(store)
+        assert len(_rows(store)) == 2  # nothing was acknowledged: nothing may go
+        notify._ack(store, 1, 2)  # the Worker has the first one
+        notify.prune(store)
+        assert [r["ref"] for r in _rows(store)] == [str(second.id)]
+
+
+def test_an_unconfigured_notifier_deletes_nothing_and_ends_its_loop(settings):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Ian", "", "codex", None)
         _job(store, bot, "failed", error="x", kind="auth")
         with closing(store._connect()) as db:
-            db.execute("UPDATE notify_events SET created_at=? WHERE ref=?", ("2020-01-01T00:00:00Z", str(old.id)))
-        notify.prune(store, notify.KEEP_UNCONFIGURED)
-        assert [r["ref"] for r in _rows(store)] != [str(old.id)] and len(_rows(store)) == 1
+            db.execute("UPDATE notify_events SET created_at=?", ("2020-01-01T00:00:00Z",))
+        asyncio.run(notify.Notifier(store, url="").run())  # returns at once: nothing to push, nothing pruned
+        assert len(_rows(store)) == 1
+
+
+def test_a_backlog_over_the_bound_is_kept_logged_once_and_shown_in_healthz(settings, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(notify, "BACKLOG_LIMIT", 5)
+    monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: httpx.Response(200, json={"ack": 0}))
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Jo", "", "codex", None)
+        for _ in range(8):
+            _job(store, bot, "failed", error="x", kind="auth")
+        with closing(store._connect()) as db:
+            db.execute("UPDATE notify_events SET created_at=?", ("2020-01-01T00:00:00Z",))
+        notifier = notify.Notifier(store, url="https://w.example/heartbeat", secret_file=_secret(tmp_path))
+        with caplog.at_level("ERROR", logger="botoffice.notify"):
+            notifier.push_once()
+            notifier.push_once()
+        assert len(_rows(store)) == 8 and notify.backlog(store) == 8
+        assert [r.getMessage() for r in caplog.records].count("notify backlog over the limit: 8 events unacknowledged, all kept") == 1
+        assert client.get("/healthz").json()["notify_backlog"] == 8
 
 
 def test_a_worker_that_acks_nothing_does_not_spin_the_loop(settings, tmp_path, monkeypatch):
@@ -339,3 +388,80 @@ def test_app_pushes_in_the_background_only_when_configured(settings, tmp_path, m
     with _client(settings):
         time.sleep(0.4)
     assert len(calls) >= 2
+
+
+def _sql(store, sql, *args):
+    with closing(store._connect()) as db:
+        db.execute(sql, args)
+
+
+def _assignment(store, bot, aid, **fields):
+    stamp = fields.pop("updated_at", "2026-11-20T10:00:00+00:00")
+    row = {"id": aid, "bot_id": str(bot.id), "title": "SECRET TITLE", "status": "open", "created_at": stamp,
+           "updated_at": stamp, **fields}
+    _sql(store, f"INSERT INTO assignments ({','.join(row)}) VALUES ({','.join('?' * len(row))})", *row.values())
+
+
+def test_needs_you_states_that_appear_and_clear_between_pushes_are_still_logged(settings):
+    """Each transition is written by a trigger at the write itself; nothing polls, so a state that is
+    gone before the next push (or the next detector pass) is on record all the same."""
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Kit", "", "codex", None)
+        # an assignment waits on the owner (the id holds a "+00:00" timestamp) and is closed again at once
+        _assignment(store, bot, "a1", status="waiting_on_user", updated_at="2026-11-20T10:00:00+00:00")
+        _sql(store, "UPDATE assignments SET status='done' WHERE id='a1'")
+        _assignment(store, bot, "a2", status="blocked")
+        _sql(store, "UPDATE assignments SET stalled_at='2026-11-20T11:00:00+00:00' WHERE id='a2'")
+        _sql(store, "UPDATE assignments SET status='done' WHERE id='a2'")
+        _assignment(store, bot, "a3", status="dropped", created_by="user", updated_by="bot:x")  # not a transition
+        _sql(store, "UPDATE assignments SET status='active' WHERE id='a3'")
+        _sql(store, "UPDATE assignments SET status='dropped', updated_by='bot:kit' WHERE id='a3'")
+        # an approval is asked and answered, a tripwire fires and is dismissed, a watcher pauses and resumes
+        _sql(store, "INSERT INTO approvals (id, bot_id, job_id, tool, summary, input_hash, scope, source, status, created_at) "
+                    "VALUES (7,?,?,?,?,?,?,?,?,?)", str(bot.id), "job-1", "bash", "rm -rf /", "h" * 64, "once", "chat", "pending", "t")
+        _sql(store, "UPDATE approvals SET status='approved' WHERE id=7")
+        _sql(store, "INSERT INTO gate_log (bot_id, job_id, decision, effect, preset, summary, created_at) "
+                    "VALUES (?,?,?,?,?,?,?)", str(bot.id), "job-1", "deny", "never", "secrets", "cat ~/.ssh/id", "t")
+        _sql(store, "UPDATE gate_log SET dismissed_at='t'")
+        _sql(store, "INSERT INTO watchers (id, bot_id, kind, name, enabled, created_at) VALUES ('w1',?,?,?,1,'t')",
+             str(bot.id), "poll", "n")
+        _sql(store, "UPDATE watchers SET enabled=0, paused_reason='PRIVATE REASON' WHERE id='w1'")
+        _sql(store, "UPDATE watchers SET enabled=1, paused_reason=NULL WHERE id='w1'")
+        _sql(store, "INSERT INTO usage_notices (job_id, attempt, bot_id, provider, created_at) VALUES ('j1',1,?,?,'t')",
+             str(bot.id), "codex")
+        _sql(store, "DELETE FROM usage_notices")
+        held = store.create("p", "codex", bot_id=bot.id)
+        _sql(store, "UPDATE jobs SET failure_kind='budget' WHERE id=?", str(held.id))
+        _sql(store, "UPDATE jobs SET failure_kind=NULL WHERE id=?", str(held.id))
+        assert notify.record_needs_you(store) == 0
+        payload, _, _ = notify.build_batch(store)
+    kinds = sorted(e["kind"] for e in payload["events"])
+    assert kinds == sorted(["assignment_waiting_on_user", "assignment_blocked", "assignment_stalled", "assignment_dropped_by_bot",
+                            "approval_pending", "alert_tripwire", "watcher_paused", "usage_limit_parked", "budget_held"])
+    text = json.dumps(payload)
+    for leak in ("SECRET", "PRIVATE", "rm -rf", ".ssh", "+00:00"):
+        assert leak not in text
+    ids = [e["id"] for e in payload["events"]]
+    assert len(set(ids)) == len(ids) and all(re.fullmatch(r"e[0-9a-f]{16}", i) for i in ids)
+
+
+def test_opaque_ids_with_any_character_are_hashed_not_rejected(settings):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Lu", "", "codex", None)
+        _assignment(store, bot, "a+b/c d", status="waiting_on_user", updated_at="2026-11-20T10:00:00+00:00")
+        payload, _, _ = notify.build_batch(store)
+    assert len(payload["events"]) == 1
+    assert payload["events"][0]["id"] == notify.event_id("a:a+b/c d:waiting_on_user:2026-11-20T10:00:00+00:00")
+    assert notify.event_id("x+y") == notify.event_id("x+y") != notify.event_id("x-y")
+
+
+def test_overdue_is_logged_by_the_detector_once_and_stays_after_it_is_done(settings):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Mo", "", "codex", None)
+        _assignment(store, bot, "late", due_at="2020-01-01T00:00:00+00:00", updated_at="2026-11-20T10:00:00+00:00")
+        assert notify.record_needs_you(store) == 1 and notify.record_needs_you(store) == 0
+        _sql(store, "UPDATE assignments SET status='done' WHERE id='late'")
+        assert [r["kind"] for r in _rows(store)] == ["assignment_overdue"]

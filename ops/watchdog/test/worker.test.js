@@ -10,12 +10,14 @@ export async function resolve(spec, ctx, next) {
 }`));
 const { default: worker, Watchdog } = await import("../src/index.js");
 
-function env() {
+function env(over = {}) {
   const sent = [], store = new Map();
   const state = { storage: { async get(k) { return store.get(k); }, async put(k, v) { store.set(k, structuredClone(v)); }, async setAlarm() {} } };
   const bind = { sent };
-  const dobj = new Watchdog(state, { ALERT_TO: "me@example.test", ALERT_FROM: "w@example.test", ALERT_EMAIL: { send: async (m) => sent.push(m) } });
+  const conf = { ALERT_TO: "you@example.test", ALERT_FROM: "w@example.test", ALERT_EMAIL: { send: async (m) => sent.push(m) } };
+  const dobj = new Watchdog(state, { ...conf, ...over });
   return Object.assign(bind, {
+    ...conf, ...over,
     dobj,
     HEARTBEAT_SECRET: "s3cret",
     WATCHDOG: { idFromName: () => "main", get: () => ({ fetch: (url, init) => dobj.fetch(new Request(url, init)) }) },
@@ -35,13 +37,13 @@ test("auth, method and path are enforced", async () => {
 
 test("an authenticated event push is mailed only to the configured address", async () => {
   const e = env();
-  const res = await worker.fetch(post("/events", { prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q:1", cls: "needs_you", bot: "Ann", kind: "question_open", to: "evil@example.test" }], to: "evil@example.test" }), e);
+  const res = await worker.fetch(post("/events", { prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q:1", cls: "needs_you", bot: "bot-aaaaaa", kind: "question_open", to: "evil@example.test" }], to: "evil@example.test" }), e);
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ack: 1 });
   assert.equal(e.sent.length, 0); // a request never sends; the alarm does
   await e.dobj.alarm();
   assert.equal(e.sent.length, 1);
-  assert.equal(e.sent[0].to, "me@example.test");
+  assert.equal(e.sent[0].to, "you@example.test");
   assert.ok(!e.sent[0].raw.includes("evil"));
 });
 
@@ -62,4 +64,28 @@ test("missing recipient config sends nothing and the cron reports the failure on
   await dobj.fetch(new Request("https://x/tick", { method: "POST" }));
   await dobj.alarm();
   assert.equal(e.sent.length, 0);
+});
+
+test("the Worker refuses any recipient other than the one allowed address, at start and on every route", async () => {
+  for (const to of ["evil@example.test", "you@example.test.evil.test", "you@example.test,evil@example.test", "", undefined, "x@gmail.com"]) {
+    const e = env({ ALERT_TO: to });
+    assert.equal((await worker.fetch(post("/events", { prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q1", cls: "needs_you", bot: "bot-aaaaaa", kind: "x" }] }), e)).status, 503);
+    assert.equal((await worker.fetch(post("/heartbeat", { controller_reachable: false }), e)).status, 503);
+    await assert.rejects(worker.scheduled({}, e), /misconfigured/);
+    await e.dobj.alarm();
+    assert.equal(e.sent.length, 0);
+    assert.equal((await e.dobj.fetch(new Request("https://x/tick", { method: "POST" }))).status, 503);
+  }
+  assert.equal((await worker.fetch(post("/events", {}, "wrong"), env({ ALERT_TO: "evil@example.test" }))).status, 401); // auth first
+  const mixed = env({ ALERT_TO: "  you@example.test " }); // case and spaces only: still the same address
+  assert.equal((await worker.fetch(post("/heartbeat", { controller_reachable: false }), mixed)).status, 200);
+});
+
+test("the mail sender and the engine themselves refuse another address (defence in depth)", async () => {
+  const { makeSender, Engine } = await import("../src/engine.js");
+  const sent = [];
+  const send = makeSender({ ALERT_EMAIL: { send: async (m) => sent.push(m) } }, class { constructor(f, t, r) { this.to = t; } });
+  await assert.rejects(send({ from: "w@example.test", to: "evil@example.test", raw: "x" }), /refused/);
+  assert.equal(sent.length, 0);
+  assert.throws(() => new Engine({ storage: {}, send, from: "w@example.test", to: "evil@example.test" }), /allowed/);
 });

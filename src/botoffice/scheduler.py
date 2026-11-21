@@ -45,6 +45,7 @@ from .workspace import (
 )
 
 SIGNAL_GRACE_SECONDS = 0.5
+PAUSE_FILE = "PAUSE"
 TICK_SECONDS = 1.0
 WATCHDOG_SECONDS = 60.0
 # a running turn this long past its timeout did not stop by itself (wait_for) and is cancelled
@@ -173,7 +174,7 @@ class Scheduler:
                 task = self._tasks.get(lane)
                 if task and not task.done():
                     continue
-                if self._stopping:
+                if self._stopping or self.paused():
                     break
                 job = self.store.claim(self.settings.desktops, self._enabled_providers())
                 if not job:
@@ -189,11 +190,22 @@ class Scheduler:
                     log.exception("scheduler tick failed")
             await asyncio.sleep(0.05)
 
+    def paused(self) -> bool:
+        """Maintenance pause: while the file <data_dir>/PAUSE exists nothing new starts and nothing fires
+        (no claim, routine, inbox, wake-up or watcher). Running turns finish; queued work waits for the
+        file to go. Checked on every pass, so it needs no restart: create it, wait for running_jobs 0
+        in /healthz, restart, remove it."""
+        try:
+            return (self.settings.data_dir / PAUSE_FILE).exists()
+        except OSError:
+            return False
+
     def tick(self) -> None:
-        self._fire_routines()
-        self._read_inboxes()
-        self.assignments.fire_due()
-        self.watchers.tick(lambda fn: threading.Thread(target=fn, name="botoffice-poll", daemon=True).start())
+        if not self.paused():
+            self._fire_routines()
+            self._read_inboxes()
+            self.assignments.fire_due()
+            self.watchers.tick(lambda fn: threading.Thread(target=fn, name="botoffice-poll", daemon=True).start())
         if time.monotonic() - self._last_watchdog >= WATCHDOG_SECONDS:
             self._last_watchdog = time.monotonic()
             self.watchdog()

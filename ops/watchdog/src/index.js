@@ -1,6 +1,6 @@
 // Bot Office watchdog. The Worker authenticates; one Durable Object ("main") owns all state and mail.
 import { EmailMessage } from "cloudflare:email";
-import { sanitize, sanitizeEvents } from "./logic.js";
+import { sanitize, sanitizeEvents, configError } from "./logic.js";
 import { Engine, makeSender } from "./engine.js";
 
 const MAX_BODY = 32 * 1024;
@@ -25,6 +25,7 @@ export default {
     const path = new URL(request.url).pathname;
     if (request.method !== "POST" || !ROUTES[path]) return new Response("not found", { status: 404 });
     if (!(await authorized(request, env.HEARTBEAT_SECRET))) return new Response("unauthorized", { status: 401 });
+    if (configError(env)) return new Response("misconfigured", { status: 503 }); // refuse to run with a recipient that is not the allowed one
     const text = await request.text();
     if (text.length > MAX_BODY) return new Response("too large", { status: 413 });
     let data = null;
@@ -38,6 +39,7 @@ export default {
   },
 
   async scheduled(_event, env) {
+    if (configError(env)) throw new Error("misconfigured: " + configError(env));
     const res = await stub(env).fetch("https://watchdog.internal/tick", { method: "POST" });
     if (!res.ok) throw new Error("tick failed: HTTP " + res.status); // surfaces in the cron's error log
   },
@@ -47,16 +49,18 @@ const stub = (env) => env.WATCHDOG.get(env.WATCHDOG.idFromName("main"));
 
 export class Watchdog {
   constructor(state, env) {
-    this.engine = new Engine({ storage: state.storage, send: makeSender(env, EmailMessage), from: env.ALERT_FROM || "", to: env.ALERT_TO || "" });
+    this.configError = configError(env);
+    this.engine = this.configError ? null : new Engine({ storage: state.storage, send: makeSender(env, EmailMessage), from: env.ALERT_FROM || "", to: env.ALERT_TO || "" });
   }
 
   /** Mail goes out here, never inside a request: a slow mail server cannot hold up a heartbeat. */
   async alarm() {
-    await this.engine.drain();
+    if (this.engine) await this.engine.drain();
   }
 
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (!this.engine) return new Response("misconfigured", { status: 503 });
     try {
       if (path === "/heartbeat") await this.engine.heartbeat(await request.json());
       else if (path === "/events") return Response.json(await this.engine.events(await request.json()));

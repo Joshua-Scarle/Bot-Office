@@ -68,6 +68,8 @@ def version(store, assignment_id):
 def _downgrade_to_0_11_3(path):
     """The 0.11.3 schema by hand: drop what task lists add (columns, indexes, the watermark marker)."""
     with closing(sqlite3.connect(path)) as db:
+        for trigger in ("notify_asg_new", "notify_asg_state", "notify_asg_dropped"):  # they read the dropped columns
+            db.execute(f"DROP TRIGGER {trigger}")
         db.execute("DROP INDEX assignments_pick")
         db.execute("DROP INDEX assignment_events_actor")
         db.execute("DELETE FROM meta WHERE key='tasks_seen_init'")

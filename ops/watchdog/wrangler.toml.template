@@ -16,9 +16,9 @@ new_sqlite_classes = ["Watchdog"]
 
 [[send_email]]
 name = "ALERT_EMAIL"
-destination_address = "<VERIFIED_DESTINATION_ADDRESS>"   # only this address can ever be mailed
+destination_address = "you@example.test"   # the sole recipient: Cloudflare refuses any other, and the Worker checks it at start
 
 [vars]
-ALERT_TO = "<VERIFIED_DESTINATION_ADDRESS>"
+ALERT_TO = "you@example.test"   # must be exactly this; the Worker refuses to run (503) otherwise
 ALERT_FROM = "watchdog@<YOUR_DOMAIN_WITH_EMAIL_ROUTING>"
 # HEARTBEAT_SECRET is a Worker secret: wrangler secret put HEARTBEAT_SECRET

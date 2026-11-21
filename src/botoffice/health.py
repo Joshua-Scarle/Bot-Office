@@ -180,9 +180,12 @@ def build(app_state: Any, backup_path: Path | None = None) -> dict[str, Any]:
     live = scheduler.liveness()
     scheduler_ok = bool(live["alive"]) and live["last_tick_age_seconds"] is not None \
         and live["last_tick_age_seconds"] <= SCHEDULER_STALE_SECONDS
-    db_ok, running = True, None
+    db_ok, running, queued = True, None, None
     try:
         running = len(store.running_job_ids())
+        from . import notify  # late: notify imports this module
+
+        queued = notify.backlog(store)
     except Exception:  # noqa: BLE001 - any DB failure is the answer here, never a 500
         db_ok = False
     free = disk_free_pct(settings.data_dir)
@@ -194,6 +197,8 @@ def build(app_state: Any, backup_path: Path | None = None) -> dict[str, Any]:
         "scheduler": {"alive": scheduler_ok, "last_tick_age_seconds": live["last_tick_age_seconds"]},
         "db_reachable": db_ok,
         "running_jobs": running,
+        "paused": scheduler.paused(),
+        "notify_backlog": queued,
         "backup": backup_status(backup_path),
         "disk_free_pct": free,
     }

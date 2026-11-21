@@ -37,7 +37,7 @@ function rig({ failSend = 0, sendDelay = 0, sendTimeoutMs = 50 } = {}) {
     if (ctl.failSend > 0) { ctl.failSend--; throw new Error("send failed"); }
     sent.push(msg);
   };
-  const mk = (st = storage) => new Engine({ storage: st, send, now: () => clock.t, newId: () => `id${++n}`, from: "w@example.test", to: "me@example.test", sendTimeoutMs });
+  const mk = (st = storage) => new Engine({ storage: st, send, now: () => clock.t, newId: () => `id${++n}`, from: "w@example.test", to: "you@example.test", sendTimeoutMs });
   const engine = mk();
   const r = {
     storage, sent, clock, ctl, engine, mk,
@@ -46,7 +46,7 @@ function rig({ failSend = 0, sendDelay = 0, sendTimeoutMs = 50 } = {}) {
     beat: (d = good) => engine.heartbeat(sanitize(d)),
     /** the controller pushes `list` ([{cls, id?, bot?, kind?}]) as the next batch; returns the ack */
     async push(list, over = {}) {
-      const events = list.map((e) => ({ seq: ++seq, id: e.id ?? `${e.cls}:${seq}`, cls: e.cls, bot: e.bot ?? "Ann", kind: e.kind ?? "question_open", job: e.job ?? null }));
+      const events = list.map((e) => ({ seq: ++seq, id: e.id ?? `${e.cls}:${seq}`, cls: e.cls, bot: e.bot ?? "bot-aaaaaa", kind: e.kind ?? "question_open", job: e.job ?? null }));
       return engine.events(sanitizeEvents({ prefs: {}, epoch: "e1", upto: seq, events, ...over }));
     },
     /** what the alarm would do */
@@ -65,14 +65,14 @@ test("a new needs-you event mails once, from the alarm, not from the push", asyn
   await r.go();
   assert.equal(r.mails.length, 1);
   assert.match(r.mails[0].subject, /1 item needs you/);
-  assert.match(r.mails[0].text, /Ann: question open/);
+  assert.match(r.mails[0].text, /bot-aaaaaa: question open/);
   await r.go();
   assert.equal(r.mails.length, 1);
 });
 
 test("events already acknowledged are not queued again (a lost ack is harmless)", async () => {
   const r = rig();
-  const ev = sanitizeEvents({ prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q:1:open", cls: "needs_you", bot: "Ann", kind: "question_open" }] });
+  const ev = sanitizeEvents({ prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q:1:open", cls: "needs_you", bot: "bot-aaaaaa", kind: "question_open" }] });
   await r.engine.events(ev); await r.engine.events(ev);
   await r.go();
   assert.equal(r.mails[0].text.match(/^- /gm).length, 1);
@@ -99,38 +99,61 @@ test("rate limit merges, never drops", async () => {
   assert.equal(r.mails[1].text.match(/^- /gm).length, 2);
 });
 
-test("OVERFLOW: 500 events end to end are all counted, with correct subject and 'and N more' lines", async () => {
+test("OVERFLOW: 500 events end to end: every identity is in some mail, split into parts, exact counts", async () => {
   const r = rig();
   let acked = 0, pushes = 0, minute = 0;
   // the controller keeps pushing from its cursor; the Worker takes what fits and acks just that
-  const queue = Array.from({ length: 500 }, (_, i) => ({ seq: i + 1, id: `q:${i}:open`, cls: "needs_you", bot: "Ann", kind: "question_open" }));
+  const queue = Array.from({ length: 500 }, (_, i) => ({ seq: i + 1, id: `e${String(i).padStart(16, "0")}`, cls: "failed", bot: "bot-aaaaaa", kind: "auth", job: `job${i}` }));
   while (acked < 500 && pushes++ < 100) {
     r.at(minute);
     const batch = queue.filter((e) => e.seq > acked).slice(0, 100);
     const res = await r.engine.events(sanitizeEvents({ prefs: {}, epoch: "e1", upto: batch[batch.length - 1].seq, events: batch }));
     acked = Math.max(acked, res.ack);
-    await r.go();
-    minute += 11; // past the per-class gap, so the next batch can mail
+    for (let i = 0; i < 6; i++) { await r.go(); r.clock.t += 1; } // the alarm fires until the outbox is empty
+    minute += 61; // past even the slow gap (more than SOFT_CAP mails go out), so the next batch can mail
   }
   assert.equal(acked, 500);
-  r.at(minute); await r.go();
-  const total = r.mails.reduce((n, m) => {
-    const lines = m.text.match(/^- .*$/gm), more = m.text.match(/^- and (\d+) more$/m);
-    const shown = lines.length - (more ? 1 : 0), count = Number(m.subject.match(/(\d+) items/)[1]);
-    assert.equal(shown + (more ? Number(more[1]) : 0), count, "lines + 'more' equal the subject count");
-    assert.ok(shown <= MAX_LINES);
-    return n + count;
-  }, 0);
+  r.at(minute + 61); for (let i = 0; i < 6; i++) { await r.go(); r.clock.t += 1; }
+  const seen = new Set();
+  let total = 0;
+  for (const m of r.mails) {
+    const lines = m.text.match(/^- .*$/gm);
+    assert.ok(lines.length <= MAX_LINES);
+    assert.ok(!/\band \d+ more\b/.test(m.text), "no 'and N more'");
+    assert.equal(Number(m.subject.match(/(\d+) turns/)[1]), lines.length, "the subject count is the number of lines");
+    for (const l of lines) seen.add(l.match(/job (job\d+)/)[1]);
+    total += lines.length;
+  }
   assert.equal(total, 500);
-  const first = r.mails[0];
-  assert.match(first.subject, new RegExp(`${MAX_PENDING} items need you`));
-  assert.match(first.text, new RegExp(`- and ${MAX_PENDING - MAX_LINES} more`));
+  assert.equal(seen.size, 500, "every incident identity was delivered");
+  assert.ok(r.mails.some((m) => /\[part 3 of 3\]/.test(m.subject)) || r.mails.some((m) => /\[part 2 of 3\]/.test(m.subject)));
+});
+
+test("a digest of 100 failed jobs becomes three mails (40, 40, 20) that together name all 100, in order", async () => {
+  const r = rig();
+  await r.push(Array.from({ length: 100 }, (_, i) => ({ cls: "failed", kind: "auth", job: `j${i}` })));
+  for (let i = 0; i < 5; i++) { await r.go(); r.clock.t += 1; }
+  assert.deepEqual(r.mails.map((m) => m.text.match(/^- .*$/gm).length), [40, 40, 20]);
+  assert.match(r.mails[0].subject, /40 turns failed \[part 1 of 3\]/);
+  assert.match(r.mails[2].subject, /20 turns failed \[part 3 of 3\]/);
+  assert.match(r.mails[1].text, /Part 2 of 3; 100 in all/);
+  assert.deepEqual(r.mails.flatMap((m) => m.text.match(/job (j\d+)/g)), Array.from({ length: 100 }, (_, i) => `job j${i}`));
+});
+
+test("a failing part is retried and later parts do not overtake it", async () => {
+  const r = rig({ failSend: 1 });
+  await r.push(Array.from({ length: 50 }, (_, i) => ({ cls: "failed", kind: "auth", job: `j${i}` })));
+  await r.go();
+  assert.equal(r.sent.length, 0);
+  r.clock.t += BACKOFF_BASE_MS + 1;
+  for (let i = 0; i < 4; i++) { await r.go(); r.clock.t += 1; }
+  assert.deepEqual(r.mails.map((m) => m.text.match(/^- .*$/gm).length), [40, 10]);
 });
 
 test("when the Worker is full it acks only what it stored; the rest stays queued at the controller", async () => {
   const r = rig();
   r.engine.events(sanitizeEvents({ prefs: {}, epoch: "e1", upto: 0, events: [] }));
-  const mkEvents = (from, n) => Array.from({ length: n }, (_, i) => ({ seq: from + i, id: `q:${from + i}`, cls: "needs_you", bot: "Ann", kind: "question_open" }));
+  const mkEvents = (from, n) => Array.from({ length: n }, (_, i) => ({ seq: from + i, id: `q:${from + i}`, cls: "needs_you", bot: "bot-aaaaaa", kind: "question_open" }));
   const a = await r.engine.events(sanitizeEvents({ prefs: {}, epoch: "e1", upto: 100, events: mkEvents(1, 100) }));
   assert.equal(a.ack, 100);
   const b = await r.engine.events(sanitizeEvents({ prefs: {}, epoch: "e1", upto: 200, events: mkEvents(101, 100) }));
@@ -144,7 +167,7 @@ test("when the Worker is full it acks only what it stored; the rest stays queued
 test("a different controller epoch restarts the cursor", async () => {
   const r = rig();
   await r.push(need(2));
-  const res = await r.engine.events(sanitizeEvents({ prefs: {}, epoch: "e2", upto: 1, events: [{ seq: 1, id: "q:9:open", cls: "needs_you", bot: "Ann", kind: "question_open" }] }));
+  const res = await r.engine.events(sanitizeEvents({ prefs: {}, epoch: "e2", upto: 1, events: [{ seq: 1, id: "q:9:open", cls: "needs_you", bot: "bot-aaaaaa", kind: "question_open" }] }));
   assert.equal(res.ack, 1);
   await r.go();
   assert.equal(r.mails[0].text.match(/^- /gm).length, 3);
@@ -227,20 +250,20 @@ test("a second engine on the same storage sees the first's writes", async () => 
   const r = rig();
   const other = r.mk();
   await r.push(need(1));
-  await other.events(sanitizeEvents({ prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q:1", cls: "needs_you", bot: "Ann", kind: "question_open" }] }));
+  await other.events(sanitizeEvents({ prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q:1", cls: "needs_you", bot: "bot-aaaaaa", kind: "question_open" }] }));
   await other.drain(); await r.go();
   assert.equal(r.sent.length, 1);
 });
 
 test("the complete message is persisted before the first send and re-sent byte for byte", async () => {
   const r = rig({ failSend: 2 });
-  await r.push([{ cls: "needs_you", bot: "Ann" }]);
+  await r.push([{ cls: "needs_you", bot: "bot-aaaaaa" }]);
   await r.go(); // send fails
-  const box = r.storage.raw("s").outbox.needs_you;
+  const box = r.storage.raw("s").outbox.needs_you[0];
   assert.ok(box && box.raw.includes("Message-ID: <id1@example.test>") && box.raw.includes("Date: "));
   const saved = box.raw;
   r.clock.t += BACKOFF_BASE_MS + 1; // later: a recomposed message would carry a new Date
-  await r.push([{ cls: "needs_you", bot: "Bob" }]); // a new event must not alter the persisted message
+  await r.push([{ cls: "needs_you", bot: "bot-bbbbbb" }]); // a new event must not alter the persisted message
   await r.go(); // fails again
   r.clock.t += 2 * BACKOFF_BASE_MS + 1;
   await r.go(); // succeeds
@@ -259,12 +282,12 @@ test("failed sends back off exponentially and are not retried on every push", as
   assert.equal(r.ctl.attempts, 1); // pushes and alarms inside the backoff window do not resend
   const waits = [];
   for (let k = 0; k < 4; k++) {
-    const next = r.storage.raw("s").outbox.needs_you.next_at;
+    const next = r.storage.raw("s").outbox.needs_you[0].next_at;
     waits.push(next - r.clock.t);
     r.clock.t = next; await r.go();
   }
   assert.ok(waits[1] > waits[0] && waits[2] > waits[1]);
-  assert.ok(r.storage.alarm >= r.storage.raw("s").outbox.needs_you.next_at); // alarm follows the backoff
+  assert.ok(r.storage.alarm >= r.storage.raw("s").outbox.needs_you[0].next_at); // alarm follows the backoff
 });
 
 test("a hung mail server is cut off by the send timeout and does not block heartbeats", async () => {
@@ -277,7 +300,7 @@ test("a hung mail server is cut off by the send timeout and does not block heart
   await r.beat(); // handled while the send is still in flight
   assert.ok(Date.now() - t < 40, "heartbeat is not queued behind the send");
   await draining;
-  assert.equal(r.storage.raw("s").outbox.needs_you.attempts, 1);
+  assert.equal(r.storage.raw("s").outbox.needs_you[0].attempts, 1);
   assert.equal(r.sent.length, 0);
 });
 
@@ -319,12 +342,15 @@ test("the daily soft cap slows mails down but never drops one", async () => {
 
 test("compose: plain ASCII subject, one line per entry, exact counts", () => {
   const e = (i) => ({ type: "event", item: { bot: "A", kind: "auth", job: "" } });
-  const m = compose("failed", [e()], T0);
+  const [m] = compose("failed", [e()], T0);
   assert.match(m.subject, /^\[Bot Office\] a turn failed$/);
   assert.equal(m.text.match(/^- /gm).length, 1);
   const big = compose("failed", Array.from({ length: 500 }, e), T0);
-  assert.match(big.subject, /500 turns failed/);
-  assert.match(big.text, new RegExp(`- and ${500 - MAX_LINES} more`));
+  assert.equal(big.length, 13); // 12 x 40 + 20: every entry in exactly one mail
+  assert.equal(big.reduce((n, p) => n + p.text.match(/^- /gm).length, 0), 500);
+  assert.match(big[0].subject, /40 turns failed \[part 1 of 13\]/);
+  assert.match(big[12].subject, /20 turns failed \[part 13 of 13\]/);
+  assert.ok(big.every((p) => !/and \d+ more/.test(p.text)));
 });
 
 test("no free text can reach a mail: only strict patterns survive, the rest become placeholders", () => {
@@ -334,7 +360,7 @@ test("no free text can reach a mail: only strict patterns survive, the rest beco
   assert.equal(evs.backup_reason, null);
   assert.deepEqual(evs.events[0], { seq: 1, id: "j:1:1", cls: "failed", bot: "a bot", job: "", kind: "other" });
   assert.equal(sanitizeEvents({ backup_reason: "stage_upload" }).backup_reason, "stage_upload");
-  assert.equal(compose("failed", [{ type: "event", item: evs.events[0] }], T0).text.includes("hunter2"), false);
+  assert.equal(compose("failed", [{ type: "event", item: evs.events[0] }], T0)[0].text.includes("hunter2"), false);
 });
 
 test("MIN_GAP_MS is ten minutes", () => assert.equal(MIN_GAP_MS, 10 * MIN));

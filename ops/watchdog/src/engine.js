@@ -20,9 +20,13 @@
 // The mail system cannot tell us whether the first one arrived, so a rare duplicate is the price of never
 // losing a message; mail clients may or may not fold the two. Exactly-once is not possible here.
 //
+// A digest is never truncated: every entry is listed in some mail. More than MAX_LINES entries of one
+// class are split into several mails ("part i of k"), queued together in that class's outbox and sent in
+// order, each with its exact count in the subject.
+//
 // Rate limiting only delays: pending entries merge into one digest. An incident that recovers before its
 // mail went out is still mailed, marked as already recovered.
-import { CLASSES, DEFAULT_PREFS, evaluate, unjudged, classOf, buildRaw } from "./logic.js";
+import { CLASSES, DEFAULT_PREFS, RECIPIENT, evaluate, unjudged, classOf, buildRaw } from "./logic.js";
 
 export const MIN_GAP_MS = 10 * 60 * 1000; // between two mails of the same class
 export const SLOW_GAP_MS = 60 * 60 * 1000; // the gap once SOFT_CAP mails went out in 24 h (a flapping guard)
@@ -55,21 +59,25 @@ function line(e) {
   return `- ${it.bot}: ${it.kind.replace(/_/g, " ")}${it.job ? ` (job ${it.job})` : ""}`;
 }
 
-/** The mail for one class: {subject, text}. Every entry counts once; past MAX_LINES the rest is "and N more". */
+/** The mails for one class: [{subject, text}], MAX_LINES entries each, every entry in exactly one. */
 export function compose(cls, entries, now) {
-  const n = entries.length;
-  const subject = "[Bot Office] " + (cls === "outage" || cls === "backup" ? SUBJECT[cls]() + (n > 1 ? ` (${n} updates)` : "") : SUBJECT[cls](n));
-  const shown = entries.slice(0, MAX_LINES).map(line);
-  if (n > shown.length) shown.push(`- and ${n - shown.length} more`);
+  const parts = Math.max(1, Math.ceil(entries.length / MAX_LINES));
   const head = cls === "needs_you" ? "New items need you" : cls === "failed" ? "Failed turns" : cls === "done" ? "Finished turns" : "Bot Office needs attention";
-  return { subject, text: `${head} (${new Date(now).toISOString()}):\n\n${shown.join("\n")}${FOOTER}` };
+  return Array.from({ length: parts }, (_, i) => {
+    const chunk = entries.slice(i * MAX_LINES, (i + 1) * MAX_LINES), n = chunk.length;
+    const tail = parts > 1 ? ` [part ${i + 1} of ${parts}]` : "";
+    const subject = "[Bot Office] " + (cls === "outage" || cls === "backup" ? SUBJECT[cls]() + (n > 1 ? ` (${n} updates)` : "") : SUBJECT[cls](n)) + tail;
+    const total = parts > 1 ? `Part ${i + 1} of ${parts}; ${entries.length} in all.\n` : "";
+    return { subject, text: `${head} (${new Date(now).toISOString()}):\n${total}\n${chunk.map(line).join("\n")}${FOOTER}` };
+  });
 }
 
 export class Engine {
   #chain = Promise.resolve();
   #draining = false;
   constructor({ storage, send, now = () => Date.now(), newId = () => crypto.randomUUID(), from = "", to = "", sendTimeoutMs = SEND_TIMEOUT_MS }) {
-    Object.assign(this, { storage, send, clock: now, newId, from, to, sendTimeoutMs });
+    if (to && String(to).trim().toLowerCase() !== RECIPIENT) throw new Error("recipient is not the allowed address");
+    Object.assign(this, { storage, send, clock: now, newId, from, to: to ? RECIPIENT : "", sendTimeoutMs });
   }
 
   /** One state operation at a time, each reading state afresh from storage. */
@@ -163,7 +171,7 @@ export class Engine {
     let when = null;
     const soon = (t) => { when = when === null ? t : Math.min(when, t); };
     for (const cls of CLASSES) {
-      const box = s.outbox[cls];
+      const box = (s.outbox[cls] || [])[0];
       if (box) soon(Math.max(now, box.next_at || 0));
       else if (s.pending.some((e) => e.cls === cls)) soon(Math.max(now, (s.last_sent[cls] || 0) + gap));
     }
@@ -179,18 +187,20 @@ export class Engine {
         const s = await this.#load(), now = this.clock(), gap = this.#gap(s, now);
         let promoted = false;
         for (const cls of CLASSES) {
-          if (s.outbox[cls]) continue;
+          if ((s.outbox[cls] || []).length) continue;
           const mine = s.pending.filter((e) => e.cls === cls);
           if (!mine.length || now - (s.last_sent[cls] || 0) < gap) continue; // held, kept pending, merged later
-          const { subject, text } = compose(cls, mine, now);
-          const msg_id = this.newId();
-          // the complete message, composed once: body, Date and Message-ID never change on a retry
-          s.outbox[cls] = { msg_id, raw: buildRaw({ from: this.from, to: this.to, subject, text, messageId: msg_id, now }), attempts: 0, next_at: now };
+          // the complete messages, composed once: body, Date and Message-ID never change on a retry
+          s.outbox[cls] = compose(cls, mine, now).map(({ subject, text }) => {
+            const msg_id = this.newId();
+            return { msg_id, raw: buildRaw({ from: this.from, to: this.to, subject, text, messageId: msg_id, now }), attempts: 0, next_at: now };
+          });
           s.pending = s.pending.filter((e) => e.cls !== cls);
           promoted = true;
         }
         if (promoted) await this.#save(s); // write-ahead: if this fails nothing was sent and nothing is lost
-        return CLASSES.filter((c) => s.outbox[c] && (s.outbox[c].next_at || 0) <= now).map((c) => ({ cls: c, msg_id: s.outbox[c].msg_id, raw: s.outbox[c].raw }));
+        // the oldest message of each class, in order: a later part never overtakes a failing earlier one
+        return CLASSES.filter((c) => (s.outbox[c] || []).length && (s.outbox[c][0].next_at || 0) <= now).map((c) => ({ cls: c, msg_id: s.outbox[c][0].msg_id, raw: s.outbox[c][0].raw }));
       });
       for (const mail of due) {
         let ok = true;
@@ -201,10 +211,11 @@ export class Engine {
           console.log("mail failed:", mail.cls, err && err.name); // class only
         }
         await this.#exclusive(async () => {
-          const s = await this.#load(), now = this.clock(), box = s.outbox[mail.cls];
+          const s = await this.#load(), now = this.clock(), box = (s.outbox[mail.cls] || [])[0];
           if (!box || box.msg_id !== mail.msg_id) return;
           if (ok) {
-            delete s.outbox[mail.cls];
+            s.outbox[mail.cls].shift();
+            if (!s.outbox[mail.cls].length) delete s.outbox[mail.cls];
             s.last_sent[mail.cls] = now;
             s.sent_log.push(now);
           } else {
@@ -229,6 +240,7 @@ export class Engine {
 
 export function makeSender(env, EmailMessage) {
   return async ({ from, to, raw }) => {
+    if (String(to).trim().toLowerCase() !== RECIPIENT) throw Object.assign(new Error("recipient refused"), { name: "RecipientRefused" });
     await env.ALERT_EMAIL.send(new EmailMessage(from, to, raw));
   };
 }

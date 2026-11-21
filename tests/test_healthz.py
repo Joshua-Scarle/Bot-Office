@@ -40,7 +40,7 @@ def test_healthz_shape_no_auth_and_no_secrets(settings, tmp_path, monkeypatch):
         assert resp.status_code == 200
         body = resp.json()
         text = resp.text
-    assert set(body) == {"ok", "version", "uptime_seconds", "scheduler", "db_reachable",
+    assert set(body) == {"ok", "version", "uptime_seconds", "scheduler", "db_reachable", "paused", "notify_backlog",
                          "running_jobs", "backup", "disk_free_pct"}
     assert body["db_reachable"] is True and body["running_jobs"] == 0
     assert set(body["backup"]) == {"state", "age_hours", "bytes", "stale"}
@@ -461,3 +461,13 @@ def test_pusher_runs_on_an_older_system_python():
     imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                 and node.module == "datetime" for alias in node.names}
     assert "UTC" not in imported
+
+
+def test_healthz_reports_the_pause_and_the_notify_backlog(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv(health.BACKUP_STATUS_ENV, str(tmp_path / "status.json"))
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/healthz").json()["paused"] is False
+        (settings.data_dir / "PAUSE").write_text("")
+        body = client.get("/healthz").json()
+        assert body["paused"] is True and body["running_jobs"] == 0 and body["scheduler"]["alive"] is True
+        assert body["notify_backlog"] == 0

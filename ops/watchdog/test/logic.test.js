@@ -42,7 +42,7 @@ test("mail has no CRLF injection and is base64 text", () => {
 test("sanitizeEvents keeps allowlisted fields only and drops bodies, secrets and free text", () => {
   const ev = sanitizeEvents({
     prefs: { needs_you: false, evil: true }, backup_reason: "disk full\nBcc: x", prompt: "SECRET PROMPT", token: "tok", epoch: "e1", upto: 3,
-    events: [{ seq: 1, id: "q:1:open", cls: "needs_you", bot: "Ann", kind: "question_open", ask: "SECRET PROMPT", body: "x" },
+    events: [{ seq: 1, id: "q:1:open", cls: "needs_you", bot: "bot-aaaaaa", kind: "question_open", ask: "SECRET PROMPT", body: "x" },
       { seq: 2, id: "bad id!", cls: "failed", bot: "x" }, null, { seq: 3, id: "j:9:1", cls: "failed", bot: "B", job: "9", kind: "auth", reason: "login needed" }],
   });
   const dump = JSON.stringify(ev);
@@ -59,4 +59,10 @@ test("a healthz without a backup object (timed out) is unjudged, not unknown", (
   assert.deepEqual(evaluate(hb(body, T0), T0, T0).map((p) => p.kind), ["unhealthy"]);
   assert.deepEqual(unjudged([], hb(body, T0)), ["backup"]);
   assert.equal(sanitize({ controller_reachable: true, healthz: { ok: true, backup: { state: "weird" } } }).backup_state, "unknown");
+});
+
+test("only the pseudonymous bot label is accepted: real-looking names become 'a bot'", () => {
+  const ev = (bot) => sanitizeEvents({ prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "e0123456789abcdef", cls: "failed", bot, kind: "auth" }] }).events[0].bot;
+  for (const name of ["Alice", "passwordABC123", "Ada-2", "bot-ABCDEF", "bot-abc12", "bot-abc1234", "bot-abc12g", "xbot-abc123"]) assert.equal(ev(name), "a bot", name);
+  assert.equal(ev("bot-0a1b2c"), "bot-0a1b2c");
 });

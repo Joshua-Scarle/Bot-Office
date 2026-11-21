@@ -261,6 +261,60 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
     )
 
 
+def _init_notify_triggers(db: sqlite3.Connection) -> None:
+    """Needs-you transitions are logged in notify_events by the write that causes them, so a state that
+    appears and clears between two pushes is still on record. Keys are raw and opaque (they may hold any
+    character); notify.py hashes them before anything leaves. Overdue assignments are time-driven (no
+    write happens) and are logged by notify.record_needs_you instead."""
+    stamp = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+    insert = "INSERT OR IGNORE INTO notify_events (key, cls, bot_id, ref, kind, created_at)"
+    state = ("CASE WHEN NEW.stalled_at IS NOT NULL THEN 'stalled' WHEN NEW.status='waiting_on_user' THEN 'waiting_on_user' "
+             "WHEN NEW.status='blocked' AND NEW.escalate IS NOT 'never' THEN 'blocked' "
+             "WHEN NEW.status='waiting_on_bot' AND NEW.escalate IS 'always' THEN 'waiting_on_bot' END")
+    asg = (f"{insert} SELECT 'a:' || NEW.id || ':' || {state} || ':' || COALESCE(NEW.stalled_at, NEW.updated_at), "
+           f"'needs_you', NEW.bot_id, NULL, 'assignment_' || {state}, {stamp} "
+           f"WHERE NEW.status NOT IN ('done','dropped') AND NEW.dismissed_at IS NULL AND {state} IS NOT NULL;")
+    db.execute(f"CREATE TRIGGER IF NOT EXISTS notify_asg_new AFTER INSERT ON assignments BEGIN {asg} END")
+    db.execute("CREATE TRIGGER IF NOT EXISTS notify_asg_state AFTER UPDATE OF status, stalled_at, escalate ON assignments "
+               "WHEN OLD.status IS NOT NEW.status OR OLD.stalled_at IS NOT NEW.stalled_at "
+               f"OR OLD.escalate IS NOT NEW.escalate BEGIN {asg} END")
+    db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS notify_asg_dropped AFTER UPDATE OF status, updated_by ON assignments
+            WHEN NEW.status='dropped' AND NEW.created_by='user' AND NEW.updated_by LIKE 'bot:%'
+                 AND (OLD.status IS NOT NEW.status OR OLD.updated_by IS NOT NEW.updated_by)
+            BEGIN {insert} VALUES ('a:' || NEW.id || ':dropped_by_bot', 'needs_you', NEW.bot_id, NULL,
+                                   'assignment_dropped_by_bot', {stamp}); END""")
+    db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS notify_approval_new AFTER INSERT ON approvals WHEN NEW.status='pending'
+            BEGIN {insert} VALUES ('p:' || NEW.id || ':pending', 'needs_you', NEW.bot_id, NEW.job_id,
+                                   'approval_pending', {stamp}); END""")
+    db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS notify_approval_expired AFTER UPDATE OF status ON approvals
+            WHEN NEW.status='expired' AND OLD.status IS NOT 'expired' AND NEW.resume_job_id IS NULL
+            BEGIN {insert} VALUES ('p:' || NEW.id || ':expired', 'needs_you', NEW.bot_id, NEW.job_id,
+                                   'approval_expired', {stamp}); END""")
+    db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS notify_tripwire AFTER INSERT ON gate_log
+            WHEN NEW.preset='secrets' AND NEW.effect='never' AND NEW.bot_id IS NOT NULL
+            BEGIN {insert} VALUES ('g:' || NEW.id, 'needs_you', NEW.bot_id, NEW.job_id, 'alert_tripwire', {stamp}); END""")
+    db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS notify_usage_parked AFTER INSERT ON usage_notices
+            BEGIN {insert} VALUES ('u:' || NEW.job_id || ':' || NEW.attempt, 'needs_you', NEW.bot_id, NEW.job_id,
+                                   'usage_limit_parked', {stamp}); END""")
+    db.execute(
+        f"""CREATE TRIGGER IF NOT EXISTS notify_watcher_paused AFTER UPDATE OF enabled, paused_reason ON watchers
+            WHEN NEW.enabled=0 AND NEW.paused_reason IS NOT NULL
+                 AND (OLD.enabled IS NOT 0 OR OLD.paused_reason IS NOT NEW.paused_reason)
+            BEGIN {insert} VALUES ('w:' || NEW.id || ':' || strftime('%Y-%m-%dT%H:%M:%f','now'), 'needs_you',
+                                   NEW.bot_id, NULL, 'watcher_paused', {stamp}); END""")
+    for name, event in (("new", "INSERT"), ("kind", "UPDATE OF failure_kind, status")):  # one per bot, kind and day
+        db.execute(
+            f"""CREATE TRIGGER IF NOT EXISTS notify_held_{name} AFTER {event} ON jobs
+                WHEN NEW.status='queued' AND NEW.failure_kind IN ('budget','auto_cap') AND NEW.bot_id IS NOT NULL
+                BEGIN {insert} VALUES ('h:' || NEW.bot_id || ':' || NEW.failure_kind || ':' || strftime('%Y-%m-%d','now'),
+                                       'needs_you', NEW.bot_id, NULL, NEW.failure_kind || '_held', {stamp}); END""")
+
+
 class BridgeHopConflict(Exception):
     """An inbound bridge thread's hop moved between reading it and queueing the turn."""
 
@@ -844,6 +898,7 @@ class JobStore:
                     VALUES ('q:' || NEW.id || ':open', 'needs_you', NEW.bot_id, NULL, 'question_open',
                             strftime('%Y-%m-%dT%H:%M:%SZ','now')); END""")
             _init_control_tables(db)
+            _init_notify_triggers(db)
 
     def _import_bridge_json(self, db: sqlite3.Connection) -> None:
         """One-time: import the pre-0.9.0 bridge JSON files, then rename them ``*.imported``."""

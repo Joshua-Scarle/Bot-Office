@@ -1,17 +1,20 @@
 """Email notifications, controller side: a durable event log pushed to the external watchdog Worker
 (ops/watchdog), which batches and mails it.
 
-What leaves here: fixed reason codes, ids, counts and a bot label, never free text. Failure kinds and
-backup stages are enums; a bot name goes out only when it matches a strict pattern (one short token),
-otherwise as "bot-<6 hex of a hash of its id>". No prompt, reply, title, error text or secret is ever read
-into the payload. The recipient is not known here at all (the Worker owns it).
+What leaves here: fixed reason codes, hashed ids, counts and a pseudonymous bot label, never free text.
+Failure kinds and backup stages are enums; a bot is always "bot-<6 hex of sha256(bot id)>", its name is
+never read; an event id is a hash of the internal key (which may hold any character). No prompt, reply,
+title, name, error text or secret is read into the payload. The recipient is not known here at all (the
+Worker owns it).
 
 Delivery: events are APPENDED to the notify_events table when they happen (SQL triggers on job
-status changes and new questions; `record_needs_you` for the other needs-you states, which are
-derived), so a short-lived or old item is never lost to polling. They are pushed in order, in batches,
+status changes, questions, assignments, approvals, tripwires, usage parking, watchers and budget holds;
+`record_needs_you` only for overdue tasks, which no write announces), so a short-lived item is never
+lost to polling. They are pushed in order, in batches,
 and removed from the queue only when the Worker acknowledges a sequence number (a durable cursor in
 `meta`). A push outage, however long, only delays; the Worker takes at most what it can hold and
-acknowledges just that, the rest stays queued here. Classes: needs_you, failed, outage, backup (default
+acknowledges just that, the rest stays queued here. An unacknowledged event is NEVER deleted by age: past
+BACKLOG_LIMIT the queue is kept and surfaced (a Needs-you item, `notify_backlog` in /healthz, a log line). Classes: needs_you, failed, outage, backup (default
 on), done (default off); outage and backup are raised by the Worker from the heartbeat.
 """
 from __future__ import annotations
@@ -49,15 +52,12 @@ TIMEOUT_SECONDS = 8
 BATCH = 100  # events per push; the rest stays queued and goes in the next push
 MAX_PUSHES_PER_CYCLE = 20
 KEEP_ACKED = timedelta(days=14)
-KEEP_UNACKED = timedelta(days=60)  # an outage longer than this loses the oldest events (counted in the README)
-KEEP_UNCONFIGURED = timedelta(days=1)  # nothing is pushed: no backlog of old events is built up for later
+BACKLOG_LIMIT = 1000  # unacknowledged events past this are kept and reported, never dropped
 _MAX_SECRET_BYTES = 4096
 
 JOB_KINDS = frozenset(failures.KINDS) | {"needs_login", "succeeded", "failed", "cancelled", "incomplete"}
 _CODE = re.compile(r"^[a-z][a-z_]{0,31}$")
-_BOT = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,23}$")
 _REF = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
-_KEY = re.compile(r"^[A-Za-z0-9:_.-]{1,80}$")
 
 
 class ConfigError(Exception):
@@ -89,31 +89,37 @@ def kind_code(value: object, cls: str) -> str:
     return text if text in JOB_KINDS else "other"
 
 
-def bot_label(bot_id: object, name: object) -> str:
-    """The bot's name only if it is one short plain token; anything else is a hash of its id."""
-    if isinstance(name, str) and _BOT.match(name):
-        return name
+def bot_label(bot_id: object) -> str:
+    """The only thing that names a bot outside the controller: a hash of its id, never its name."""
     return "bot-" + hashlib.sha256(str(bot_id).encode()).hexdigest()[:6]
 
 
+def event_id(key: str) -> str:
+    """Opaque id of an event: a hash of its internal key, so any character in the key is safe."""
+    return "e" + hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
 def record_needs_you(store: JobStore) -> int:
-    """Append every currently derived needs-you item (other than failed turns, which are the "failed"
-    class) not logged yet. Idempotent by item id. Returns how many were new."""
+    """Append overdue assignments not logged yet (idempotent by item id). Every other needs-you state is
+    logged by a trigger at the write that causes it (store._init_notify_triggers). Returns how many were new."""
     if not get_prefs(store)["needs_you"]:
         return 0
-    items = [item for item in needs_you.needs_you(store) if item["kind"] != "job"]
+    items = [item for item in needs_you.needs_you(store) if item["kind"] == "assignment" and item["state"] == "overdue"]
     stamp = now().strftime("%Y-%m-%dT%H:%M:%SZ")
     new = 0
     with closing(store._connect()) as db:
         for item in items:
-            key = item["id"]
-            if not isinstance(key, str) or not _KEY.match(key):
-                continue
-            kind = kind_code(f"{item['kind']}_{item['state']}", "needs_you")
             cur = db.execute("INSERT OR IGNORE INTO notify_events (key, cls, bot_id, ref, kind, created_at) "
-                             "VALUES (?,?,?,?,?,?)", (key, "needs_you", item["bot_id"], None, kind, stamp))
+                             "VALUES (?,?,?,?,?,?)", (str(item["id"]), "needs_you", item["bot_id"], None,
+                                                      "assignment_overdue", stamp))
             new += cur.rowcount
     return new
+
+
+def backlog(store: JobStore) -> int:
+    """Events not acknowledged by the Worker yet (a count only)."""
+    with closing(store._connect()) as db:
+        return db.execute("SELECT COUNT(*) FROM notify_events WHERE seq>?", (_cursor(store),)).fetchone()[0]
 
 
 def _epoch(store: JobStore) -> str:
@@ -138,15 +144,14 @@ def build_batch(store: JobStore, stamp=None) -> tuple[dict, int, bool]:
     prefs = get_prefs(store)
     cursor = _cursor(store)
     with closing(store._connect()) as db:
-        rows = db.execute("SELECT e.seq, e.key, e.cls, e.bot_id, e.ref, e.kind, b.name FROM notify_events e "
-                          "LEFT JOIN bots b ON b.id=e.bot_id WHERE e.seq>? ORDER BY e.seq LIMIT ?",
+        rows = db.execute("SELECT seq, key, cls, bot_id, ref, kind FROM notify_events WHERE seq>? ORDER BY seq LIMIT ?",
                           (cursor, BATCH + 1)).fetchall()
     more = len(rows) > BATCH
     rows = rows[:BATCH]
-    events = [{"seq": row["seq"], "id": row["key"], "cls": row["cls"], "bot": bot_label(row["bot_id"], row["name"]),
+    events = [{"seq": row["seq"], "id": event_id(row["key"]), "cls": row["cls"], "bot": bot_label(row["bot_id"]),
                "job": row["ref"] if isinstance(row["ref"], str) and _REF.match(row["ref"]) else None,
                "kind": kind_code(row["kind"], row["cls"])}
-              for row in rows if row["cls"] in EVENT_CLASSES and prefs[row["cls"]] and _KEY.match(row["key"])]
+              for row in rows if row["cls"] in EVENT_CLASSES and prefs[row["cls"]]]
     upto = rows[-1]["seq"] if rows else cursor
     payload = {"sent_at": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"), "epoch": _epoch(store), "prefs": prefs,
                "backup_reason": health.backup_reason() if prefs["backup"] else None,
@@ -154,9 +159,11 @@ def build_batch(store: JobStore, stamp=None) -> tuple[dict, int, bool]:
     return payload, upto, more
 
 
-def prune(store: JobStore, keep: timedelta) -> None:
+def prune(store: JobStore, keep: timedelta = KEEP_ACKED) -> None:
+    """Delete ACKNOWLEDGED events older than *keep*. Unacknowledged ones are never deleted."""
     with closing(store._connect()) as db:
-        db.execute("DELETE FROM notify_events WHERE created_at<?", ((now() - keep).strftime("%Y-%m-%dT%H:%M:%SZ"),))
+        db.execute("DELETE FROM notify_events WHERE seq<=? AND created_at<?",
+                   (_cursor(store), (now() - keep).strftime("%Y-%m-%dT%H:%M:%SZ")))
 
 
 def _ack(store: JobStore, ack: object, upto: int) -> None:
@@ -207,6 +214,7 @@ class Notifier:
         self.secret_file = secret_file or Path(os.environ.get(SECRET_FILE_ENV) or DEFAULT_SECRET_FILE).expanduser()
         self.interval = interval
         self._last_error: str | None = None
+        self._backlogged = False
 
     @property
     def configured(self) -> bool:
@@ -219,7 +227,8 @@ class Notifier:
         try:
             secret = read_secret(self.secret_file)
             record_needs_you(self.store)
-            prune(self.store, KEEP_UNACKED)
+            prune(self.store)
+            self._watch_backlog()
             body, upto, more = build_batch(self.store)
             # a redirect is never followed: the bearer token goes to the configured URL only
             resp = httpx.post(events_url(self.url), json=body, timeout=TIMEOUT_SECONDS, follow_redirects=False,
@@ -247,12 +256,18 @@ class Notifier:
             self._last_error = error
         return error is None, error is None and more
 
+    def _watch_backlog(self) -> None:
+        over = backlog(self.store) > BACKLOG_LIMIT
+        if over != self._backlogged:
+            (log.error if over else log.info)(
+                "notify backlog %s: %d events unacknowledged, all kept", "over the limit" if over else "back under the limit",
+                backlog(self.store))
+            self._backlogged = over
+
     async def run(self) -> None:
         if not self.configured:
-            log.info("watchdog events push off (%s is not set to an https URL)", URL_ENV)
-            while True:  # the triggers still log events; keep only the last day so enabling it later is not a flood
-                await asyncio.to_thread(prune, self.store, KEEP_UNCONFIGURED)
-                await asyncio.sleep(3600)
+            log.info("watchdog events push off (%s is not set to an https URL); events stay queued", URL_ENV)
+            return
         while True:
             for _ in range(MAX_PUSHES_PER_CYCLE):
                 ok, more = await asyncio.to_thread(self.push_once)

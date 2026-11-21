@@ -38,11 +38,23 @@ export function unjudged(problems, hb) {
   return hb && hb.data && hb.data.backup_state === "unjudged" ? ["backup"] : [];
 }
 
-const CODE = /^[a-z][a-z_]{0,31}$/, BOT = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/, REF = /^[A-Za-z0-9_-]{1,40}$/, KEY = /^[A-Za-z0-9:_.-]{1,80}$/;
+/** The one address this Worker may ever mail. Any other ALERT_TO is refused at start. */
+export const RECIPIENT = "you@example.test";
+
+/** Config problems as a short fixed string, or null when the Worker may run: ALERT_TO must be exactly
+ *  RECIPIENT (and the send_email binding present), ALERT_FROM a plain address. Never echoes a value. */
+export function configError(env) {
+  const to = typeof env.ALERT_TO === "string" ? env.ALERT_TO.trim().toLowerCase() : "";
+  if (to !== RECIPIENT) return "ALERT_TO is not the allowed recipient";
+  if (typeof env.ALERT_FROM !== "string" || !/^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,}$/.test(env.ALERT_FROM)) return "ALERT_FROM is not a plain address";
+  return null;
+}
+
+const CODE = /^[a-z][a-z_]{0,31}$/, BOT = /^bot-[0-9a-f]{6}$/, REF = /^[A-Za-z0-9_-]{1,40}$/, KEY = /^[A-Za-z0-9:_.-]{1,80}$/;
 export const EVENT_CLASSES = ["needs_you", "failed", "done"];
 export const MAX_BATCH = 100;
 
-/** The controller's event batch, reduced to what the mail may carry: ids, a bot label and fixed codes.
+/** The controller's event batch, reduced to what the mail may carry: hashed ids, a pseudonymous bot label ("bot-" + 6 hex, nothing else is accepted) and fixed codes.
  *  No free text field exists any more; a value that does not match its strict pattern becomes a neutral
  *  placeholder ("other", "a bot"), so nothing a user typed can reach the mail. */
 export function sanitizeEvents(body) {
