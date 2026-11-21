@@ -206,7 +206,7 @@ class PushWriter:
                 raise OSError("short write")
             view = view[done:]
 
-    def commit(self) -> dict:
+    def commit(self, cancel: threading.Event | None = None) -> dict:
         if self.written != self.size or self.hash.hexdigest() != self.sha256:
             raise ValueError("the content is not what was approved (sha256 or size)")
         os.fsync(self.fd)
@@ -215,6 +215,8 @@ class PushWriter:
         os.close(self.fd)
         self.fd = -1
         self._check_target()
+        if cancel is not None and cancel.is_set():  # End grant up to the last moment: nothing lands
+            raise ValueError("cancelled")
         if self.overwrite:
             os.replace(self.tmp, self.name, src_dir_fd=self.dir_fd, dst_dir_fd=self.dir_fd)
         else:

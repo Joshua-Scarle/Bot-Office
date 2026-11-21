@@ -19,6 +19,7 @@ import socket
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 
 from websockets.asyncio.client import connect
@@ -116,6 +117,17 @@ def describe(op: str, args: dict, meta: dict) -> str:
         return f"{who} wants a screenshot of this screen"
     verb = {"ls": "list", "read": "read", "pull": "copy"}[op]
     return f"{who} wants to {verb} {args.get('path')}"
+
+
+def _past(until: object) -> bool:
+    """Whether the grant end Bot Office sent (ISO 8601 with offset) has passed."""
+    if not isinstance(until, str):
+        return False
+    try:
+        end = datetime.fromisoformat(until)
+    except ValueError:
+        return False
+    return end.tzinfo is not None and datetime.now(timezone.utc) >= end
 
 
 def _audit_args(op: str, args: dict) -> dict:
@@ -296,6 +308,8 @@ class Agent:
                 answer = await asyncio.to_thread(self.confirm, grant_question(meta))
                 if str(grant) in self.ended:
                     raise ops.Declined("the grant ended while waiting for the answer here")
+                if answer and cancel.is_set():  # a late yes is void, and not kept for the next call
+                    raise ops.Declined("cancelled by Bot Office while waiting for the answer here")
                 self.answers[key] = answer
                 if not answer:
                     self.declined.add(str(grant))
@@ -327,6 +341,8 @@ class Agent:
             entry["sandbox"] = ctx.sandbox
             if op != "resolve" and meta.get("grant") is not None and str(meta["grant"]) in self.ended:
                 raise ops.Declined("the grant for this call was ended")
+            if op != "resolve" and _past(meta.get("until")):  # the cap, by this computer's clock too
+                raise ops.Declined("the grant for this call has run out of time")
             if op != "resolve" and self.flag("confirm_local"):
                 entry["confirmed_local"] = True
                 await self.confirm_grant(str(op), args, meta, cancel)
@@ -424,9 +440,7 @@ class Agent:
                 if message["type"] == "chunk":
                     await self.send({"type": "credit", "id": call_id, "n": 1})
                 if message["type"] == "chunk_end":
-                    if cancel.is_set():  # the last moment an End grant can still stop the write
-                        raise ValueError("cancelled")
-                    return await asyncio.to_thread(writer.commit)
+                    return await asyncio.to_thread(writer.commit, cancel)
                 try:
                     block = base64.b64decode(message.get("data") or "", validate=True)
                 except ValueError as exc:

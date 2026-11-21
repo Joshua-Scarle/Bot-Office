@@ -671,3 +671,35 @@ def test_hub_sends_nothing_under_a_dead_grant():
     with pytest.raises(HubError) as caught:
         asyncio.run(hub.call("m", "read", {}, timeout=5, grant_id=1, alive=lambda: False))
     assert caught.value.status == 403 and ws.sent == []
+
+
+def test_ending_a_grant_twice_leaves_a_newer_card_alone(tmp_path):
+    store, _, machine, job = setup(tmp_path)
+    first = machines.record_request(store, job, machine, "read", READ)
+    machines.approve(store, first["approval_id"])
+    grant = machines.list_grants(store)[0]
+    machines.end_grant(store, grant["id"])
+    fresh = machines.record_request(store, job, machine, "read", READ)  # asks again after End grant
+    assert fresh["status"] == "pending"
+    machines.end_grant(store, grant["id"])  # a repeated End grant
+    assert machines.approval_dict(store, fresh["approval_id"])["status"] == "pending"
+
+
+def test_hub_fails_closed_when_the_grant_check_breaks():
+    from botoffice.machine_hub import Hub, HubError, _Connection
+
+    class WS:
+        sent = []
+
+        async def send_text(self, text):
+            self.sent.append(text)
+
+    def broken():
+        raise RuntimeError("database is locked")
+
+    hub = Hub(None)
+    ws = WS()
+    hub.connections["m"] = _Connection(ws, "m")
+    with pytest.raises(HubError) as caught:
+        asyncio.run(hub.call("m", "read", {}, timeout=5, grant_id=1, alive=broken))
+    assert caught.value.status == 403 and ws.sent == [] and hub.connections["m"].calls == {}
