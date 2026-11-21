@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import shlex
+import sys
 from pathlib import Path
 
+from .. import team
 from ..compaction import COMPACT_POLICY, compact_token_limit
 from .cli import CliAdapter
 
@@ -21,6 +23,7 @@ CLAUDE_SETTINGS = {
 # tools an unattended (dontAsk) run may use without a prompt; MCP and anything else is refused
 UNATTENDED_TOOLS = ("Bash", "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS",
                     "WebFetch", "WebSearch", "TodoWrite", "Task", "Skill", "BashOutput", "KillShell")
+TEAM_MCP = Path(__file__).resolve().parents[3] / "bin" / "bot-office-team-mcp"
 # MCP tools are not listed: strict-profile runs (triggers; scheduled turns of a "gated" bot) refuse
 # them; default ("full") scheduled runs keep them, as in 0.10.x (README, gen 9)
 
@@ -41,7 +44,7 @@ def claude_settings(job, full: bool) -> dict:
             deny += [f"Read(/{target})", f"Edit(/{target})"]
     permissions: dict = {"deny": deny}
     if job.unattended and full:
-        permissions["allow"] = list(UNATTENDED_TOOLS)
+        permissions["allow"] = [*UNATTENDED_TOOLS, *team.allowed_tools(job)]  # only the first-party botoffice server
     settings["permissions"] = permissions
     return settings
 
@@ -94,6 +97,12 @@ class ClaudeAdapter(CliAdapter):
         if job is not None and job.bot_id is not None:
             args += ["--add-dir", str(self._bot_dir(workspace, job) / "attachments")]
             args += ["--add-dir", str(self._bot_dir(workspace, job) / "uploads")]  # files of any type the owner sent
+        # teammate tools: the controller's own stdio MCP server, job-token only. Not --strict-mcp-config:
+        # that would drop the owner's other MCP servers in full access. The token is not in argv or a file;
+        # claude expands ${BOT_OFFICE_AGENT_TOKEN} from its own environment (BOT_OFFICE_TEAM_MCP=0 turns this off)
+        mcp = team.mcp_config(job, sys.executable, str(TEAM_MCP))
+        if mcp:
+            args += ["--mcp-config", json.dumps(mcp), "--allowedTools", *team.allowed_tools(job)]
         if session:
             args += ["--resume", session]
         model = self._job_model(job)

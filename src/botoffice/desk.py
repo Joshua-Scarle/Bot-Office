@@ -19,6 +19,7 @@ USAGE = (
     " | open URL | message BOT TEXT | attach FILE\n"
     "       desk grok send --to NAME --kind question|result|blocker|fyi --text TEXT"
     " [--thread ID] [--from NAME]\n"
+    "       desk team list | status BOT | read BOT [--limit N] [--since X] | message [--queue] BOT TEXT | ask BOT TEXT [--timeout S]\n"
     "       desk grok install-config\n"
     "       desk inbox post --to BOT --from NAME --text TEXT [--thread ID] [--hop N]"
 )
@@ -159,6 +160,10 @@ def main(argv: list[str] | None = None) -> int:
             from .ask import main as ask_main
 
             return ask_main(rest)
+        if command == "team":
+            from .team_client import main as team_main
+
+            return team_main(rest)
         if command == "attach":
             if len(rest) != 1:
                 raise DeskError("attach needs exactly one file")

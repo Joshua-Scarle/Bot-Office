@@ -28,7 +28,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
-from . import isolation, needs_you, notify, safefs, vnc
+from . import isolation, needs_you, notify, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -986,7 +986,7 @@ def create_app(
         if "description" in fields:
             fields["description"] = (fields["description"] or "").strip()
         for key in ("name", "instructions", "default_provider", "model", "icon", "cli_access", "notify", "allow_sudo",
-                    "scheduled_runs", "daily_budget", "digest", "bot_steer", "chat_only"):
+                    "scheduled_runs", "daily_budget", "digest", "bot_steer", "chat_only", "team_read", "team_private"):
             if key in fields and fields[key] is None:
                 del fields[key]
         if "daily_budget" in fields:
@@ -1000,6 +1000,8 @@ def create_app(
             fields["bot_steer"] = int(fields["bot_steer"])
         if "chat_only" in fields:
             fields["chat_only"] = int(fields["chat_only"])
+        if "team_private" in fields:
+            fields["team_private"] = int(fields["team_private"])
         if fields.get("job_timeout") is not None and fields["job_timeout"] > settings.max_turn_timeout:
             raise HTTPException(status_code=422, detail=f"job_timeout must be at most {settings.max_turn_timeout} seconds")
         if "notify" in fields:
@@ -1959,6 +1961,46 @@ def create_app(
         if binding and item["from_bot"] != str(binding.bot_id):
             raise HTTPException(status_code=403, detail="message belongs to another bot")
         return item
+
+    # ---- teammate tools (E7-1): job token only (agent_scope, never the master token); see team.py ----------
+    def _team_db(job: Job, fn):
+        try:
+            with closing(store._connect()) as db:
+                return fn(db)
+        except team.TeamError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+    @app.get("/v1/agent/team")
+    async def agent_team_list(job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        return _team_db(job, lambda db: team.team_list(db, str(job.bot_id)))
+
+    @app.get("/v1/agent/team/{bot}/status")
+    async def agent_team_status(bot: str, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        def run(db):
+            reader, target = team.resolve(db, str(job.bot_id), bot)
+            return team.team_status(db, reader, target), target["id"]
+        result, target_id = _team_db(job, run)
+        team.log_read(store, job, "team_status", target_id, 1)
+        return result
+
+    @app.get("/v1/agent/team/{bot}/transcript")
+    async def agent_team_transcript(bot: str, limit: int = Query(default=20, ge=1, le=team.TRANSCRIPT_LIMIT),
+                                    since: str | None = Query(default=None, max_length=64),
+                                    job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        def run(db):
+            _, target = team.resolve(db, str(job.bot_id), bot)
+            return team.team_transcript(db, target, limit, since), target["id"]
+        result, target_id = _team_db(job, run)
+        team.log_read(store, job, "team_read", target_id, result["count"])
+        return result
+
+    async def _team_send(job: Job, body: AgentMessageCreate) -> dict:
+        item = await message_agent(str(job.bot_id), AgentMessageCreate(to=body.to, body=body.body, mode=body.mode), job)
+        return {key: item[key] for key in ("id", "status", "mode", "delivery", "note", "hop") if key in item}
+
+    @app.post("/v1/agent/team/message")
+    async def agent_team_message(body: AgentMessageCreate, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        return await _team_send(job, body)
 
     @app.post(
         "/v1/bots/{bot_id}/messages",

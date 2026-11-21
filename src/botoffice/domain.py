@@ -197,6 +197,10 @@ class Bot(BaseModel):
     bot_steer: bool = True
     # 0.11.10: never continues by itself (no auto-continue, loop, verify or wake-up turns)
     chat_only: bool = False
+    # 0.12.18: which bots' status and chat this bot may read through the teammate tools
+    # (section: its own section and unsectioned bots; all; none), and whether others may read it at all
+    team_read: Literal["section", "all", "none"] = "section"
+    team_private: bool = False
     # unread state for the owner (filled by GET /v1/bots and the read/unread endpoints)
     unread_count: int = 0
     unread_since: datetime | None = None
@@ -281,6 +285,8 @@ class BotUpdate(_BotFields):
     digest: bool | None = None
     bot_steer: bool | None = None
     chat_only: bool | None = None
+    team_read: Literal["section", "all", "none"] | None = None
+    team_private: bool | None = None
 
 
 class ModelOption(BaseModel):

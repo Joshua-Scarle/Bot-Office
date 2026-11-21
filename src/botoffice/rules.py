@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from . import git_guard, github_access, nested_agents
+from . import git_guard, github_access, nested_agents, team
 from .domain import Job
 from .store import JobStore, now
 
@@ -316,7 +316,7 @@ def presets_hit(action: Action) -> list[str]:
         protected = any(name in command for name in _PROTECTED_WRITE_DIRS) and _WRITE_OPS.search(command)
         if rm_outside or protected or "destructive" in after or any(pattern.search(command) for pattern in DESTRUCTIVE):
             hits.append("destructive")
-    if tool.startswith("mcp") or tool == "mcp":
+    if (tool.startswith("mcp") or tool == "mcp") and not team.is_first_party_tool(action.tool):
         # an MCP tool can do anything its server can; unattended runs ask first
         hits.append("outbound")
     if tool in WRITE_TOOLS and any(name.lstrip("~") in path or name in path
@@ -490,13 +490,16 @@ class Rules:
         if guarded:
             return "ask", git_guard.PRESET, f"{guarded} always waits for your approval"
         # A16: so does sending email or messages to people (the "send" class is locked on)
-        sending = git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
+        first_party = team.is_first_party_tool(action.tool)  # the controller's own bot-to-bot tools: not outbound
+        sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
         if "ask" in effects:
             return "ask", preset, "a rule asks first"
         if "allow" in effects and not (job.source in STRICT_SOURCES and hits):
             return "allow", preset, "a rule allows it"
+        if first_party:
+            return "allow", None, "first-party teammate tool"
         from . import approval_classes
         chosen = approval_classes.match(self.store, action.tool, action.command)
         if chosen is not None:

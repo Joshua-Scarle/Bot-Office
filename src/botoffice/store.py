@@ -16,7 +16,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from . import attachments as attachment_files
-from . import avatars, continuation, failures, sections
+from . import avatars, continuation, failures, sections, team
 from . import history as chat_history
 from . import usage as budgets
 from .catalog import DEFAULT_ICON, DEFAULT_ICONS, default_effort, default_model
@@ -49,6 +49,8 @@ BOT_FIELDS = {
     "digest",
     "bot_steer",
     "chat_only",
+    "team_read",
+    "team_private",
 }
 IDENTITY_MIGRATION = "crewdeck-identity-v1"
 EFFORT_MIGRATION = "crewdeck-effort-v1"
@@ -783,8 +785,13 @@ class JobStore:
                 ("tasks_seen_event", "INTEGER NOT NULL DEFAULT 0"),
                 # 0.11.10: a chat-only bot never continues by itself (no loop, verify or wake-up turns)
                 ("chat_only", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.12.18 teammate tools: team_read section|all|none; team_private hides the bot from reads
+                ("team_read", "TEXT NOT NULL DEFAULT 'section'"),
+                ("team_private", "INTEGER NOT NULL DEFAULT 0"),
             ))
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            team.init_schema(db)
+            team.seed_private(db)
             # email-notification outbox (notify.py): appended by these triggers and by notify's detector,
             # acknowledged by the Worker through a cursor; holds codes and ids only, never text
             db.execute(
