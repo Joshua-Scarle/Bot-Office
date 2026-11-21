@@ -200,6 +200,7 @@ class Bot(BaseModel):
     # 0.12.18: which bots' status and chat this bot may read through the teammate tools
     # (section: its own section and unsectioned bots; all; none), and whether others may read it at all
     team_read: Literal["section", "all", "none"] = "section"
+    team_messaging: Literal["off", "ask", "allow"] = "allow"
     team_private: bool = False
     # unread state for the owner (filled by GET /v1/bots and the read/unread endpoints)
     unread_count: int = 0
@@ -286,6 +287,7 @@ class BotUpdate(_BotFields):
     bot_steer: bool | None = None
     chat_only: bool | None = None
     team_read: Literal["section", "all", "none"] | None = None
+    team_messaging: Literal["off", "ask", "allow"] | None = None
     team_private: bool | None = None
 
 
