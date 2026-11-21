@@ -116,11 +116,13 @@ def test_claude_exec_argv_stdin_and_env(monkeypatch, tmp_path):
     args, kwargs = calls[1]
     assert args == (
         "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--replay-user-messages",
-        "--permission-mode", "acceptEdits", "--disallowedTools", "AskUserQuestion", "--permission-prompts", "none", "--effort", "medium",
+        "--permission-mode", "acceptEdits", "--disallowedTools", "AskUserQuestion", "--permission-prompts", "none",
+        "--settings", args[args.index("--settings") + 1], "--effort", "medium",
     )
+    import json
+    assert set(json.loads(args[args.index("--settings") + 1])["hooks"]) == {"PreCompact", "SessionStart"}  # restricted mode too
     assert "--dangerously-skip-permissions" not in args and "--bare" not in args
     assert kwargs["cwd"] == tmp_path
-    import json
     assert inputs[0] is None
     assert json.loads(inputs[1])["message"]["content"][0]["text"] == "write report"
     _assert_env(kwargs["env"], tmp_path)

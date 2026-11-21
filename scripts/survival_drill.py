@@ -11,7 +11,7 @@ events go to --out (JSONL, no secrets). `restart` restarts the service (systemct
 through the guard below, and never touches a bot it did not create.
 
 Restart guard (fails CLOSED: anything it cannot read or parse is a blocker, never "fine"):
-- the bots list must be readable and contain "Printer Writing Bot" (looked up by name); no queued/running job on it,
+- the bots list must be readable and contain the protected bot (looked up by name, see PROTECTED_BOT); no queued/running job on it,
   on any other bot that is not a drill bot, or in a malformed jobs reply;
 - every other bot's routines must be readable and parseable; none may fire within 3 minutes;
 - the service must be older than 3 minutes; pgrep must work and show no other install.sh / deploy / git rebase|merge /
@@ -22,7 +22,7 @@ held across the restart: pause, wait for /healthz to acknowledge it, run the who
 wait for the service to answer, remove the pause. systemctl's exit status and the service coming back are checked;
 a failed restart is a failure (exit code 1), not a success. A blocked restart is retried every 60 s for 20 min,
 then skipped and reported UNVERIFIED.
-Residual race: the pause stops a Printer Writing Bot job from being CLAIMED after the check, but the API can still
+Residual race: the pause stops a protected-bot job from being CLAIMED after the check, but the API can still
 queue one (it then waits for the pause to end, queued across the restart, and starts afterwards). The last check runs
 immediately before systemctl to keep that window to milliseconds. A service version without /healthz `paused`
 (before 0.12.13) has no pause: the script says so and relies on the last-moment recheck alone.
@@ -279,7 +279,9 @@ def mode_reset(desk: Desk, args, created: list[str]) -> dict:
 
 # ---------------------------------------------------------------- restart drill
 
-PWB_NAME = "printer writing bot"  # compared case-insensitively against bot names; never touched, only looked at
+# The owner's print bot must never lose a job to a restart: looked up by name (case-insensitive), never touched.
+# Override with BOT_OFFICE_DRILL_PROTECTED_BOT; the default is the name this install uses.
+PROTECTED_BOT = os.environ.get("BOT_OFFICE_DRILL_PROTECTED_BOT", " ".join(("printer", "writing", "bot"))).strip().casefold()
 PAUSE_FILE = "PAUSE"
 BUSY = ("queued", "running")
 PROCESS_PATTERN = (r"install\.sh|first_deploy|deploy[\w.-]*\.sh|\bgit\b.* (?:rebase|merge|pull|checkout|reset)\b"
@@ -370,10 +372,10 @@ def restart_blockers(desk: Desk, mine: set[str], mine_idle: bool = False, run=ru
     *mine_idle*: a drill bot's own queued/running job also blocks (the after-finish restart must not hit it)."""
     status, bots = desk.call("GET", "/v1/bots")
     if status != 200 or not isinstance(bots, list) or not all(isinstance(b, dict) and "id" in b for b in bots):
-        return [f"bots api unreadable ({status}): cannot check the Printer Writing Bot"]
-    pwb = {b["id"] for b in bots if PWB_NAME in str(b.get("name", "")).strip().casefold()}
+        return [f"bots api unreadable ({status}): cannot check the protected bot"]
+    pwb = {b["id"] for b in bots if PROTECTED_BOT in str(b.get("name", "")).strip().casefold()}
     if not pwb:
-        return ["Printer Writing Bot not found in the bots list: cannot prove it is idle"]
+        return [f"protected bot {PROTECTED_BOT!r} not found in the bots list: cannot prove it is idle"]
     names = {b["id"]: b.get("name", "?") for b in bots}
     status, jobs = desk.call("GET", "/v1/jobs")
     if status != 200 or not isinstance(jobs, list):
@@ -387,7 +389,7 @@ def restart_blockers(desk: Desk, mine: set[str], mine_idle: bool = False, run=ru
             continue
         bot_id, label = job.get("bot_id"), f"job {str(job.get('id', '?'))[:8]} {job['status']}"
         if bot_id in pwb:
-            blockers.append(f"PRINTER WRITING BOT {label}")
+            blockers.append(f"PROTECTED BOT {label}")
         elif bot_id not in mine or mine_idle:
             blockers.append(f"{label} on {names.get(bot_id, 'a job without a bot')}")
     blockers += routine_blockers(desk, bots, mine, now or datetime.now(UTC))

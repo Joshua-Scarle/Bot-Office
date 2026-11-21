@@ -30,7 +30,7 @@ def test_filler_is_large_deterministic_and_secret_free():
 
 
 TOKEN = "tok-SECRET-0123456789"
-PWB = {"id": "pwb-1", "name": "Printer Writing Bot"}
+PWB = {"id": "pwb-1", "name": drill.PROTECTED_BOT.title()}
 OTHER = {"id": "bot-2", "name": "Ada"}
 MINE = {"id": "drill-1", "name": "ZZ drill e5 restart cursor (safe to delete)"}
 NOON = datetime(2026, 11, 22, 12, 7, tzinfo=UTC)  # 07:07 New York (routines run in New York time)
@@ -90,9 +90,9 @@ def test_clean_state_has_no_blockers(tmp_path):
 
 
 @pytest.mark.parametrize("status", ["queued", "running"])
-def test_printer_writing_bot_job_blocks_by_name(tmp_path, status):
+def test_protected_bot_job_blocks_by_name(tmp_path, status):
     found = blockers(tmp_path, {"GET /v1/jobs": (200, [job("pwb-1", status)])})
-    assert len(found) == 1 and found[0].startswith("PRINTER WRITING BOT")
+    assert len(found) == 1 and found[0].startswith("PROTECTED BOT")
 
 
 def test_other_bot_job_blocks_but_a_drill_bots_own_job_only_blocks_when_asked(tmp_path):
@@ -105,7 +105,7 @@ def test_other_bot_job_blocks_but_a_drill_bots_own_job_only_blocks_when_asked(tm
 
 @pytest.mark.parametrize("replies", [
     {"GET /v1/bots": (500, "boom")}, {"GET /v1/bots": (0, "refused")}, {"GET /v1/bots": (200, {"x": 1})},
-    {"GET /v1/bots": (200, [OTHER, MINE])},  # no Printer Writing Bot to look at
+    {"GET /v1/bots": (200, [OTHER, MINE])},  # no protected bot to look at
     {"GET /v1/jobs": (500, "boom")}, {"GET /v1/jobs": (200, {"jobs": []})}, {"GET /v1/jobs": (200, ["junk"])},
 ])
 def test_unreadable_or_malformed_bots_and_jobs_fail_closed(tmp_path, replies):
@@ -132,7 +132,7 @@ def test_pgrep_failure_and_other_processes_block_and_own_process_is_ignored(tmp_
     assert any("pgrep failed" in b for b in blockers(tmp_path, shell=Shell(pgrep=(2, ""))))
     assert any("pgrep failed" in b for b in blockers(tmp_path, shell=Shell(pgrep=(-1, "no pgrep"))))
     for line in ("4242 bash ./install.sh", "4242 /bin/sh deploy-prod.sh", "4242 git rebase origin/master",
-                 "4242 git -C /home/ubuntu/bot-office merge feature", "4242 systemctl --user restart bot-office",
+                 "4242 git -C /srv/bot-office merge feature", "4242 systemctl --user restart bot-office",
                  "4242 python3 scripts/survival_drill.py restart cursor"):
         assert any(b.startswith("process:") for b in blockers(tmp_path, shell=Shell(pgrep=(0, line + "\n")))), line
     mine = str(drill.os.getpid())
@@ -217,7 +217,7 @@ def test_restart_runs_paused_rechecks_before_systemctl_and_resumes_afterwards(tm
     assert not (tmp_path / "PAUSE").exists()  # resumed afterwards
 
 
-def test_printer_writing_bot_job_appearing_after_the_pause_cancels_the_restart(tmp_path):
+def test_protected_bot_job_appearing_after_the_pause_cancels_the_restart(tmp_path):
     shell = Shell()
     state = {"checks": 0}
 
