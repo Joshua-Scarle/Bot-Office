@@ -103,7 +103,7 @@ from .domain import (
     TextBody,
     Wakeup,
 )
-from .provider_status import ProviderStatusCache
+from .provider_status import ProviderProbeError, ProviderStatusCache
 from .providers.antigravity import AntigravityAdapter
 from .providers.base import ProviderAdapter
 from .providers.claude import ClaudeAdapter
@@ -787,7 +787,10 @@ def create_app(
     @app.get("/v1/providers", response_model=list[ProviderInfo], dependencies=[Depends(auth)])
     async def get_providers(refresh: bool = False) -> list[ProviderInfo]:
         """Engine sign-in status, from a cache (60 s, renewed in the background); ``?refresh=1`` probes now."""
-        return await provider_status.get(refresh=refresh)
+        try:
+            return await provider_status.get(refresh=refresh)
+        except ProviderProbeError as exc:
+            raise HTTPException(status_code=503, detail="could not check the engines just now; try again") from exc
 
     @app.get("/v1/model-choices", response_model=list[EngineChoice], dependencies=[Depends(auth)])
     async def get_model_choices(refresh: bool = False) -> list[EngineChoice]:

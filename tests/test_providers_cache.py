@@ -9,7 +9,9 @@ from fastapi.testclient import TestClient
 
 from botoffice.api import create_app
 from botoffice.domain import ProviderInfo
-from botoffice.provider_status import ProviderStatusCache
+import pytest
+
+from botoffice.provider_status import ProviderProbeError, ProviderStatusCache
 from botoffice.providers.fake import FakeAdapter
 
 H = {"Authorization": "Bearer test-token"}
@@ -105,7 +107,7 @@ def test_refresh_does_not_return_a_probe_that_started_before_it():
         first = asyncio.create_task(cache.get())
         await asyncio.sleep(0.01)
         probe.login = "needs_login"      # the user signed out while the first probe ran
-        clock.now += 1
+        clock.now += 5
         fresh = await cache.get(refresh=True)
         await first
         assert fresh[0].login_status == "needs_login" and probe.calls == 2
@@ -139,28 +141,73 @@ def test_invalidate_during_a_probe_discards_its_answer():
     asyncio.run(go())
 
 
-def test_probe_failure_keeps_the_last_answer():
+def test_background_probe_failure_keeps_the_last_answer():
     async def go():
         cache, probe, clock = make(ttl=60)
         await cache.get()
         probe.fail = True
         clock.now += 61
-        assert (await cache.get())[0].login_status == "ok"
+        assert (await cache.get())[0].login_status == "ok"     # stale answer, renewal fails behind it
         await settle(cache)
-        assert (await cache.get(refresh=True))[0].login_status == "ok"
+        assert (await cache.get())[0].login_status == "ok"     # still served, and it retries next time
         probe.fail = False
         probe.login = "needs_login"
-        assert (await cache.get(refresh=True))[0].login_status == "needs_login"
+        clock.now += 1
+        await cache.get()
+        await settle(cache)
+        assert (await cache.get())[0].login_status == "needs_login"
     asyncio.run(go())
 
 
-def test_first_probe_failure_is_not_cached():
+def test_a_probe_the_caller_waits_for_that_fails_raises_not_stale():
+    async def go():
+        cache, probe, clock = make()
+        await cache.get()
+        probe.fail = True
+        clock.now += 5
+        with pytest.raises(ProviderProbeError):
+            await cache.get(refresh=True)
+        cache.invalidate()
+        with pytest.raises(ProviderProbeError):
+            await cache.get()
+        probe.fail = False
+        assert (await cache.get())[0].login_status == "ok"     # nothing was poisoned
+    asyncio.run(go())
+
+
+def test_first_probe_failure_raises_and_is_not_cached():
     async def go():
         cache, probe, _ = make()
         probe.fail = True
-        assert await cache.get() == []
+        with pytest.raises(ProviderProbeError):
+            await cache.get()
         probe.fail = False
         assert (await cache.get())[0].login_status == "ok"
+    asyncio.run(go())
+
+
+def test_invalidate_during_a_probe_gives_waiters_the_new_answer():
+    async def go():
+        cache, probe, clock = make(Probe(delay=0.05))
+        waiting = asyncio.create_task(cache.get())
+        await asyncio.sleep(0.01)
+        probe.login = "needs_login"
+        cache.invalidate()
+        result = await waiting
+        assert result[0].login_status == "needs_login" and probe.calls == 2
+    asyncio.run(go())
+
+
+def test_refresh_burst_with_a_running_clock_shares_a_probe():
+    async def go():
+        cache, probe, clock = make(Probe(delay=0.05))
+        await cache.get()
+        clock.now += 5
+        first = asyncio.create_task(cache.get(refresh=True))
+        await asyncio.sleep(0.01)
+        clock.now += 0.2                 # the second caller arrives a moment later
+        await asyncio.gather(first, cache.get(refresh=True))
+        assert probe.calls == 2
     asyncio.run(go())
 
 
@@ -243,3 +290,15 @@ def test_api_needs_login_job_invalidates_the_cache(settings):
 def test_api_refresh_requires_auth(settings):
     with TestClient(_app(settings, FakeAdapter())) as client:
         assert client.get("/v1/providers?refresh=1").status_code in (401, 403)
+
+
+def test_api_probe_failure_is_a_503_not_stale_data(settings):
+    fake = FakeAdapter()
+    with TestClient(_app(settings, fake)) as client:
+        client.get("/v1/providers", headers=H)
+        cache = client.app.state.provider_status
+
+        async def broken():
+            raise RuntimeError("boom")
+        cache._probe = broken
+        assert client.get("/v1/providers?refresh=1", headers=H).status_code == 503
