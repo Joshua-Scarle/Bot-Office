@@ -814,6 +814,11 @@ class JobStore:
                 )"""
             )
             db.execute("CREATE INDEX IF NOT EXISTS working_snapshots_bot ON working_snapshots(bot_id, job_id)")
+            # 0.12.18: where a session reset cut a bot's context (messages up to floor are not part of any later
+            # prompt); cleaned=0 until the files (worklog, WORKING.md, ...) are archived (context_reset.py)
+            db.execute("CREATE TABLE IF NOT EXISTS context_resets (bot_id TEXT PRIMARY KEY, floor INTEGER NOT NULL, "
+                       "job_floor INTEGER NOT NULL, gen INTEGER NOT NULL, reset_at TEXT NOT NULL, "
+                       "cleaned INTEGER NOT NULL DEFAULT 0)")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS bot_aliases (alias TEXT PRIMARY KEY, bot_id TEXT NOT NULL)"
             )
@@ -2226,6 +2231,7 @@ class JobStore:
             db.execute("DELETE FROM bot_reads WHERE bot_id=?", (key,))
             self.sections.forget_bot(db, key)
             db.execute("DELETE FROM working_snapshots WHERE bot_id=?", (key,))
+            db.execute("DELETE FROM context_resets WHERE bot_id=?", (key,))
             # 0.11.0: its usage notices, own action rules (global rules have bot_id NULL), approvals and gate log
             for table in ("usage_notices", "action_rules", "approvals", "gate_log"):
                 db.execute(f"DELETE FROM {table} WHERE bot_id=?", (key,))
@@ -2624,6 +2630,7 @@ class JobStore:
     def list_messages(
         self, bot_id: UUID | str, limit: int | None = None, *, include_archived: bool = False,
         up_to: int | None = None, include_progress: bool = True, include_hidden: bool | None = None,
+        after_id: int | None = None,
     ) -> list[Message]:
         """*include_hidden* (default: same as *include_archived*) also returns Bot-Office machinery rows."""
         where = "bot_id=?" + ("" if include_archived else " AND archived_at IS NULL")
@@ -2634,6 +2641,8 @@ class JobStore:
         args: tuple = (str(bot_id),)
         if up_to is not None:
             where, args = where + " AND id<=?", (*args, up_to)
+        if after_id:
+            where, args = where + " AND id>?", (*args, after_id)
         with closing(self._connect()) as db:
             rows = self._message_rows(db, where, args, limit if limit is not None else -1)
             return self._hydrate(db, bot_id, rows)
@@ -2699,9 +2708,10 @@ class JobStore:
 
         Raises EditError(413) when it cannot be seeded in full; nothing is ever dropped.
         """
+        floor = self._context_floor(db, bot_id)  # nothing from before a session reset is seeded back
         rows = db.execute(
-            "SELECT * FROM messages WHERE bot_id=? AND archived_at IS NULL AND kind!='say' AND id<? ORDER BY id",
-            (bot_id, before_id),
+            "SELECT * FROM messages WHERE bot_id=? AND archived_at IS NULL AND kind!='say' AND id<? AND id>? ORDER BY id",
+            (bot_id, before_id, floor),
         ).fetchall()
         messages = [_model(Message, row, ("created_at", "archived_at")) for row in rows]
         chars = len(text) + sum(len(m.text) + 64 for m in messages)
@@ -2732,6 +2742,8 @@ class JobStore:
         row = db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
         if not row or row["bot_id"] != bot_id or row["archived_at"]:
             raise EditError(404, "message not found")
+        if row["id"] <= self._context_floor(db, bot_id):
+            raise EditError(409, "this message is from before the session was reset and cannot be edited")
         if row["steer_job_id"]:
             raise EditError(409, "steering messages cannot be edited")
         if row["role"] != "user" or row["sender"] is not None or row["source"] not in EDITABLE_SOURCES:
@@ -2983,6 +2995,65 @@ class JobStore:
                 db.rollback()
                 raise
         return _model(Message, row, ("created_at", "archived_at"))
+
+    # --- session reset: where the bot's context starts (0.12.18) ---
+
+    @staticmethod
+    def _context_floor(db: sqlite3.Connection, bot_id: str) -> int:
+        row = db.execute("SELECT floor FROM context_resets WHERE bot_id=?", (bot_id,)).fetchone()
+        return row["floor"] if row else 0
+
+    def context_floor(self, bot_id: UUID | str) -> int:
+        """Id of the last message before the bot's latest session reset (0: never reset). Messages up to it
+        stay in the chat the owner sees but are never put into a prompt, history.md or a seed."""
+        with closing(self._connect()) as db:
+            return self._context_floor(db, str(bot_id))
+
+    def context_job_floor(self, bot_id: UUID | str) -> int:
+        """Row id of the newest job when the bot was last reset (0: never): jobs up to it are earlier work."""
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT job_floor FROM context_resets WHERE bot_id=?", (str(bot_id),)).fetchone()
+        return row["job_floor"] if row else 0
+
+    def reset_context(self, bot_id: UUID | str) -> int | None:
+        """Cut the bot's context at its newest message and job, atomically with the check that it has no queued
+        or running job (None: busy, nothing changed). Returns this reset's generation. Also drops what could bring
+        older state back: the WORKING.md snapshots an edit would roll back to and a pending rollback of WORKING.md."""
+        key = str(bot_id)
+        with self.chat_lock, closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if db.execute("SELECT 1 FROM jobs WHERE bot_id=? AND status IN ('queued','running') LIMIT 1",
+                              (key,)).fetchone():
+                    db.rollback()
+                    return None
+                last = db.execute("SELECT COALESCE(MAX(id), 0) FROM messages WHERE bot_id=?", (key,)).fetchone()[0]
+                jobs = db.execute("SELECT COALESCE(MAX(rowid), 0) FROM jobs").fetchone()[0]  # jobs are never deleted
+                before = db.execute("SELECT gen FROM context_resets WHERE bot_id=?", (key,)).fetchone()
+                gen = (before["gen"] if before else 0) + 1
+                db.execute("INSERT INTO context_resets (bot_id, floor, job_floor, gen, reset_at, cleaned) "
+                           "VALUES (?,?,?,?,?,0) ON CONFLICT(bot_id) DO UPDATE SET floor=excluded.floor, "
+                           "job_floor=excluded.job_floor, gen=excluded.gen, reset_at=excluded.reset_at, cleaned=0",
+                           (key, last, jobs, gen, now().isoformat()))
+                db.execute("DELETE FROM working_snapshots WHERE bot_id=?", (key,))
+                # nothing owed from an edit survives: the cleanup archives every session pointer and the floor
+                # bounds any seed, so a pending rewind (an edit whose job never reached a provider) is moot
+                db.execute("UPDATE bots SET working_restore=NULL, session_reset=NULL, rewind_seed=NULL WHERE id=?", (key,))
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return gen
+
+    def context_cleanup_pending(self, bot_id: UUID | str) -> int | None:
+        """The generation of a reset whose files are not archived yet (None: nothing owed)."""
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT gen FROM context_resets WHERE bot_id=? AND cleaned=0", (str(bot_id),)).fetchone()
+        return row["gen"] if row else None
+
+    def complete_context_cleanup(self, bot_id: UUID | str, gen: int) -> None:
+        with closing(self._connect()) as db:
+            db.execute("UPDATE context_resets SET cleaned=1 WHERE bot_id=? AND gen=?", (str(bot_id), gen))
 
     def get_meta(self, key: str) -> str | None:
         with closing(self._connect()) as db:
