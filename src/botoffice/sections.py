@@ -56,7 +56,7 @@ _BLANKS = "\u115f\u1160\u3164\uffa0\u2800"   # invisible fillers that are not fo
 
 
 def _strip_marks(text: str) -> str:
-    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc", "Mn", "Me") and ch not in _BLANKS)
+    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc", "Mn", "Mc", "Me") and ch not in _BLANKS)
 
 
 def reserved_key(name: str) -> str:

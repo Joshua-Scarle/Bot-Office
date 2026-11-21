@@ -55,7 +55,7 @@ EFFORT_MIGRATION = "crewdeck-effort-v1"
 READS_MIGRATION = "reads-seeded-v1"
 AVATARS_MIGRATION = "avatars.default_assigned"
 AVATAR_CHARS_MIGRATION = "avatars.characters_default"      # 0.12.12: generated patterns -> derived characters
-AVATAR_GHOST_BACKUP = "avatars.ghost_backup"              # JSON {bot_id: old "char|ghost|<color>" seed}, to undo the droplet re-key
+AVATAR_GHOST_BACKUP = "avatars.ghost_backup"              # JSON {bot_id: [old "char|ghost|<color>" seeds, oldest first]}, to undo the droplet re-key
 AVATAR_PATTERN_BACKUP = "avatars.pattern_backup"            # JSON {bot_id: old pattern seed}, to undo that migration
 # 0.9.0: Grok bridge rate/hop state moved from JSON files into SQLite (imported once)
 BRIDGE_IMPORT = "bridge_json_import"
@@ -1171,7 +1171,7 @@ class JobStore:
                 found = db.execute("SELECT value FROM meta WHERE key=?", (AVATAR_GHOST_BACKUP,)).fetchone()
                 backup = json.loads(found[0]) if found else {}
                 for bot_id, (old, new) in changes.items():
-                    backup.setdefault(bot_id, old)
+                    backup.setdefault(bot_id, []).append(old)       # oldest first: a rollback and re-upgrade adds to it
                     db.execute("UPDATE bots SET avatar_seed=? WHERE id=?", (new, bot_id))
                 db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (AVATAR_GHOST_BACKUP, json.dumps(backup)))
             db.commit()

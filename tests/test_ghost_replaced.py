@@ -62,16 +62,16 @@ def test_startup_migration_rekeys_ghost_keeps_color_is_idempotent_and_touches_no
         assert changed <= {"avatar_seed"}, changed
     with sqlite3.connect(path) as db:
         backup = json.loads(db.execute("SELECT value FROM meta WHERE key='avatars.ghost_backup'").fetchone()[0])
-        assert backup == {str(a.id): "char|ghost|yellow", str(b.id): "char|ghost|slate"}
+        assert backup == {str(a.id): ["char|ghost|yellow"], str(b.id): ["char|ghost|slate"]}
     JobStore(path)                                                # a no-op start leaves the backup as it was
     with sqlite3.connect(path) as db:
         assert json.loads(db.execute("SELECT value FROM meta WHERE key='avatars.ghost_backup'").fetchone()[0]) == backup
-    # rollback to 0.12.12 and back: old code could store a ghost again; the next start re-keys it, keeping the first backup
+    # rollback to 0.12.12 and back: old code could store a ghost again; the next start re-keys it, the backup keeps both values
     with sqlite3.connect(path) as db:
         db.execute("UPDATE bots SET avatar_seed='char|ghost|cyan' WHERE id=?", (str(a.id),))
     assert JobStore(path).get_bot(a.id).avatar_seed == "char|droplet|cyan"
     with sqlite3.connect(path) as db:
-        assert json.loads(db.execute("SELECT value FROM meta WHERE key='avatars.ghost_backup'").fetchone()[0])[str(a.id)] == "char|ghost|yellow"
+        assert json.loads(db.execute("SELECT value FROM meta WHERE key='avatars.ghost_backup'").fetchone()[0])[str(a.id)] == ["char|ghost|yellow", "char|ghost|cyan"]
 
 
 def test_page_draws_droplet_reads_ghost_as_droplet_and_has_no_ghost_body():
