@@ -108,7 +108,7 @@ from .providers.codex import CodexAdapter
 from .providers.cursor import CursorAdapter
 from .providers.grok import GrokAdapter
 from .providers.opencode import OpenCodeAdapter
-from .scheduler import Scheduler
+from .scheduler import Scheduler, on_terminate
 from .store import EditError, JobStore
 from .turns import TurnError
 from .watchers import BODY_LIMIT as WATCHER_BODY_LIMIT
@@ -478,6 +478,7 @@ def create_app(
         store.initialize()
         await asyncio.to_thread(attachments.prune, settings.data_dir, store.attachment_references())
         await scheduler.start()
+        on_terminate(scheduler.begin_shutdown)
         reaper = asyncio.create_task(reap_voice(), name="botoffice-voice-reaper")
         yield
         reaper.cancel()
