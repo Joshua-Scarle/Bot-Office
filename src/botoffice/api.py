@@ -2597,6 +2597,10 @@ def create_app(
                         "ssh/scp/rsync to hosts, publish/push of packages and images, MCP tools",
             "destructive": "sudo, systemctl, crontab, podman rm/stop/kill, git reset --hard / clean, rm -r outside the "
                            "workspace, writes to ~/.ssh, ~/.config/systemd, shell profiles, /etc, the Bot-Office repo",
+            "nested-agent": "another agent CLI (claude, codex, opencode, gemini, cursor-agent, aider) started with its "
+                            "permission checks off (--permission-mode bypassPermissions, --dangerously-skip-permissions, "
+                            "--yolo, --full-auto, -a never, -s danger-full-access...); your outbound and destructive "
+                            "rules also govern it",
             "secrets": "the controller token, database, bridge config, private dir and other bots' dirs (always never)",
             "network": "strict-profile Codex runs get network only with a 'network' allow rule; without one "
                        "they start only if scripts/probe_gate.sh codex proved bot-task reaches Bot-Office "

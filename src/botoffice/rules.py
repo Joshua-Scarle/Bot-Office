@@ -9,6 +9,10 @@ asks ``POST /v1/agent/gate`` and this module decides:
   destructive presets for trigger runs.
 - presets ``outbound`` and ``destructive``: ask in runs under the strict unattended profile, allow
   otherwise.
+- preset ``nested-agent`` (0.12.18, B8): another agent CLI started with its permission checks off
+  (nested_agents.py); the ``outbound`` and ``destructive`` rules also match it.
+- a run nobody watches (UNATTENDED_SOURCES) is also judged by the other scope's never and ask rules
+  (0.12.18, B11): scheduling a run never pre-authorises what it does.
 
 The strict profile (release gate, no CLI bypass, outbound/destructive ask) applies to ``trigger``
 (watcher) runs always, and to routine, wake-up, assignment and bot-to-bot inbox runs only for a
@@ -40,7 +44,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from . import git_guard, github_access
+from . import git_guard, github_access, nested_agents
 from .domain import Job
 from .store import JobStore, now
 
@@ -52,7 +56,7 @@ SCHEDULED_RUNS = ("full", "gated")
 EFFECTS = ("ask", "allow", "never")
 KINDS = ("shell", "path", "domain", "preset", "tool")
 SCOPES = ("attended", "unattended", "all")
-PRESETS = ("outbound", "destructive", "secrets", "network")
+PRESETS = ("outbound", "destructive", "secrets", "network", nested_agents.PRESET)
 GRANT_HOURS = 24
 PASS_SECONDS = 600
 PATTERN_LIMIT = 500
@@ -296,6 +300,9 @@ def presets_hit(action: Action) -> list[str]:
     hits: list[str] = []
     command = action.command
     tool = action.tool.lower()
+    if command and len(command) <= COMMAND_LIMIT and nested_agents.bypass_launch(command):
+        # B8: another agent CLI with its permission checks off; first, so the card names it
+        hits.append(nested_agents.PRESET)
     if len(command) > COMMAND_LIMIT:
         # too long to scan in bounded time: treated as both (asks under the strict profile)
         hits += ["outbound", "destructive"]
@@ -321,7 +328,9 @@ def _rule_matches(rule: sqlite3.Row, action: Action, hits: list[str]) -> bool:
     kind, pattern = rule["kind"], rule["pattern"]
     try:
         if kind == "preset":
-            return pattern in hits
+            # B8: a nested agent with its permission checks off can do anything outbound or
+            # destructive, so the bot's rules for those govern it too
+            return pattern in hits or (pattern in ("outbound", "destructive") and nested_agents.PRESET in hits)
         if kind == "shell":
             return bool(action.command) and re.search(pattern, action.command) is not None
         if kind == "path":
@@ -459,9 +468,17 @@ class Rules:
         if marker:
             return "never", "secrets", f"protected path ({marker})"
         hits = presets_hit(action)
+        scope = "unattended" if unattended else "attended"
         with closing(self.store._connect()) as db:
-            rules = [rule for rule in self._rules(db, bot_id, "unattended" if unattended else "attended")
-                     if _rule_matches(rule, action, hits)]
+            rules = [rule for rule in self._rules(db, bot_id, scope) if _rule_matches(rule, action, hits)]
+            if (job.source or "api") in UNATTENDED_SOURCES:
+                # B11: a wake-up, routine, assignment, inbox or trigger run has nobody watching, whichever
+                # profile it runs under, so the other scope's never and ask rules judge it too (the
+                # strictest wins: never > ask > allow; only its own scope's allow rules open anything).
+                # Scheduling a run never pre-authorises what it does.
+                other = "attended" if unattended else "unattended"
+                rules += [rule for rule in self._rules(db, bot_id, other)
+                          if rule["effect"] != "allow" and rule["scope"] == other and _rule_matches(rule, action, hits)]
         effects = {rule["effect"] for rule in rules}
         preset = hits[0] if hits else None
         if "never" in effects:

@@ -316,8 +316,20 @@ UNATTENDED_RULE = (
     "BOT-OFFICE-STATUS: done — nothing new.")
 
 
+# 0.12.18 (B11): a scheduled run starts with no approval from the turn that scheduled it (the gate
+# judges it by the bot's rules at fire time; this line only tells the bot so)
+SCHEDULED_RULE = {
+    "wakeup": (" This run was started by a scheduled wake. Earlier approvals do not carry over; any send or "
+               "destructive action needs a fresh approval."),
+    "routine": (" This run was started by a scheduled routine. Earlier approvals do not carry over; any send "
+                "or destructive action needs a fresh approval."),
+}
+
+
 def _reply_rule(job: Job) -> str:
-    return _base_reply_rule(job) + (UNATTENDED_RULE if job.source in UNATTENDED_SOURCES else "")
+    return (_base_reply_rule(job) + (UNATTENDED_RULE if job.source in UNATTENDED_SOURCES else "")
+            # a resume turn after an approval (it names its origin) does hold that one grant
+            + ("" if job.origin_job_id else SCHEDULED_RULE.get(job.source or "", "")))
 
 
 def _base_reply_rule(job: Job) -> str:
