@@ -30,6 +30,7 @@ from .cron import cron_matches, to_cron_time
 from .domain import Bot, Job, JobStatus, Routine
 from .memory import MAX_MEMORY_BYTES, Memory, Merge
 from .providers.base import ProviderAdapter, RunResult
+from .context_reset import reconcile_context
 from .providers.cli import REPO_BIN, SESSION_ENGINES, CliAdapter, archive_session
 from .rules import Rules, gate_state, github_token, github_token_path, helpers_reachable, is_unattended
 from .store import JobStore, RoutineChanged, now
@@ -610,6 +611,7 @@ class Scheduler:
             if bot:
                 bot_dir = self.memory.bot_dir(bot.id)
                 state = isolation.state_dir(bot_dir)  # pointers, marker, snapshots
+                reconcile_context(self.store, self.memory, bot.id, self.providers)  # an owed reset cleanup, before any prompt
                 marker = state / ".handoff-pending"
                 effective_job = job.model_copy(update={"cli_access": bot.cli_access})
                 can_resume = getattr(adapter, "_can_resume", lambda job: True)(effective_job)

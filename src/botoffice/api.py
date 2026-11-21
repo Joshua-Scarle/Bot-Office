@@ -112,6 +112,7 @@ from .providers.codex import CodexAdapter
 from .providers.cursor import CursorAdapter
 from .providers.grok import GrokAdapter
 from .providers.opencode import OpenCodeAdapter
+from .context_reset import reconcile_context
 from .scheduler import Scheduler, on_terminate
 from .store import EditError, JobStore
 from .turns import TurnError
@@ -1051,19 +1052,22 @@ def create_app(
         return _with_status([store.bot_unread(bot_id) or updated])[0]
 
     def _reset_session(bot: Bot) -> dict[str, list[str]]:
-        if any(j.bot_id == bot.id and j.status in {JobStatus.QUEUED, JobStatus.RUNNING} for j in store.list()):
+        if store.reset_context(bot.id) is None:  # cuts the chat context; refuses a bot with a queued or running job
             raise HTTPException(status_code=409, detail="bot is busy; reset after its current job")
-        bot_dir = memory.bot_dir(bot.id)
-        reset = [name for name, adapter in providers.items()
-                 if hasattr(adapter, "reset_session") and adapter.reset_session(bot_dir)]
+        try:  # session pointers, worklog, WORKING.md, engine work dirs: archived, not deleted
+            reset = reconcile_context(store, memory, bot.id, providers)
+        except OSError as exc:  # the reset is recorded and no job of this bot runs until the cleanup has finished
+            raise HTTPException(status_code=500, detail=f"reset recorded, cleanup pending ({exc}); retry the reset") from exc
         return {"reset": reset}
 
     @app.post("/v1/bots/{bot_id}/session/reset", dependencies=[Depends(auth)])
     async def reset_bot_session(bot_id: UUID) -> dict[str, list[str]]:
         """Forget the bot's saved provider sessions; its next turn starts one fresh session.
 
-        Chat history, memory.md and WORKING.md are kept (the fresh session is seeded with
-        WORKING.md and the last few messages). Refused while the bot has a queued or running job.
+        Bot-Office puts no earlier chat, history.md, worklog, WORKING.md or earlier job directory into the
+        next prompt (the files are archived under the bot's reset-archive/, not deleted; old job directories
+        stay on disk like all of data/). Kept: the owner's chat view, memory.md, instructions, the task list
+        and files already in the bot's attachments. Refused while the bot has a queued or running job.
         """
         return _reset_session(_bot(bot_id))
 
@@ -1098,7 +1102,7 @@ def create_app(
                     raise HTTPException(status_code=409, detail={
                         "confirm_required": True,
                         "message": f"Start a fresh {bot.default_provider} session for {bot.name}? "
-                                   "Chat history, memory and WORKING.md are kept."})
+                                   "Your chat view, memory and tasks are kept; the bot is no longer shown the earlier chat, its WORKING.md or worklog."})
                 return {"action": "map", "target": target, **_reset_session(bot)}
             return {"action": "map", "target": target, "args": args}
         mode = {"run": "raw", "command": "command", "expand": "expand"}[action]

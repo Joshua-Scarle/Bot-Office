@@ -585,7 +585,7 @@ def _image_index(store: JobStore, bot: Bot) -> dict[int, list[str]]:
     """Write INDEX.md for sent and received images; return message id -> stable paths."""
     rows, by_message = [], {}
     root = attachments.directory(store.path.parent, bot.id)
-    for m in store.list_messages(bot.id, include_archived=True):
+    for m in store.list_messages(bot.id, include_archived=True, after_id=store.context_floor(bot.id)):
         for name in m.attachments:
             folder = attachments.folder_for(store.path.parent, bot.id, name) if attachments.is_valid_id(name) else None
             if folder is not None and (folder / name).is_file():
@@ -745,7 +745,8 @@ def self_extra(store: JobStore, bot: Bot, job: Job, working: str, moment: dateti
         if len(match.encode()) <= 120 and match not in paths:
             paths.append(match)
     with contextlib.closing(store._connect()) as db:
-        rows = db.execute("SELECT id FROM jobs WHERE bot_id=? AND id!=? ORDER BY created_at DESC, id DESC LIMIT 2", (str(bot.id), str(job.id))).fetchall()
+        rows = db.execute("SELECT id FROM jobs WHERE bot_id=? AND id!=? AND rowid>? ORDER BY created_at DESC, id DESC LIMIT 2",
+                          (str(bot.id), str(job.id), store.context_job_floor(bot.id))).fetchall()  # not before a session reset
     dirs = [str(data_dir / 'workspaces' / row['id']) for row in rows]
     not_started = sum(task.status == "open" for task in tasks)
     counts = f"{len(tasks) - not_started} in progress or waiting, {not_started} not started (see prompt; `bot-task list`)"
@@ -793,7 +794,8 @@ def prepare_bot_workspace(
         if current and current.steer_status == "queued":
             # a steer turned into a queued turn also sees the reply of the turn it was sent into
             upto = max(upto, store.steered_reply_id(current) or 0)
-        messages = store.list_messages(bot.id, HISTORY_LIMIT, up_to=upto, include_progress=False)
+        messages = store.list_messages(bot.id, HISTORY_LIMIT, up_to=upto, include_progress=False,
+                                       after_id=store.context_floor(bot.id))  # nothing from before a session reset
         by_message = {}
     indexed = _image_index(store, bot)
     by_message = {**indexed, **by_message}
