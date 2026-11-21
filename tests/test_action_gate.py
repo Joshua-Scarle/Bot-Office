@@ -288,7 +288,7 @@ def run_gate(args, event, env):
 
 def test_gate_script_fail_modes():
     dead = {"BOT_OFFICE_AGENT_TOKEN": "t", "BOT_OFFICE_API_URL": "http://127.0.0.1:9"}
-    # Joshua's own CLI (no token, no mode): no-op
+    # the owner's own CLI (no token, no mode): no-op
     assert run_gate(["claude"], bash("git push"), {})[0] == 0
     # unattended without a token, or with the controller unreachable: fail closed
     code, _, err = run_gate(["claude", "--mode", "unattended"], bash("ls"), {})

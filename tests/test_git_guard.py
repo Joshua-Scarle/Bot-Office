@@ -121,8 +121,8 @@ GH_AND_API = [
 DELETES = [
     "rm /etc/hosts", "rm -rf /srv/shared", "rm -rf ~/project", "rm -rf ~", "rm -rf $HOME/x", "rm -rf ../other", "rm -r ../../x",
     "rm -rf /tmp/x", "rm /srv/bots/ada/other/file", "rm -rf /", "rm -rf -- /var/x", "rm -f /root/.bashrc", "rm -rf \"$TMPDIR/x\"",
-    "rm -rf $(dirname $0)/..", "rm $(find / -name x)", "unlink /etc/x", "rmdir /srv/x", "shred -u /home/x/secret", "trash-put /home/u/x",
-    "gio trash /home/u/x", "find /srv -name '*.log' -delete", "find / -type f -exec rm {} \\;", "find .. -delete", "find ~ -name x -delete",
+    "rm -rf $(dirname $0)/..", "rm $(find / -name x)", "unlink /etc/x", "rmdir /srv/x", "shred -u /var/x/secret", "trash-put /var/u/x",
+    "gio trash /var/u/x", "find /srv -name '*.log' -delete", "find / -type f -exec rm {} \\;", "find .. -delete", "find ~ -name x -delete",
     "cd /etc && rm passwd", "cd .. && rm -rf other", "cd ~ && rm x", "cd \"$OLD\" && rm x", "pushd /srv && rm x",
     "rsync -a --delete src/ host:/srv/x/", "rsync -a --delete ./a/ /srv/b/", "rsync --remove-source-files /srv/a ./b",
     "mv /srv/shared/data /dev/null", "sudo rm -rf /srv/x", "sh -c 'rm -rf /srv/x'", "echo y | rm -r /var/x",
@@ -443,7 +443,7 @@ def test_the_hook_refuses_a_guarded_command_when_the_controller_cannot_be_asked(
     # everything else still fails open when attended
     assert run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("git push origin feature", WORK), dead)[0] == 0
     assert run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("ls", WORK), dead)[0] == 0
-    # Joshua's own CLI (no token, no mode): untouched
+    # the owner's own CLI (no token, no mode): untouched
     assert run_script("bot-office-gate", ["claude"], bash("git push origin main", WORK), {})[0] == 0
 
 
