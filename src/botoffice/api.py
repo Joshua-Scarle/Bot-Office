@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import approval_classes, attachments, avatars, baseline, continuation, grok_bridge, health, isolation, needs_you, safefs, vnc
+from . import approval_classes, attachments, avatars, baseline, continuation, grok_bridge, health, isolation, needs_you, notify, safefs, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -189,9 +189,20 @@ class ApprovalsBody(BaseModel):
     timeout_min: int | None = Field(default=None, ge=0)
 
 
+class NotificationsBody(BaseModel):
+    """Email classes (0.12.11): each toggle is optional; missing keys keep their value."""
+    model_config = ConfigDict(extra="forbid")
+    needs_you: bool | None = None
+    failed: bool | None = None
+    outage: bool | None = None
+    backup: bool | None = None
+    done: bool | None = None
+
+
 class SettingsBody(BaseModel):
     auto_continue: AutoContinueBody | None = None
     approvals: ApprovalsBody | None = None
+    notifications: NotificationsBody | None = None
 
 
 class AgentMessageCreate(BaseModel):
@@ -495,15 +506,21 @@ def create_app(
             with contextlib.suppress(Exception):
                 await voice.reap_idle()
 
+    notifier = notify.Notifier(store)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store.initialize()
         await asyncio.to_thread(attachments.prune, settings.data_dir, store.attachment_references())
         await scheduler.start()
+        pusher = asyncio.create_task(notifier.run(), name="botoffice-notify")
         warm = asyncio.create_task(provider_status.warm(), name="botoffice-provider-warm")
         on_terminate(scheduler.begin_shutdown)
         reaper = asyncio.create_task(reap_voice(), name="botoffice-voice-reaper")
         yield
+        pusher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pusher
         warm.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await warm
@@ -1463,7 +1480,8 @@ def create_app(
                 "auto_continue_chat_limit": continuation.chat_limit(auto),
                 "auto_continue_defaults": continuation.defaults(),
                 "approvals": {**approval_classes.settings(store), "gates": gates,
-                              "unpausable_bots": approval_classes.unpausable_bots(store)}}
+                              "unpausable_bots": approval_classes.unpausable_bots(store)},
+                "notifications": {"email": notify.get_prefs(store), "configured": notifier.configured}}
 
     @app.put("/v1/settings", dependencies=[Depends(auth)])
     async def put_settings(body: SettingsBody) -> dict[str, object]:
@@ -1475,6 +1493,8 @@ def create_app(
                 baseline.set_auto_continue(store, maximum=changes.pop("max", None), **changes)
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if body.notifications is not None:
+            notify.set_prefs(store, body.notifications.model_dump())
         if body.approvals is not None:
             change = body.approvals
             try:

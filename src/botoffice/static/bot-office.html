@@ -582,6 +582,16 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <p class="muted">A message from you or Stop ends the run, and a bot also stops when it says it is blocked or needs you. Continuations run quietly: the bot stays "Working" in the chat. Automatic turns are chat continuations, assignment steps and checks, and wake-ups; your own messages, Start and Reply, and routines are not counted. A bot over a cap waits instead of dropping work, and its chat and Needs you say which cap. Assignments also keep their own turn budget (20 turns by default). Chat-only bots (set in a bot's dialog) never continue.</p>
       <div class="tools-bar"><button id="behavior-save" type="button" class="primary">Save</button><span id="behavior-state" class="muted" role="status"></span></div>
     </section>
+    <section class="settings-section" id="set-notify" aria-labelledby="set-notify-title">
+      <h3 id="set-notify-title">Email notifications</h3>
+      <p class="muted">Bot Office can email you through its external watchdog (set up on the server; see the README). The mail carries only counts, bot names, job ids and a short reason, never message text. One mail per kind, and a digest when several arrive together. <span id="notify-configured" class="muted" role="status"></span></p>
+      <label class="check"><input id="notify-needs_you" type="checkbox"> A new item needs you</label>
+      <label class="check"><input id="notify-failed" type="checkbox"> A bot's turn failed</label>
+      <label class="check"><input id="notify-outage" type="checkbox"> The server or controller is down or not answering</label>
+      <label class="check"><input id="notify-backup" type="checkbox"> The nightly backup failed or is overdue</label>
+      <label class="check"><input id="notify-done" type="checkbox"> A summary of finished turns (off by default)</label>
+      <div class="tools-bar"><button id="notify-save" type="button" class="primary">Save</button><span id="notify-state" class="muted" role="status"></span></div>
+    </section>
     <section class="settings-section" id="set-approvals" aria-labelledby="set-approvals-title">
       <h3 id="set-approvals-title">Approvals</h3>
       <p class="muted">Bots work on their own and rarely ask. Turn on the kinds of action you want done, but not without your yes. When a bot tries one, it pauses that one step and its chat shows an Approve / Deny card.</p>
@@ -4345,6 +4355,12 @@ function showLayer(prefix, data) {
   $(prefix + "-state").textContent = data.customized ? "Customized" : "Default";
   $(prefix + "-reset").disabled = !data.customized;
 }
+const NOTIFY_KEYS = ["needs_you", "failed", "outage", "backup", "done"];
+function showNotify(data) {
+  const note = data.notifications || {email: {}, configured: false};
+  for (const key of NOTIFY_KEYS) $("notify-" + key).checked = !!note.email[key];
+  $("notify-configured").textContent = note.configured ? "" : "The watchdog is not configured on this server, so no mail is sent yet.";
+}
 function showBehavior(data) {
   const auto = data.auto_continue;
   $("auto-continue").checked = !!auto.enabled;
@@ -4413,7 +4429,7 @@ async function loadSettings() {
   const [rules, system, settings, engines] = await Promise.all([
     api("/v1/rules-for-all-bots"), api("/v1/system-prompt"), api("/v1/settings"),
     api("/v1/providers").catch(() => [])]);
-  showLayer("rules", rules); showLayer("system", system); showBehavior(settings); showApprovals(settings.approvals);
+  showLayer("rules", rules); showLayer("system", system); showBehavior(settings); showNotify(settings); showApprovals(settings.approvals);
   showEngines(engines);
 }
 function showEngines(engines) {
@@ -4461,6 +4477,13 @@ $("behavior-save").onclick = async () => {
     showBehavior(await api("/v1/settings", {method: "PUT", body: JSON.stringify({auto_continue})}));
     $("behavior-state").textContent = "Saved.";
   } catch (e) { $("behavior-state").textContent = e.message; }
+};
+$("notify-save").onclick = async () => {
+  const notifications = Object.fromEntries(NOTIFY_KEYS.map((key) => [key, $("notify-" + key).checked]));
+  try {
+    showNotify(await api("/v1/settings", {method: "PUT", body: JSON.stringify({notifications})}));
+    $("notify-state").textContent = "Saved.";
+  } catch (e) { $("notify-state").textContent = e.message; }
 };
 $("approvals-save").onclick = () => {
   const enabled = {};
