@@ -816,7 +816,8 @@ class Scheduler:
                     try:
                         text, ids = attachments.collect_outgoing(
                             self.settings.data_dir, sender.id, workspace, audit, text,
-                            self.store.attachment_references(), source_bot_id=target.id)
+                            self.store.attachment_references(), source_bot_id=target.id,
+                            private_dir=self.settings.private_dir)
                     except Exception:
                         log.exception("Could not collect images for the inbox copy of job %s", job.id)
                 # dropped if the sender's ask ("to <target>" row of this job) was archived by an edit
@@ -1016,7 +1017,7 @@ class Scheduler:
         try:
             text, ids = attachments.collect_outgoing(
                 self.settings.data_dir, job.bot_id, workspace, audit, text,
-                self.store.attachment_references(),
+                self.store.attachment_references(), private_dir=self.settings.private_dir,
             )
         except Exception:
             log.exception("Could not collect outgoing images for job %s", job.id)
