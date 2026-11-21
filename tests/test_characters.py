@@ -78,7 +78,7 @@ def test_character_catalog_and_page_lists_agree(client):
     cat = client.get("/v1/avatar-characters", headers=H).json()
     assert cat["shapes"] == list(avatars.CHAR_SHAPES) and cat["colors"] == list(avatars.CHAR_COLORS)
     assert cat["expressions"] == list(avatars.CHAR_EXPRESSIONS)
-    assert len(cat["shapes"]) * len(cat["colors"]) == 80
+    assert len(cat["shapes"]) * len(cat["colors"]) == 120
     shapes = re.search(r"const CHAR_SHAPES = (\[[^\]]*\])", PAGE).group(1)
     assert json.loads(shapes) == cat["shapes"]
     colors = re.search(r"const CHAR_COLORS = \{(.*?)\};", PAGE, re.S).group(1)
@@ -193,7 +193,7 @@ for (const shape of CHAR_SHAPES) for (const color of Object.keys(CHAR_COLORS)) f
 }
 console.log(n);
 ''')
-    assert out.strip() == str(8 * 10 * 6)
+    assert out.strip() == str(len(avatars.CHAR_SHAPES) * 10 * 6)
 
 
 def test_picker_is_a_keyboard_radio_group():
@@ -202,7 +202,7 @@ def test_picker_is_a_keyboard_radio_group():
 
 def test_markup_and_css_for_characters():
     assert 'id="f-kind"' in PAGE and 'role="radiogroup"' in PAGE
-    for kind in ("emoji", "character", "upload", "pattern"):
+    for kind in ("emoji", "character", "upload"):
         assert f'data-kind="{kind}"' in PAGE and f'data-panel="{kind}"' in PAGE
     assert 'id="f-char-shapes"' in PAGE and 'id="f-char-colors"' in PAGE and 'id="head-dot"' in PAGE
     # motion only when the user has not asked for less

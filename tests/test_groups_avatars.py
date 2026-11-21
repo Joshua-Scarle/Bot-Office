@@ -345,3 +345,153 @@ def test_very_wide_jpeg_is_refused_after_the_reduced_decode(client, monkeypatch)
     bot = mk(client, "Wide")
     monkeypatch.setattr(avatars, "MAX_UPLOAD_PIXELS", 100_000)
     assert client.put(f"/v1/bots/{bot['id']}/icon", headers=H, content=image_bytes("JPEG", (6000, 300))).status_code == 413
+
+
+# ---------------------------------------------------------------- Hidden (0.12.11)
+def hidden(client):
+    return layout(client)["hidden"]
+
+
+def test_hidden_section_always_exists_collapsed_and_is_not_a_regular_section(client):
+    lay = layout(client)
+    assert lay["hidden"] == {"id": "hidden", "name": "Hidden", "builtin": True, "collapsed": True, "bot_ids": []}
+    assert lay["sections"] == []                                    # not in the reorderable list
+    assert client.patch("/v1/sections/hidden", headers=H, json={"collapsed": False}).json()["collapsed"] is False
+    assert hidden(client)["collapsed"] is False
+
+
+def test_hidden_cannot_be_renamed_deleted_or_reordered_and_its_name_is_reserved(client):
+    assert client.patch("/v1/sections/hidden", headers=H, json={"name": "Nope"}).status_code == 409
+    assert client.delete("/v1/sections/hidden", headers=H).status_code == 409
+    for name in ("Hidden", "hidden", "HIDDEN", " hidden ", "Ｈidden", "Hid​den", "hİdden".replace("İ", "i")):
+        assert client.post("/v1/sections", headers=H, json={"name": name}).status_code == 409, name
+    other = client.post("/v1/sections", headers=H, json={"name": "Work"}).json()["id"]
+    assert client.patch(f"/v1/sections/{other}", headers=H, json={"name": "HiDdEn"}).status_code == 409
+    assert client.put("/v1/sections/order", headers=H, json={"ids": ["hidden", other]}).status_code == 200   # ignored, not an error
+    assert [s["id"] for s in layout(client)["sections"]] == [other] and hidden(client)["name"] == "Hidden"
+    assert client.post("/v1/sections", headers=H, json={"name": "Hidden stuff"}).status_code == 201
+
+
+def test_hide_and_unhide_a_bot_through_the_move_route_and_survive_a_restart(settings):
+    with TestClient(create_app(settings, {"codex": FakeAdapter()})) as c:
+        a, b = mk(c, "A")["id"], mk(c, "B")["id"]
+        r = c.put(f"/v1/bots/{a}/section", headers=H, json={"section_id": "hidden", "index": 0})
+        assert r.status_code == 200 and r.json()["hidden"]["bot_ids"] == [a]
+        assert a not in r.json()["ungrouped"]["bot_ids"] and b in r.json()["ungrouped"]["bot_ids"]
+        c.put(f"/v1/bots/{a}/section", headers=H, json={"section_id": "hidden", "index": 0})   # twice: no duplicate
+        assert hidden(c)["bot_ids"] == [a]
+        c.patch("/v1/sections/hidden", headers=H, json={"collapsed": False})
+    with TestClient(create_app(settings, {"codex": FakeAdapter()})) as c:                    # restart
+        lay = layout(c)
+        assert lay["hidden"]["bot_ids"] == [a] and lay["hidden"]["collapsed"] is False and lay["sections"] == []
+        assert c.get("/v1/bots", headers=H).json() and {x["id"] for x in c.get("/v1/bots", headers=H).json()} >= {a, b}
+        r = c.put(f"/v1/bots/{a}/section", headers=H, json={"section_id": None, "index": 0})
+        assert r.json()["hidden"]["bot_ids"] == [] and a in r.json()["ungrouped"]["bot_ids"]
+
+
+def test_hidden_membership_moves_between_sections_and_hidden_and_a_deleted_section_keeps_hidden_bots(client):
+    a, b = mk(client, "A")["id"], mk(client, "B")["id"]
+    s = client.post("/v1/sections", headers=H, json={"name": "Work"}).json()["id"]
+    client.put(f"/v1/bots/{a}/section", headers=H, json={"section_id": s, "index": 0})
+    client.put(f"/v1/bots/{b}/section", headers=H, json={"section_id": s, "index": 1})
+    client.put(f"/v1/bots/{a}/section", headers=H, json={"section_id": "hidden", "index": 0})
+    lay = layout(client)
+    assert lay["sections"][0]["bot_ids"] == [b] and lay["hidden"]["bot_ids"] == [a]
+    assert client.delete(f"/v1/sections/{s}", headers=H).status_code == 200
+    lay = layout(client)
+    assert lay["hidden"]["bot_ids"] == [a] and lay["ungrouped"]["bot_ids"] == [b]
+
+
+def test_seed_hidden_in_one_call_replaces_the_set_and_validates(client):
+    a, b, c = (mk(client, n)["id"] for n in "ABC")
+    r = client.put("/v1/sections/hidden/members", headers=H, json={"bot_ids": [a, b, a]})
+    assert r.status_code == 200 and r.json()["hidden"]["bot_ids"] == [a, b]
+    assert c in r.json()["ungrouped"]["bot_ids"] and a not in r.json()["ungrouped"]["bot_ids"]
+    r = client.put("/v1/sections/hidden/members", headers=H, json={"bot_ids": [b]})
+    assert r.json()["hidden"]["bot_ids"] == [b] and a in r.json()["ungrouped"]["bot_ids"]
+    bad = client.put("/v1/sections/hidden/members", headers=H, json={"bot_ids": [b, "00000000-0000-0000-0000-000000000000"]})
+    assert bad.status_code == 404 and hidden(client)["bot_ids"] == [b]                       # all or nothing
+    assert client.put("/v1/sections/hidden/members", headers=H, json={"bot_ids": ["nope"]}).status_code == 422
+    assert client.put("/v1/sections/hidden/members", json={"bot_ids": []}).status_code == 401
+    assert client.put("/v1/sections/hidden/members", headers=H, json={"bot_ids": []}).json()["hidden"]["bot_ids"] == []
+
+
+def test_deleting_a_hidden_bot_cleans_its_membership(client):
+    a = mk(client, "A")["id"]
+    client.put(f"/v1/bots/{a}/section", headers=H, json={"section_id": "hidden", "index": 0})
+    assert client.delete(f"/v1/bots/{a}", headers=H).status_code == 204
+    assert hidden(client)["bot_ids"] == []
+
+
+def test_hidden_startup_is_idempotent_repairs_the_name_and_moves_a_clashing_section(settings):
+    path = settings.data_dir / "agentdesk.sqlite3"
+    store = JobStore(path)
+    with sqlite3.connect(path) as db:                               # older code could rename or delete it, a user could have made "Hidden"
+        db.execute("DELETE FROM bot_sections WHERE id='hidden'")
+        db.execute("INSERT INTO bot_sections (id, name, position, collapsed, created_at) VALUES ('mine','Hidden',0,0,'x')")
+    for _ in range(3):
+        again = JobStore(path)
+    lay = again.sections.layout()
+    assert lay["hidden"]["name"] == "Hidden" and lay["hidden"]["collapsed"] is True
+    assert [s["name"] for s in lay["sections"]] == ["Hidden (old)"]
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE bot_sections SET name='Renamed', collapsed=0 WHERE id='hidden'")
+    assert JobStore(path).sections.layout()["hidden"]["name"] == "Hidden"
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM bot_sections WHERE id='hidden'").fetchone()[0] == 1
+    del store
+
+
+def test_a_hidden_bot_still_runs_its_jobs_and_is_listed_everywhere(settings):
+    """Hiding is only sidebar placement: the scheduler's claim, the bot list and the bot's own routes ignore it."""
+    from botoffice.scheduler import Scheduler
+    settings.ensure_dirs()
+    store = JobStore(settings.data_dir / "agentdesk.sqlite3")
+    scheduler = Scheduler(store, settings, {"codex": FakeAdapter()})
+    bot = store.create_bot("Quiet", "", "codex", None)
+    store.sections.move_bot(str(bot.id), "hidden", 0)
+    assert store.sections.layout()["hidden"]["bot_ids"] == [str(bot.id)]
+    scheduler.turns.post_message(bot, "routine work", source="routine")
+    job = store.claim(["desktop-1"], {"codex"})
+    assert job is not None and str(job.bot_id) == str(bot.id)
+    assert str(bot.id) in {str(b.id) for b in store.list_bots()}
+    import inspect
+    from botoffice import store as store_mod
+    src = inspect.getsource(store_mod)
+    assert src.count("bot_section_members") <= 2 and "sections." not in inspect.getsource(Scheduler)   # nothing schedules by section
+
+
+# ---------------------------------------------------------------- characters replace patterns (0.12.11)
+def test_derived_character_is_stable_valid_and_spreads():
+    ids = [f"00000000-0000-4000-8000-{n:012d}" for n in range(200)]
+    seeds = [avatars.derived_character(i) for i in ids]
+    assert seeds == [avatars.derived_character(i) for i in ids]
+    assert all(avatars.character_seed(*s[len(avatars.CHAR_PREFIX):].split("|")) == s for s in seeds)
+    assert len(set(seeds)) > 60 and {s.split("|")[1] for s in seeds} == set(avatars.CHAR_SHAPES)
+
+
+def test_migration_turns_patterns_into_derived_characters_once_and_keeps_a_backup(settings):
+    import json
+    path = settings.data_dir / "agentdesk.sqlite3"
+    store = JobStore(path)
+    pat, up, emoji, char = (store.create_bot(n, "i", "codex", None) for n in ("Pat", "Up", "Emoji", "Char"))
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE bots SET avatar_seed='preset-4' WHERE id=?", (str(pat.id),))
+        db.execute("UPDATE bots SET avatar_seed='preset-5', icon_image='image/png' WHERE id=?", (str(up.id),))
+        db.execute("UPDATE bots SET avatar_seed=NULL WHERE id=?", (str(emoji.id),))
+        db.execute("UPDATE bots SET avatar_seed='char|star|red' WHERE id=?", (str(char.id),))
+        db.execute("DELETE FROM meta WHERE key='avatars.characters_default'")
+    store = JobStore(path)
+    assert store.get_bot(pat.id).avatar_seed == avatars.derived_character(str(pat.id))
+    assert store.get_bot(pat.id).avatar == "character" and store.get_bot(pat.id).icon == pat.icon
+    assert store.get_bot(up.id).avatar_seed == "preset-5" and store.get_bot(emoji.id).avatar_seed is None
+    assert store.get_bot(char.id).avatar_seed == "char|star|red"
+    with sqlite3.connect(path) as db:
+        backup = json.loads(db.execute("SELECT value FROM meta WHERE key='avatars.pattern_backup'").fetchone()[0])
+    assert backup == {str(pat.id): "preset-4"}
+    store.update_bot(pat.id, avatar_seed="preset-9")                # an explicit later choice is not overwritten again
+    assert JobStore(path).get_bot(pat.id).avatar_seed == "preset-9"
+
+
+def test_character_seed_is_not_a_usable_generator_seed_so_old_code_falls_back_to_the_emoji():
+    assert not avatars.valid_seed(avatars.derived_character("x"))

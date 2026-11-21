@@ -46,7 +46,8 @@ PRESET_SEEDS = tuple(f"preset-{n}" for n in range(PRESET_COUNT))
 # "|" is not allowed in a generator seed (SEED_RE), so 0.12.1 reads such a value as "no usable image" and shows
 # the emoji after a rollback. The names are the contract (the UI holds the drawings; a test keeps both lists equal).
 CHAR_PREFIX = "char|"
-CHAR_SHAPES = ("square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond")
+CHAR_SHAPES = ("square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond",
+               "squircle", "ghost", "shield", "triangle")   # 0.12.11 added the last four (new shapes go at the end)
 CHAR_COLORS = ("blue", "violet", "pink", "red", "orange", "yellow", "green", "teal", "cyan", "slate")
 CHAR_EXPRESSIONS = ("idle", "working", "waiting", "done", "error", "sleeping")
 
@@ -84,6 +85,15 @@ def default_character(bot_id, used=()) -> str:
     pool = [seed for seed in counts if counts[seed] == least]
     digest = hashlib.sha256(str(bot_id).encode()).digest()
     return pool[int.from_bytes(digest[:4], "big") % len(pool)]
+
+
+def derived_character(key) -> str:
+    """The character a bot gets from a stable hash of its id: shape and color from separate digest bytes. Used when
+    the 0.12.11 migration replaces a generated pattern (the same id always gives the same character)."""
+    digest = hashlib.sha256(("botoffice-char:" + str(key)).encode()).digest()
+    shape = CHAR_SHAPES[int.from_bytes(digest[:4], "big") % len(CHAR_SHAPES)]
+    color = CHAR_COLORS[int.from_bytes(digest[4:8], "big") % len(CHAR_COLORS)]
+    return f"{CHAR_PREFIX}{shape}|{color}"
 
 
 def default_seed(bot_id, used=()) -> str:

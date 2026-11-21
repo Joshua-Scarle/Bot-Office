@@ -468,7 +468,7 @@ def characters(page, out: Path, base: str, token: str, bot_id: str, name: str, s
     """0.12.2: pick a built-in character, see it in the sidebar, header and dialog, and watch its face follow the status."""
     page.click("#edit-bot")
     page.click('#f-kind [data-kind="character"]')
-    check(page.locator("#f-char-shapes button").count() == 8 and page.locator("#f-char-colors button").count() == 10, "the Character tab offers 8 shapes and 10 colors")
+    check(page.locator("#f-char-shapes button").count() == 12 and page.locator("#f-char-colors button").count() == 10, "the Character tab offers 12 shapes and 10 colors")
     page.locator("#f-char-shapes button[data-shape=star]").click()
     page.locator("#f-char-colors button[data-color=violet]").click()
     check(page.locator("#f-icon-preview svg.char").get_attribute("data-shape") == "star" and page.locator("#f-icon-preview svg.char").get_attribute("data-color") == "violet",
@@ -538,7 +538,7 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     heads = lambda: page.locator("#bot-list .sec-head .sec-name").evaluate_all("(n) => n.map((e) => e.textContent)")  # noqa: E731
     row = lambda n: page.locator("#bot-list .bot-row", has_text=n)  # noqa: E731
     section_of = lambda n: page.locator("#bot-list .sec", has=page.locator(".bot-row", has_text=n)).get_attribute("data-section")  # noqa: E731
-    check(page.locator("#bot-list .sec-head").count() == 0, "with no sections the list is flat, as before")
+    check(page.locator('#bot-list .sec-head:not([data-section="hidden"])').count() == 0, "with no sections the list is flat, as before (only the built-in Hidden header)")
     before_bots = page.locator("#bot-list .bot-item").count()
     # every bot has an avatar image (default generated), the emoji stays as data
     page.wait_for_function("() => document.querySelectorAll('#bot-list .avatar img, #bot-list .avatar svg.char').length >= " + str(before_bots), timeout=10000)
@@ -549,7 +549,7 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
         page.fill("#bot-list .sec-rename", name)
         page.press("#bot-list .sec-rename", "Enter")
         page.wait_for_function("(n) => [...document.querySelectorAll('.sec-name')].some((e) => e.textContent === n)", arg=name)
-    check(heads()[:2] == ["Work", "Play"] and heads()[-1] == "Ungrouped", f"two sections were created, Ungrouped is last ({heads()})")
+    check(heads()[:2] == ["Work", "Play"] and heads()[-2:] == ["Ungrouped", "Hidden"], f"two sections were created, Ungrouped then Hidden last ({heads()})")
     page.click("#new-section")
     page.press("#bot-list .sec-rename", "Escape")
     check(page.locator("#bot-list .sec-rename").count() == 0 and len(layout()["sections"]) == 2, "Escape cancels a new section")
@@ -668,8 +668,9 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     bot_id = ids[names[0]]
     state = lambda: next(b for b in call(base, token, "GET", "/v1/bots") if b["id"] == bot_id)  # noqa: E731
     page.click("#edit-bot")
-    page.wait_for_selector("#f-presets button", state="attached", timeout=10000)
-    check(page.locator("#f-presets button").count() == 12, "the dialog offers 12 default avatars")
+    page.click('#f-kind [data-kind="character"]')
+    check(page.locator('#f-kind [data-kind="pattern"]').count() == 0, "the picker has no Pattern tab any more")
+    check(page.locator("#f-char-shapes button").count() == len(av.CHAR_SHAPES) == 12 and page.locator("#f-char-colors button").count() == 10, "the dialog offers 12 shapes and 10 colors")
     page.set_input_files("#f-image", {"name": "me.png", "mimeType": "image/png", "buffer": av.render_png("preset-5")})
     page.wait_for_selector("#f-icon-preview img")
     shot(page, out, "avatar-upload")
@@ -688,17 +689,15 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=15000)
     check(state()["avatar"] == "upload", "the shrunk photo became the avatar")
     page.click("#edit-bot")
-    page.click('#f-kind [data-kind="pattern"]')
-    page.click("#f-avatar-shuffle")
-    page.wait_for_function("() => document.querySelector('#f-icon-preview img')")
-    page.locator("#f-presets button").nth(3).click()
-    check(page.locator("#f-presets button").nth(3).get_attribute("aria-pressed") == "true", "choosing a default avatar marks it")
-    page.click("#f-avatar-shuffle")
-    shot(page, out, "avatar-generated")
+    page.click('#f-kind [data-kind="character"]')
+    page.locator('#f-char-shapes button[data-shape="ghost"]').click()
+    check(page.locator('#f-char-shapes button[data-shape="ghost"]').get_attribute("aria-pressed") == "true", "choosing a shape marks it")
+    page.locator('#f-char-colors button[data-color="teal"]').click()
+    shot(page, out, "avatar-character")
     page.click("#dialog-save")
     page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)
     after = state()
-    check(after["avatar"] == "generated" and after["icon_image"] is None and after["avatar_seed"] not in (None, "preset-3"), f"generate replaces the upload ({after['avatar_seed']})")
+    check(after["avatar"] == "character" and after["icon_image"] is None and after["avatar_seed"] == "char|ghost|teal", f"a character replaces the upload ({after['avatar_seed']})")
     page.click("#edit-bot")
     page.click('#f-kind [data-kind="emoji"]')
     check(page.locator("#f-icon-preview img").count() == 0 and page.locator("#f-icon-preview svg").count() == 0, "the Emoji tab shows the emoji in the preview")
@@ -708,6 +707,7 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
     page.wait_for_timeout(300)
     check(page.locator("#head-icon img").count() == 0 and page.locator("#head-icon").inner_text().strip() != "", "the emoji fallback shows in the header")
     characters(page, out, base, token, bot_id, names[0], state)
+    hidden_section(page, out, base, token, ids, names, layout, row)
     # a failing image falls back to the emoji
     call(base, token, "POST", f"/v1/bots/{ids[names[1]]}/icon/generate", {"seed": "preset-1"})
     page.route(f"**/v1/bots/{ids[names[1]]}/icon*", lambda route: route.fulfill(status=500, body="x"))
@@ -721,6 +721,51 @@ def groups_and_avatars(page, out: Path, base: str, token: str) -> None:
         call(base, token, "DELETE", f"/v1/sections/{s['id']}")
     for bid in ids.values():
         call(base, token, "DELETE", f"/v1/bots/{bid}")
+
+
+def hidden_section(page, out: Path, base, token, ids, names, layout, row) -> None:
+    print("Hidden section (0.12.11)")
+    hid = lambda: layout()["hidden"]  # noqa: E731
+    page.reload()
+    page.wait_for_selector("#bot-list .bot-item", timeout=15000)
+    head = page.locator('.sec-head[data-section="hidden"]')
+    check(head.count() == 1 and head.locator(".sec-menu").count() == 0 and head.get_attribute("draggable") != "true", "Hidden is always there, without a menu, and cannot be dragged")
+    check(hid()["collapsed"] is True and page.locator('.sec[data-section="hidden"] .bot-row').count() == 0, "Hidden is collapsed by default")
+    check(page.evaluate("() => [...document.querySelectorAll('#bot-list .sec')].pop().dataset.section") == "hidden", "Hidden is the last group, below Ungrouped")
+    # the bot menu hides a bot
+    row(names[1]).hover()
+    row(names[1]).locator(".row-menu").click()
+    page.click('.sidebar-menu button[role="menuitem"]:has-text("Hide")')
+    page.wait_for_timeout(500)
+    check(hid()["bot_ids"] == [ids[names[1]]] and row(names[1]).count() == 0, "the Hide menu item moves the bot into Hidden (collapsed, so not listed)")
+    # search shows a hidden match
+    page.fill("#bot-search", names[1])
+    page.wait_for_selector('.sec[data-section="hidden"] .bot-row', timeout=5000)
+    check(page.locator('.sec[data-section="hidden"] .bot-row').count() == 1, "searching finds the hidden bot")
+    shot(page, out, "search-finds-hidden")
+    page.fill("#bot-search", "")
+    # expanding persists server-side; Unhide from the menu
+    page.click('.sec-head[data-section="hidden"] .sec-toggle')
+    page.wait_for_timeout(400)
+    check(hid()["collapsed"] is False and row(names[1]).count() == 1, "expanding Hidden shows its bot and is saved on the server")
+    row(names[1]).locator(".row-menu").click()
+    page.click('.sidebar-menu button[role="menuitem"]:has-text("Unhide")')
+    page.wait_for_timeout(500)
+    check(hid()["bot_ids"] == [] and ids[names[1]] in layout()["ungrouped"]["bot_ids"], "Unhide moves it back to Ungrouped")
+    # drag into the Hidden header, then the settings toggle brings it back
+    row(names[1]).drag_to(page.locator('.sec-head[data-section="hidden"]'))
+    page.wait_for_timeout(500)
+    check(hid()["bot_ids"] == [ids[names[1]]], "dragging a bot onto the Hidden header hides it")
+    open_bot(page, names[1])
+    page.click("#edit-bot")
+    check(page.locator("#f-hidden").is_checked(), "the settings toggle shows a hidden bot as hidden")
+    page.locator("#f-hidden").uncheck()
+    page.click("#dialog-save")
+    page.wait_for_function("() => !document.querySelector('#bot-dialog').open", timeout=10000)
+    check(hid()["bot_ids"] == [], "unchecking Hide in the settings moves the bot out of Hidden")
+    call(base, token, "PATCH", "/v1/sections/hidden", {"collapsed": True})
+    page.reload()
+    page.wait_for_selector("#bot-list .bot-item", timeout=15000)
 
 
 def sidebar_search(page, out: Path) -> None:

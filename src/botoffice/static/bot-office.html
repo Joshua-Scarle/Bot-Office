@@ -318,7 +318,9 @@ dialog textarea { min-height: 90px; resize: vertical; }
 .kind-row button { padding: 4px 12px; border-radius: 999px; }
 .kind-row button[aria-checked="true"] { border-color: var(--accent); color: var(--text); background: var(--raised); }
 .kind-panel[hidden] { display: none; }
-.char-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; margin: 2px 0 6px; }
+.char-label { margin: 6px 0 0; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.sec-head.is-hidden-sec .sec-toggle { opacity: .8; }
+.char-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin: 2px 0 6px; }
 .char-grid button { padding: 2px; border-radius: 12px; aspect-ratio: 1; border: 2px solid transparent; background: var(--panel); }
 .char-grid button[aria-pressed="true"] { border-color: var(--accent); }
 .char-grid svg { width: 100%; height: 100%; display: block; }
@@ -634,7 +636,6 @@ dialog textarea { min-height: 90px; resize: vertical; }
           <button type="button" role="radio" data-kind="emoji" aria-checked="false">Emoji</button>
           <button type="button" role="radio" data-kind="character" aria-checked="false">Character</button>
           <button type="button" role="radio" data-kind="upload" aria-checked="false">Image</button>
-          <button type="button" role="radio" data-kind="pattern" aria-checked="false">Pattern</button>
         </div>
       </div>
     </div>
@@ -643,7 +644,9 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <p class="hint">The emoji shows with a small status dot. It is also used where only text fits (notifications, the page title).</p>
     </div>
     <div class="kind-panel" data-panel="character" hidden>
+      <p class="char-label">Shape</p>
       <div id="f-char-shapes" class="char-grid" role="group" aria-label="Character shape"></div>
+      <p class="char-label">Color</p>
       <div id="f-char-colors" class="char-colors" role="group" aria-label="Character color"></div>
       <p class="hint">A little character whose face shows what the bot is doing: idle, working, waiting for you, done, error or asleep.</p>
     </div>
@@ -651,10 +654,8 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <span class="file-btn"><button type="button" tabindex="-1">Upload image…</button><input id="f-image" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Upload icon image"></span>
       <p class="hint">PNG, JPEG or WebP, up to 2 MB; it is cropped square and resized to 256 px. It shows with a small status dot. Nothing changes until you choose a file.</p>
     </div>
-    <div class="kind-panel" data-panel="pattern" hidden>
-      <div id="f-presets" class="preset-grid" role="group" aria-label="Default avatars"></div>
-      <button type="button" id="f-avatar-shuffle">Generate new</button>
-    </div>
+    <label class="check"><input id="f-hidden" type="checkbox"> Hide in the sidebar (moves the bot to the Hidden section)</label>
+    <p class="hint">A hidden bot works exactly as before: jobs, routines, watchers and messages are unaffected. Open the Hidden section, or search, to find it.</p>
     <label>Description<input id="f-desc" maxlength="500" placeholder="What this bot is for"></label>
     <div class="picker"><label for="f-model">Model</label>
       <input id="f-model" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="f-model-list" autocomplete="off" spellcheck="false" maxlength="100" placeholder="Type to search models">
@@ -904,7 +905,7 @@ async function iconUrl(bot) {
 
 
 /* ---- character avatars (0.12.2): our own shapes, drawn inline; the face follows the bot's status ---- */
-const CHAR_SHAPES = ["square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond"];
+const CHAR_SHAPES = ["square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond", "squircle", "ghost", "shield", "triangle"];
 const CHAR_COLORS = {blue: "#3b82f6", violet: "#8b5cf6", pink: "#ec4899", red: "#ef4444", orange: "#f97316", yellow: "#facc15",
   green: "#22c55e", teal: "#14b8a6", cyan: "#22d3ee", slate: "#94a3b8"};
 const EXPRESSIONS = ["idle", "working", "waiting", "done", "error", "sleeping"];
@@ -912,7 +913,8 @@ const EXPRESSION_LABEL = {idle: "idle", working: "working", waiting: "waiting fo
 const DONE_MS = 20000;
 state.doneUntil = new Map(); state.doneTimer = null;
 // face centre y and half the eye gap, per shape (so the eyes sit inside every body)
-const CHAR_FACE = {square: [24, 7], circle: [24, 7], blob: [24, 7], hexagon: [24, 7], cloud: [26, 6.5], pill: [24, 8], star: [26, 5.5], diamond: [24, 6]};
+const CHAR_FACE = {square: [24, 7], circle: [24, 7], blob: [24, 7], hexagon: [24, 7], cloud: [26, 6.5], pill: [24, 8], star: [26, 5.5], diamond: [24, 6],
+  squircle: [24, 7], ghost: [22, 7], shield: [22, 7], triangle: [29, 5.5]};
 const SVG_NS = "http:" + "//www.w3.org/2000/svg";   // split: the page must contain no literal URL
 function svgEl(tag, attrs, cls) {
   const node = document.createElementNS(SVG_NS, tag);
@@ -938,6 +940,16 @@ function starPoints() {
   for (let i = 0; i < 10; i++) { const t = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 9.5 : 18.5; pts.push((24 + r * Math.cos(t)).toFixed(2) + "," + (25.5 + r * Math.sin(t)).toFixed(2)); }
   return pts.join(" ");
 }
+function squirclePath() {   // |x|^4 + |y|^4 = r^4: rounder than the square, flatter than the circle
+  let d = "";
+  for (let i = 0; i < 96; i++) {
+    const t = (i / 96) * Math.PI * 2, c = Math.cos(t), s = Math.sin(t);
+    d += (i ? "L" : "M") + (24 + 19 * Math.sign(c) * Math.sqrt(Math.abs(c))).toFixed(2) + " " + (24 + 19 * Math.sign(s) * Math.sqrt(Math.abs(s))).toFixed(2);
+  }
+  return d + "Z";
+}
+const GHOST_PATH = "M8 41V22a16 16 0 0 1 32 0V41L36 37L32 41L28 37L24 41L20 37L16 41L12 37Z";
+const SHIELD_PATH = "M24 6L39 11V24C39 33 33 39 24 43C15 39 9 33 9 24V11Z";
 const BLOB_PATH = polar(180, 16.6, 3.0, 6, -Math.PI / 2);   // the "blob" shape: exactly 6 round lobes, one pointing up
 function charBody(shape, fill) {
   const g = svgEl("g", {fill}, "body");
@@ -951,6 +963,10 @@ function charBody(shape, fill) {
   }
   else if (shape === "pill") g.append(svgEl("rect", {x: 3.5, y: 11, width: 41, height: 26, rx: 13}));
   else if (shape === "star") g.append(svgEl("polygon", {points: starPoints(), ...round, "stroke-width": 5}));
+  else if (shape === "squircle") g.append(svgEl("path", {d: squirclePath()}));
+  else if (shape === "ghost") g.append(svgEl("path", {d: GHOST_PATH, ...round, "stroke-width": 2}));
+  else if (shape === "shield") g.append(svgEl("path", {d: SHIELD_PATH, ...round, "stroke-width": 3}));
+  else if (shape === "triangle") g.append(svgEl("polygon", {points: "24,10 40,37 8,37", ...round, "stroke-width": 7}));
   else if (shape === "diamond") g.append(svgEl("rect", {x: 10, y: 10, width: 28, height: 28, rx: 7, transform: "rotate(45 24 24)"}));
   else g.append(svgEl("rect", {x: 5.5, y: 5.5, width: 37, height: 37, rx: 12}));   // square
   return g;
@@ -1080,16 +1096,18 @@ async function loadSections() {
 // Bots in section order. Without a layout (or sections) every bot is one flat, headerless list as before.
 function sidebarLayout() {
   const byId = new Map(state.bots.map((b) => [b.id, b]));
-  const lay = state.sections || { sections: [], ungrouped: { collapsed: false, bot_ids: state.bots.map((b) => b.id) } };
+  const lay = state.sections || { sections: [], ungrouped: { collapsed: false, bot_ids: state.bots.map((b) => b.id) }, hidden: { collapsed: true, bot_ids: [] } };
   const seen = new Set();
   const take = (ids) => ids.map((id) => { seen.add(id); return byId.get(id); }).filter(Boolean);
   const sections = lay.sections.map((s) => ({ ...s, bots: take(s.bot_ids) }));
+  const hid = lay.hidden || { collapsed: true, bot_ids: [] };   // 0.12.11: the built-in Hidden section, always drawn last
+  const hidden = { id: "hidden", name: "Hidden", builtin: true, collapsed: hid.collapsed, bots: take(hid.bot_ids) };
   const ungrouped = { id: "ungrouped", name: "Ungrouped", collapsed: lay.ungrouped.collapsed, bots: take(lay.ungrouped.bot_ids) };
   for (const bot of state.bots) if (!seen.has(bot.id)) ungrouped.bots.push(bot);
-  return { sections, ungrouped };
+  return { sections, ungrouped, hidden };
 }
 function sectionOfBot(lay, botId) {
-  return [...lay.sections, lay.ungrouped].find((s) => s.bots.some((b) => b.id === botId));
+  return [...lay.sections, lay.ungrouped, lay.hidden].find((s) => s.bots.some((b) => b.id === botId));
 }
 
 function renderBots() {
@@ -1122,6 +1140,9 @@ function renderSidebar() {
   const ungShown = lay.ungrouped.bots.filter(match);
   shown += ungShown.length;
   if (!filtering || ungShown.length) nodes.push(sectionNode(lay, lay.ungrouped, ungShown, filtering, !grouped));
+  const hidShown = lay.hidden.bots.filter(match);   // a search shows hidden matches (the group opens while filtering)
+  shown += hidShown.length;
+  if (!filtering || hidShown.length) nodes.push(sectionNode(lay, lay.hidden, hidShown, filtering, false));
   if (!shown && filtering) {
     state.renaming = null; state.draftSection = false;
     const empty = el("p", "muted pad", `No bots match "${query}".`);
@@ -1147,7 +1168,7 @@ function sectionNode(lay, sec, visible, filtering, headless) {
   if (open) {
     visible.forEach((bot, index) => body.append(botRow(lay, sec, bot, filtering)));
     if (!visible.length && !filtering) {
-      body.append(el("p", "sec-empty", sec.id === "ungrouped" ? "Drop bots here to ungroup them." : "Empty. Drag bots here, or use ⋯ then Move to."));
+      body.append(el("p", "sec-empty", sec.id === "ungrouped" ? "Drop bots here to ungroup them." : sec.id === "hidden" ? "No hidden bots. Drag a bot here, or use ⋯ then Hide." : "Empty. Drag bots here, or use ⋯ then Move to."));
     }
   }
   wrap.append(body);
@@ -1165,8 +1186,8 @@ function sectionNode(lay, sec, visible, filtering, headless) {
 }
 
 function sectionHead(lay, sec, open, filtering) {
-  const isUng = sec.id === "ungrouped";
-  const head = el("div", "sec-head");
+  const isUng = sec.id === "ungrouped", fixed = isUng || Boolean(sec.builtin);   // Ungrouped and Hidden: no menu, no rename, no reorder
+  const head = el("div", "sec-head" + (sec.builtin ? " is-hidden-sec" : ""));
   head.dataset.section = sec.id;
   if (state.renaming && state.renaming.id === sec.id) { head.append(renameInput(sec.name, sec.id)); return head; }
   const toggle = el("button", "sec-toggle");
@@ -1179,11 +1200,11 @@ function sectionHead(lay, sec, open, filtering) {
   if (!open && unread) { const badge = el("span", "unread", String(unread)); badge.setAttribute("aria-label", unread + " unread in " + sec.name); toggle.append(badge); }
   toggle.onclick = () => toggleSection(sec);
   toggle.addEventListener("keydown", (event) => {
-    if (isUng || !event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+    if (fixed || !event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
     event.preventDefault(); moveSectionStep(lay, sec, event.key === "ArrowUp" ? -1 : 1);
   });
   head.append(toggle);
-  if (!isUng) {
+  if (!fixed) {
     const menu = el("button", "sec-menu", "⋯");
     menu.type = "button"; menu.setAttribute("aria-haspopup", "menu"); menu.setAttribute("aria-label", "Options for section " + sec.name);
     menu.onclick = () => openMenu(menu, sectionMenuItems(sec.id));
@@ -1195,14 +1216,14 @@ function sectionHead(lay, sec, open, filtering) {
   head.addEventListener("dragover", (event) => {
     if (!state.drag) return;
     if (state.drag.type === "bot") { event.preventDefault(); clearDropMarks(); head.parentElement.classList.add("drop-into"); }
-    else if (state.drag.type === "section" && state.drag.id !== sec.id) { event.preventDefault(); clearDropMarks(); head.classList.add(isUng || dropPosition(event, head) === "after" ? "drop-after" : "drop-before"); }
+    else if (state.drag.type === "section" && state.drag.id !== sec.id && !sec.builtin) { event.preventDefault(); clearDropMarks(); head.classList.add(fixed || dropPosition(event, head) === "after" ? "drop-after" : "drop-before"); }
   });
   head.addEventListener("drop", (event) => {
     if (!state.drag) return;
     event.preventDefault(); event.stopPropagation();
-    const drag = state.drag, after = isUng || dropPosition(event, head) === "after";
+    const drag = state.drag, after = fixed || dropPosition(event, head) === "after";
     if (drag.type === "bot") finishDrop(() => moveBot(drag.id, sec.id, 1e6));
-    else if (drag.id !== sec.id) finishDrop(() => placeSection(lay, drag.id, sec.id, after));
+    else if (drag.id !== sec.id && !sec.builtin) finishDrop(() => placeSection(lay, drag.id, sec.id, after));
   });
   return head;
 }
@@ -1257,7 +1278,7 @@ async function toggleSection(sec) {
   if (!state.sections) return;
   if ($("bot-search").value.trim()) { setStatus("Clear the search to collapse or expand sections."); announce(""); requestAnimationFrame(() => announce("Clear the search to collapse or expand sections")); return; }   // a search shows every match
   const next = !sec.collapsed;
-  const target = sec.id === "ungrouped" ? state.sections.ungrouped : state.sections.sections.find((s) => s.id === sec.id);
+  const target = sec.id === "ungrouped" ? state.sections.ungrouped : sec.id === "hidden" ? state.sections.hidden : state.sections.sections.find((s) => s.id === sec.id);
   if (target) target.collapsed = next;
   renderBots();
   focusSidebar('.sec-head[data-section="' + sec.id + '"] .sec-toggle');
@@ -1445,12 +1466,12 @@ function botMenuItems(botId) {
   const lay = sidebarLayout(), sec = sectionOfBot(lay, botId), bot = state.bots.find((b) => b.id === botId);
   if (!sec || !bot) return [];
   const at = sec.bots.findIndex((b) => b.id === botId), filtering = Boolean($("bot-search").value.trim());
-  const items = [{ label: "Move to" }];
+  const items = [sec.id === "hidden" ? { text: "Unhide", run: () => moveBot(botId, "ungrouped", 1e6) } : { text: "Hide", run: () => moveBot(botId, "hidden", 1e6) }, { label: "Move to" }];
   for (const target of [...lay.sections, lay.ungrouped]) {
     if (target.id === sec.id) continue;
     items.push({ text: target.name, run: () => moveBot(botId, target.id, 1e6) });
   }
-  if (items.length === 1) items.push({ text: "Create a section first (+ New section)", run: () => {}, disabled: true });
+  if (items.length === 2) items.push({ text: "Create a section first (+ New section)", run: () => {}, disabled: true });
   items.push({ label: "Order" },
     { text: "Move up", disabled: filtering || at <= 0, run: () => moveBotStep(sidebarLayout(), bot, -1) },
     { text: "Move down", disabled: filtering || at < 0 || at >= sec.bots.length - 1, run: () => moveBotStep(sidebarLayout(), bot, 1) });
@@ -3924,8 +3945,6 @@ function updateIconPreview() {
   else if (state.removeImage || !(hasImage(bot) || charOf(bot))) { fillAvatar(preview, { ...bot, icon_image: null, avatar_seed: null }, { url: null, icon }); }
   else fillAvatar(preview, bot);
   const keep = !state.pendingImage && !state.removeImage && state.editing && !state.editing.icon_image;
-  const current = state.pendingSeed || (keep && !charOf(state.editing) ? state.editing.avatar_seed : null);
-  document.querySelectorAll("#f-presets button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.seed === current)));
   const chosen = state.pendingChar ? parseChar(state.pendingChar) : (keep && !state.pendingSeed ? charOf(state.editing) : null);
   document.querySelectorAll("#f-char-shapes button").forEach((b) => b.setAttribute("aria-pressed", String(Boolean(chosen) && b.dataset.shape === chosen.shape)));
   document.querySelectorAll("#f-char-colors button").forEach((b) => b.setAttribute("aria-pressed", String(Boolean(chosen) && b.dataset.color === chosen.color)));
@@ -3935,7 +3954,7 @@ function updateIconPreview() {
   document.querySelectorAll(".kind-panel").forEach((p) => { p.hidden = p.dataset.panel !== state.kind; });
 }
 // which avatar type the saved bot has, as a picker choice
-function kindOf(bot) { return !bot ? "character" : bot.avatar === "upload" ? "upload" : bot.avatar === "character" ? "character" : bot.avatar === "generated" ? "pattern" : "emoji"; }
+function kindOf(bot) { return !bot ? "character" : bot.avatar === "upload" ? "upload" : bot.avatar === "character" ? "character" : "emoji"; }   // 0.12.11: no Pattern tab; an old pattern bot opens on Character
 // Each tab keeps its own pending choice, so moving between tabs never loses work and the saved result is always the open tab's
 function pendingSnapshot() { return { char: state.pendingChar, seed: state.pendingSeed, remove: state.removeImage, image: state.pendingImage }; }
 function chooseKind(kind) {
@@ -3950,7 +3969,6 @@ function chooseKind(kind) {
     const saved = state.editing;
     if (kind === "emoji") state.removeImage = Boolean(!saved || saved.avatar !== "emoji");
     else if (kind === "character" && !(saved && charOf(saved))) { pickChar("square:blue"); return; }
-    else if (kind === "pattern" && !(saved && saved.avatar === "generated")) { pickSeed("preset-" + Math.floor(Math.random() * 12)); return; }
   }
   updateIconPreview();
 }
@@ -3994,27 +4012,6 @@ function clearPendingImage() {
   if (state.pendingImage) URL.revokeObjectURL(state.pendingImage.url);
   state.pendingImage = null;
 }
-function pickSeed(seed) {
-  clearPendingImage(); $("f-image").value = "";
-  state.pendingSeed = seed; state.pendingChar = null; state.removeImage = false; state.kind = "pattern";
-  updateIconPreview();
-}
-async function buildPresets() {
-  const grid = $("f-presets");
-  if (grid.childElementCount) return;
-  let presets = [];
-  try { presets = (await api("/v1/avatar-presets")).presets; } catch (err) { return; }
-  grid.replaceChildren(...presets.map((preset, i) => {
-    const button = el("button"); button.type = "button"; button.dataset.seed = preset.seed;
-    button.title = "Default avatar " + (i + 1); button.setAttribute("aria-label", "Default avatar " + (i + 1)); button.setAttribute("aria-pressed", "false");
-    seedUrl(preset.seed).then((url) => { if (url) { const img = el("img"); img.alt = ""; img.src = url; button.append(img); } });
-    button.onclick = () => pickSeed(preset.seed);
-    return button;
-  }));
-  updateIconPreview();
-}
-$("f-avatar-shuffle").onclick = () => pickSeed(Array.from(crypto.getRandomValues(new Uint8Array(6)), (v) => v.toString(16).padStart(2, "0")).join(""));
-
 async function openDialog(bot) {
   state.editing = bot;
   clearPendingImage();
@@ -4027,7 +4024,6 @@ async function openDialog(bot) {
     const shape = CHAR_SHAPES[Math.floor(Math.random() * CHAR_SHAPES.length)], colors = Object.keys(CHAR_COLORS);
     state.pendingChar = shape + ":" + colors[Math.floor(Math.random() * colors.length)];
   }
-  buildPresets();
   buildCharPicker();
   $("dialog-title").textContent = bot ? "Bot settings" : "New bot";
   $("dialog-save").textContent = bot ? "Save" : "Create bot";
@@ -4059,6 +4055,8 @@ async function openDialog(bot) {
   $("f-notify").checked = !bot || bot.notify !== false;
   $("f-bot-steer").checked = !bot || bot.bot_steer !== false;
   $("f-chat-only").checked = Boolean(bot && bot.chat_only);
+  state.hiddenAtOpen = Boolean(bot && state.sections && state.sections.hidden && state.sections.hidden.bot_ids.includes(bot.id));
+  $("f-hidden").checked = state.hiddenAtOpen;
   $("f-allow-sudo").checked = Boolean(bot && bot.allow_sudo);
   $("f-scheduled-runs").value = bot && bot.scheduled_runs === "gated" ? "gated" : "full";
   $("f-digest").checked = Boolean(bot && bot.digest);
@@ -4199,6 +4197,10 @@ $("bot-form").onsubmit = async (event) => {
       saved = await api("/v1/bots/" + saved.id + "/icon/generate", { method: "POST", body: JSON.stringify({ seed: state.pendingSeed }) });
     } else if (state.removeImage && saved.avatar !== "emoji") {
       saved = await api("/v1/bots/" + saved.id + "/icon", { method: "DELETE" });
+    }
+    if ($("f-hidden").checked !== state.hiddenAtOpen) {   // 0.12.11: the Hide toggle is a move into or out of the Hidden section
+      state.sections = await api("/v1/bots/" + saved.id + "/section", { method: "PUT", body: JSON.stringify({ section_id: $("f-hidden").checked ? "hidden" : null, index: 100000 }) });
+      state.hiddenAtOpen = $("f-hidden").checked;
     }
     $("bot-dialog").close();
     state.selected = saved.id;

@@ -27,7 +27,8 @@ def _run(script: str) -> None:
 def test_markup_has_the_section_and_avatar_controls():
     assert 'id="new-section"' in PAGE and 'id="sidebar-live"' in PAGE and 'aria-live="polite"' in PAGE
     assert '<dialog id="section-dialog"' in PAGE and 'id="section-delete-cancel" autofocus' in PAGE
-    assert 'id="f-presets"' in PAGE and 'id="f-avatar-shuffle"' in PAGE
+    assert 'id="f-presets"' not in PAGE and 'data-kind="pattern"' not in PAGE          # 0.12.11: the Pattern tab is gone
+    assert 'id="f-hidden"' in PAGE and '"Hide"' in PAGE and '"Unhide"' in PAGE
     assert 'accept="image/png,image/jpeg,image/webp"' in PAGE and "image/svg" not in PAGE.split('id="f-image"')[1][:200]
     for aria in ('aria-expanded', 'aria-haspopup", "menu"', 'role", "menuitem"'):
         assert aria in PAGE
@@ -78,3 +79,30 @@ assert.strictEqual(hasImage({icon_image: "image/png", avatar_seed: null}), true)
 assert.strictEqual(hasImage({icon_image: null, avatar_seed: "preset-1"}), true);
 assert.strictEqual(hasImage({icon_image: null, avatar_seed: null, icon: "🤖"}), false);
 ''')
+
+
+def test_hidden_group_is_last_builtin_searchable_and_cannot_be_dragged_or_edited():
+    code = _slice("function sidebarLayout()", "function renderBots()")
+    _run('''
+const assert = require("assert");
+const state = { bots: [{id: "a"}, {id: "b"}, {id: "c"}], sections: null };
+''' + code + r'''
+let lay = sidebarLayout();                                      // no layout yet: Hidden exists, empty and collapsed
+assert.deepStrictEqual(lay.hidden.bots, []); assert.strictEqual(lay.hidden.collapsed, true); assert.strictEqual(lay.hidden.builtin, true);
+state.sections = { sections: [], ungrouped: { collapsed: false, bot_ids: ["a"] }, hidden: { id: "hidden", collapsed: false, bot_ids: ["c", "b", "gone"] } };
+lay = sidebarLayout();
+assert.deepStrictEqual(lay.hidden.bots.map((b) => b.id), ["c", "b"]); assert.strictEqual(lay.hidden.collapsed, false);
+assert.strictEqual(sectionOfBot(lay, "b").id, "hidden"); assert.strictEqual(sectionOfBot(lay, "a").id, "ungrouped");
+assert.ok(!lay.sections.some((s) => s.id === "hidden"));        // never in the reorderable list
+''')
+    page_ok = "const hidShown = lay.hidden.bots.filter(match)" in PAGE and "if (!filtering || hidShown.length)" in PAGE
+    assert page_ok                                               # a search shows hidden matches, the header stays otherwise
+    head = _slice("function sectionHead(", "function renameInput(")
+    assert "fixed || !event.altKey" in head and "head.draggable = !filtering" in head and "if (!fixed) {" in head   # no menu, no drag for built-ins
+    assert "!sec.builtin" in head
+
+
+def test_bot_menu_offers_hide_and_unhide_and_settings_toggle_moves_the_bot():
+    assert 'sec.id === "hidden" ? { text: "Unhide"' in PAGE and 'moveBot(botId, "hidden", 1e6)' in PAGE
+    save = _slice("$(\"dialog-save\").disabled = true;", "$(\"delete-start\").onclick")
+    assert 'section_id: $("f-hidden").checked ? "hidden" : null' in save

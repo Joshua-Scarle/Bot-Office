@@ -54,6 +54,8 @@ IDENTITY_MIGRATION = "crewdeck-identity-v1"
 EFFORT_MIGRATION = "crewdeck-effort-v1"
 READS_MIGRATION = "reads-seeded-v1"
 AVATARS_MIGRATION = "avatars.default_assigned"
+AVATAR_CHARS_MIGRATION = "avatars.characters_default"      # 0.12.11: generated patterns -> derived characters
+AVATAR_PATTERN_BACKUP = "avatars.pattern_backup"            # JSON {bot_id: old pattern seed}, to undo that migration
 # 0.9.0: Grok bridge rate/hop state moved from JSON files into SQLite (imported once)
 BRIDGE_IMPORT = "bridge_json_import"
 TASKS_SEEN_INIT = "tasks_seen_init"  # meta key: the "changes by others" watermark was set (task lists)
@@ -800,6 +802,7 @@ class JobStore:
             self._migrate_reads(db)
             sections.ensure_schema(db)
             self._migrate_avatars(db)
+            self._migrate_avatar_characters(db)
             chat_history.ensure_fts(db, lambda d, key: d.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES (?,?)", (key, now().isoformat())))
 
@@ -974,6 +977,30 @@ class JobStore:
                 used.append(seed)
                 db.execute("UPDATE bots SET avatar_seed=? WHERE id=?", (seed, row["id"]))
             db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (AVATARS_MIGRATION, now().isoformat()))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_avatar_characters(db: sqlite3.Connection) -> None:
+        """One-time (0.12.11): a bot still on a generated pattern gets the character its id hashes to. Uploads, emoji-only
+        bots and bots that already have a character are untouched. The old seeds are kept as JSON in ``meta``
+        (``avatars.pattern_backup``) so the change can be undone; 0.12.1 and older show the emoji for a character."""
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if db.execute("SELECT 1 FROM meta WHERE key=?", (AVATAR_CHARS_MIGRATION,)).fetchone():
+                db.rollback()
+                return
+            old = {}
+            rows = db.execute("SELECT id, avatar_seed FROM bots WHERE icon_image IS NULL AND avatar_seed IS NOT NULL "
+                              "AND avatar_seed NOT LIKE 'char|%'").fetchall()
+            for row in rows:
+                old[row["id"]] = row["avatar_seed"]
+                db.execute("UPDATE bots SET avatar_seed=? WHERE id=?", (avatars.derived_character(row["id"]), row["id"]))
+            if old:
+                db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (AVATAR_PATTERN_BACKUP, json.dumps(old)))
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (AVATAR_CHARS_MIGRATION, now().isoformat()))
             db.commit()
         except BaseException:
             db.rollback()

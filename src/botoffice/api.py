@@ -149,6 +149,11 @@ class SectionOrder(BaseModel):
     ids: list[str] = Field(max_length=200)
 
 
+class HiddenMembers(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    bot_ids: list[UUID] = Field(max_length=500)
+
+
 class BotSectionMove(BaseModel):
     model_config = ConfigDict(extra="forbid")
     section_id: str | None = None
@@ -1372,6 +1377,11 @@ def create_app(
     @app.put("/v1/sections/order", dependencies=[Depends(auth)])
     async def order_sections(body: SectionOrder) -> dict:
         return _sections(store.sections.reorder, body.ids)
+
+    @app.put("/v1/sections/hidden/members", dependencies=[Depends(auth)])
+    async def set_hidden_members(body: HiddenMembers) -> dict:
+        """0.12.11: make exactly these bots the Hidden section's members (others there return to Ungrouped)."""
+        return _sections(store.sections.set_hidden, [str(b) for b in body.bot_ids])
 
     @app.patch("/v1/sections/{section_id}", dependencies=[Depends(auth)])
     async def patch_section(section_id: str, body: SectionPatch) -> dict:
