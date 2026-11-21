@@ -208,3 +208,38 @@ def test_wait_ends_when_the_asking_turn_ends(settings):
             db.execute("UPDATE jobs SET status='failed' WHERE id=?", (str(job.id),))
         thread.join(15)
         assert not thread.is_alive() and out["seconds"] < 10 and waits(d) == 0
+
+
+def test_stalled_target_is_detected_when_queued_and_every_lane_is_taken(settings):
+    from botoffice.domain import Slot
+    with Desk(settings) as d:
+        lanes = settings.run_lanes
+        for i in range(lanes):
+            run_job(d.store, d.bot(f"Busy{i}"))
+        waiting_bot = d.bot("Waiter")
+        queued = d.store.create("q", "codex", bot_id=waiting_bot.id, source="chat")
+        with closing(d.store._connect()) as db:
+            db.execute("INSERT INTO agent_messages (id, from_bot, to_bot, body, job_id, thread_id, hop, created_at) "
+                       "VALUES ('m1','a','b','q',?, 't', 1, '2026-11-21T12:00:00+00:00')", (str(queued.id),))
+        assert team.target_stalled(d.store, lanes, "m1") is True
+        assert team.lane_free(d.store, lanes, str(queued.id)) is False
+        # a lane frees up (claimed in between is the same snapshot): no longer stalled
+        with closing(d.store._connect()) as db:
+            db.execute("UPDATE jobs SET status='succeeded' WHERE status='running' AND id=(SELECT id FROM jobs WHERE status='running' LIMIT 1)")
+        assert team.target_stalled(d.store, lanes, "m1") is False
+        assert team.lane_free(d.store, lanes, str(queued.id)) is True
+        assert team.target_stalled(d.store, lanes, "nope") is False  # a steered message has no job of its own
+
+
+def test_ask_gives_up_early_when_its_queued_target_cannot_get_a_lane(settings, monkeypatch):
+    with Desk(settings, Replier(), lifespan=False) as d:
+        asker = d.bot("Asker")
+        d.bot("Tgt")
+        _, h = run_job(d.store, asker)
+        monkeypatch.setattr(team, "lane_free", lambda *a: True)  # the pre-send check was fooled (claimed in between)
+        monkeypatch.setattr(team, "target_stalled", lambda *a: True)  # ...and the recheck sees a queued target, no lane
+        thread, out = ask_in_thread(d, h, "Tgt", timeout_s=30)
+        thread.join(15)
+        body = out["response"].json()
+        assert body["status"] == "pending" and out["seconds"] < 5, body
+        assert waits(d) == 0

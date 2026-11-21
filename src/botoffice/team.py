@@ -36,7 +36,7 @@ SNIPPET_CHARS = 300  # a reply snippet in team_status
 TITLE_CHARS = 120
 ASK_DEFAULT_S = 90
 ASK_MAX_S = 180
-PRIVATE_BOTS = ("Printer Writing Bot",)  # flagged team_private by the 0.12.17 migration (a data flag only)
+PRIVATE_ENV = "BOT_OFFICE_TEAM_PRIVATE_BOTS"  # comma-separated bot names flagged team_private once, by the migration
 _STATUS_LINE = re.compile(r"^\s*BOT-OFFICE-STATUS:\s*(.+?)\s*$", re.MULTILINE)
 
 
@@ -44,10 +44,17 @@ def enabled(environ: dict | None = None) -> bool:
     return (environ if environ is not None else os.environ).get(KILL_SWITCH, "1").strip() != "0"
 
 
-def is_first_party_tool(tool: str) -> bool:
-    """Exactly the five tools of the controller-written ``botoffice`` MCP server (rules.py exemption).
-    Any other name under that prefix, and every other MCP tool, keeps the connector handling."""
-    return tool in {TOOL_PREFIX + name for name in TOOLS}
+def is_first_party_tool(tool: str, job=None, environ: dict | None = None) -> bool:
+    """Exactly the five tools of the controller-written ``botoffice`` MCP server (rules.py exemption), and
+    only for a job the controller registered that server for: a Claude job of a bot with the kill switch
+    off-state not set. Without a *job* only the name is checked (the pure classification). Any other name
+    under that prefix, every other MCP tool, and a job without the registration (kill switch, another
+    engine) keep the connector handling, so a same-named server a bot declared itself gets no exemption."""
+    if tool not in {TOOL_PREFIX + name for name in TOOLS}:
+        return False
+    if job is None:
+        return True
+    return bool(getattr(job, "bot_id", None)) and str(getattr(job, "provider", "")) == "claude" and enabled(environ)
 
 
 def allowed_tools(job, environ: dict | None = None) -> list[str]:
@@ -80,7 +87,9 @@ def seed_private(db: sqlite3.Connection) -> None:
     nothing else reads the flag, so their own behaviour, settings and jobs are untouched."""
     if db.execute("SELECT 1 FROM meta WHERE key='team.private_seeded'").fetchone():
         return
-    db.execute(f"UPDATE bots SET team_private=1 WHERE name IN ({','.join('?' * len(PRIVATE_BOTS))})", PRIVATE_BOTS)
+    names = [name.strip() for name in os.environ.get(PRIVATE_ENV, "").split(",") if name.strip()]
+    if names:
+        db.execute(f"UPDATE bots SET team_private=1 WHERE name IN ({','.join('?' * len(names))})", names)
     db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('team.private_seeded', '1')")
 
 
@@ -196,7 +205,11 @@ def team_status(db: sqlite3.Connection, reader: sqlite3.Row, target: sqlite3.Row
         current = {"job": job["id"][:8], "status": job["status"], "source": job["source"],
                    "started_at": job["started_at"], "finished_at": job["finished_at"]}
         if job["status"] not in ("running", "queued"):
-            current["outcome"] = _outcome(job["reply_text"], job["error"])
+            # the outcome comes from the visible, retained reply message itself, never from jobs.reply_text (the
+            # job may have a hidden or archived final reply next to a visible progress message)
+            shown = db.execute("SELECT text FROM messages WHERE job_id=? AND role='assistant' AND archived_at IS NULL "
+                               "AND hidden=0 ORDER BY id DESC LIMIT 1", (job["id"],)).fetchone()
+            current["outcome"] = _outcome(shown["text"] if shown else None, job["error"])
     tasks = [{"title": _clip(row["title"], TITLE_CHARS), "status": row["status"],
               "waiting_on": _clip(row["status_note"], TITLE_CHARS) if row["status"].startswith(("waiting", "blocked")) else ""}
              for row in db.execute("SELECT title, status, status_note FROM assignments WHERE bot_id=? "
@@ -307,13 +320,22 @@ def release_wait(store, job) -> None:
 
 
 def lane_free(store, lanes: int, job_id: str) -> bool:
-    """A lane is free for the turn just queued as *job_id*: running + queued-ahead leaves room for it."""
+    """A lane is free for the turn just queued as *job_id*: running + queued-ahead leaves room for it. One
+    statement, so one snapshot: a job claimed meanwhile cannot be missed by both counts."""
     with closing(store._connect()) as db:
-        running = db.execute("SELECT COUNT(*) FROM jobs WHERE status='running'").fetchone()[0]
-        mine = db.execute("SELECT created_at FROM jobs WHERE id=?", (job_id,)).fetchone()
-        ahead = db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND id<>? AND created_at<=?",
-                           (job_id, mine["created_at"] if mine else "")).fetchone()[0]
-    return running + ahead < lanes
+        row = db.execute(
+            "SELECT (SELECT COUNT(*) FROM jobs WHERE status='running') + (SELECT COUNT(*) FROM jobs WHERE status='queued' "
+            "AND id<>:j AND created_at<=COALESCE((SELECT created_at FROM jobs WHERE id=:j), '')) AS busy", {"j": job_id}).fetchone()
+    return row["busy"] < lanes
+
+
+def target_stalled(store, lanes: int, message_id: str) -> bool:
+    """True when the asked turn is still queued and every lane is taken: waiting on it would only starve the lanes."""
+    with closing(store._connect()) as db:
+        row = db.execute(
+            "SELECT j.status AS status, (SELECT COUNT(*) FROM jobs WHERE status='running') AS running FROM agent_messages m "
+            "JOIN jobs j ON j.id=m.job_id WHERE m.id=?", (message_id,)).fetchone()
+    return row is not None and row["status"] == "queued" and row["running"] >= lanes
 
 
 def find_reply(store, message_id: str) -> dict | None:

@@ -157,7 +157,7 @@ def test_status_content_and_read_audit(settings):
         assert "team_status" in events and "team_read" in events
 
 
-def test_patch_exposes_team_settings_and_seed_is_a_data_flag(settings):
+def test_patch_exposes_team_settings_and_seed_is_a_data_flag(settings, monkeypatch):
     with Desk(settings) as d:
         bot = d.bot("Plain")
         got = d.client.patch(f"/v1/bots/{bot.id}", headers=MASTER, json={"team_read": "all", "team_private": True}).json()
@@ -166,15 +166,16 @@ def test_patch_exposes_team_settings_and_seed_is_a_data_flag(settings):
         assert d.client.get("/v1/bots", headers=MASTER).json()[0]["team_read"] == "all"
         fresh = d.bot("Fresh")
         assert fresh.team_read == "section" and fresh.team_private is False  # defaults leave other bots alone
-        printer = d.bot("Printer Writing Bot")
+        printer = d.bot("Guarded Bot")
         with closing(d.store._connect()) as db:
             db.execute("DELETE FROM meta WHERE key='team.private_seeded'")
             before = dict(db.execute("SELECT * FROM bots WHERE id=?", (str(printer.id),)).fetchone())
         from botoffice.store import JobStore
+        monkeypatch.setenv("BOT_OFFICE_TEAM_PRIVATE_BOTS", "Guarded Bot")
         JobStore(d.store.path).initialize()  # a restart: the migration runs on the existing database
         with closing(d.store._connect()) as db:
             after = dict(db.execute("SELECT * FROM bots WHERE id=?", (str(printer.id),)).fetchone())
-            others = [r[0] for r in db.execute("SELECT team_private FROM bots WHERE name<>'Printer Writing Bot' AND name<>'Plain'")]
+            others = [r[0] for r in db.execute("SELECT team_private FROM bots WHERE name<>'Guarded Bot' AND name<>'Plain'")]
         assert {k: v for k, v in after.items() if v != before[k]} == {"team_private": 1}  # nothing else changed
         assert after["cli_access"] == before["cli_access"] and others == [0]
         JobStore(d.store.path).initialize()  # idempotent: a later flag the owner cleared stays cleared
@@ -183,3 +184,58 @@ def test_patch_exposes_team_settings_and_seed_is_a_data_flag(settings):
         JobStore(d.store.path).initialize()
         with closing(d.store._connect()) as db:
             assert db.execute('SELECT team_private FROM bots WHERE id=?', (str(printer.id),)).fetchone()[0] == 0
+
+
+def test_status_outcome_needs_a_retained_reply_and_migration_upgrades_an_old_database(settings):
+    with Desk(settings) as d:
+        reader, mate = d.bot("Reader"), d.bot("Mate")
+        job, h = run_job(d.store, mate)
+        with closing(d.store._connect()) as db:
+            db.execute("UPDATE jobs SET status='succeeded', reply_text='secret result\nBOT-OFFICE-STATUS: done', finished_at='2026-11-21' WHERE id=?",
+                       (str(job.id),))
+        mid = add_message(d.store, mate, "assistant", "secret result\nBOT-OFFICE-STATUS: done", job_id=str(job.id))
+        _, hr = run_job(d.store, reader)
+        assert d.client.get("/v1/agent/team/Mate/status", headers=hr).json()["job"]["outcome"] == "done"
+        with closing(d.store._connect()) as db:
+            db.execute("UPDATE messages SET archived_at='2026-11-21' WHERE id=?", (mid,))
+        assert "outcome" in d.client.get("/v1/agent/team/Mate/status", headers=hr).json()["job"]
+        assert d.client.get("/v1/agent/team/Mate/status", headers=hr).json()["job"]["outcome"] == ""
+        # an old database (no team columns or tables) is upgraded in place, rows untouched
+        with closing(d.store._connect()) as db:
+            db.execute("DROP TABLE team_reads"); db.execute("DROP TABLE team_ask_waits")
+            db.execute("ALTER TABLE bots DROP COLUMN team_read"); db.execute("ALTER TABLE bots DROP COLUMN team_private")
+            db.execute("DELETE FROM meta WHERE key='team.private_seeded'")
+        from botoffice.store import JobStore
+        store = JobStore(d.store.path)
+        store.initialize()
+        assert store.get_bot(mate.id).team_read == "section" and store.get_bot(mate.id).team_private is False
+        with closing(store._connect()) as db:
+            assert db.execute("SELECT COUNT(*) FROM team_ask_waits").fetchone()[0] == 0
+
+
+def test_status_outcome_hidden_when_the_only_reply_is_hidden(settings):
+    with Desk(settings) as d:
+        mate = d.bot("Mate2")
+        job, _ = run_job(d.store, mate)
+        with closing(d.store._connect()) as db:
+            db.execute("UPDATE jobs SET status='succeeded', reply_text='private text\nBOT-OFFICE-STATUS: done' WHERE id=?", (str(job.id),))
+        mid = add_message(d.store, mate, "assistant", "private text", job_id=str(job.id))
+        with closing(d.store._connect()) as db:
+            db.execute("UPDATE messages SET hidden=1 WHERE id=?", (mid,))
+        _, hr = run_job(d.store, d.bot("Reader2"))
+        assert d.client.get("/v1/agent/team/Mate2/status", headers=hr).json()["job"]["outcome"] == ""
+
+
+def test_status_outcome_comes_from_the_visible_message_not_a_hidden_final_reply(settings):
+    with Desk(settings) as d:
+        mate = d.bot("Mate3")
+        job, _ = run_job(d.store, mate)
+        with closing(d.store._connect()) as db:
+            db.execute("UPDATE jobs SET status='succeeded', reply_text='HIDDEN-FINAL\nBOT-OFFICE-STATUS: done' WHERE id=?", (str(job.id),))
+        add_message(d.store, mate, "assistant", "working on it", job_id=str(job.id))  # visible progress
+        hidden = add_message(d.store, mate, "assistant", "HIDDEN-FINAL\nBOT-OFFICE-STATUS: done", job_id=str(job.id))
+        with closing(d.store._connect()) as db:
+            db.execute("UPDATE messages SET hidden=1 WHERE id=?", (hidden,))
+        _, hr = run_job(d.store, d.bot("Reader3"))
+        body = d.client.get("/v1/agent/team/Mate3/status", headers=hr).json()
+        assert body["job"]["outcome"] == "working on it" and "HIDDEN-FINAL" not in str(body)

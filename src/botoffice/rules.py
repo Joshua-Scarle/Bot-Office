@@ -296,7 +296,7 @@ def _rm_outside(command: str) -> bool:
     return False
 
 
-def presets_hit(action: Action) -> list[str]:
+def presets_hit(action: Action, first_party: bool = False) -> list[str]:
     hits: list[str] = []
     command = action.command
     tool = action.tool.lower()
@@ -316,7 +316,7 @@ def presets_hit(action: Action) -> list[str]:
         protected = any(name in command for name in _PROTECTED_WRITE_DIRS) and _WRITE_OPS.search(command)
         if rm_outside or protected or "destructive" in after or any(pattern.search(command) for pattern in DESTRUCTIVE):
             hits.append("destructive")
-    if (tool.startswith("mcp") or tool == "mcp") and not team.is_first_party_tool(action.tool):
+    if (tool.startswith("mcp") or tool == "mcp") and not (first_party and team.is_first_party_tool(action.tool)):
         # an MCP tool can do anything its server can; unattended runs ask first
         hits.append("outbound")
     if tool in WRITE_TOOLS and any(name.lstrip("~") in path or name in path
@@ -468,7 +468,8 @@ class Rules:
         marker = secret_hit(action, bot_id, self.extra_secrets)
         if marker:
             return "never", "secrets", f"protected path ({marker})"
-        hits = presets_hit(action)
+        first_party = team.is_first_party_tool(action.tool, job)  # the controller's own bot-to-bot tools: not outbound
+        hits = presets_hit(action, first_party)
         scope = "unattended" if unattended else "attended"
         with closing(self.store._connect()) as db:
             rules = [rule for rule in self._rules(db, bot_id, scope) if _rule_matches(rule, action, hits)]
@@ -490,7 +491,6 @@ class Rules:
         if guarded:
             return "ask", git_guard.PRESET, f"{guarded} always waits for your approval"
         # A16: so does sending email or messages to people (the "send" class is locked on)
-        first_party = team.is_first_party_tool(action.tool)  # the controller's own bot-to-bot tools: not outbound
         sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"

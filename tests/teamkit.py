@@ -32,10 +32,12 @@ def set_bot(store, bot, **columns):
             db.execute(f"UPDATE bots SET {key}=? WHERE id=?", (value, str(bot.id)))
 
 
-def run_job(store, bot, source="chat", prompt="work"):
+def run_job(store, bot, source="chat", prompt="work", provider="codex"):
     """A running job of *bot* and its agent token (claimed one at a time, so it is the job claimed)."""
-    job = store.create(prompt, "codex", bot_id=bot.id, source=source)
-    claimed = store.claim(Slot.DESKTOP_1, {"codex"})
+    job = store.create(prompt, provider, bot_id=bot.id, source=source)
+    claimed = store.claim(Slot.DESKTOP_1, {provider})
+    if claimed is None:  # a running scheduler (lifespan desks) may have claimed it between create and claim
+        claimed = store.get(job.id)
     assert claimed is not None and claimed.id == job.id
     return claimed, {"Authorization": "Bearer " + store.issue_agent_token(claimed)}
 

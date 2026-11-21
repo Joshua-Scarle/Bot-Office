@@ -2029,6 +2029,9 @@ def create_app(
                     current = store.get(job.id)
                     if found or loop.time() >= deadline or current is None or str(current.status) != "running":
                         break
+                    if team.target_stalled(store, lanes, item["id"]):  # still queued and no lane free: give up, pending
+                        waiting = False
+                        break
                     await asyncio.sleep(min(0.5, max(0.0, deadline - loop.time())))
             if found:
                 store.claim_reply_wake(item["id"], "answered in turn")

@@ -100,8 +100,9 @@ def handle(client, message):
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": ident, "result": {"tools": TOOLS}}
     if method == "tools/call":
-        name, args = params.get("name"), params.get("arguments") or {}
-        if name not in {tool["name"] for tool in TOOLS} or not isinstance(args, dict):
+        name, args = params.get("name"), params.get("arguments", {})
+        args = {} if args is None else args
+        if not isinstance(name, str) or name not in {tool["name"] for tool in TOOLS} or not isinstance(args, dict):
             return error(ident, -32602, "unknown tool or invalid arguments")
         try:
             text, failed = call_tool(client, name, args), False
@@ -119,22 +120,28 @@ def send(response):
 
 
 def main():
-    for stream in (sys.stdin, sys.stdout):
-        stream.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     try:
         client = TeamClient()
     except TeamClientError as exc:
         print(f"bot-office-team-mcp: {exc}", file=sys.stderr)
         return 2
-    for line in sys.stdin:
-        if len(line) > MAX_LINE:
+    stdin = sys.stdin.buffer
+    while True:
+        raw = stdin.readline(MAX_LINE + 1)  # bounded: an oversized line is skipped to its end, never held whole
+        if not raw:
+            break
+        if len(raw) > MAX_LINE:
+            while raw and not raw.endswith(b"\n"):
+                raw = stdin.readline(MAX_LINE)
             send(error(None, -32600, "message too large"))
             continue
+        line = raw.decode("utf-8", "replace")
         if not line.strip():
             continue
         try:
             message = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             send(error(None, -32700, "parse error"))
             continue
         if isinstance(message, list):  # a batch (older protocol versions)

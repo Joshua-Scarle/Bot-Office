@@ -15,6 +15,16 @@ import urllib.request
 
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 MAX_RESPONSE = 256 * 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect could carry the token to another host: never follow one."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)  # no proxy, no redirect: the token only goes to the loopback URL
 _CLOSING = re.compile(r"<(/?)\s*untrusted-data", re.IGNORECASE)
 
 
@@ -40,7 +50,7 @@ class TeamClient:
         request = urllib.request.Request(self.url + path, data=data, method=method, headers={
             "Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 (loopback only, checked above)
+            with _OPENER.open(request, timeout=timeout) as response:  # loopback only (checked above), no redirects
                 raw = response.read(MAX_RESPONSE + 1)
         except urllib.error.HTTPError as exc:
             detail = ""
@@ -119,10 +129,11 @@ def render(tool: str, data: dict, bot: str = "") -> str:
         lines = [f'#{m["id"]} {m["at"]} {m["from"]} ({m["role"]}): {m["text"]}' for m in data.get("messages", [])]
         return wrap_untrusted(f"team_read:{bot}", "\n".join(lines) or "(no retained messages)")
     reply = data.get("reply")
-    head = {key: data[key] for key in ("id", "status", "delivery", "note") if data.get(key) is not None}
+    head = {key: data[key] for key in ("id", "status", "delivery") if data.get(key) is not None}
     text = json.dumps(head, ensure_ascii=False)
-    if reply:
-        text += "\n" + wrap_untrusted(f"reply:{bot}", reply)
+    for key in ("note", "reply"):  # a note can name the other bot: fenced like its reply
+        if data.get(key):
+            text += "\n" + wrap_untrusted(f"{key}:{bot}", data[key])
     return text
 
 
