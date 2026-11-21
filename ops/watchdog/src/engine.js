@@ -53,7 +53,8 @@ const FOOTER = "\n\nThis is an automatic notice from the Bot Office watchdog, no
 function line(e) {
   if (e.type === "recovery") return `- RECOVERED: ${e.text}`;
   if (e.type === "alert") {
-    const gone = e.resolved_at ? ` (already recovered after about ${Math.max(1, Math.round((e.resolved_at - e.at) / 60000))} min)` : "";
+    // counted from the outage start (the last good heartbeat), not from when it was detected
+    const gone = e.resolved_at ? ` (already recovered after about ${Math.max(1, Math.round((e.resolved_at - (e.started ?? e.at)) / 60000))} min)` : "";
     return `- ${e.text}${gone}`;
   }
   const it = e.item;
@@ -71,6 +72,15 @@ export function compose(cls, entries, now) {
     const total = parts > 1 ? `Part ${i + 1} of ${parts}; ${entries.length} in all.\n` : "";
     return { subject, text: `${head} (${new Date(now).toISOString()}):\n${total}\n${chunk.map(line).join("\n")}${FOOTER}` };
   });
+}
+
+/** When an outage began: the last heartbeat (none arriving) or the last healthy one (controller down or
+ * unhealthy), never after its detection; other kinds (backup) and unknown times count from detection. */
+export function outageStart(s, kind, now) {
+  let at;
+  if (kind === "heartbeat_missing") at = s.hb ? s.hb.received_at : s.first_seen;
+  else if (kind === "controller_down" || kind === "unhealthy") at = s.last_good_hb;
+  return typeof at === "number" && at <= now ? at : now;
 }
 
 export class Engine {
@@ -100,6 +110,7 @@ export class Engine {
       const s = await this.#load(), now = this.clock();
       s.first_seen ??= now;
       s.hb = { received_at: now, data };
+      if (data && data.controller_reachable && data.ok) s.last_good_hb = now; // the controller answered healthy
       await this.#save(s);
     });
   }
@@ -162,8 +173,9 @@ export class Engine {
       const cls = classOf(p.kind);
       const muted = !s.prefs[cls];
       const text = p.text + (cls === "backup" && s.backup_reason ? ` Reason code: ${s.backup_reason}.` : "");
-      s.incidents[p.kind] = { cls, since: now, muted, text };
-      if (!muted) s.pending.push({ id: `inc:${p.kind}:${now}`, cls, type: "alert", key: p.kind, text, at: now });
+      const started = outageStart(s, p.kind, now);
+      s.incidents[p.kind] = { cls, since: now, started, muted, text };
+      if (!muted) s.pending.push({ id: `inc:${p.kind}:${now}`, cls, type: "alert", key: p.kind, text, at: now, started });
     }
     for (const [kind, inc] of Object.entries(s.incidents)) {
       if (current.has(kind) || skip.has(inc.cls)) continue;
@@ -171,7 +183,7 @@ export class Engine {
       if (inc.muted || !s.prefs[inc.cls]) continue;
       const open = s.pending.find((e) => e.type === "alert" && e.key === kind && !e.resolved_at);
       if (open) open.resolved_at = now; // not mailed yet: the one mail says it is already over
-      else s.pending.push({ id: `rec:${kind}:${now}`, cls: inc.cls, type: "recovery", key: kind, text: inc.text.split(" Reason code:")[0].replace(/\.$/, "") + ` (lasted about ${Math.max(1, Math.round((now - inc.since) / 60000))} min)`, at: now });
+      else s.pending.push({ id: `rec:${kind}:${now}`, cls: inc.cls, type: "recovery", key: kind, text: inc.text.split(" Reason code:")[0].replace(/\.$/, "") + ` (lasted about ${Math.max(1, Math.round((now - (inc.started ?? inc.since)) / 60000))} min)`, at: now });
     }
   }
 

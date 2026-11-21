@@ -414,3 +414,38 @@ test("no free text can reach a mail: only strict patterns survive, the rest beco
 });
 
 test("MIN_GAP_MS is ten minutes", () => assert.equal(MIN_GAP_MS, 10 * MIN));
+
+test("a recovery counts the outage from the last good heartbeat, not from its detection", async () => {
+  const r = rig();
+  await r.beat(); await r.engine.tick(); await r.go(); // last heartbeat at minute 0
+  r.at(20); await r.engine.tick(); await r.go(); // detected at minute 20 (heartbeat missing)
+  const alert = r.mails.filter((m) => /server or controller/.test(m.subject));
+  assert.equal(alert.length, 1);
+  r.at(45); await r.beat(); await r.engine.tick(); await r.go();
+  const done = r.mails.filter((m) => /RECOVERED/.test(m.text));
+  assert.equal(done.length, 1);
+  assert.match(done[0].text, /lasted about 45 min/); // not 25 (minutes since detection)
+});
+
+test("an unmailed alert that already recovered counts from the last healthy heartbeat", async () => {
+  const r = rig();
+  await r.beat(); r.at(1); await r.engine.tick();
+  await r.beat(down); r.at(2); await r.engine.tick(); await r.go(); // first outage alert mailed at minute 2
+  await r.beat(good); r.at(3); await r.engine.tick(); await r.go(); // recovered; its mail waits for the gap
+  r.at(4); await r.beat(); // the last healthy heartbeat before the next outage
+  r.at(6); await r.beat(down); await r.engine.tick(); await r.go(); // detected at minute 6, held by the gap
+  r.at(9); await r.beat(good); await r.engine.tick(); await r.go();
+  r.at(13); await r.beat(); await r.engine.tick(); await r.go();
+  const outage = r.mails.filter((m) => /server or controller/.test(m.subject));
+  assert.equal(outage.length, 2);
+  assert.match(outage[1].text, /already recovered after about 5 min/); // minute 4 to 9, not 6 to 9
+});
+
+test("with no heartbeat time known the duration falls back to the detection time", async () => {
+  const r = rig();
+  r.at(0); await r.beat(down); r.at(1); await r.engine.tick(); await r.go(); // never healthy: no last good heartbeat
+  r.at(11); await r.beat(good); await r.engine.tick(); await r.go();
+  const done = r.mails.filter((m) => /RECOVERED/.test(m.text));
+  assert.equal(done.length, 1);
+  assert.match(done[0].text, /lasted about 10 min/);
+});
