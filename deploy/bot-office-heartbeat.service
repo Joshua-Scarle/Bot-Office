@@ -3,8 +3,12 @@ Description=Bot-Office heartbeat push to the external watchdog
 
 [Service]
 Type=oneshot
-# WATCHDOG_URL=https://... goes in this file (the secret itself lives in WATCHDOG_SECRET_FILE, mode 0600)
+# Default install directory; heartbeat.env (below) may override BOT_OFFICE_DIR.
+Environment=BOT_OFFICE_DIR=%h/printpilot-agentdesk
+# WATCHDOG_URL=https://... (and BOT_OFFICE_DIR if the install is elsewhere) go in this file;
+# the secret itself lives in WATCHDOG_SECRET_FILE (mode 0600)
 EnvironmentFile=%h/.config/bot-office/heartbeat.env
 Environment=WATCHDOG_SECRET_FILE=%h/.config/bot-office/watchdog-secret
-ExecStart=/usr/bin/python3 %h/printpilot-agentdesk/scripts/healthz_push.py
+# stdlib only: the system python3 (3.9 or newer) is enough, no venv
+ExecStart=/usr/bin/python3 ${BOT_OFFICE_DIR}/scripts/healthz_push.py
 TimeoutStartSec=30

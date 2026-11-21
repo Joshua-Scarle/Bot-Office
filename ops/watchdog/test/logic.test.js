@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { sanitize, evaluate, step, composeMail, buildRaw, MIN_ALERT_GAP_MS } from "../src/logic.js";
+import { sanitize, sanitizeEvents, evaluate, unjudged, buildRaw } from "../src/logic.js";
 
 const MIN = 60000, T0 = 1_800_000_000_000;
 const good = { sent_at: "x", controller_reachable: true, healthz: { ok: true, version: "1", scheduler: { alive: true }, db_reachable: true, running_jobs: 0, disk_free_pct: 50, backup: { state: "ok", age_hours: 3 } } };
@@ -30,33 +30,26 @@ test("sanitize drops unknown fields", () => {
   assert.ok(!JSON.stringify(d).includes("s3cret") && !JSON.stringify(d).includes("/x"));
 });
 
-test("one alert per incident, one recovery", () => {
-  const bad = [{ kind: "k", text: "t" }];
-  let r = step(null, bad, T0); assert.equal(r.send.type, "alert");
-  r = step(r.state, bad, T0 + 5 * MIN); assert.equal(r.send, null);
-  r = step(r.state, bad, T0 + 600 * MIN); assert.equal(r.send, null);
-  r = step(r.state, [], T0 + 605 * MIN); assert.equal(r.send.type, "recovery");
-  r = step(r.state, [], T0 + 610 * MIN); assert.equal(r.send, null);
-});
-test("flap: second alert waits for the gap; unnotified recovery is silent", () => {
-  const bad = [{ kind: "k", text: "t" }];
-  let r = step(null, bad, T0);
-  r = step(r.state, [], T0 + 2 * MIN); assert.equal(r.send.type, "recovery");
-  r = step(r.state, bad, T0 + 3 * MIN); assert.equal(r.send, null); assert.equal(r.state.notified, false);
-  r = step(r.state, [], T0 + 4 * MIN); assert.equal(r.send, null); // never alerted -> no recovery mail
-  r = step(r.state, bad, T0 + 4 * MIN + MIN_ALERT_GAP_MS + 2 * MIN); assert.equal(r.send.type, "alert");
-});
-test("daily cap", () => {
-  const bad = [{ kind: "k", text: "t" }];
-  let st = null, sent = 0, t = T0;
-  for (let i = 0; i < 20; i++) {
-    let r = step(st, bad, t); sent += r.send ? 1 : 0; t += 11 * MIN;
-    r = step(r.state, [], t); sent += r.send ? 1 : 0; t += 11 * MIN; st = r.state;
-  }
-  assert.ok(sent <= 6);
+test("backup is not judged while the controller is down", () => {
+  const p = evaluate(hb({ controller_reachable: false, healthz: null }, T0), T0, T0);
+  assert.deepEqual(p.map((x) => x.kind), ["controller_down"]);
+  assert.deepEqual(unjudged(p), ["backup"]);
 });
 test("mail has no CRLF injection and is base64 text", () => {
   const raw = buildRaw({ from: "a@b.c", to: "x@y.z\r\nBcc: e@f.g", subject: "s", text: "hello", messageId: "id", now: T0 });
   assert.ok(!/\r\nBcc:/.test(raw));
-  assert.equal(composeMail({ type: "recovery", since: T0 }, T0 + 5 * MIN).subject, "[Bot Office] RECOVERED");
+});
+test("sanitizeEvents keeps allowlisted fields only and drops bodies and secrets", () => {
+  const ev = sanitizeEvents({
+    prefs: { needs_you: false, evil: true }, backup_reason: "disk full\nBcc: x", prompt: "SECRET PROMPT", token: "tok",
+    needs_you: { count: 3, items: [{ id: "q:1:open", bot: "Ann", kind: "question open", ask: "SECRET PROMPT", body: "x" }, { id: "bad id!", bot: "x" }, null] },
+    failed: { count: 1, items: [{ id: "j:9:1", bot: "B", job: "9", kind: "auth", reason: "login\u0000 needed" }] },
+  });
+  const dump = JSON.stringify(ev);
+  assert.ok(!dump.includes("SECRET") && !dump.includes("tok") && !dump.includes("evil") && !dump.includes("\\n"));
+  assert.equal(ev.prefs.needs_you, false); assert.equal(ev.prefs.failed, true); assert.equal(ev.prefs.done, false);
+  assert.deepEqual(ev.lists.needs_you.items.map((i) => i.id), ["q:1:open"]);
+  assert.equal(ev.lists.needs_you.count, 3);
+  assert.equal(ev.lists.failed.items[0].reason, "login needed");
+  assert.equal(sanitizeEvents("x"), null);
 });

@@ -1,71 +1,66 @@
-// Bot Office watchdog: receives heartbeats, checks them on a cron, mails on trouble.
+// Bot Office watchdog. The Worker authenticates; one Durable Object ("main") owns all state and mail.
 import { EmailMessage } from "cloudflare:email";
-import { sanitize, evaluate, step, composeMail, buildRaw } from "./logic.js";
+import { sanitize, sanitizeEvents } from "./logic.js";
+import { Engine, makeSender } from "./engine.js";
 
-const MAX_BODY = 16 * 1024;
+const MAX_BODY = 32 * 1024;
 
-function timingSafeEqual(a, b) {
-  const enc = new TextEncoder();
-  const x = enc.encode(a), y = enc.encode(b);
-  // compare against a fixed-length digest so length is not leaked either
-  return crypto.subtle.digest("SHA-256", x).then(async (hx) => {
-    const hy = await crypto.subtle.digest("SHA-256", y);
-    return crypto.subtle.timingSafeEqual(hx, hy);
-  });
+async function digest(text) {
+  return crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+}
+// compare fixed-length digests so neither content nor length is leaked
+async function authorized(request, secret) {
+  if (!secret) return false;
+  const given = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+  const a = new Uint8Array(await digest(given)), b = new Uint8Array(await digest(secret));
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
-async function sendMail(env, send, now) {
-  const { subject, text } = composeMail(send, now);
-  const raw = buildRaw({ from: env.ALERT_FROM, to: env.ALERT_TO, subject, text, messageId: crypto.randomUUID(), now });
-  await env.ALERT_EMAIL.send(new EmailMessage(env.ALERT_FROM, env.ALERT_TO, raw));
-}
+const ROUTES = { "/heartbeat": sanitize, "/events": sanitizeEvents };
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-    if (request.method !== "POST" || url.pathname !== "/heartbeat") return new Response("not found", { status: 404 });
-    const given = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
-    if (!env.HEARTBEAT_SECRET || !(await timingSafeEqual(given, env.HEARTBEAT_SECRET))) {
-      return new Response("unauthorized", { status: 401 });
-    }
+    const path = new URL(request.url).pathname;
+    if (request.method !== "POST" || !ROUTES[path]) return new Response("not found", { status: 404 });
+    if (!(await authorized(request, env.HEARTBEAT_SECRET))) return new Response("unauthorized", { status: 401 });
     const text = await request.text();
     if (text.length > MAX_BODY) return new Response("too large", { status: 413 });
-    let data;
+    let data = null;
     try {
-      data = sanitize(JSON.parse(text));
+      data = ROUTES[path](JSON.parse(text));
     } catch {
       data = null;
     }
     if (!data) return new Response("bad request", { status: 400 });
-    await env.WATCHDOG_KV.put("heartbeat", JSON.stringify({ received_at: Date.now(), data }));
-    return new Response("ok");
+    return stub(env).fetch("https://watchdog.internal" + path, { method: "POST", body: JSON.stringify(data) });
   },
 
   async scheduled(_event, env) {
-    const now = Date.now();
-    const hb = JSON.parse((await env.WATCHDOG_KV.get("heartbeat")) || "null");
-    let firstSeen = Number(await env.WATCHDOG_KV.get("first_seen")) || null;
-    if (!firstSeen) {
-      firstSeen = now;
-      await env.WATCHDOG_KV.put("first_seen", String(now));
-    }
-    const prev = JSON.parse((await env.WATCHDOG_KV.get("incident")) || "null");
-    const { state, send } = step(prev, evaluate(hb, now, firstSeen), now);
-    if (send) {
-      try {
-        await sendMail(env, send, now);
-      } catch (err) {
-        // roll back so the next cron retries; log the error class only
-        console.log("mail failed:", err && err.name);
-        state.mails.pop();
-        if (send.type === "alert") state.notified = false;
-        else {
-          state.open = true;
-          state.notified = true;
-          state.since = send.since;
-        }
-      }
-    }
-    if (JSON.stringify(state) !== JSON.stringify(prev)) await env.WATCHDOG_KV.put("incident", JSON.stringify(state));
+    const res = await stub(env).fetch("https://watchdog.internal/tick", { method: "POST" });
+    if (!res.ok) throw new Error("tick failed: HTTP " + res.status); // surfaces in the cron's error log
   },
 };
+
+const stub = (env) => env.WATCHDOG.get(env.WATCHDOG.idFromName("main"));
+
+export class Watchdog {
+  constructor(state, env) {
+    this.engine = new Engine({ storage: state.storage, send: makeSender(env, EmailMessage) });
+  }
+
+  async fetch(request) {
+    const path = new URL(request.url).pathname;
+    try {
+      if (path === "/heartbeat") await this.engine.heartbeat(await request.json());
+      else if (path === "/events") await this.engine.events(await request.json());
+      else if (path === "/tick") await this.engine.tick();
+      else return new Response("not found", { status: 404 });
+      return new Response("ok");
+    } catch (err) {
+      console.log("watchdog error:", err && err.name);
+      return new Response("error", { status: 500 });
+    }
+  }
+}

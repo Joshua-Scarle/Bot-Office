@@ -552,9 +552,11 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        # no auth on purpose (the loopback watchdog pusher calls it); health.build returns
-        # only booleans, numbers and short enums. Cheap: one tiny indexed query, one stat, one small file.
-        return JSONResponse(health.build(app.state), headers={"Cache-Control": "no-store"})
+        # no auth on purpose (the loopback watchdog pusher calls it); the body holds only booleans,
+        # numbers and short enums. The blocking work (database, disk, status file) runs in a bounded
+        # worker thread, never on the event loop.
+        body, code = await health.snapshot(app.state)
+        return JSONResponse(body, status_code=code, headers={"Cache-Control": "no-store"})
 
     memory = scheduler.memory
     assignments = scheduler.assignments

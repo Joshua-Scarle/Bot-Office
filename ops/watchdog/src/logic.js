@@ -2,9 +2,10 @@
 
 export const HEARTBEAT_MAX_AGE_MS = 15 * 60 * 1000; // VPS / controller considered down
 export const BACKUP_MAX_AGE_HOURS = 30;
-export const MIN_ALERT_GAP_MS = 10 * 60 * 1000; // between two mails
-export const MAX_MAILS_PER_DAY = 6; // flapping guard, recovery mails included
-const DAY_MS = 24 * 60 * 60 * 1000;
+export const CLASSES = ["needs_you", "failed", "outage", "backup", "done"];
+export const DEFAULT_PREFS = { needs_you: true, failed: true, outage: true, backup: true, done: false };
+const KIND_CLASS = { heartbeat_missing: "outage", controller_down: "outage", unhealthy: "outage", backup_state: "backup", backup_stale: "backup" };
+export const classOf = (kind) => KIND_CLASS[kind];
 const BACKUP_STATES = ["ok", "failed", "not_configured", "unknown"];
 
 /** Keep only the fields the watchdog uses; everything else in a push is dropped. */
@@ -27,6 +28,33 @@ export function sanitize(body) {
     backup_state: BACKUP_STATES.includes(backup.state) ? backup.state : "unknown",
     backup_age_hours: num(backup.age_hours),
   };
+}
+
+/** Classes `evaluate` could not judge from this problem list (their open incidents stay as they are). */
+export function unjudged(problems) {
+  return problems.some((p) => p.kind === "heartbeat_missing" || p.kind === "controller_down") ? ["backup"] : [];
+}
+
+const clean = (v, n) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim().slice(0, n) : "");
+
+/** The controller's event summary, reduced to what the mail may carry. Anything else is dropped. */
+export function sanitizeEvents(body) {
+  if (!body || typeof body !== "object") return null;
+  const prefs = {};
+  for (const c of CLASSES) prefs[c] = body.prefs && typeof body.prefs[c] === "boolean" ? body.prefs[c] : DEFAULT_PREFS[c];
+  const out = { prefs, backup_reason: clean(body.backup_reason, 120) || null, lists: {} };
+  for (const c of ["needs_you", "failed", "done"]) {
+    const list = body[c];
+    if (!list || typeof list !== "object" || !Array.isArray(list.items)) continue;
+    const items = [];
+    for (const it of list.items.slice(0, 50)) {
+      if (!it || typeof it.id !== "string" || !/^[A-Za-z0-9:_.-]{1,80}$/.test(it.id)) continue;
+      items.push({ id: it.id, bot: clean(it.bot, 60), job: clean(it.job, 40), kind: clean(it.kind, 40), reason: clean(it.reason, 120) });
+    }
+    const count = Number.isInteger(list.count) && list.count >= items.length ? Math.min(list.count, 1e6) : items.length;
+    out.lists[c] = { count, items };
+  }
+  return out;
 }
 
 /** Problems for the newest heartbeat; empty list = healthy. `hb` is {received_at, data} or null. */
@@ -54,6 +82,7 @@ export function evaluate(hb, now, firstSeen) {
     if (d.disk_free_pct !== null && d.disk_free_pct < 5) why.push(`disk ${d.disk_free_pct}% free`);
     problems.push({ kind: "unhealthy", text: `healthz reports ok=false${why.length ? ": " + why.join(", ") : ""}.` });
   }
+  if (!d.controller_reachable) return problems; // no healthz, so nothing known about the backup
   if (d.backup_state !== "ok") {
     problems.push({ kind: "backup_state", text: `Backup state is "${d.backup_state}" (expected "ok").` });
   } else if (d.backup_age_hours === null || d.backup_age_hours > BACKUP_MAX_AGE_HOURS) {
@@ -63,59 +92,6 @@ export function evaluate(hb, now, firstSeen) {
     });
   }
   return problems;
-}
-
-/**
- * One cron step. `state` is the stored incident record ({open, since, kinds, notified, mails: [ms]}).
- * Returns {state, send} where send is null or {type: "alert"|"recovery", problems, since}.
- * One alert per incident, one recovery mail; mails are rate-limited (gap + daily cap).
- */
-export function step(state, problems, now) {
-  const s = { open: false, since: null, kinds: [], notified: false, mails: [], ...(state || {}) };
-  s.mails = s.mails.filter((t) => now - t < DAY_MS);
-  const last = s.mails.length ? Math.max(...s.mails) : 0;
-  let send = null;
-  if (problems.length) {
-    if (!s.open) {
-      s.open = true;
-      s.since = now;
-      s.notified = false;
-    }
-    s.kinds = problems.map((p) => p.kind);
-    if (!s.notified && s.mails.length < MAX_MAILS_PER_DAY && now - last >= MIN_ALERT_GAP_MS) {
-      s.notified = true;
-      s.mails.push(now);
-      send = { type: "alert", problems, since: s.since };
-    }
-  } else if (s.open) {
-    if (s.notified && s.mails.length < MAX_MAILS_PER_DAY) {
-      s.mails.push(now);
-      send = { type: "recovery", problems: [], since: s.since };
-    }
-    s.open = false;
-    s.since = null;
-    s.kinds = [];
-    s.notified = false;
-  }
-  return { state: s, send };
-}
-
-export function composeMail(send, now) {
-  const when = new Date(now).toISOString();
-  if (send.type === "recovery") {
-    const mins = Math.round((now - send.since) / 60000);
-    return {
-      subject: "[Bot Office] RECOVERED",
-      text: `Bot Office is healthy again (${when}). The incident lasted about ${mins} min.\n\nThis is an automatic system notice from the Bot Office watchdog.`,
-    };
-  }
-  return {
-    subject: "[Bot Office] ALERT: " + send.problems.map((p) => p.kind).join(", "),
-    text:
-      `Bot Office needs attention (detected ${when}).\n\n` +
-      send.problems.map((p) => "- " + p.text).join("\n") +
-      "\n\nYou get one mail per incident and one when it recovers.\nThis is an automatic system notice from the Bot Office watchdog, not a bot message.",
-  };
 }
 
 /** Plain-text RFC 5322 message; header values are stripped of CR/LF. */

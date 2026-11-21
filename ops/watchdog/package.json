@@ -3,5 +3,5 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "scripts": { "test": "node --test test/logic.test.js" }
+  "scripts": { "test": "node --test test/*.test.js" }
 }
