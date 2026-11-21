@@ -368,3 +368,31 @@ def test_migration_from_the_0_12_5_index_on_a_database_with_files_and_status_lin
     with closing(sqlite3.connect(path)) as db:
         assert not db.execute("SELECT 1 FROM sqlite_master WHERE name LIKE 'messages_fts%'").fetchone()
         assert db.execute("SELECT count(*) FROM messages_search").fetchone()[0] == 3
+
+
+def test_a_0_12_5_database_opened_without_fts5_loses_its_old_triggers(tmp_path):
+    path = tmp_path / "nofts.sqlite3"
+    JobStore(path).initialize()
+    with closing(sqlite3.connect(path)) as db:
+        for t in history.TRIGGER_NAMES:
+            db.execute(f"DROP TRIGGER {t}")
+        db.execute("DROP TABLE messages_search")
+        db.execute("CREATE TABLE messages_fts_stub (x)")
+        db.execute("CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts_stub VALUES (1); END")
+        db.commit()
+
+    class NoFts:  # the connection of a SQLite build without the FTS5 module
+        def __init__(self, db):
+            self.db = db
+
+        def execute(self, sql, *a):
+            if "VIRTUAL TABLE" in sql:
+                raise sqlite3.OperationalError("no such module: fts5")
+            return self.db.execute(sql, *a)
+
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+
+    with closing(sqlite3.connect(path, isolation_level=None)) as db:
+        assert history.ensure_fts(NoFts(db), lambda *a: None) is False
+        assert db.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'messages_fts_%'").fetchone()[0] == 0

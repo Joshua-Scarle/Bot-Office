@@ -41,10 +41,14 @@ _TRIGGERS = (
 _BACKFILL = f"INSERT INTO {TABLE}(rowid, text, names) SELECT m.id, m.text, {names_sql('m')} FROM messages m"
 
 
-def _drop_legacy(db: sqlite3.Connection) -> None:
-    """Remove the 0.12.5 index and its triggers (an older version that ran meanwhile recreates them)."""
+def _drop_legacy_triggers(db: sqlite3.Connection) -> None:
     for name in ("messages_fts_ai", "messages_fts_ad", "messages_fts_au"):
         db.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+
+def _drop_legacy(db: sqlite3.Connection) -> None:
+    """Remove the 0.12.5 index and its triggers (an older version that ran meanwhile recreates them)."""
+    _drop_legacy_triggers(db)
     try:
         db.execute(f"DROP TABLE IF EXISTS {LEGACY_TABLE}")
     except sqlite3.OperationalError:
@@ -72,6 +76,14 @@ def ensure_fts(db: sqlite3.Connection, meta_set) -> bool:
         db.rollback()
         if "fts5" not in str(exc).lower():
             raise  # a lock or disk error is not "no FTS5": let the start fail rather than hide it
+        # a 0.12.5 database opened where FTS5 is missing: its triggers would fail every chat write
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            _drop_legacy_triggers(db)
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
         return False
     except BaseException:
         db.rollback()

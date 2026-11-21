@@ -135,7 +135,7 @@ def test_denylist_follows_symlinks_dotdot_and_hard_links(lair):
     key = home / ".ssh" / "id_ed25519"
     (home / "work" / "innocent.txt").symlink_to(key)  # a name that looks harmless, pointing at a key
     (home / "work" / "dir").symlink_to(home / ".ssh", target_is_directory=True)  # a directory link into ~/.ssh
-    os.link(key, home / "work" / "hard.txt")  # same file, other name: not a protected path, so identity is the check
+    os.link(key, home / "work" / "hard.txt")  # same file, other name: not a protected path, so the link count is the check
     token = settings.data_dir / "token"
     token.write_text("t")
     os.link(token, home / "work" / "tok.txt")
@@ -147,11 +147,11 @@ def test_denylist_follows_symlinks_dotdot_and_hard_links(lair):
         f"../../../home/work/../.ssh/id_ed25519",
         str(workspace / ".." / ".." / "token"),  # ../ into the data dir
         "~/.ssh/id_ed25519",
-        str(home / "work" / "tok.txt"),
+        str(home / "work" / "tok.txt"), str(home / "work" / "hard.txt"),
         str(home / "work" / "fine.txt")]) + "\n")
     message = finish(lair[0], "done")
     assert [attachments.display_name(a) for a in message.attachments] == ["fine.txt"]
-    assert "8 files were not attached: a protected location." in message.text
+    assert "9 files were not attached: a protected location." in message.text
 
 
 def test_denylist_covers_the_private_controller_dir(turn, tmp_path):
@@ -312,3 +312,14 @@ def test_page_csp_allows_only_its_own_frames_and_the_viewer_never_gets_same_orig
     assert "frame-src 'self'" in csp and "default-src 'none'" in csp
     html = api.CHAT_PAGE.read_text()
     assert 'setAttribute("sandbox", "")' in html and "allow-same-origin" not in html
+
+
+def test_env_and_key_files_are_refused_even_inside_the_workspace(turn):
+    workspace = turn[-1]
+    for name in (".env", "prod.env", ".env.local", "id_rsa", "server.pem", "rclone.conf"):
+        (workspace / name).write_text("x")
+    (workspace / "ok.txt").write_text("ok")
+    (workspace / SIDECAR).write_text("".join(f"{workspace / n}\n" for n in (".env", "prod.env", ".env.local", "id_rsa", "server.pem", "rclone.conf", "ok.txt")))
+    message = finish(turn, "done")
+    assert [attachments.display_name(a) for a in message.attachments] == ["ok.txt"]
+    assert "6 files were not attached: a protected location." in message.text

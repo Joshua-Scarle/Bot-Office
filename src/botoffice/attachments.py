@@ -278,7 +278,7 @@ def _read_outside(path: str, workspace: Path, limit: int, dirs: list[Path], file
                   own: list[Path]) -> tuple[Path, bytes]:
     """Read a regular file from anywhere that is not denylisted. Symlinks are resolved first and the denylist is
     applied to the lexical path and to the real one; the final open refuses a symlink and rechecks the real path of the
-    descriptor and its identity against the protected files. *own* (the job workspace and the bot's folders) are the
+    descriptor, and refuses a file with several hard links. *own* (the job workspace and the bot's folders) are the
     places a link may start from: only where it leads is judged."""
     if not path or _is_remote(path) or "\x00" in path:
         raise ValueError("not a local path")
@@ -298,13 +298,8 @@ def _read_outside(path: str, workspace: Path, limit: int, dirs: list[Path], file
             now = real
         if now != real and is_denied(now, dirs, files):
             raise Denied("protected location")
-        for protected in files:  # a hard link to a protected file has another name but the same identity
-            try:
-                other = os.stat(protected)
-            except OSError:
-                continue
-            if (other.st_dev, other.st_ino) == (info.st_dev, info.st_ino):
-                raise Denied("protected location")
+        if info.st_nlink > 1:  # a hard link has another name but the same file: it may be a protected one
+            raise Denied("protected location")
         with os.fdopen(fd, "rb", closefd=False) as stream:
             data = stream.read(limit + 1)
         if not data or len(data) > limit:
@@ -371,6 +366,8 @@ def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: 
                     outside = True
             else:
                 resolved, data = _read_local(path, roots, sniff=True)
+            if from_sidecar and _name_denied(resolved):
+                raise Denied("protected name")  # .env, keys, credentials: refused wherever they lie, the workspace too
             if resolved in saved:
                 continue
             mime = sniff_image(data)
