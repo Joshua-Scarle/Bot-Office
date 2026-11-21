@@ -1904,10 +1904,10 @@ def create_app(
     async def message_agent(bot_ref: str, body: AgentMessageCreate, binding: Job | None = Depends(agent_auth)) -> dict:  # noqa: B008
         return await _deliver(bot_ref, body, binding, "message")
 
-    def _send_gate(binding: Job, target, kind: str, ref: str, text: str) -> int:
+    def _send_gate(binding: Job, target, kind: str, ref: str, text: str, delivery: str) -> int:
         """B12: every job send goes through team.send_gate (here, and for the inbox-file path in the scheduler)."""
         try:
-            return team.send_gate(store, scheduler.rules, binding, str(target.id), kind, ref, text)
+            return team.send_gate(store, scheduler.rules, binding, str(target.id), kind, ref, text, delivery)
         except team.TeamError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
@@ -1918,7 +1918,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="bot not found")
         if binding and binding.bot_id != sender.id:
             raise HTTPException(status_code=403, detail="token is bound to another bot")
-        slot = _send_gate(binding, target, kind, body.to, body.body) if binding and sender.id != target.id else 0
+        slot = _send_gate(binding, target, kind, body.to, body.body, body.mode) if binding and sender.id != target.id else 0
         blocked = _steer_blocked(target)
         try:
             _, _, item = scheduler.turns.post_agent_message(

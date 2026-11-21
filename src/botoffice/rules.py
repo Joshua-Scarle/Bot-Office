@@ -821,14 +821,15 @@ class Rules:
         if not job.origin_job_id or not job.bot_id:
             return None
         origin = self.store.get(job.origin_job_id)
-        with closing(self.store._connect()) as db:
-            # B12: a resume turn that a teammate steered into is a team turn the card was not raised for
-            if team.steered_resume(db, job, origin):
-                return None
         stamp = now().isoformat()
         with closing(self.store._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                # B12: a resume turn that a teammate steered into is a team turn the card was not raised for (checked
+                # in the transaction that consumes the grant, so a steer cannot slip in between)
+                if team.steered_resume(db, job, origin):
+                    db.commit()
+                    return None
                 row = db.execute(
                     "SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='approved' AND job_id=? "
                     "AND resume_job_id=? AND grant_expires_at>? ORDER BY id LIMIT 1",

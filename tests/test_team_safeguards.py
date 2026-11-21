@@ -498,3 +498,17 @@ def test_never_rule_of_the_other_scope_does_not_block_an_attended_chat_send(sett
         assert gate.team_send_mode(chat, SEND) == "allow"
         routine, _ = claude_job(d, sender, source="routine")
         assert gate.team_send_mode(routine, SEND) == "off"
+
+
+def test_card_binds_the_delivery_mode(settings):
+    with Desk(settings) as d:
+        alice, sender = d.bot("Alice"), d.bot("Sender", team_messaging="ask")
+        job, _ = claude_job(d, sender)
+        with closing(d.store._connect()) as db:
+            db.execute("INSERT INTO approvals (bot_id,job_id,tool,summary,input_hash,scope,source,status,consumed_by,created_at) "
+                       "VALUES (?,?,?,?,?,?,?,'consumed',?,?)", (str(sender.id), str(job.id), SEND,
+                                                                 f'{SEND}: {{"bot":"Alice","mode":"queue","text":"hi"}} (in /tmp)',
+                                                                 "h", "attended", "chat", str(job.id), "2026-01-01"))
+        with pytest.raises(team.TeamError):
+            team.reserve_send(d.store, job, str(alice.id), "message", "ask", "Alice", "hi", "steer", limit=9, window_s=60)
+        assert team.reserve_send(d.store, job, str(alice.id), "message", "ask", "Alice", "hi", "queue", limit=9, window_s=60)
