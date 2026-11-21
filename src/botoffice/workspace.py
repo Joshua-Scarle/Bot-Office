@@ -302,7 +302,25 @@ def _clip(text: str, limit: int) -> str:
 REPLY_FILE_PROVIDERS: set[str] = set()
 
 
+# 0.12.15: appended to every turn nobody is watching, whatever the saved prompt says: a prompt may ask to
+# stay quiet when nothing changed, never when something went wrong (Needs-you lists blocked, failed and
+# status-less ends of these turns)
+UNATTENDED_SOURCES = ("routine", "wakeup", "trigger", "inbox")
+UNATTENDED_RULE = (
+    " This turn was not started by a live message, so nobody is watching it. Staying quiet when nothing "
+    "changed is fine (send no message). Never stay quiet about a problem: if a command or check fails or is "
+    "unavailable, or a sign-in (GitHub, gh, a website) is missing or expired, and you cannot work around it, "
+    "so that you cannot do what the prompt asks, do not skip it or end quietly, whatever the prompt says about "
+    "silence or sending nothing (a retry or fallback that works is fine). Say what failed in your reply and end with BOT-OFFICE-STATUS: blocked — <what failed> (waiting_on_user — <what "
+    "you need> if only the user can fix it). Always end with a BOT-OFFICE-STATUS line; a quiet run ends with "
+    "BOT-OFFICE-STATUS: done — nothing new.")
+
+
 def _reply_rule(job: Job) -> str:
+    return _base_reply_rule(job) + (UNATTENDED_RULE if job.source in UNATTENDED_SOURCES else "")
+
+
+def _base_reply_rule(job: Job) -> str:
     if job.provider in REPLY_FILE_PROVIDERS:
         return "Write the reply the user will see, as plain text, only to reply.txt in the current directory. Your in-progress text already streams live in the chat, so do not repeat it with desk say."
     return ("Your final message is the reply the user sees; give it directly as plain text. Do not write "

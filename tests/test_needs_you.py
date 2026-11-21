@@ -76,7 +76,7 @@ def test_failed_unattended_turns_and_repeated_failures(settings):
         ids = []
         for i, source in enumerate(("chat", "routine", "routine")):
             job = store.create("x", "codex", bot_id=bea.id, source=source)
-            set_row(store, "jobs", job.id, status="failed", failure_kind="provider_error", error="boom",
+            set_row(store, "jobs", job.id, status="failed", failure_kind="provider_error", error="boom" if i != 1 else "bang",  # equal reasons would group
                     finished_at=(stamp + timedelta(seconds=i)).isoformat())
             ids.append(str(job.id))
         items = needs(client)

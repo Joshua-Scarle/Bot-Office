@@ -7,6 +7,7 @@ state, so a resolved item disappears and a new state (or a new failure) comes ba
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
@@ -22,6 +23,16 @@ REPEAT_FAILURES = 3
 # failures Joshua must act on wherever they happen; other failures only of turns he did not start
 ACTION_KINDS = ("auth", "usage_limit", "gate", "budget")
 UNATTENDED = ("routine", "wakeup", "inbox", "api", "trigger")
+# 0.12.15: turns nobody watches that end badly (blocked, waiting on the owner, failed, no status line) stay
+# listed for a week, one item per bot, routine/assignment/watcher and reason, until a later run of the same
+# one succeeds or the owner dismisses it. Assignment turns that end blocked or waiting already have their
+# assignment item; routine, wake-up and watcher turns must end with a status line, bot replies need not.
+UNATTENDED_WINDOW = timedelta(days=7)
+BAD_END_SOURCES = ("routine", "wakeup", "inbox", "trigger")
+NO_STATUS_SOURCES = BAD_END_SOURCES
+NO_STATUS_REASON = "the turn ended without a BOT-OFFICE-STATUS line"
+END_WORDS = {"blocked": "ended blocked", "waiting_on_user": "is waiting on you", "failed": "failed",
+             "no_status": "ended without a status line"}
 ASSIGNMENT_ACTIONS = ["reply", "start", "done", "dismiss"]
 # #10: a job parked on a usage limit for longer than this gets one notice per attempt
 PARK_NOTICE_AFTER = timedelta(minutes=10)
@@ -102,31 +113,7 @@ def needs_you(store: JobStore) -> list[dict]:
                 "ask": f'{bot["name"]} dropped your task "{row["title"]}": {row["status_note"] or "no note"}',
                 "at": row["closed_at"], "actions": ["dismiss"],
             })
-        since = (stamp - FAILED_WINDOW).isoformat()
-        # only actionable failures, filtered before the limit: login/usage failures of any turn
-        # (assignment turns too, whatever their escalation), others of unattended non-assignment turns
-        kinds, sources = ",".join("?" * len(ACTION_KINDS)), ",".join("?" * len(UNATTENDED))
-        failed = db.execute(
-            "SELECT j.* FROM jobs j WHERE j.status IN ('failed','needs_login') AND j.finished_at>=? "
-            "AND j.dismissed_at IS NULL AND j.bot_id IS NOT NULL "
-            f"AND (j.status='needs_login' OR j.failure_kind IN ({kinds}) "
-            f"OR (j.assignment_id IS NULL AND j.source IN ({sources}))) "
-            "AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.bot_id=j.bot_id AND k.status='succeeded' "
-            "AND k.finished_at>j.finished_at) ORDER BY j.finished_at DESC LIMIT 50",
-            (since, *ACTION_KINDS, *UNATTENDED)).fetchall()
-        for job in failed:
-            bot = bots.get(job["bot_id"])
-            if bot is None:
-                continue
-            kind = "needs_login" if job["status"] == "needs_login" else job["failure_kind"]
-            reason = (job["error"] or kind or "failed").splitlines()[0][:200]
-            items.append({
-                "id": f"j:{job['id']}:{job['attempts']}", "kind": "job", "state": "failed", "bot_id": job["bot_id"],
-                "bot_name": bot["name"], "notify": bool(bot["notify"]), "job_id": job["id"],
-                "title": f"{job['source'] or 'turn'} failed",
-                "ask": f"{bot['name']}'s {job['source'] or ''} turn failed: {reason}", "at": job["finished_at"],
-                "actions": ["retry", "dismiss"],
-            })
+        _unattended(db, bots, items, stamp)
         for bot_id, bot in bots.items():
             last = db.execute(
                 "SELECT id, status, failure_kind, dismissed_at FROM jobs WHERE bot_id=? AND status NOT IN "
@@ -296,9 +283,20 @@ def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None)
 
 
 def dismiss_job(store: JobStore, job_id: str) -> bool:
+    """Dismiss a finished job and every other open bad end in the same grouped Needs-you item."""
+    stamp = now()
     with closing(store._connect()) as db:
-        return db.execute("UPDATE jobs SET dismissed_at=? WHERE id=? AND status NOT IN ('queued','running')",
-                          (now().isoformat(), job_id)).rowcount > 0
+        row = db.execute("SELECT * FROM jobs WHERE id=? AND status NOT IN ('queued','running')", (job_id,)).fetchone()
+        if row is None:
+            return False
+        ids = [job_id]
+        end = _bad_end(row)
+        if end is not None and row["bot_id"] is not None and row["dismissed_at"] is None:  # a repeated click is a no-op
+            key = (row["bot_id"], _stream(row), _reason_key(*end))
+            ids += [other["id"] for other, category, reason in _bad_ends(db, stamp)
+                    if (other["bot_id"], _stream(other), _reason_key(category, reason)) == key]
+        db.execute(f"UPDATE jobs SET dismissed_at=? WHERE id IN ({','.join('?' * len(ids))})", (stamp.isoformat(), *ids))
+    return True
 
 
 def last_desk_job(store: JobStore, desktop: str) -> str | None:
@@ -307,3 +305,122 @@ def last_desk_job(store: JobStore, desktop: str) -> str | None:
         row = db.execute("SELECT id FROM jobs WHERE slot=? AND bot_id IS NOT NULL "
                          "ORDER BY COALESCE(started_at, created_at) DESC LIMIT 1", (desktop,)).fetchone()
     return row["id"] if row else None
+
+
+def _stream(job: sqlite3.Row) -> tuple[str, str]:
+    """The run series a job belongs to: a later success of the same series clears an earlier bad end."""
+    for column in ("routine_id", "assignment_id", "watcher_id"):
+        if job[column]:
+            return column, job[column]
+    return "source", job["source"]
+
+
+def _bad_end(job: sqlite3.Row) -> tuple[str, str] | None:
+    """(category, reason) when *job* ended in a way the owner should hear about, else None."""
+    status, assignment = job["status"], job["assignment_id"]
+    if status in ("failed", "needs_login"):
+        if status == "failed" and not (assignment or job["failure_kind"] in ACTION_KINDS or job["source"] in UNATTENDED):
+            return None
+        kind = "needs_login" if status == "needs_login" else job["failure_kind"]
+        return "failed", (job["error"] or kind or "failed").splitlines()[0][:200]
+    if assignment or job["source"] not in BAD_END_SOURCES:
+        return None
+    state, _, reason = (job["outcome"] or "").partition(":")
+    if status == "incomplete" and state in ("blocked", "waiting_on_user"):
+        return state, reason.strip()[:200] or "no reason given"
+    if status == "succeeded" and job["outcome"] == "unverified" and job["source"] in NO_STATUS_SOURCES:
+        return "no_status", NO_STATUS_REASON
+    return None
+
+
+def _reason_key(category: str, reason: str) -> str:
+    return category + ":" + re.sub(r"\d{4,}", "#", " ".join(reason.lower().split()))
+
+
+def _name(job: sqlite3.Row) -> str:
+    if job["routine_id"]:
+        label = job["routine_name"] or (job["routine_prompt"] or "").strip()[:40]
+        return f'routine "{label}"' if label else "a deleted routine"
+    if job["assignment_id"]:
+        return f'assignment "{job["assignment_title"]}"' if job["assignment_title"] else "an assignment"
+    if job["watcher_id"]:
+        return f'watcher "{job["watcher_name"]}"' if job["watcher_name"] else "a watcher"
+    return {"inbox": "a bot message", "wakeup": "a wake-up", "api": "an API message",
+            "trigger": "a watcher event"}.get(job["source"], f"a {job['source']} turn")
+
+
+def _bad_ends(db: sqlite3.Connection, stamp: datetime) -> list[tuple[sqlite3.Row, str, str]]:
+    """Unattended bad ends still open (no later success of their series, not dismissed), oldest first."""
+    since = (stamp - UNATTENDED_WINDOW).isoformat()
+    kinds, sources = ",".join("?" * len(ACTION_KINDS)), ",".join("?" * len(UNATTENDED))
+    rows = db.execute(
+        "SELECT j.*, r.name AS routine_name, r.prompt AS routine_prompt, a.title AS assignment_title, "
+        "a.status AS assignment_status, w.name AS watcher_name FROM jobs j "
+        "LEFT JOIN routines r ON r.id=j.routine_id LEFT JOIN assignments a ON a.id=j.assignment_id "
+        "LEFT JOIN watchers w ON w.id=j.watcher_id "
+        "WHERE j.bot_id IS NOT NULL AND j.finished_at>=? AND j.dismissed_at IS NULL "
+        "AND j.status IN ('failed','needs_login','incomplete','succeeded') "
+        "AND (j.status='needs_login' OR j.assignment_id IS NOT NULL "
+        f"OR (j.status='failed' AND (j.failure_kind IN ({kinds}) OR j.source IN ({sources}))) "
+        "OR (j.status IN ('incomplete','succeeded') AND j.source IN ('routine','wakeup','inbox','trigger'))) "
+        "ORDER BY j.finished_at, j.rowid", (since, *ACTION_KINDS, *UNATTENDED)).fetchall()
+    bad = [(row, *end) for row in rows if (end := _bad_end(row)) is not None
+           and row["assignment_status"] not in ("done", "dropped")]
+    if not bad:
+        return []
+    wins = db.execute(
+        "SELECT bot_id, source, routine_id, assignment_id, watcher_id, outcome, finished_at FROM jobs "
+        "WHERE status='succeeded' AND finished_at>=? AND bot_id IS NOT NULL ORDER BY finished_at",
+        (min(row["finished_at"] for row, _, _ in bad),)).fetchall()
+    # newest success per bot, per series and per series with a status line (one pass, no pairwise compare)
+    by_bot: dict[str, str] = {}
+    by_series: dict[tuple, str] = {}
+    by_series_stated: dict[tuple, str] = {}
+    for win in wins:
+        by_bot[win["bot_id"]] = win["finished_at"]
+        by_series[(win["bot_id"], _stream(win))] = win["finished_at"]
+        if win["outcome"] != "unverified":
+            by_series_stated[(win["bot_id"], _stream(win))] = win["finished_at"]
+    open_ends = []
+    for row, category, reason in bad:
+        key = (row["bot_id"], _stream(row))
+        # a failure of no particular routine, assignment or watcher (key[1][0] == "source") is cleared by any
+        # later success of the bot, as before 0.12.15
+        login = row["status"] == "needs_login" or (category == "failed" and (
+            row["failure_kind"] in ACTION_KINDS or key[1][0] == "source"))
+        # a login or usage problem is fixed for the whole bot; the rest only by the same series running
+        # well again (a missing status line only by a run that has one)
+        newest = by_bot if login else (by_series_stated if category == "no_status" else by_series)
+        if newest.get(row["bot_id"] if login else key, "") <= row["finished_at"]:
+            open_ends.append((row, category, reason))
+    return open_ends
+
+
+def _unattended(db: sqlite3.Connection, bots: dict, items: list[dict], stamp: datetime) -> None:
+    """Needs-you items for unattended turns that ended badly, grouped by bot, series and reason."""
+    groups: dict[tuple, list[tuple[sqlite3.Row, str, str]]] = {}
+    for row, category, reason in _bad_ends(db, stamp):
+        groups.setdefault((row["bot_id"], _stream(row), _reason_key(category, reason)), []).append((row, category, reason))
+    for group in sorted(groups.values(), key=lambda g: g[-1][0]["finished_at"], reverse=True)[:50]:
+        bot = bots.get(group[0][0]["bot_id"])
+        if bot is None:
+            continue
+        (first, category, _), (job, _, reason) = group[0], group[-1]
+        count = len(group)
+        what = _name(job)
+        repeat = f" ({count} times since {to_cron_time(datetime.fromisoformat(first['finished_at'])).strftime('%b %-d, %-I:%M %p')} ET)" if count > 1 else ""
+        item = {"bot_id": job["bot_id"], "bot_name": bot["name"], "notify": bool(bot["notify"]), "job_id": job["id"],
+                "job_ids": [row["id"] for row, _, _ in group], "count": count, "reason": reason,
+                "name": what, "first_at": first["finished_at"], "at": job["finished_at"]}
+        if category == "failed":
+            kind = "needs_login" if job["status"] == "needs_login" else job["failure_kind"]
+            items.append({**item, "id": f"j:{first['id']}:{first['attempts']}", "kind": "job", "state": "failed",
+                          "title": f"{job['source'] or 'turn'} failed",
+                          "ask": f"{bot['name']}'s {what} failed: {reason or kind}{repeat}",
+                          "actions": ["retry", "dismiss"]})
+        else:
+            # the id names the group's first run, so a growing repeat count never notifies again (failed groups too)
+            items.append({**item, "id": f"x:{first['id']}:{category}", "kind": "unattended", "state": category,
+                          "title": f"{what} {END_WORDS[category]}",
+                          "ask": f"{bot['name']}'s {what} {END_WORDS[category]}: {reason}{repeat}",
+                          "actions": ["dismiss"]})
