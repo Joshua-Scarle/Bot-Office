@@ -50,14 +50,26 @@ DECODERS = re.compile(r"\b(base64\s+(-d|--decode)|xxd\s+-r|openssl\s+(enc|base64
 DYNAMIC = re.compile(r"\$\(|`|\$\{|\$'|\beval\b|<\(|>\(")
 # catastrophic words, for strings that cannot be parsed with confidence
 RAW_CATASTROPHIC = re.compile(
-    r"\brm\b[^;|&\n]*\s-(\w*[rR]\w*|-recursive)\b|--no-preserve-root|\bmkfs|\bmke2fs\b|\bwipefs\b"
+    r"\brm\b[^;|&\n]*\s-(\w*[rR]\w*|-r[a-z]*)\b|\brm\b[^;|&\n]*\s--no?\b|--no-p|\bmkfs|\bmke2fs\b|\bwipefs\b"
     r"|\bdd\b[^;|&\n]*\bof=|\b(shutdown|reboot|poweroff|halt)\b|\bsystemctl\b[^;|&\n]*\b(poweroff|reboot|halt|kexec)\b"
-    r"|\b(chmod|chown|chgrp)\b[^;|&\n]*\s-(\w*R\w*|-recursive)\b|/dev/(sd|nvme|hd|vd|xvd|mmcblk|dm-|md|mapper/|disk/)"
+    r"|\b(chmod|chown|chgrp)\b[^;|&\n]*\s-(\w*R\w*|-rec[a-z]*)\b|/dev/(sd|nvme|hd|vd|xvd|mmcblk|dm-|md|mapper/|disk/)"
     r"|:\s*\(\s*\)\s*\{")
 REDIRECT_TO_DISK = re.compile(r">\s*&?\s*/dev/+(sd|nvme|hd|vd|xvd|mmcblk|dm-|md|mapper/|disk/)")
 FORK_BOMB = re.compile(r"([^\s(){};|&]+)\(\)\{[^}]*\1\|\1|function([^\s(){};|&]+)\{[^}]*\2\|\2")
 GLOB = re.compile(r"[*?\[]")
 NESTING_MAX = 4
+# what the shell itself would turn into other words: $IFS (a space), other variables (maybe empty)
+# and brace lists ({rm,-rf,/} is "rm -rf /"); the string is checked again with them spelled out
+IFS_WORD = re.compile(r"\$\{IFS\}|\$IFS(?![A-Za-z0-9_])")
+VARIABLE = re.compile(r"\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])")
+BRACE_LIST = re.compile(r"\{([^{}\s]*,[^{}\s]*)\}")
+
+
+def _option(arg: str, *names: str) -> bool:
+    """*arg* is one of the long options *names*, spelled out or abbreviated (GNU accepts any
+    unambiguous prefix, so "--rec" is "--recursive")."""
+    word = arg.split("=", 1)[0]
+    return len(word) > 2 and word.startswith("--") and any(name.startswith(word) for name in names)
 
 
 class Checker:
@@ -200,6 +212,12 @@ class Checker:
     def _script(self, text: str, bases: tuple[str, ...], depth: int) -> None:
         if depth > NESTING_MAX:
             self._deny("too deeply nested shell strings")
+        text = text.replace("\\\n", "")  # a line continuation joins the two lines
+        spelled = re.sub(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])", self.home, text)
+        spelled = VARIABLE.sub("", IFS_WORD.sub(" ", spelled))
+        spelled = BRACE_LIST.sub(lambda match: " ".join(match.group(1).split(",")), spelled)
+        if spelled != text:
+            self._script(spelled, bases, depth + 1)
         self._raw_paths(text)
         compact = re.sub(r"\s+", "", text)
         if FORK_BOMB.search(compact) or ":(){" in compact:
@@ -297,6 +315,10 @@ class Checker:
                 self._deny(f"{name} writes to a disk device")
             if name in SHELLS or name in ("eval",):
                 self._nested(name, rest, bases, depth)
+            if name == "alias":  # alias x='rm -rf /'; x
+                for arg in rest:
+                    if "=" in arg:
+                        self._script(arg.split("=", 1)[1], bases, depth + 1)
             if name in ("find",):
                 self._find(rest, bases, literal)
         # anywhere in the words (also as an argument of something we do not know): these are
@@ -323,9 +345,9 @@ class Checker:
 
     def _rm(self, rest: list[str], bases: tuple[str, ...], literal: bool) -> None:
         options = [arg for arg in rest if arg.startswith("-") and arg != "--"]
-        if "--no-preserve-root" in options:
+        if any(_option(arg, "--no-preserve-root") for arg in options):
             self._deny("rm --no-preserve-root")
-        recursive = any(arg in ("--recursive", "-R", "-r") or re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*", arg)
+        recursive = any(_option(arg, "--recursive") or re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*", arg)
                         for arg in options)
         if not recursive:
             return
@@ -341,7 +363,7 @@ class Checker:
                 self._deny(f"recursive rm of {why}")
 
     def _recursive_owner(self, name: str, rest: list[str], bases: tuple[str, ...], literal: bool) -> None:
-        if not any(arg in ("-R", "--recursive") or re.fullmatch(r"-[A-Za-z]*R[A-Za-z]*", arg) for arg in rest):
+        if not any(_option(arg, "--recursive") or re.fullmatch(r"-[A-Za-z]*R[A-Za-z]*", arg) for arg in rest):
             return
         operands = [arg for arg in rest if not arg.startswith("-")]
         for arg in operands[1:] if name != "setfacl" else operands:

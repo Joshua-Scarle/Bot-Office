@@ -13,6 +13,8 @@ opens a port. The computer's own deny-list always wins, whatever you allowed.
    lasts 10 minutes. On the computer, run `botoffice-agent pair ABCD-EFGH`.
 3. Compare the fingerprint the agent printed with the one in Settings > Computers, then press
    **Activate**. Until you activate it, the device token is useless.
+   Bot Office serves only agents 0.2 or newer (their hello says they keep their own deny-list and
+   obey End grant). An older agent is turned away, and the audit shows `outdated_agent`.
 
 ## What a bot can do
 
@@ -47,7 +49,9 @@ default setting it asks again.
   "Controlling a computer" is on. The computer checks its deny-list again.
 - **A wider call** (a `push` under read, or a `run` under files) raises **one** widen card. Calls
   inside the current scope keep working while it waits. Allowing it widens the same grant. Its end
-  time does not move.
+  time does not move. If a still wider call comes while a card waits, that card is withdrawn and a
+  new one asks for the wider scope, so you never allow more than the card you saw. When the grant
+  ends, its waiting widen card is denied with it.
 - **The grant is bound** to this computer, this bot, this job and this scope. It ends when the job
   ends, when you end it, or at the time cap (**4 hours** by default; Settings > Computers, Grant
   cap, 1 minute to 24 hours), whichever comes first.

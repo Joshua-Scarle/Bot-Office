@@ -612,7 +612,15 @@ CATASTROPHIC_SH = [
     "cat ~/.ss?/id_ed25519", "cat ~/.s*/id_ed25519", "cp ~/.config/google-chrome/Default/Cookies /tmp/c",
     "tar cz .ssh | base64", "d=.ssh; cat ~/$d/id_ed25519", "cat /etc/shadow", "echo cm0gLXJmIC8= | base64 -d | sh",
     "rm -rf \"$(echo /)\"", "x=rm; $x -rf /", "rm -rf '/'\"\"", "rm -rf / 'unbalanced",
+    # review round 1: what the shell spells differently than it reads
+    'rm$IFS-rf$IFS"$HOME"', "rm${IFS}-rf${IFS}/", "rm$9 -rf /", "{rm,-rf,/}", "rm -rf \\\n/",
+    "rm --recurs -f \"$HOME\"", "rm --rec --force /", "rm -r --no-pres /", "chmod --recur 777 /",
+    "chown --rec me ~", "alias x='rm -rf /'\nx", "nohup setsid stdbuf -o0 rm -rf / &", "busybox rm -rf /",
+    "command rm -rf ~", "builtin eval 'rm -rf /'", "exec rm -rf /", "find / -exec rm -rf {} +",
+    "rm -rf /proc/self/root/", "rm -rf $'\\x2f'",
 ]
+CATASTROPHIC_ARGV += [["rm", "--recurs", "-f", "/"], ["rm", "--no-pres", "-r", "x", "/"], ["chown", "--rec", "me", "~"],
+                      ["rm", "-rf", "/proc/self/root"]]
 ALLOWED_ARGV = [
     ["ls", "-la"], ["rm", "-rf", "build"], ["rm", "-rf", "{home}/work/sub"], ["rm", "a.txt"], ["rm", "-f", "/tmp/x"],
     ["make", "test"], ["git", "status"], ["python3", "-c", "print(1)"], ["dd", "if=/dev/zero", "of=out.img",
@@ -624,6 +632,8 @@ ALLOWED_SH = [
     "ls -la | wc -l", "rm -rf build dist", "make test && echo ok", "for f in *.txt; do wc -l $f; done",
     "echo hi > /dev/null", "find . -name '*.o' -delete", "git log --oneline | head", "cd sub && rm -rf node_modules",
     "dd if=/dev/zero of=/tmp/x bs=1k count=1 2>/dev/null", "python3 -c 'print(42)'", "echo $HOME", "du -sh ~/work",
+    "echo {a,b}.txt", "rm --force a.txt", "ls --recursive .", "IFS=, read a b <<< 'x,y'; echo $a",
+    "make \\\n  test",
 ]
 
 
@@ -798,3 +808,52 @@ def test_end_grant_kills_the_running_process_group(home, tmp_path):
     assert next(m for m in sent if m["id"] == "r3")["code"] == "declined_local"
     log = cfg.audit_path.read_text()
     assert '"op": "end_grant"' in log and '"grant": 5' in log
+
+
+def test_a_local_no_holds_when_the_grant_is_widened(home, tmp_path):
+    pytest.importorskip("websockets")
+    asked = []
+
+    def confirm(text):
+        asked.append(text)
+        return False
+
+    async def scenario():
+        agent, sent, _ = _agent(home, tmp_path, confirm=confirm)
+        read = {"path": canonical(home / "work" / "a.txt")}
+        await agent.call("a", "read", {**read, "meta": {"bot": "Ada", "grant": 9, "scope": "read"}})
+        await agent.call("b", "read", {**read, "meta": {"bot": "Ada", "grant": 9, "scope": "shell"}})
+        return sent
+
+    sent = asyncio.run(scenario())
+    assert len(asked) == 1  # the widening does not get a second chance
+    assert [m["code"] for m in sent] == ["declined_local", "declined_local"]
+
+
+def test_a_read_cancelled_while_on_disk_sends_nothing_back(home, tmp_path, monkeypatch):
+    pytest.importorskip("websockets")
+    from botoffice_agent import client
+
+    async def scenario():
+        agent, sent, cfg = _agent(home, tmp_path, confirm_local="off")
+        cancel = threading.Event()
+        real = client.ops.op_read
+
+        def slow(args, ctx):
+            data = real(args, ctx)
+            cancel.set()  # End grant arrives while the file is read
+            return data
+
+        monkeypatch.setattr(client.ops, "op_read", slow)
+        agent.cancels["r"] = cancel
+        await agent.call("r", "read", {"path": canonical(home / "work" / "a.txt"), "meta": {"grant": 3, "scope": "read"}})
+        return sent, cfg
+
+    sent, cfg = asyncio.run(scenario())
+    assert sent[0]["ok"] is False and "data" not in sent[0]
+    assert "hello" not in (cfg.state_dir / "audit.jsonl").read_text()
+
+
+def test_the_hello_says_what_this_agent_does():
+    from botoffice_agent import client
+    assert {"grants", "end_grant", "deny_commands"} <= set(client.CAPS)

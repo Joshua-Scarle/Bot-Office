@@ -31,12 +31,14 @@ every grant. It is MIT licensed and uses the Python standard library plus `webso
     `/dev/nvme*`, shutdown, reboot, poweroff and halt, `systemctl poweroff|reboot`, fork bombs, and
     `chmod -R`/`chown -R` of `/` or `~`. It also refuses any word naming a deny-listed path, and
     your own `commands` patterns in `deny.toml`. A shell string it cannot read with confidence is
-    refused if it contains a catastrophic word anywhere. This is a tripwire, not a sandbox.
+    refused if it contains a catastrophic word anywhere. It also checks the string as the shell would
+    spell it out (`$IFS` as a space, other variables empty, `{a,b}` lists, line continuations) and
+    reads abbreviated long options (`--rec` is `--recursive`). This is a tripwire, not a sandbox.
 - **Sandbox** (switch, off by default). Commands run in bubblewrap: a read-only view of the
   computer, deny-listed paths hidden, no network, a private `/tmp`. When the sandbox ends, every
   process inside it ends too.
 - **Confirm on this computer** (switch, off by default). One pop-up here per grant, and once more
-  when the grant is widened. A no (or no answer) holds for the whole grant.
+  when the grant is widened. A no (or no answer) holds for the whole grant, widened or not.
 - **Kill switches.** End grant in Bot Office stops that grant's calls here at once. Running
   commands get TERM, then KILL, to their whole process group. Revoke makes the agent exit (it is
   not restarted). Stop all computer access does both for every grant. Here:

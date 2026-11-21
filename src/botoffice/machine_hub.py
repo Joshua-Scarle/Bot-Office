@@ -16,7 +16,8 @@ call and sends ``cancel`` (the agent kills the command's process group) plus ``{
 
 A new connection for the same computer replaces the old one. Revoke closes the socket with 4401 and
 every call in flight fails at once. Close codes the agent acts on: 4401 revoked or invalid token
-(it exits), 4403 not activated yet (it waits and retries), 4000 replaced.
+(it exits), 4403 not activated yet (it waits and retries), 4000 replaced, 4426 an agent too old
+for session grants (its hello lacks REQUIRED_CAPS).
 """
 from __future__ import annotations
 
@@ -45,8 +46,9 @@ CREDIT_MAX = 64  # push chunks the agent may have asked for and not received yet
 CANCEL_SEND_TIMEOUT = 5.0
 INFLIGHT_MAX = 4
 SEEN_EVERY = 60.0
+REQUIRED_CAPS = frozenset({"grants", "end_grant", "deny_commands"})  # what the agent must say it does
 GRANT_CHECK = 2.0  # seconds between liveness checks of the grant behind a call in flight
-CLOSE_REPLACED, CLOSE_REVOKED, CLOSE_PENDING = 4000, 4401, 4403
+CLOSE_REPLACED, CLOSE_REVOKED, CLOSE_PENDING, CLOSE_OUTDATED = 4000, 4401, 4403, 4426
 
 
 class HubError(Exception):
@@ -124,6 +126,14 @@ class Hub:
         except (asyncio.TimeoutError, ValueError, WebSocketDisconnect, RuntimeError, KeyError, TypeError):
             with contextlib.suppress(RuntimeError, WebSocketDisconnect):
                 await ws.close(code=1002)
+            return
+        caps = hello.get("caps")
+        if not isinstance(caps, list) or not REQUIRED_CAPS.issubset(caps):
+            # an agent from before session grants (no deny-list of its own, no End grant): not served
+            machines.log_event(self.store, "outdated_agent", machine_id=machine_id,
+                               detail=machines._clean(hello.get("version") or "?", 40))
+            with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+                await ws.close(code=CLOSE_OUTDATED, reason="update botoffice-agent to 0.2 or newer")
             return
         old = self.connections.get(machine_id)
         self.connections[machine_id] = conn
@@ -207,6 +217,8 @@ class Hub:
             raise HubError("the computer is offline", 409)
         if len(conn.calls) >= INFLIGHT_MAX:
             raise HubError("the computer is busy with other calls; try again shortly", 429)
+        if alive is not None and not await asyncio.to_thread(alive):  # nothing is sent under a dead grant
+            raise HubError("the grant for this task ended; the call was not sent", 403)
         call_id = secrets.token_hex(8)
         call = _Call(asyncio.get_running_loop().create_future(), sink, limit, grant_id=grant_id)
         conn.calls[call_id] = call
@@ -248,6 +260,9 @@ class Hub:
             raise HubError("the computer disconnected") from exc
         finally:
             conn.calls.pop(call_id, None)
+        if alive is not None and not await asyncio.to_thread(alive):
+            # a quick call that crossed End grant (or the job's end): its result is not handed over
+            raise HubError("the grant for this task ended while the call ran; its result was dropped", 403)
         if not result.get("ok"):
             code = str(result.get("code") or "error")[:40]
             detail = machines._clean(result.get("error") or "failed", 500)
