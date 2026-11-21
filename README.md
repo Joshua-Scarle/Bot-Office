@@ -141,7 +141,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 
 ## What changed in 0.12.7
 
-Follow-up to 0.12.5 (search) and 0.12.4 (files), with Joshua's answers.
+Follow-up to 0.12.5 (search) and 0.12.4 (files), with the owner's answers.
 
 - **Search is by relevance.** Results come best match first (FTS5 `bm25`), newest first on a tie, instead of newest first. **Load more** pages with `offset` (a message arriving meanwhile can shift a page by one; the page drops a repeat). The Ctrl/Cmd+Shift+F shortcut is unchanged. Without FTS5 the `LIKE` fallback puts a message holding the whole query first, then the shorter (denser) one, then the newer.
 - **More is searched.** The names of attached files (`Q3_budget.pdf` is found by `budget`; images have no name) and Bot-Office's own status lines (wake-ups, automatic continuations: the `hidden` rows). A status-line hit is tagged "Bot Office" and has `hidden: true`; the chat does not show those rows, so a click lands on the message just before it. Archived (rewound) messages are still not searched.

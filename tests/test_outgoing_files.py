@@ -143,8 +143,8 @@ def test_denylist_follows_symlinks_dotdot_and_hard_links(lair):
         str(home / "work" / "innocent.txt"),
         str(home / "work" / "dir" / "id_ed25519"),
         str(home / "work" / "dir" / ".." / ".ssh" / "id_ed25519"),
-        f"../../../home/.ssh/id_ed25519",  # ../ out of the workspace, relative
-        f"../../../home/work/../.ssh/id_ed25519",
+        f"../../../{home.name}/.ssh/id_ed25519",  # ../ out of the workspace, relative
+        f"../../../{home.name}/work/../.ssh/id_ed25519",
         str(workspace / ".." / ".." / "token"),  # ../ into the data dir
         "~/.ssh/id_ed25519",
         str(home / "work" / "tok.txt"), str(home / "work" / "hard.txt"),
