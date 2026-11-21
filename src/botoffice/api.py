@@ -1924,13 +1924,11 @@ def create_app(
             _, _, item = scheduler.turns.post_agent_message(
                 sender, target, body.body, str(binding.id) if binding else None, mode=body.mode,
                 can_steer=lambda job: blocked(job) is None)
-        except BaseException as exc:
+        except TurnError as exc:  # refused before anything was stored: it did not go out, so it stops counting
             if slot:
-                team.settle_send(store, slot, False)  # it did not go out: it stops counting
-            if isinstance(exc, TurnError):
-                status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
-                raise HTTPException(status_code=status, detail=str(exc)) from exc
-            raise
+                team.settle_send(store, slot, False)
+            status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
         if item.get("delivery") == "steer":
             item["note"] = (f"Delivered to {target.name} while it works; it reads it within its current task and "
                             "answers with a message to you if you asked something (it appears in your chat).")

@@ -517,7 +517,7 @@ class Scheduler:
                     if job and sender.id != target.id else 0
                 try:
                     self.turns.post_agent_message(sender, target, text, data["job_id"])
-                except BaseException:
+                except TurnError:
                     if slot:
                         team.settle_send(self.store, slot, False)
                     raise

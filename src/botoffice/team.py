@@ -421,16 +421,22 @@ def recent_sends(db: sqlite3.Connection, sender_id: str, window_s: int, at: date
                       (str(sender_id), cutoff)).fetchone()[0]
 
 
-def _free_card(db: sqlite3.Connection, job, ref: str, text: str) -> int | None:
+def _free_card(db: sqlite3.Connection, job, kind: str, ref: str, text: str) -> int | None:
     """In ask mode a send goes out only after the user approved a card for exactly this send: an approval this job
-    consumed for a team send tool, naming this target and this text, that no earlier send has used."""
-    names = [TOOL_PREFIX + name for name in SEND_TOOLS]
+    consumed for this send tool whose recorded arguments name this target and this text, that no earlier send has
+    used."""
+    tool = TOOL_PREFIX + ("team_ask" if kind == "ask" else "team_message")
     used = {row[0] for row in db.execute("SELECT card FROM team_sends WHERE job_id=? AND card>0 AND status='sent'",
                                          (str(job.id),))}
-    for row in db.execute(f"SELECT id, summary FROM approvals WHERE consumed_by=? AND status='consumed' AND tool IN "
-                          f"({','.join('?' * len(names))}) ORDER BY id", (str(job.id), *names)):
-        if row["id"] not in used and json.dumps(ref, ensure_ascii=False) in row["summary"] \
-                and json.dumps(text, ensure_ascii=False) in row["summary"]:
+    for row in db.execute("SELECT id, summary FROM approvals WHERE consumed_by=? AND status='consumed' AND tool=? "
+                          "ORDER BY id", (str(job.id), tool)):
+        if row["id"] in used or not row["summary"].startswith(tool + ": "):
+            continue
+        try:
+            data, _ = json.JSONDecoder().raw_decode(row["summary"][len(tool) + 2:])  # the card's canonical arguments
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("bot") == ref and data.get("text") == text:
             return int(row["id"])
     return None
 
@@ -449,7 +455,7 @@ def reserve_send(store, job, target_id: str, kind: str, mode: str = "allow", ref
         try:
             card = 0
             if mode == "ask":
-                card = _free_card(db, job, ref, text) or 0
+                card = _free_card(db, job, kind, ref, text) or 0
                 if not card:
                     raise TeamError(403, "this bot's teammate messages need the user's approval first (team_messaging "
                                          "is ask). Use the team_message or team_ask tool: it raises the approval card. "
@@ -493,20 +499,33 @@ def send_gate(store, rules, job, target_id: str, kind: str, ref: str = "", text:
     return reserve_send(store, job, target_id, kind, mode, ref, text)
 
 
+def _directly_team(db: sqlite3.Connection, job) -> bool:
+    return (getattr(job, "source", None) or "") == "inbox" or db.execute(
+        "SELECT 1 FROM agent_message_links WHERE steered_into=? LIMIT 1", (str(job.id),)).fetchone() is not None or db.execute(
+        "SELECT 1 FROM agent_messages WHERE job_id=? LIMIT 1", (str(job.id),)).fetchone() is not None
+
+
 def is_team_job(db: sqlite3.Connection, job) -> bool:
-    """A turn another bot started (source inbox), or one an agent message was steered into: whatever it is asked
-    to do, a teammate's request is never the user's approval (rules.py)."""
+    """A turn another bot started (source inbox), or one an agent message was steered into, or a resume turn of
+    such a job (the origin chain): whatever it is asked to do, a teammate's request is never the user's approval
+    (rules.py). An unresolved chain (a cycle, or deeper than 64) counts as a team turn: it fails closed."""
     seen: set[str] = set()
-    while job is not None and str(job.id) not in seen and len(seen) < 8:
-        seen.add(str(job.id))
-        if (getattr(job, "source", None) or "") == "inbox" or db.execute(
-                "SELECT 1 FROM agent_message_links WHERE steered_into=? LIMIT 1", (str(job.id),)).fetchone() or db.execute(
-                "SELECT 1 FROM agent_messages WHERE job_id=? LIMIT 1", (str(job.id),)).fetchone():
+    while job is not None:
+        if str(job.id) in seen or len(seen) >= 64:
             return True
-        origin = getattr(job, "origin_job_id", None)  # an approved card's resume turn stays what its origin was
+        seen.add(str(job.id))
+        if _directly_team(db, job):
+            return True
+        origin = getattr(job, "origin_job_id", None)
         row = db.execute("SELECT id, source, origin_job_id FROM jobs WHERE id=?", (str(origin),)).fetchone() if origin else None
         job = SimpleNamespace(**dict(row)) if row else None
     return False
+
+
+def steered_resume(db: sqlite3.Connection, job, origin) -> bool:
+    """*job* is a resume turn that became a team turn by itself (a teammate's message was steered into it) while
+    the job its card came from was not one: that card was not raised for a team turn, so it is not used."""
+    return _directly_team(db, job) and (origin is None or not is_team_job(db, origin))
 
 
 _FROM_BOT = re.compile(r"^\(from ([^\n]{1,200}?)\) ")
