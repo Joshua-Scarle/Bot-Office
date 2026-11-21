@@ -139,6 +139,14 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.16
+
+**The "ghost" character is now a droplet.** The 0.12.12 "ghost" shape looked too much like an arcade character, so it is replaced by an original, simple droplet (a round belly with one soft tip, our own SVG; eyes in the belly, all six expressions and all ten colors fit at 36 px). Shape id `droplet`; it takes the ghost's slot in the shape list, so the character a bot's id hashes to is unchanged for every other shape and a bot that used to hash to the ghost now gets the droplet. The hash never yields `ghost` again. Ghost is gone from the picker.
+
+- **Old values keep working.** A stored `char|ghost|<color>` is read as the droplet by the server (`PUT /v1/bots/{id}/avatar/character` accepts `ghost` and stores `droplet`; `GET /v1/avatar-characters` lists the alias in `aliases`) and by the page. On every start a small idempotent step rewrites stored `char|ghost|<color>` to `char|droplet|<color>` (same color; only `avatar_seed` of those bots changes). The old values are kept in `meta` key `avatars.ghost_backup` (JSON, oldest first). A value with an unknown color is left as it was.
+- **Reserved names.** The reserved-name check for "Hidden" and "Ungrouped" now strips combining and invisible marks both before and after casefolding (the 0.12.12 form let `Hidden` + U+0345 through, because casefolding turns that mark into a letter), and also ignores spacing marks and the blank filler characters. Lookalike letters from other scripts are deliberately not folded: the built-in section is found by its fixed id, so a lookalike name is just an ordinary section.
+- **Rollback.** No schema change. 0.12.12 to 0.12.15 code does not know `droplet`: its page shows the emoji for such a bot (the same fallback old code uses for any character it does not know). To restore the ghost values, use the DB copy below or `avatars.ghost_backup`.
+
 ## What changed in 0.12.15
 
 - **Needs-you no longer misses unattended turns that end badly.** A routine, wake-up, bot message or watcher turn (nobody watching) that ends `blocked`, `waiting_on_user`, failed, or with no `BOT-OFFICE-STATUS` line now appears in Needs-you with the bot, the routine or watcher name, the reason text, the time and a repeat count. Repeats of the same bot, routine and reason are one item ("ended blocked 12 times"), not twelve. The item clears when a later run of the same routine or watcher succeeds with a status, or when you dismiss it; it also ages out after 7 days. Assignment turns keep their existing assignment item. Turns you start from the chat are not flagged.
