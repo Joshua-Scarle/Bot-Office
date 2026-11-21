@@ -1185,17 +1185,18 @@ def create_app(
 
     VIEW_SECONDS = 120
 
-    def _view_signature(bot_id: UUID, attachment_id: str, expires: int) -> str:
+    def _view_signature(bot_id: UUID, attachment_id: str, expires: int, scripts: bool = False) -> str:
         key = (settings.read_token() or "").encode()
         if not key:
             raise HTTPException(status_code=503, detail="API token is not configured")
-        mac = hmac.new(key, f"view\n{bot_id}\n{attachment_id}\n{expires}".encode(), hashlib.sha256)
+        mac = hmac.new(key, f"view\n{bot_id}\n{attachment_id}\n{expires}\n{int(scripts)}".encode(), hashlib.sha256)
         return base64.urlsafe_b64encode(mac.digest()).decode().rstrip("=")
 
     @app.post("/v1/bots/{bot_id}/attachments/{attachment_id}/view-link", dependencies=[Depends(auth)])
-    async def attachment_view_link(bot_id: UUID, attachment_id: str) -> dict:
+    async def attachment_view_link(bot_id: UUID, attachment_id: str, scripts: bool = False) -> dict:
         """A two-minute URL for the sandboxed viewer of one HTML or SVG file: an iframe cannot send the bearer
-        token, so the link itself carries a signature for exactly this bot and file."""
+        token, so the link itself carries a signature for exactly this bot and file. ``scripts`` (default off, asked
+        for again at every open) signs a link whose response lets inline script run in the still-opaque sandbox."""
         _bot(bot_id)
         if not attachments.is_file_id(attachment_id) or attachments.serve_type(attachment_id)[1] not in ("html", "svg"):
             raise HTTPException(status_code=400, detail="only an html or svg file can be viewed")
@@ -1204,15 +1205,19 @@ def create_app(
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=404, detail="attachment not found") from exc
         expires = int(time.time()) + VIEW_SECONDS
-        sig = _view_signature(bot_id, attachment_id, expires)
-        return {"url": f"/v1/bots/{bot_id}/attachments/{attachment_id}/view?exp={expires}&sig={sig}", "expires_in": VIEW_SECONDS}
+        sig = _view_signature(bot_id, attachment_id, expires, scripts)
+        flag = "&scripts=1" if scripts else ""
+        return {"url": f"/v1/bots/{bot_id}/attachments/{attachment_id}/view?exp={expires}{flag}&sig={sig}",
+                "expires_in": VIEW_SECONDS, "scripts": scripts}
 
     @app.get("/v1/bots/{bot_id}/attachments/{attachment_id}/view")
-    async def view_attachment(bot_id: UUID, attachment_id: str, exp: int = 0, sig: str = "") -> Response:
+    async def view_attachment(bot_id: UUID, attachment_id: str, exp: int = 0, sig: str = "", scripts: int = 0) -> Response:
         """An HTML or SVG file for the page's sandboxed iframe. Authorised by the signed link, not the bearer.
         The response carries ``Content-Security-Policy: sandbox`` (no allow-same-origin, no scripts, no network), and the
-        page frames it with an empty ``sandbox`` attribute as well."""
-        if exp < int(time.time()) or not hmac.compare_digest(sig.encode(), _view_signature(bot_id, attachment_id, exp).encode()):
+        page frames it with an empty ``sandbox`` attribute as well. A link signed with ``scripts=1`` (the signature
+        covers the flag, so it cannot be added to a plain link) swaps in ``allow-scripts`` only, still without network."""
+        run = scripts == 1
+        if exp < int(time.time()) or not hmac.compare_digest(sig.encode(), _view_signature(bot_id, attachment_id, exp, run).encode()):
             raise HTTPException(status_code=403, detail="link expired or invalid")
         served, preview = attachments.serve_type(attachment_id)
         if not attachments.is_file_id(attachment_id) or preview not in ("html", "svg"):
@@ -1223,7 +1228,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="attachment not found") from exc
         return Response(data, media_type=served, headers={
             "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
-            "Content-Security-Policy": attachments.VIEW_CSP + "; frame-ancestors 'self'",
+            "Content-Security-Policy": (attachments.VIEW_CSP_SCRIPTS if run else attachments.VIEW_CSP) + "; frame-ancestors 'self'",
             "Content-Disposition": f'inline; filename="{attachments.display_name(attachment_id)}"'})
 
     def _png_response(request: Request, data: bytes, mime: str, versioned: bool) -> Response:

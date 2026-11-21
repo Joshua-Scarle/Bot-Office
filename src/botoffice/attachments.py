@@ -45,6 +45,10 @@ TEXT_EXTENSIONS = frozenset(
 # Response CSP of a stored HTML / SVG file: no allow-same-origin and no allow-scripts in ``sandbox`` (an opaque
 # origin that may not run script), nothing fetched from anywhere but data: and inline style.
 VIEW_CSP = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'"
+# 0.12.10: the opt-in "run scripts" view adds allow-scripts and inline script only: still an opaque origin (never
+# allow-same-origin), no network (connect-src 'none'), no forms, popups or top navigation.
+VIEW_CSP_SCRIPTS = ("sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; img-src data:; "
+                    "style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'")
 
 
 def serve_type(name: str) -> tuple[str, str | None]:

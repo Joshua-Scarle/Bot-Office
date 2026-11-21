@@ -311,7 +311,7 @@ def test_page_csp_allows_only_its_own_frames_and_the_viewer_never_gets_same_orig
     csp = api._page_with_csp()[1]
     assert "frame-src 'self'" in csp and "default-src 'none'" in csp
     html = api.CHAT_PAGE.read_text()
-    assert 'setAttribute("sandbox", "")' in html and "allow-same-origin" not in html
+    assert 'setAttribute("sandbox", scripts ? "allow-scripts" : "")' in html and "allow-same-origin" not in html
 
 
 def test_env_and_key_files_are_refused_even_inside_the_workspace(turn):
@@ -323,3 +323,70 @@ def test_env_and_key_files_are_refused_even_inside_the_workspace(turn):
     message = finish(turn, "done")
     assert [attachments.display_name(a) for a in message.attachments] == ["ok.txt"]
     assert "6 files were not attached: a protected location." in message.text
+
+
+def _csp_parts(got):
+    return [part.strip() for part in got.headers["content-security-policy"].split(";")]
+
+
+def test_run_scripts_is_off_by_default_and_the_link_says_so(client_bot):
+    client, bot = client_bot
+    info = up(client, bot, "app.html", PAGE)
+    plain = client.post(info["url"] + "/view-link", headers=H).json()
+    assert plain["scripts"] is False and "scripts=" not in plain["url"]
+    off = client.post(info["url"] + "/view-link", headers=H, params={"scripts": "false"}).json()
+    assert off["scripts"] is False and "scripts=" not in off["url"]
+    got = client.get(plain["url"])
+    assert _csp_parts(got)[0] == "sandbox"  # no tokens at all: nothing is allowed
+    assert "script-src" not in got.headers["content-security-policy"]
+
+
+def test_run_scripts_link_adds_allow_scripts_only_never_same_origin(client_bot):
+    client, bot = client_bot
+    info = up(client, bot, "app.html", PAGE)
+    link = client.post(info["url"] + "/view-link", headers=H, params={"scripts": "true"}).json()
+    assert link["scripts"] is True and "scripts=1" in link["url"]
+    got = client.get(link["url"])
+    assert got.status_code == 200 and got.content == PAGE
+    parts = _csp_parts(got)
+    assert parts[0].split() == ["sandbox", "allow-scripts"]
+    for banned in ("allow-same-origin", "allow-top-navigation", "allow-popups", "allow-forms", "allow-modals"):
+        assert banned not in got.headers["content-security-policy"]
+    assert "connect-src 'none'" in parts and "default-src 'none'" in parts and "form-action 'none'" in parts
+    assert "frame-ancestors 'self'" in parts and "script-src 'unsafe-inline'" in parts
+    assert got.headers["x-content-type-options"] == "nosniff" and "no-store" in got.headers["cache-control"]
+    assert H["Authorization"].split()[-1] not in link["url"]  # the master token is never in the URL
+
+
+def test_scripts_flag_is_signed_and_cannot_be_added_to_a_plain_link(client_bot):
+    client, bot = client_bot
+    info = up(client, bot, "app.html", PAGE)
+    plain = client.post(info["url"] + "/view-link", headers=H).json()["url"]
+    assert client.get(plain + "&scripts=1").status_code == 403
+    on = client.post(info["url"] + "/view-link", headers=H, params={"scripts": "true"}).json()["url"]
+    assert client.get(on.replace("&scripts=1", "")).status_code == 403  # nor taken off, which would only confuse
+    assert client.get(on.replace("scripts=1", "scripts=2")).status_code == 403
+    assert client.get(on).status_code == 200
+
+
+def test_svg_run_scripts_uses_the_same_policy(client_bot):
+    client, bot = client_bot
+    info = up(client, bot, "pic.svg", PAGE)
+    got = client.get(client.post(info["url"] + "/view-link", headers=H, params={"scripts": "true"}).json()["url"])
+    assert _csp_parts(got)[0].split() == ["sandbox", "allow-scripts"] and got.headers["content-type"] == "image/svg+xml"
+
+
+def test_page_frames_scripts_only_behind_an_unchecked_switch_and_never_with_same_origin():
+    import re
+    from botoffice import api
+    html = api.CHAT_PAGE.read_text()
+    assert 'id="file-preview-run"' in html and 'id="file-preview-run" checked' not in html
+    assert "allow-same-origin" not in html and "allow-top-navigation" not in html and "allow-popups" not in html and "allow-forms" not in html
+    # the only sandbox values the page can set: the empty one, or allow-scripts when the switch is on
+    assert re.findall(r'setAttribute\("sandbox", ([^)]*)\)', html) == ['scripts ? "allow-scripts" : ""']
+    # off at every open and never remembered
+    assert "run.checked = false" in html
+    start = html.index("async function previewFile")
+    body = html[start:html.index("async function downloadFile")]
+    assert "localStorage" not in body and "sessionStorage" not in body
+    assert 'scripts ? "?scripts=true" : ""' in body and "Scripts are running in this page" in body
