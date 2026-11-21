@@ -12,10 +12,11 @@ const { default: worker, Watchdog } = await import("../src/index.js");
 
 function env() {
   const sent = [], store = new Map();
-  const state = { storage: { async get(k) { return store.get(k); }, async put(k, v) { store.set(k, structuredClone(v)); } } };
+  const state = { storage: { async get(k) { return store.get(k); }, async put(k, v) { store.set(k, structuredClone(v)); }, async setAlarm() {} } };
   const bind = { sent };
   const dobj = new Watchdog(state, { ALERT_TO: "me@example.test", ALERT_FROM: "w@example.test", ALERT_EMAIL: { send: async (m) => sent.push(m) } });
   return Object.assign(bind, {
+    dobj,
     HEARTBEAT_SECRET: "s3cret",
     WATCHDOG: { idFromName: () => "main", get: () => ({ fetch: (url, init) => dobj.fetch(new Request(url, init)) }) },
   });
@@ -34,8 +35,11 @@ test("auth, method and path are enforced", async () => {
 
 test("an authenticated event push is mailed only to the configured address", async () => {
   const e = env();
-  const res = await worker.fetch(post("/events", { prefs: {}, needs_you: { count: 1, items: [{ id: "q:1", bot: "Ann", kind: "question open", to: "evil@example.test" }] }, to: "evil@example.test" }), e);
+  const res = await worker.fetch(post("/events", { prefs: {}, epoch: "e1", upto: 1, events: [{ seq: 1, id: "q:1", cls: "needs_you", bot: "Ann", kind: "question_open", to: "evil@example.test" }], to: "evil@example.test" }), e);
   assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ack: 1 });
+  assert.equal(e.sent.length, 0); // a request never sends; the alarm does
+  await e.dobj.alarm();
   assert.equal(e.sent.length, 1);
   assert.equal(e.sent[0].to, "me@example.test");
   assert.ok(!e.sent[0].raw.includes("evil"));
@@ -46,6 +50,8 @@ test("heartbeat then cron tick: down controller mails once", async () => {
   assert.equal((await worker.fetch(post("/heartbeat", { controller_reachable: false, healthz: null }), e)).status, 200);
   await worker.scheduled({}, e);
   await worker.scheduled({}, e);
+  await e.dobj.alarm();
+  await e.dobj.alarm();
   assert.equal(e.sent.length, 1);
 });
 
@@ -54,5 +60,6 @@ test("missing recipient config sends nothing and the cron reports the failure on
   const dobj = new Watchdog({ storage: { async get() {}, async put() {} } }, { ALERT_EMAIL: { send: async (m) => e.sent.push(m) } });
   await dobj.fetch(new Request("https://x/heartbeat", { method: "POST", body: JSON.stringify({ controller_reachable: false }) }));
   await dobj.fetch(new Request("https://x/tick", { method: "POST" }));
+  await dobj.alarm();
   assert.equal(e.sent.length, 0);
 });

@@ -39,17 +39,24 @@ test("mail has no CRLF injection and is base64 text", () => {
   const raw = buildRaw({ from: "a@b.c", to: "x@y.z\r\nBcc: e@f.g", subject: "s", text: "hello", messageId: "id", now: T0 });
   assert.ok(!/\r\nBcc:/.test(raw));
 });
-test("sanitizeEvents keeps allowlisted fields only and drops bodies and secrets", () => {
+test("sanitizeEvents keeps allowlisted fields only and drops bodies, secrets and free text", () => {
   const ev = sanitizeEvents({
-    prefs: { needs_you: false, evil: true }, backup_reason: "disk full\nBcc: x", prompt: "SECRET PROMPT", token: "tok",
-    needs_you: { count: 3, items: [{ id: "q:1:open", bot: "Ann", kind: "question open", ask: "SECRET PROMPT", body: "x" }, { id: "bad id!", bot: "x" }, null] },
-    failed: { count: 1, items: [{ id: "j:9:1", bot: "B", job: "9", kind: "auth", reason: "login\u0000 needed" }] },
+    prefs: { needs_you: false, evil: true }, backup_reason: "disk full\nBcc: x", prompt: "SECRET PROMPT", token: "tok", epoch: "e1", upto: 3,
+    events: [{ seq: 1, id: "q:1:open", cls: "needs_you", bot: "Ann", kind: "question_open", ask: "SECRET PROMPT", body: "x" },
+      { seq: 2, id: "bad id!", cls: "failed", bot: "x" }, null, { seq: 3, id: "j:9:1", cls: "failed", bot: "B", job: "9", kind: "auth", reason: "login needed" }],
   });
   const dump = JSON.stringify(ev);
-  assert.ok(!dump.includes("SECRET") && !dump.includes("tok") && !dump.includes("evil") && !dump.includes("\\n"));
+  assert.ok(!dump.includes("SECRET") && !dump.includes("tok") && !dump.includes("evil") && !dump.includes("login") && !dump.includes("\\n"));
   assert.equal(ev.prefs.needs_you, false); assert.equal(ev.prefs.failed, true); assert.equal(ev.prefs.done, false);
-  assert.deepEqual(ev.lists.needs_you.items.map((i) => i.id), ["q:1:open"]);
-  assert.equal(ev.lists.needs_you.count, 3);
-  assert.equal(ev.lists.failed.items[0].reason, "login needed");
+  assert.deepEqual(ev.events.map((i) => i.id), ["q:1:open", "j:9:1"]);
+  assert.equal(ev.upto, 3);
+  assert.equal(ev.backup_reason, null);
   assert.equal(sanitizeEvents("x"), null);
+});
+test("a healthz without a backup object (timed out) is unjudged, not unknown", () => {
+  const body = { controller_reachable: true, healthz: { ok: false, timed_out: true } };
+  assert.equal(sanitize(body).backup_state, "unjudged");
+  assert.deepEqual(evaluate(hb(body, T0), T0, T0).map((p) => p.kind), ["unhealthy"]);
+  assert.deepEqual(unjudged([], hb(body, T0)), ["backup"]);
+  assert.equal(sanitize({ controller_reachable: true, healthz: { ok: true, backup: { state: "weird" } } }).backup_state, "unknown");
 });

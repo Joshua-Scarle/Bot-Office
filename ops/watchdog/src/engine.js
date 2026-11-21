@@ -1,26 +1,40 @@
 // The watchdog's coordinated state machine. It runs inside ONE Durable Object, so all state lives in
-// strongly consistent transactional storage and every operation is serialised by `#exclusive`.
+// strongly consistent transactional storage and every state change is serialised by `#exclusive`.
 // No Cloudflare imports: storage and mail sending are injected, so `node --test` can drive it.
 //
-// Delivery model (nothing is ever dropped silently):
-//   1. A notification is first written to storage as pending (a problem opened, a new event seen).
-//   2. When a class may send (gap since its last mail), its pending entries become one OUTBOX message with
-//      a fixed id, and that is written to storage BEFORE the mail is sent (write-ahead).
-//   3. The outbox entry is removed only after a send succeeded. A failed send stays queued and is retried
-//      on the next run with the same Message-ID; a failed write after a successful send repeats that one
-//      mail with the same Message-ID (at-least-once, never lost).
-//   Rate limiting only delays: pending entries are merged into one digest. An incident that recovers
-//   before its mail went out is still mailed, marked as already recovered.
+// Intake: the controller sends its durable event log in batches, in order, each with a sequence number.
+// `events()` takes events while there is room (MAX_PENDING per class) and answers {ack: cursor}: the
+// controller removes from its queue only up to that cursor, so what does not fit simply stays queued there
+// and goes in a later push. Nothing is sampled, truncated or folded away; counts in a digest are exact.
+//
+// Delivery (sending never happens inside a request, so a slow mail server cannot delay heartbeats):
+//   1. State changes (events, heartbeat evaluation) only write storage and set the alarm.
+//   2. The alarm runs `drain()`. A class whose gap since its last mail has passed turns its pending entries
+//      into ONE outbox message: the complete RFC 5322 text (body, Date, Message-ID) is composed once and
+//      saved BEFORE the first send, and exactly that text is re-sent on every retry.
+//   3. A send is bounded (SEND_TIMEOUT_MS) and runs outside the state queue. Success removes the outbox
+//      entry; failure keeps it and retries with exponential backoff (BACKOFF_BASE_MS doubling, 1 h cap).
+//
+// At-least-once boundary: if a send times out or the process dies after the mail server accepted it but
+// before the outbox entry was removed, the identical message (same Message-ID and Date) is sent again.
+// The mail system cannot tell us whether the first one arrived, so a rare duplicate is the price of never
+// losing a message; mail clients may or may not fold the two. Exactly-once is not possible here.
+//
+// Rate limiting only delays: pending entries merge into one digest. An incident that recovers before its
+// mail went out is still mailed, marked as already recovered.
 import { CLASSES, DEFAULT_PREFS, evaluate, unjudged, classOf, buildRaw } from "./logic.js";
 
 export const MIN_GAP_MS = 10 * 60 * 1000; // between two mails of the same class
 export const SLOW_GAP_MS = 60 * 60 * 1000; // the gap once SOFT_CAP mails went out in 24 h (a flapping guard)
 export const SOFT_CAP = 12;
-export const SEEN_GRACE_MS = 24 * 60 * 60 * 1000;
+export const MAX_PENDING = 100; // events per class held at once; beyond it the controller keeps them queued
+export const SEND_TIMEOUT_MS = 8000;
+export const BACKOFF_BASE_MS = 30 * 1000;
+export const BACKOFF_MAX_MS = 60 * 60 * 1000;
+export const MAX_LINES = 40;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MAX_EVENTS_PER_CLASS = 200;
 
-const fresh = () => ({ hb: null, first_seen: null, prefs: { ...DEFAULT_PREFS }, incidents: {}, seen: {}, pending: [], outbox: {}, last_sent: {}, sent_log: [], counts: {}, backup_reason: null });
+const fresh = () => ({ hb: null, first_seen: null, prefs: { ...DEFAULT_PREFS }, incidents: {}, pending: [], outbox: {}, last_sent: {}, sent_log: [], epoch: null, cursor: 0, backup_reason: null });
 
 const SUBJECT = {
   needs_you: (n) => (n === 1 ? "1 item needs you" : `${n} items need you`),
@@ -31,36 +45,34 @@ const SUBJECT = {
 };
 const FOOTER = "\n\nThis is an automatic notice from the Bot Office watchdog, not a bot message. Each item is mailed once; mails of one kind are at least 10 minutes apart and are merged into a digest.";
 
-function line(e, now) {
-  if (e.type === "more") return `- and ${e.n} more`;
+function line(e) {
   if (e.type === "recovery") return `- RECOVERED: ${e.text}`;
   if (e.type === "alert") {
     const gone = e.resolved_at ? ` (already recovered after about ${Math.max(1, Math.round((e.resolved_at - e.at) / 60000))} min)` : "";
     return `- ${e.text}${gone}`;
   }
   const it = e.item;
-  return `- ${it.bot || "a bot"}: ${it.kind}${it.job ? ` (job ${it.job})` : ""}${it.reason ? `: ${it.reason}` : ""}`;
+  return `- ${it.bot}: ${it.kind.replace(/_/g, " ")}${it.job ? ` (job ${it.job})` : ""}`;
 }
 
-/** The mail for one class: {subject, text}. */
-export function compose(cls, entries, counts, now) {
-  const alerts = entries.filter((e) => e.type === "alert" || e.type === "recovery").length;
+/** The mail for one class: {subject, text}. Every entry counts once; past MAX_LINES the rest is "and N more". */
+export function compose(cls, entries, now) {
   const n = entries.length;
   const subject = "[Bot Office] " + (cls === "outage" || cls === "backup" ? SUBJECT[cls]() + (n > 1 ? ` (${n} updates)` : "") : SUBJECT[cls](n));
-  const shown = entries.slice(0, 40).map((e) => line(e, now));
-  const more = n > shown.length ? [`- and ${n - shown.length} more`] : [];
-  const total = counts[cls] > n && alerts === 0 ? [`\n${counts[cls]} are open in total.`] : [];
+  const shown = entries.slice(0, MAX_LINES).map(line);
+  if (n > shown.length) shown.push(`- and ${n - shown.length} more`);
   const head = cls === "needs_you" ? "New items need you" : cls === "failed" ? "Failed turns" : cls === "done" ? "Finished turns" : "Bot Office needs attention";
-  return { subject, text: `${head} (${new Date(now).toISOString()}):\n\n${[...shown, ...more].join("\n")}${total.join("")}${FOOTER}` };
+  return { subject, text: `${head} (${new Date(now).toISOString()}):\n\n${shown.join("\n")}${FOOTER}` };
 }
 
 export class Engine {
   #chain = Promise.resolve();
-  constructor({ storage, send, now = () => Date.now(), newId = () => crypto.randomUUID(), from = "", to = "" }) {
-    Object.assign(this, { storage, send, clock: now, newId, from, to });
+  #draining = false;
+  constructor({ storage, send, now = () => Date.now(), newId = () => crypto.randomUUID(), from = "", to = "", sendTimeoutMs = SEND_TIMEOUT_MS }) {
+    Object.assign(this, { storage, send, clock: now, newId, from, to, sendTimeoutMs });
   }
 
-  /** One operation at a time, each reading state afresh from storage. */
+  /** One state operation at a time, each reading state afresh from storage. */
   #exclusive(fn) {
     const run = this.#chain.then(fn);
     this.#chain = run.catch(() => {});
@@ -83,25 +95,28 @@ export class Engine {
     });
   }
 
+  /** Take the controller's batch; answer {ack}: the highest sequence number safely stored here. */
   events(ev) {
     return this.#exclusive(async () => {
       const s = await this.#load(), now = this.clock();
       s.first_seen ??= now;
       s.prefs = ev.prefs;
       s.backup_reason = ev.backup_reason;
-      for (const [cls, list] of Object.entries(ev.lists)) {
-        s.counts[cls] = list.count;
-        for (const item of list.items) {
-          const known = s.seen[item.id];
-          s.seen[item.id] = { cls, last_seen: now };
-          // a disabled class is remembered (so turning it on later does not replay old items) but not queued
-          if (!known && s.prefs[cls]) s.pending.push({ id: item.id, cls, type: "event", item, at: now });
+      if (s.epoch !== ev.epoch) { s.epoch = ev.epoch; s.cursor = 0; } // a different controller database: its numbering restarts
+      let full = false;
+      for (const e of ev.events) {
+        if (e.seq <= s.cursor) continue; // already stored (an ack that never reached the controller)
+        if (s.prefs[e.cls]) {
+          // a disabled class is acknowledged without being queued, so turning it on later does not replay old items
+          if (s.pending.filter((p) => p.cls === e.cls).length >= MAX_PENDING) { full = true; break; }
+          s.pending.push({ id: e.id, cls: e.cls, type: "event", item: { bot: e.bot, job: e.job, kind: e.kind }, at: now });
         }
+        s.cursor = e.seq;
       }
-      for (const [id, v] of Object.entries(s.seen)) if (now - v.last_seen > SEEN_GRACE_MS) delete s.seen[id];
-      this.#bound(s);
+      if (!full) s.cursor = Math.max(s.cursor, ev.upto);
       await this.#save(s);
-      await this.#drain(s);
+      await this.#schedule(s);
+      return { ack: s.cursor };
     });
   }
 
@@ -109,37 +124,20 @@ export class Engine {
     return this.#exclusive(async () => {
       const s = await this.#load(), now = this.clock();
       s.first_seen ??= now;
-      const problems = evaluate(s.hb, now, s.first_seen);
-      this.#reconcile(s, problems, now);
-      this.#bound(s);
+      this.#reconcile(s, evaluate(s.hb, now, s.first_seen), now);
       await this.#save(s);
-      await this.#drain(s);
+      await this.#schedule(s);
     });
   }
 
-  #bound(s) {
-    // storage stays small even if mail cannot go out for days: past MAX_EVENTS_PER_CLASS pending events,
-    // the oldest are folded into one "and N more" entry, so they are still counted, never hidden
-    for (const cls of ["needs_you", "failed", "done"]) {
-      const mine = s.pending.filter((e) => e.cls === cls && e.type === "event");
-      if (mine.length <= MAX_EVENTS_PER_CLASS) continue;
-      const fold = mine.slice(0, mine.length - MAX_EVENTS_PER_CLASS);
-      const gone = new Set(fold);
-      const old = s.pending.find((e) => e.cls === cls && e.type === "more");
-      const n = fold.length + (old ? old.n : 0);
-      s.pending = s.pending.filter((e) => !gone.has(e) && e !== old);
-      s.pending.push({ id: `more:${cls}`, cls, type: "more", n, at: fold[0].at });
-    }
-  }
-
   #reconcile(s, problems, now) {
-    const skip = new Set(unjudged(problems));
+    const skip = new Set(unjudged(problems, s.hb));
     const current = new Map(problems.map((p) => [p.kind, p]));
     for (const p of problems) {
       if (s.incidents[p.kind]) continue;
       const cls = classOf(p.kind);
       const muted = !s.prefs[cls];
-      const text = p.text + (cls === "backup" && s.backup_reason ? ` Reason: ${s.backup_reason}` : "");
+      const text = p.text + (cls === "backup" && s.backup_reason ? ` Reason code: ${s.backup_reason}.` : "");
       s.incidents[p.kind] = { cls, since: now, muted, text };
       if (!muted) s.pending.push({ id: `inc:${p.kind}:${now}`, cls, type: "alert", key: p.kind, text, at: now });
     }
@@ -149,44 +147,88 @@ export class Engine {
       if (inc.muted || !s.prefs[inc.cls]) continue;
       const open = s.pending.find((e) => e.type === "alert" && e.key === kind && !e.resolved_at);
       if (open) open.resolved_at = now; // not mailed yet: the one mail says it is already over
-      else s.pending.push({ id: `rec:${kind}:${now}`, cls: inc.cls, type: "recovery", key: kind, text: inc.text.split(" Reason:")[0].replace(/\.$/, "") + ` (lasted about ${Math.max(1, Math.round((now - inc.since) / 60000))} min)`, at: now });
+      else s.pending.push({ id: `rec:${kind}:${now}`, cls: inc.cls, type: "recovery", key: kind, text: inc.text.split(" Reason code:")[0].replace(/\.$/, "") + ` (lasted about ${Math.max(1, Math.round((now - inc.since) / 60000))} min)`, at: now });
     }
   }
 
-  async #drain(s) {
-    const now = this.clock();
+  #gap(s, now) {
     s.sent_log = s.sent_log.filter((t) => now - t < DAY_MS);
-    const gap = s.sent_log.length >= SOFT_CAP ? SLOW_GAP_MS : MIN_GAP_MS;
+    return s.sent_log.length >= SOFT_CAP ? SLOW_GAP_MS : MIN_GAP_MS;
+  }
+
+  /** Set the alarm to the earliest moment something can be sent (outbox retry time, or a class gap ending). */
+  async #schedule(s) {
+    if (!this.storage.setAlarm) return;
+    const now = this.clock(), gap = this.#gap(s, now);
+    let when = null;
+    const soon = (t) => { when = when === null ? t : Math.min(when, t); };
     for (const cls of CLASSES) {
-      let box = s.outbox[cls];
-      if (!box) {
-        const mine = s.pending.filter((e) => e.cls === cls);
-        if (!mine.length || now - (s.last_sent[cls] || 0) < gap) continue; // held, kept pending, merged later
-        box = s.outbox[cls] = { msg_id: this.newId(), entries: mine, attempts: 0 };
-        s.pending = s.pending.filter((e) => e.cls !== cls);
-        await this.#save(s); // write-ahead: if this fails nothing was sent and nothing is lost
-      }
-      const { subject, text } = compose(cls, box.entries, s.counts, now);
-      try {
-        await this.send({ messageId: box.msg_id, subject, text, now });
-      } catch (err) {
-        box.attempts += 1;
-        console.log("mail failed:", cls, err && err.name); // class only; stays queued for the next run
-        await this.#save(s).catch(() => {});
-        continue;
-      }
-      delete s.outbox[cls];
-      s.last_sent[cls] = now;
-      s.sent_log.push(now);
-      await this.#save(s); // if this throws, the next run resends the same message id
+      const box = s.outbox[cls];
+      if (box) soon(Math.max(now, box.next_at || 0));
+      else if (s.pending.some((e) => e.cls === cls)) soon(Math.max(now, (s.last_sent[cls] || 0) + gap));
     }
+    if (when !== null) await this.storage.setAlarm(when);
+  }
+
+  /** Run by the alarm: promote what may go out, send it outside the state queue, record the result. */
+  async drain() {
+    if (this.#draining || !this.from || !this.to) return;
+    this.#draining = true;
+    try {
+      const due = await this.#exclusive(async () => {
+        const s = await this.#load(), now = this.clock(), gap = this.#gap(s, now);
+        let promoted = false;
+        for (const cls of CLASSES) {
+          if (s.outbox[cls]) continue;
+          const mine = s.pending.filter((e) => e.cls === cls);
+          if (!mine.length || now - (s.last_sent[cls] || 0) < gap) continue; // held, kept pending, merged later
+          const { subject, text } = compose(cls, mine, now);
+          const msg_id = this.newId();
+          // the complete message, composed once: body, Date and Message-ID never change on a retry
+          s.outbox[cls] = { msg_id, raw: buildRaw({ from: this.from, to: this.to, subject, text, messageId: msg_id, now }), attempts: 0, next_at: now };
+          s.pending = s.pending.filter((e) => e.cls !== cls);
+          promoted = true;
+        }
+        if (promoted) await this.#save(s); // write-ahead: if this fails nothing was sent and nothing is lost
+        return CLASSES.filter((c) => s.outbox[c] && (s.outbox[c].next_at || 0) <= now).map((c) => ({ cls: c, msg_id: s.outbox[c].msg_id, raw: s.outbox[c].raw }));
+      });
+      for (const mail of due) {
+        let ok = true;
+        try {
+          await this.#bounded(this.send({ from: this.from, to: this.to, raw: mail.raw, messageId: mail.msg_id }));
+        } catch (err) {
+          ok = false;
+          console.log("mail failed:", mail.cls, err && err.name); // class only
+        }
+        await this.#exclusive(async () => {
+          const s = await this.#load(), now = this.clock(), box = s.outbox[mail.cls];
+          if (!box || box.msg_id !== mail.msg_id) return;
+          if (ok) {
+            delete s.outbox[mail.cls];
+            s.last_sent[mail.cls] = now;
+            s.sent_log.push(now);
+          } else {
+            box.attempts += 1;
+            box.next_at = now + Math.min(BACKOFF_BASE_MS * 2 ** (box.attempts - 1), BACKOFF_MAX_MS);
+          }
+          await this.#save(s); // if this throws after a good send, the next run resends the same message
+        });
+      }
+      await this.#exclusive(async () => this.#schedule(await this.#load()));
+    } finally {
+      this.#draining = false;
+    }
+  }
+
+  #bounded(promise) {
+    let timer;
+    const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error("send timed out"), { name: "SendTimeout" })), this.sendTimeoutMs); });
+    return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
   }
 }
 
 export function makeSender(env, EmailMessage) {
-  return async ({ messageId, subject, text, now }) => {
-    if (!env.ALERT_TO || !env.ALERT_FROM) throw new Error("ALERT_TO/ALERT_FROM not set");
-    const raw = buildRaw({ from: env.ALERT_FROM, to: env.ALERT_TO, subject, text, messageId, now });
-    await env.ALERT_EMAIL.send(new EmailMessage(env.ALERT_FROM, env.ALERT_TO, raw));
+  return async ({ from, to, raw }) => {
+    await env.ALERT_EMAIL.send(new EmailMessage(from, to, raw));
   };
 }

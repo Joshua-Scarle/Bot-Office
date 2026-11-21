@@ -6,7 +6,7 @@ export const CLASSES = ["needs_you", "failed", "outage", "backup", "done"];
 export const DEFAULT_PREFS = { needs_you: true, failed: true, outage: true, backup: true, done: false };
 const KIND_CLASS = { heartbeat_missing: "outage", controller_down: "outage", unhealthy: "outage", backup_state: "backup", backup_stale: "backup" };
 export const classOf = (kind) => KIND_CLASS[kind];
-const BACKUP_STATES = ["ok", "failed", "not_configured", "unknown"];
+const BACKUP_STATES = ["ok", "failed", "not_configured", "unknown", "unjudged"];
 
 /** Keep only the fields the watchdog uses; everything else in a push is dropped. */
 export function sanitize(body) {
@@ -25,35 +25,50 @@ export function sanitize(body) {
     db_reachable: h ? h.db_reachable === true : null,
     running_jobs: h ? num(h.running_jobs) : null,
     disk_free_pct: h ? num(h.disk_free_pct) : null,
-    backup_state: BACKUP_STATES.includes(backup.state) ? backup.state : "unknown",
+    // a healthz that carries no backup object at all (the controller's bounded answer was a timeout) cannot
+    // vouch for or against the backup: unjudged, never "unknown"
+    backup_state: h && !h.backup ? "unjudged" : BACKUP_STATES.includes(backup.state) ? backup.state : "unknown",
     backup_age_hours: num(backup.age_hours),
   };
 }
 
 /** Classes `evaluate` could not judge from this problem list (their open incidents stay as they are). */
-export function unjudged(problems) {
-  return problems.some((p) => p.kind === "heartbeat_missing" || p.kind === "controller_down") ? ["backup"] : [];
+export function unjudged(problems, hb) {
+  if (problems.some((p) => p.kind === "heartbeat_missing" || p.kind === "controller_down")) return ["backup"];
+  return hb && hb.data && hb.data.backup_state === "unjudged" ? ["backup"] : [];
 }
 
-const clean = (v, n) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim().slice(0, n) : "");
+const CODE = /^[a-z][a-z_]{0,31}$/, BOT = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/, REF = /^[A-Za-z0-9_-]{1,40}$/, KEY = /^[A-Za-z0-9:_.-]{1,80}$/;
+export const EVENT_CLASSES = ["needs_you", "failed", "done"];
+export const MAX_BATCH = 100;
 
-/** The controller's event summary, reduced to what the mail may carry. Anything else is dropped. */
+/** The controller's event batch, reduced to what the mail may carry: ids, a bot label and fixed codes.
+ *  No free text field exists any more; a value that does not match its strict pattern becomes a neutral
+ *  placeholder ("other", "a bot"), so nothing a user typed can reach the mail. */
 export function sanitizeEvents(body) {
   if (!body || typeof body !== "object") return null;
   const prefs = {};
   for (const c of CLASSES) prefs[c] = body.prefs && typeof body.prefs[c] === "boolean" ? body.prefs[c] : DEFAULT_PREFS[c];
-  const out = { prefs, backup_reason: clean(body.backup_reason, 120) || null, lists: {} };
-  for (const c of ["needs_you", "failed", "done"]) {
-    const list = body[c];
-    if (!list || typeof list !== "object" || !Array.isArray(list.items)) continue;
-    const items = [];
-    for (const it of list.items.slice(0, 50)) {
-      if (!it || typeof it.id !== "string" || !/^[A-Za-z0-9:_.-]{1,80}$/.test(it.id)) continue;
-      items.push({ id: it.id, bot: clean(it.bot, 60), job: clean(it.job, 40), kind: clean(it.kind, 40), reason: clean(it.reason, 120) });
-    }
-    const count = Number.isInteger(list.count) && list.count >= items.length ? Math.min(list.count, 1e6) : items.length;
-    out.lists[c] = { count, items };
+  const int = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : 0);
+  const out = {
+    prefs,
+    backup_reason: typeof body.backup_reason === "string" && CODE.test(body.backup_reason) ? body.backup_reason : null,
+    epoch: typeof body.epoch === "string" && /^[A-Za-z0-9]{1,32}$/.test(body.epoch) ? body.epoch : "none",
+    upto: int(body.upto),
+    events: [],
+  };
+  const list = Array.isArray(body.events) ? body.events.slice(0, MAX_BATCH) : [];
+  for (const e of list) {
+    if (!e || !Number.isSafeInteger(e.seq) || e.seq < 1 || typeof e.id !== "string" || !KEY.test(e.id) || !EVENT_CLASSES.includes(e.cls)) continue;
+    out.events.push({
+      seq: e.seq, id: e.id, cls: e.cls,
+      bot: typeof e.bot === "string" && BOT.test(e.bot) ? e.bot : "a bot",
+      job: typeof e.job === "string" && REF.test(e.job) ? e.job : "",
+      kind: typeof e.kind === "string" && CODE.test(e.kind) ? e.kind : "other",
+    });
   }
+  out.events.sort((a, b) => a.seq - b.seq);
+  out.upto = Math.max(out.upto, out.events.length ? out.events[out.events.length - 1].seq : 0);
   return out;
 }
 
@@ -83,6 +98,7 @@ export function evaluate(hb, now, firstSeen) {
     problems.push({ kind: "unhealthy", text: `healthz reports ok=false${why.length ? ": " + why.join(", ") : ""}.` });
   }
   if (!d.controller_reachable) return problems; // no healthz, so nothing known about the backup
+  if (d.backup_state === "unjudged") return problems; // the controller could not read it in time: no verdict
   if (d.backup_state !== "ok") {
     problems.push({ kind: "backup_state", text: `Backup state is "${d.backup_state}" (expected "ok").` });
   } else if (d.backup_age_hours === null || d.backup_age_hours > BACKUP_MAX_AGE_HOURS) {

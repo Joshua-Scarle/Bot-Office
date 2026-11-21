@@ -4,6 +4,8 @@ import http.server
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -205,11 +207,92 @@ def test_backup_status_file_must_be_a_regular_file_and_never_blocks(tmp_path):
     assert health.backup_reason(fifo) is None
 
 
-def test_backup_reason_is_redacted_and_short(tmp_path):
-    reason = health.backup_reason(_status(tmp_path, state="failed",
-                                          error="rclone failed token=abcdef123456 " + "x" * 500))
-    assert "abcdef123456" not in reason and len(reason) <= 120
-    assert health.backup_reason(_status(tmp_path, state="failed", error=["x"])) is None
+def test_backup_reason_is_a_fixed_code_never_the_error_text(tmp_path):
+    text = "rclone failed token=abcdef123456 password: abc " + "x" * 500
+    assert health.backup_reason(_status(tmp_path, state="failed", error=text)) == "failed"
+    assert health.backup_reason(_status(tmp_path, state="failed", error=text, stage="upload")) == "stage_upload"
+    # a stage outside the allowlist (free text) is not echoed
+    assert health.backup_reason(_status(tmp_path, state="failed", stage="password: abc")) == "failed"
+    assert health.backup_reason(_status(tmp_path, state="ok", error=text)) is None
+    assert health.backup_reason(_status(tmp_path, state="failed", error=["x"], stage=["upload"])) == "failed"
+
+
+def _stuck_reader(monkeypatch, release):
+    """A status read that hangs (a dead mount), on a fresh reader so no other test's thread interferes."""
+    monkeypatch.setattr(health, "backup_reader", health.BackupReader())
+    monkeypatch.setattr(health, "read_status_file", lambda path: release.wait(30) and None)
+    monkeypatch.setattr(health, "BACKUP_READ_WAIT_SECONDS", 0.2)
+
+
+def test_a_stuck_status_file_is_bounded_unjudged_and_does_not_pile_up_threads(tmp_path, monkeypatch):
+    release = threading.Event()
+    _stuck_reader(monkeypatch, release)
+    before = threading.active_count()
+    started = time.monotonic()
+    results = [health.backup_status(tmp_path / "s.json", NOW) for _ in range(5)]
+    reasons = [health.backup_reason(tmp_path / "s.json") for _ in range(5)]
+    elapsed = time.monotonic() - started
+    release.set()
+    assert all(r == {"state": "unjudged", "age_hours": None, "bytes": None, "stale": False} for r in results)
+    assert reasons == [None] * 5
+    assert elapsed < 4  # five bounded waits of 0.2 s each plus five more, never a hang
+    assert threading.active_count() - before <= 1  # one reader thread, reused while it is stuck
+
+
+def test_a_stuck_file_system_falls_back_to_the_last_good_read(tmp_path, monkeypatch):
+    path = _status(tmp_path, state="ok", finished=_iso(1))
+    monkeypatch.setattr(health, "backup_reader", health.BackupReader())
+    monkeypatch.setattr(health, "BACKUP_READ_WAIT_SECONDS", 0.2)
+    assert health.backup_status(path, NOW)["state"] == "ok"
+    release = threading.Event()
+    monkeypatch.setattr(health, "read_status_file", lambda p: release.wait(30) and None)
+    assert health.backup_status(path, NOW)["state"] == "ok"  # cached, not "unknown"
+    release.set()
+
+
+def test_healthz_stays_up_while_the_backup_file_system_is_stuck(settings, tmp_path, monkeypatch):
+    release = threading.Event()
+    _stuck_reader(monkeypatch, release)
+    monkeypatch.setenv(health.BACKUP_STATUS_ENV, str(tmp_path / "s.json"))
+    with TestClient(create_app(settings)) as client:
+        started = time.monotonic()
+        res = client.get("/healthz")
+        elapsed = time.monotonic() - started
+    release.set()
+    assert res.status_code == 200 and res.json()["backup"]["state"] == "unjudged"
+    assert elapsed < 2.5 and "timed_out" not in res.json()
+
+
+def test_a_stuck_health_thread_cannot_block_interpreter_shutdown(tmp_path):
+    """Daemon threads: the process exits at once even though a health build and a status read never return."""
+    script = tmp_path / "stuck.py"
+    script.write_text(
+        "import asyncio, threading, time\n"
+        "from botoffice import health\n"
+        "async def main():\n"
+        "    fut = health.run_daemon(lambda: threading.Event().wait())\n"
+        "    health.read_status_file = lambda p: threading.Event().wait()\n"
+        "    print(health.backup_status(__import__('pathlib').Path('x'))['state'], flush=True)\n"
+        "    await asyncio.sleep(0.1)\n"
+        "asyncio.run(main())\n")
+    started = time.monotonic()
+    out = subprocess.run([sys.executable, "-I", str(script)], capture_output=True, text=True, timeout=20,
+                         env={**os.environ, "PYTHONPATH": str(Path(health.__file__).parent.parent)})
+    assert out.returncode == 0 and out.stdout.strip() == "unjudged"
+    assert time.monotonic() - started < 10
+
+
+def test_timed_out_healthz_names_no_backup_so_the_watchdog_leaves_it_unjudged(settings, monkeypatch):
+    """The Python side of finding 6: the timeout body carries no backup object, which the Worker reads as
+    unjudged (ops/watchdog/test/logic.test.js and engine.test.js cover the Worker side)."""
+    release = threading.Event()
+    app = create_app(settings)
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.store, "running_job_ids", lambda: release.wait(10) and [])
+        monkeypatch.setattr(health, "HEALTH_TIMEOUT_SECONDS", 0.2)
+        res = client.get("/healthz")
+        release.set()
+    assert res.status_code == 503 and res.json()["timed_out"] is True and "backup" not in res.json()
 
 
 def test_healthz_is_bounded_and_off_the_event_loop(settings, tmp_path, monkeypatch):

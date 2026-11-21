@@ -9,9 +9,6 @@ Environment=BOT_OFFICE_TOKEN_FILE=%h/printpilot-agentdesk/data/token
 Environment=BOT_OFFICE_DATA_DIR=%h/printpilot-agentdesk/data
 Environment=AGENTDESK_TOKEN_FILE=%h/printpilot-agentdesk/data/token
 Environment=AGENTDESK_DATA_DIR=%h/printpilot-agentdesk/data
-# optional: WATCHDOG_URL turns on the email-notification push (README, "What changed in 0.12.11")
-EnvironmentFile=-%h/.config/bot-office/heartbeat.env
-Environment=WATCHDOG_SECRET_FILE=%h/.config/bot-office/watchdog-secret
 Environment=PATH=%h/printpilot-agentdesk/bin:%h/.local/bin:%h/.grok/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/printpilot-agentdesk/.venv/bin/python -m botoffice
 Restart=on-failure

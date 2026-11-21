@@ -147,71 +147,106 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 
 | Class | Trigger | Detected by |
 |---|---|---|
-| Needs you | a new item in the Needs-you list (a question, a task waiting on you, a parked usage limit, a paused watcher, ...) | the controller's event push |
-| Failed turn | a bot's turn ended `failed` or `needs sign-in` in the last 24 h | the controller's event push |
+| Needs you | a new item in the Needs-you list (a question, a task waiting on you, a parked usage limit, a paused watcher, ...) | the controller's event log |
+| Failed turn | a bot's turn ended `failed` or `needs sign-in` | the controller's event log (a database trigger on the status change) |
 | Outage | no heartbeat for 15 min, the controller does not answer `/healthz`, or `ok=false` | the heartbeat pusher |
-| Backup | the nightly backup status is `failed` or `not_configured`, or its last finish is over 30 h old, unknown or in the future | the heartbeat pusher (`/healthz`); the short reason comes from the controller |
-| Done (optional) | a digest of turns that finished successfully in the last 6 h | the controller's event push |
+| Backup | the nightly backup status is `failed` or `not_configured`, or its last finish is over 30 h old, unknown or in the future. Not judged (no alert, no recovery) while the controller cannot read the status in time | the heartbeat pusher (`/healthz`); a reason code comes from the controller |
+| Done (optional) | a digest of turns that finished successfully | the controller's event log |
 
 Mail goes only to the one address configured on the Worker (`ALERT_TO`), which must equal the Email Routing destination bound to the Worker (`destination_address`); no recipient is ever read from a push.
 
-**Design.** Two authenticated channels carry the same bearer secret (a file on the VPS, mode 0600, and a Worker secret): the *heartbeat pusher* (`scripts/healthz_push.py`, a systemd timer every 5 min, system `python3` ≥ 3.9) posts `/healthz` to the Worker's `/heartbeat`, and the *controller* itself posts a compact event summary every minute to `/events` once `WATCHDOG_URL` is set. The summary holds counts, bot names, job ids, event kinds and a short secret-redacted failure reason, and no prompt, reply, task title or secret; the Worker keeps only an allowlist of those fields. Neither client follows a redirect, so the secret can only go to the configured URL (HTTPS only).
+**No free text leaves the controller.** The Worker receives only: event ids, sequence numbers, the class, a bot label, a job id, and fixed codes. A failure kind is one of the controller's enum values (`auth`, `usage_limit`, `timeout`, `provider_error`, `tool_denied`, `interrupted`, `launch`, `gate`, `budget`, `needs_login`, `succeeded`, `cancelled`, `incomplete`, else `other`); a needs-you kind is a lowercase code such as `question_open`; the backup reason is `stage_<stage>` for a stage in a fixed list (`dump`, `archive`, `encrypt`, `upload`, `verify`, `prune`, `restore_test`) or `failed`. Error text, task titles, questions and the status file's `error` are never read into a push. A bot name is sent only if it is one plain token (`[A-Za-z][A-Za-z0-9_-]{0,23}`); any other name goes out as `bot-` plus six hex digits of a hash of the bot id. The Worker re-applies the same patterns and replaces anything else with a placeholder. (A name that is a plain token is still the owner's own label for the bot, so it is sent; name bots accordingly.)
 
-All Worker state lives in one Durable Object, so every cron run and push is serialised on strongly consistent storage. A notification is written to storage first, then sent, and removed only after the send succeeded: a failed send is retried on the next run with the same Message-ID, and a failed write after a successful send repeats that one mail with the same Message-ID (mail clients fold it), but nothing is ever lost. Rate limiting only merges: events of one class wait for a 10-minute gap (60 minutes after 12 mails in a day) and go out as one digest; an outage that recovers before its mail is allowed is still mailed, marked "already recovered". An item is mailed once while it stays in the Needs-you list or the 24 h window. A toggle that is off means those items are never queued (turning it on later does not replay old ones).
+**Delivery, controller to Worker (nothing is polled away).** Events are appended to the controller's database when they happen: a SQL trigger on `jobs` (a status change to failed, needs sign-in or succeeded), a trigger on new open questions, and a detector (`record_needs_you`, every push cycle) for the derived needs-you states such as a stalled or overdue task, logged once per item id. They are pushed in order, at most 100 per push, each with a sequence number, and removed from the queue only when the Worker's reply acknowledges a sequence number (a cursor kept in the database). The Worker holds at most 100 pending events per class; when it is full it acknowledges only what it stored, and the controller keeps the rest and sends it in later pushes (immediately again while the Worker keeps taking some). A push outage, however long, only delays: unacknowledged events are kept for 60 days (14 days after acknowledgement, 1 day while `WATCHDOG_URL` is unset). A different controller database (different `notify-epoch`) restarts the cursor. Digests count every event: the subject has the exact number, the body lists the first 40 and says "and N more".
 
-Limits: the controller looks every minute, so an item that appears and clears within one minute is not mailed; if the controller or VPS is down, the outage mail is the notice.
+**Delivery, Worker to mailbox.** All Worker state lives in one Durable Object, so every operation is serialised on strongly consistent storage. A request (heartbeat, events, cron) only updates state and sets the Durable Object alarm; the alarm sends, so a slow mail server cannot delay heartbeat handling. When a class's gap has passed (10 minutes since its last mail; 60 minutes after 12 mails in a day) its pending entries become ONE outbox message, and the complete message (body, Date, Message-ID) is saved before the first send and re-sent byte for byte on every retry. A send is cut off after 8 s; a failed send is retried with exponential backoff (30 s, 1 min, 2 min, ... capped at 1 h). Rate limiting only merges: an outage that recovers before its mail is allowed is still mailed, marked "already recovered". **At-least-once boundary:** if a send times out, or the Worker stops, after the mail server accepted the message but before the outbox entry was deleted, the identical message is sent again. The mail system never tells us whether the first one arrived, so a rare duplicate (same Message-ID and Date, which many mail clients fold, but not guaranteed) is the price of never losing one. Exactly-once is not possible here.
 
-**`GET /healthz`** (no auth, loopback like the rest of the API) returns only non-sensitive status: `ok`, `version`, `uptime_seconds`, `scheduler` (alive, last tick age), `db_reachable`, `running_jobs`, `backup` (`state`, `age_hours`, `bytes`, `stale`) and `disk_free_pct`. The database, disk and status-file work runs in one bounded worker thread (3 s, shared by concurrent calls), never on the event loop; past the bound the answer is HTTP 503 `{"ok": false, "timed_out": true}`. The backup status file (`~/contabo-backup/status.json`, or `BOT_OFFICE_BACKUP_STATUS`) is opened without blocking and must be a regular file; a wrong-typed field or a finish time more than 6 minutes in the future reads as `unknown` (and stale).
+Two channels, one bearer secret (a file on the VPS, mode 0600, and a Worker secret): the *heartbeat pusher* (`scripts/healthz_push.py`, a systemd timer every 5 min, system `python3` ≥ 3.9) posts `/healthz` to `/heartbeat`; the *controller* posts events to `/events` every minute once `WATCHDOG_URL` is set. Neither follows a redirect, so the secret goes only to the configured URL (HTTPS only).
 
-### Setup
+**`GET /healthz`** (no auth, loopback like the rest of the API) returns only non-sensitive status: `ok`, `version`, `uptime_seconds`, `scheduler` (alive, last tick age), `db_reachable`, `running_jobs`, `backup` (`state`, `age_hours`, `bytes`, `stale`) and `disk_free_pct`. The database and disk work runs on one daemon thread (3 s bound, shared by concurrent calls), never on the event loop; past the bound the answer is HTTP 503 `{"ok": false, "timed_out": true}` with no `backup` object, which the watchdog treats as "backup not judged". The backup status file (`~/contabo-backup/status.json`, or `BOT_OFFICE_BACKUP_STATUS`) is read by its own daemon thread that callers wait on for at most 1 s: opened without blocking, a regular file only, 64 KiB cap. On a stuck mount the answer is the last good read (up to 10 minutes old) or `backup.state` `unjudged`; neither `/healthz` nor the event pusher nor interpreter shutdown ever waits on the file system. A wrong-typed field or a finish time more than 6 minutes in the future reads as `unknown` (and stale).
 
-Paths below assume `BOT_OFFICE_DIR` is the directory the controller runs from (the `WorkingDirectory` of `bot-office.service`) and that you have Node 20+ and a Cloudflare account with a domain that uses Email Routing.
+Limits: an item that is derived (not a job or a question) and appears and clears within one detector cycle (about a minute) is not logged; if the controller or VPS is down, the outage mail is the notice.
+
+### Setup (the live `bot-office` unit is never overwritten)
+
+Nothing here replaces `bot-office.service` or its drop-ins, and the controller needs no unit change: `WATCHDOG_URL` is the only controller setting, and it goes into a file the unit already reads or into a new drop-in file you add. The supplied `deploy/bot-office.service` is a reference for fresh installs and is not needed (do not install it over a live one). The two new heartbeat units (service and timer) are separate files.
+
+`$D` is the directory the controller runs from (the `WorkingDirectory` of the live unit). Node 20+ and a Cloudflare account with a domain that uses Email Routing are needed.
 
 **On a machine with a checkout and Node (not the VPS):**
 
-1. `cd ops/watchdog && npm test` (30 tests; nothing to install).
-2. `cp wrangler.toml.template wrangler.toml` and fill in `destination_address` and `ALERT_TO` (the same address) and `ALERT_FROM` (`watchdog@<your domain>`). `wrangler.toml` is local; do not commit it.
-3. In the Cloudflare dashboard (Email Routing): enable it, add the address under **Destination addresses**, and click the verification link Cloudflare mails to it. Until the address shows **Verified**, nothing can be delivered.
+1. `cd ops/watchdog && npm test` (38 tests; nothing to install).
+2. `cp wrangler.toml.template wrangler.toml`; fill in `destination_address` and `ALERT_TO` (the same address) and `ALERT_FROM` (`watchdog@<your domain>`). `wrangler.toml` is local; do not commit it.
+3. In the Cloudflare dashboard (Email Routing): enable it, add the address under **Destination addresses**, and click the verification link Cloudflare mails to it. Until it shows **Verified**, nothing can be delivered.
 4. `npx wrangler login`, then `npx wrangler deploy` (the first deploy creates the Worker and its Durable Object). Note the `https://<name>.<account>.workers.dev` URL.
-5. Set the shared secret from the VPS without displaying it (step 7 below creates the file; do it first):
-   `ssh <vps> 'cat ~/.config/bot-office/watchdog-secret' | npx wrangler secret put HEARTBEAT_SECRET`
 
-**On the VPS (run from `$BOT_OFFICE_DIR`):**
+**On the VPS:**
 
-6. Deploy the controller first, so `/healthz` and the event push exist:
+5. Preflight and backups (read-only except the copies; nothing is changed yet):
    ```sh
-   cd "$BOT_OFFICE_DIR" && git pull && .venv/bin/pip install -e .
-   mkdir -p ~/.config/systemd/user
-   install -m 644 deploy/bot-office.service deploy/bot-office-heartbeat.service deploy/bot-office-heartbeat.timer ~/.config/systemd/user/
-   systemctl --user daemon-reload && systemctl --user restart bot-office
-   curl -s http://127.0.0.1:8787/healthz   # expect "ok": true
+   STAMP=$(date +%Y%m%d-%H%M%S); B=~/backups/pre-0.12.11-$STAMP; mkdir -p "$B"
+   systemctl --user show bot-office -p FragmentPath -p DropInPaths -p EnvironmentFiles -p WorkingDirectory
+   systemctl --user cat bot-office > "$B/bot-office.unit.txt"          # unit plus drop-ins, as systemd sees them
+   cp -a ~/.config/systemd/user/bot-office.service* "$B/" 2>/dev/null   # the unit file and any .d directory
+   cd "$D" && git tag "backup/pre-0.12.11-$STAMP"
+   sqlite3 "$BOT_OFFICE_DATA_DIR/agentdesk.sqlite3" ".backup '$B/agentdesk.sqlite3'"
    ```
-7. Create the secret and the settings file (mode 0600 for the secret; the pusher and the controller refuse anything else):
+6. Create the secret and the heartbeat settings (mode 0600 for the secret; the pusher and the controller refuse anything else):
    ```sh
    umask 077; mkdir -p ~/.config/bot-office
    [ -e ~/.config/bot-office/watchdog-secret ] || head -c 32 /dev/urandom | base64 > ~/.config/bot-office/watchdog-secret
-   printf 'WATCHDOG_URL=%s\nBOT_OFFICE_DIR=%s\n' 'https://<worker-host>/heartbeat' "$BOT_OFFICE_DIR" > ~/.config/bot-office/heartbeat.env
+   printf 'WATCHDOG_URL=%s\nBOT_OFFICE_DIR=%s\n' 'https://<worker-host>/heartbeat' "$D" > ~/.config/bot-office/heartbeat.env
    ```
-   `bot-office.service` reads the same `heartbeat.env` (optional file) and `WATCHDOG_SECRET_FILE`, which is what turns the controller's event push on; restart it once more after creating the file: `systemctl --user restart bot-office`.
-8. Start the timer, push once, and let it survive logout:
+   The controller reads the secret from `~/.config/bot-office/watchdog-secret` by default (set `WATCHDOG_SECRET_FILE` only if you keep it elsewhere).
+7. Give the controller `WATCHDOG_URL` without touching its unit. Look at `EnvironmentFiles=` from step 5.
+   - If the live unit already has an `EnvironmentFile=`, append one line to that file: `echo 'WATCHDOG_URL=https://<worker-host>/heartbeat' >> <that file>`.
+   - Otherwise add a NEW drop-in (a separate file; it adds to the unit and replaces nothing). Do not continue if the file exists:
+     ```sh
+     D_IN=~/.config/systemd/user/bot-office.service.d; mkdir -p "$D_IN"
+     [ -e "$D_IN/watchdog.conf" ] && echo "exists: stop and review" || \
+       printf '[Service]\nEnvironment=WATCHDOG_URL=%s\n' 'https://<worker-host>/heartbeat' > "$D_IN/watchdog.conf"
+     systemctl --user daemon-reload
+     ```
+8. Install the two NEW heartbeat units only (they do not exist yet; the check stops if one does):
    ```sh
-   systemctl --user enable --now bot-office-heartbeat.timer
-   systemctl --user start bot-office-heartbeat.service && systemctl --user status bot-office-heartbeat.service --no-pager
-   loginctl enable-linger "$USER"
+   cd "$D" && git pull && .venv/bin/pip install -e .
+   ls ~/.config/systemd/user/bot-office-heartbeat.* 2>/dev/null && echo 'exists: stop and review' || \
+   install -m 644 -D -t ~/.config/systemd/user/ deploy/bot-office-heartbeat.service deploy/bot-office-heartbeat.timer
+   systemctl --user daemon-reload
    ```
-   The unit runs `/usr/bin/python3 $BOT_OFFICE_DIR/scripts/healthz_push.py` (stdlib only; any system Python 3.9+, no venv); change `ExecStart` if your `python3` lives elsewhere.
+9. From the dev machine, set the Worker secret from the VPS file without displaying it:
+   `ssh <vps> 'cat ~/.config/bot-office/watchdog-secret' | npx wrangler secret put HEARTBEAT_SECRET`
+10. Quiesce, then restart the controller. A restart kills provider processes the controller started, so wait until no job is running and restart in the same command (nothing is claimed in between except by a race of a few milliseconds; do not message bots meanwhile):
+    ```sh
+    count() { curl -s http://127.0.0.1:8787/healthz | python3 -c 'import json,sys; print(json.load(sys.stdin)["running_jobs"])'; }
+    until [ "$(count)" = 0 ]; do sleep 10; done && systemctl --user restart bot-office
+    sleep 5; curl -s http://127.0.0.1:8787/healthz   # expect "ok": true and the new version
+    ```
+    The restart creates the `notify_events` table and its triggers (idempotent) and starts the event push.
+11. Start the timer, push once, and let it survive logout:
+    ```sh
+    systemctl --user enable --now bot-office-heartbeat.timer
+    systemctl --user start bot-office-heartbeat.service && systemctl --user status bot-office-heartbeat.service --no-pager
+    loginctl enable-linger "$USER"
+    ```
+    The heartbeat unit runs `/usr/bin/python3 $BOT_OFFICE_DIR/scripts/healthz_push.py` (stdlib only; any system Python 3.9+); change `ExecStart` if your `python3` lives elsewhere.
 
 ### Verify (about 20 minutes)
 
-- **Destination.** In the dashboard, Email Routing, Destination addresses shows the address as **Verified** (you clicked the link Cloudflare mailed, step 3). Then the first test mail below must arrive; check spam once and mark it not spam.
-- **Needs you / failed.** In Bot Office, create a needs-you item (ask a bot a question card, or let a routine fail); within about 2 minutes one mail arrives. It names the bot and the kind only. A second identical item within 10 minutes arrives merged with others.
-- **Outage.** `systemctl --user stop bot-office-heartbeat.timer`, wait about 20 minutes: one ALERT mail; then start the timer: one RECOVERED mail in the next digest. `systemctl --user stop bot-office` (heartbeats keep coming) gives the "controller does not answer" alert.
-- **Backup.** Edit a copy of `status.json` to `"state": "failed"` (use `BOT_OFFICE_BACKUP_STATUS` on a throwaway run, not the real file), or wait for a real failure: one backup mail with the reason.
+- **Destination.** The dashboard shows the address as **Verified** (step 3). The first mail below must arrive; check spam once and mark it not spam.
+- **Needs you / failed.** Create a needs-you item (a question card, or let a routine fail): within about 2 minutes one mail arrives, naming the bot label and a code only. Items arriving within 10 minutes of it come as one merged digest.
+- **Outage.** `systemctl --user stop bot-office-heartbeat.timer`, wait about 20 minutes: one ALERT mail; start the timer: one RECOVERED mail in the next digest. `systemctl --user stop bot-office` (heartbeats keep coming) gives the "controller does not answer" alert and no backup alert.
+- **Backup.** Point a throwaway run's `BOT_OFFICE_BACKUP_STATUS` at a copy of `status.json` with `"state": "failed"` (not the real file): one backup mail with a reason code.
+- **Delivery after an outage.** Stop reaching the Worker (for example `WATCHDOG_URL` pointing to a dead host in a throwaway run), create two items, restore: both arrive; `sqlite3 <db> "select count(*) from notify_events"` falls as the cursor advances.
 - **Toggles.** Switch a class off in Settings, repeat its trigger: no mail.
 
-### Rollback
+### Rollback (restores everything that was changed)
 
-`systemctl --user disable --now bot-office-heartbeat.timer` stops the heartbeat (the Worker then alerts once about the missing heartbeat; stop that by `npx wrangler delete` in `ops/watchdog`, which also removes the Durable Object and its state). To stop only the event push, delete `WATCHDOG_URL` from `~/.config/bot-office/heartbeat.env` and restart `bot-office`. Remove the unit files and run `systemctl --user daemon-reload`. For the controller, check out the previous tag and restart; the only data written is one settings row (`notify-email`), which older versions ignore, so no database restore is needed. Rotate the secret if it may have been exposed: write a new file, `wrangler secret put` it, restart the timer and `bot-office`.
+1. Stop the sources: `systemctl --user disable --now bot-office-heartbeat.timer`, then in `ops/watchdog` `npx wrangler delete` (removes the Worker, its Durable Object and state; do it within 15 minutes of the timer stopping, or accept one missing-heartbeat mail).
+2. Undo the controller setting: delete the new drop-in (`rm ~/.config/systemd/user/bot-office.service.d/watchdog.conf`, and remove the directory if it is empty and you created it) or remove the `WATCHDOG_URL=` line you appended to the existing environment file. The live unit file and its other drop-ins were never modified; `diff -r` the copies in `$B` against `~/.config/systemd/user/` to confirm. Remove the heartbeat units and `~/.config/bot-office/heartbeat.env`, then `systemctl --user daemon-reload`.
+3. Controller code: `cd "$D" && git checkout backup/pre-0.12.11-$STAMP && .venv/bin/pip install -e .`, then quiesce and restart exactly as in step 10.
+4. Database: nothing has to be restored. The new table and triggers are ignored by older versions (the triggers keep adding small rows). To remove them: `sqlite3 <db> "DROP TRIGGER IF EXISTS notify_job_failed; DROP TRIGGER IF EXISTS notify_job_done; DROP TRIGGER IF EXISTS notify_question_open; DROP TABLE IF EXISTS notify_events; DELETE FROM meta WHERE key IN ('notify-email','notify-cursor','notify-epoch');"` (with the controller stopped or idle). The pre-deploy copy `$B/agentdesk.sqlite3` is only for a real corruption.
+5. Rotate the secret if it may have been exposed: write a new file, `wrangler secret put` it (if the Worker still exists), restart the controller the quiesced way.
 
 ## What changed in 0.12.11
 

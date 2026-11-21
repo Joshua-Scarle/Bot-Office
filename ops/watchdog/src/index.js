@@ -47,14 +47,19 @@ const stub = (env) => env.WATCHDOG.get(env.WATCHDOG.idFromName("main"));
 
 export class Watchdog {
   constructor(state, env) {
-    this.engine = new Engine({ storage: state.storage, send: makeSender(env, EmailMessage) });
+    this.engine = new Engine({ storage: state.storage, send: makeSender(env, EmailMessage), from: env.ALERT_FROM || "", to: env.ALERT_TO || "" });
+  }
+
+  /** Mail goes out here, never inside a request: a slow mail server cannot hold up a heartbeat. */
+  async alarm() {
+    await this.engine.drain();
   }
 
   async fetch(request) {
     const path = new URL(request.url).pathname;
     try {
       if (path === "/heartbeat") await this.engine.heartbeat(await request.json());
-      else if (path === "/events") await this.engine.events(await request.json());
+      else if (path === "/events") return Response.json(await this.engine.events(await request.json()));
       else if (path === "/tick") await this.engine.tick();
       else return new Response("not found", { status: 404 });
       return new Response("ok");

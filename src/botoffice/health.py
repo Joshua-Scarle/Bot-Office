@@ -1,7 +1,11 @@
 """GET /healthz payload: cheap, non-sensitive status for the external watchdog (ops/watchdog).
 
 Only booleans, numbers, short enums and the version string leave here: no tokens, no paths,
-no message content, and no backup error text (status.json's "error" is read for nothing).
+no message content, and no backup error text (status.json's "error" is never read).
+
+Nothing here can block the controller or its shutdown: the status file is read by a daemon thread the
+caller waits on for a bound (BackupReader), and build() itself runs on a daemon thread (run_daemon).
+A backup that could not be read in time is "unjudged": the watchdog neither alerts nor recovers on it.
 """
 from __future__ import annotations
 
@@ -11,12 +15,12 @@ import os
 import shutil
 import stat
 import time
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import __version__, failures
+from . import __version__
 
 BACKUP_STATUS_ENV = "BOT_OFFICE_BACKUP_STATUS"
 DEFAULT_BACKUP_STATUS = "~/contabo-backup/status.json"
@@ -29,8 +33,71 @@ _STATUS_MAX_BYTES = 64 * 1024
 _started = time.monotonic()
 FUTURE_TOLERANCE_HOURS = 0.1  # a finish time further ahead than this is a clock error, not a fresh backup
 HEALTH_TIMEOUT_SECONDS = 3.0  # an answer slower than this is itself the finding
-_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="healthz")
+BACKUP_READ_WAIT_SECONDS = 1.0  # how long a caller waits for the status file before calling it unjudged
+BACKUP_CACHE_SECONDS = 600.0  # a last good read is reused this long while the file system is stuck
+BACKUP_STAGES = ("dump", "archive", "encrypt", "upload", "verify", "prune", "restore_test")
 _inflight: asyncio.Future | None = None
+
+
+def run_daemon(fn, *args) -> asyncio.Future:
+    """fn(*args) on a daemon thread, as an awaitable: a call that never returns cannot hold up
+    interpreter shutdown (a ThreadPoolExecutor thread would be joined at exit)."""
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    def deliver(setter, value) -> None:
+        if not future.done():
+            setter(value)
+
+    def work() -> None:
+        try:
+            try:
+                result = fn(*args)
+            except BaseException as exc:  # noqa: BLE001 - handed to the awaiting caller
+                loop.call_soon_threadsafe(deliver, future.set_exception, exc)
+            else:
+                loop.call_soon_threadsafe(deliver, future.set_result, result)
+        except RuntimeError:
+            pass  # the loop is gone (shutdown) before a late result: nobody is waiting
+
+    threading.Thread(target=work, name="healthz", daemon=True).start()
+    return future
+
+
+class BackupReader:
+    """Reads the backup status file on a daemon thread, one read at a time. read() waits at most `wait`
+    seconds: a stuck mount returns the last good read (up to BACKUP_CACHE_SECONDS old) or (None, False)
+    = unjudged. The caller never blocks longer than the bound, and shutdown never waits for the thread."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._path: Path | None = None
+        self._data: dict | None = None
+        self._at: float | None = None
+
+    def _work(self, path: Path) -> None:
+        data = read_status_file(path)
+        with self._lock:
+            self._path, self._data, self._at = path, data, time.monotonic()
+
+    def read(self, path: Path, wait: float | None = None) -> tuple[dict | None, bool]:
+        with self._lock:
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                thread = self._thread = threading.Thread(target=self._work, args=(path,), name="backup-status",
+                                                         daemon=True)
+                thread.start()
+        thread.join(BACKUP_READ_WAIT_SECONDS if wait is None else wait)
+        with self._lock:
+            fresh = not thread.is_alive()
+            if self._path == path and self._at is not None and (
+                    fresh or time.monotonic() - self._at < BACKUP_CACHE_SECONDS):
+                return self._data, True
+        return None, False
+
+
+backup_reader = BackupReader()
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -65,11 +132,13 @@ def read_status_file(path: Path) -> dict | None:
 
 def backup_status(path: Path | None = None, now: datetime | None = None) -> dict[str, Any]:
     """state: ok | failed | not_configured | unknown (file missing, unreadable, not a regular file, malformed,
-    or finished in the future); stale: not ok, or the last finish is older than BACKUP_STALE_HOURS or unknown."""
+    or finished in the future) | unjudged (the file system did not answer in time); stale: not ok, or the last finish is older than BACKUP_STALE_HOURS or unknown."""
     path = path or Path(os.environ.get(BACKUP_STATUS_ENV) or DEFAULT_BACKUP_STATUS).expanduser()
     now = now or datetime.now(UTC)
     state, finished, size = "unknown", None, None
-    data = read_status_file(path)
+    data, judged = backup_reader.read(path)
+    if not judged:
+        return {"state": "unjudged", "age_hours": None, "bytes": None, "stale": False}
     if data is not None:
         raw_state = data.get("state")
         state = raw_state if isinstance(raw_state, str) and raw_state in _BACKUP_STATES else "unknown"
@@ -86,12 +155,16 @@ def backup_status(path: Path | None = None, now: datetime | None = None) -> dict
 
 
 def backup_reason(path: Path | None = None) -> str | None:
-    """A short, redacted one-line reason from the status file's "error" (for the alert mail only;
-    never served by /healthz)."""
+    """A fixed reason code for the alert mail: "stage_<stage>" for a stage in BACKUP_STAGES, "failed" when the
+    status says failed, else None. The status file's free-text "error" is never read or sent."""
     path = path or Path(os.environ.get(BACKUP_STATUS_ENV) or DEFAULT_BACKUP_STATUS).expanduser()
-    data = read_status_file(path)
-    raw = data.get("error") if data else None
-    return failures.clip(raw, 120) if isinstance(raw, str) and raw.strip() else None
+    data, judged = backup_reader.read(path)
+    if not judged or not data:
+        return None
+    stage = data.get("stage")
+    if isinstance(stage, str) and stage in BACKUP_STAGES:
+        return f"stage_{stage}"
+    return "failed" if data.get("state") == "failed" else None
 
 
 def disk_free_pct(path: Path) -> float | None:
@@ -128,13 +201,13 @@ def build(app_state: Any, backup_path: Path | None = None) -> dict[str, Any]:
 
 async def snapshot(app_state: Any, backup_path: Path | None = None,
                    timeout: float | None = None) -> tuple[dict[str, Any], int]:
-    """build() off the event loop, bounded, and shared: concurrent callers wait on one run in a
-    dedicated single thread, so a slow disk or a locked database can neither stall the controller nor
-    pile up threads. Returns (body, http status); a timeout is ok=false, 503."""
+    """build() off the event loop, bounded, and shared: concurrent callers wait on one run on one
+    daemon thread, so a slow disk or a locked database can neither stall the controller nor
+    pile up threads, and a stuck one cannot block shutdown. Returns (body, http status); a timeout is ok=false, 503."""
     global _inflight
     loop = asyncio.get_running_loop()
-    if _inflight is None or _inflight.done():
-        _inflight = loop.run_in_executor(_executor, build, app_state, backup_path)
+    if _inflight is None or _inflight.done() or _inflight.get_loop() is not loop:  # (another loop: a dead run)
+        _inflight = run_daemon(build, app_state, backup_path)
     try:
         return await asyncio.wait_for(asyncio.shield(_inflight), HEALTH_TIMEOUT_SECONDS if timeout is None else timeout), 200
     except TimeoutError:

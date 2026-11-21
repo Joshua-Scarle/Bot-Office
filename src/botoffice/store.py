@@ -652,6 +652,20 @@ class JobStore:
                 ("chat_only", "INTEGER NOT NULL DEFAULT 0"),
             ))
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            # email-notification outbox (notify.py): appended by these triggers and by notify's detector,
+            # acknowledged by the Worker through a cursor; holds codes and ids only, never text
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS notify_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, cls TEXT NOT NULL,
+                    bot_id TEXT, ref TEXT, kind TEXT NOT NULL, created_at TEXT NOT NULL)""")
+            for name, status, cls, prefix in (("failed", "'failed','needs_login'", "failed", "j"),
+                                              ("done", "'succeeded'", "done", "d")):
+                db.execute(
+                    f"""CREATE TRIGGER IF NOT EXISTS notify_job_{name} AFTER UPDATE OF status ON jobs
+                        WHEN NEW.status IN ({status}) AND OLD.status IS NOT NEW.status AND NEW.bot_id IS NOT NULL
+                        BEGIN INSERT OR IGNORE INTO notify_events (key, cls, bot_id, ref, kind, created_at)
+                        VALUES ('{prefix}:' || NEW.id || ':' || NEW.attempts, '{cls}', NEW.bot_id, NEW.id,
+                                COALESCE(NEW.failure_kind, NEW.status), strftime('%Y-%m-%dT%H:%M:%SZ','now')); END""")
             # WORKING.md as it was before each turn that changed it, so an edit can roll it back
             db.execute(
                 """CREATE TABLE IF NOT EXISTS working_snapshots (
@@ -824,6 +838,11 @@ class JobStore:
                        "status TEXT NOT NULL, answer TEXT, blocking INTEGER NOT NULL, created_at TEXT NOT NULL, "
                        "answered_at TEXT)")
             db.execute("CREATE INDEX IF NOT EXISTS questions_bot ON questions(bot_id, status)")
+            db.execute(
+                """CREATE TRIGGER IF NOT EXISTS notify_question_open AFTER INSERT ON questions WHEN NEW.status='open'
+                    BEGIN INSERT OR IGNORE INTO notify_events (key, cls, bot_id, ref, kind, created_at)
+                    VALUES ('q:' || NEW.id || ':open', 'needs_you', NEW.bot_id, NULL, 'question_open',
+                            strftime('%Y-%m-%dT%H:%M:%SZ','now')); END""")
             _init_control_tables(db)
 
     def _import_bridge_json(self, db: sqlite3.Connection) -> None:

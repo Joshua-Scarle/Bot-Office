@@ -69,73 +69,170 @@ def test_corrupt_stored_prefs_fall_back_to_defaults(settings):
         assert notify.get_prefs(store)["needs_you"] is True and notify.get_prefs(store)["failed"] is False
 
 
-def test_events_hold_counts_names_ids_and_a_redacted_reason_never_bodies(settings, tmp_path):
+def _rows(store):
+    with closing(store._connect()) as db:
+        return [dict(row) for row in db.execute("SELECT * FROM notify_events ORDER BY seq")]
+
+
+def _question(store, bot, qid="q1", prompt="SECRET QUESTION TEXT"):
+    with closing(store._connect()) as db:
+        db.execute("INSERT INTO questions (id, bot_id, message_id, status, payload, blocking, created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   (qid, str(bot.id), 1, "open", json.dumps({"steps": [{"prompt": prompt}]}), 0, now().isoformat()))
+
+
+def test_events_are_appended_when_they_happen_and_carry_codes_never_text(settings, tmp_path):
     (tmp_path / "status.json").write_text(json.dumps({"state": "failed", "finished": now().isoformat(),
-                                                      "error": "upload failed " + SECRET_TEXT}))
+                                                      "error": "password: abc " + SECRET_TEXT, "stage": "upload"}))
     with _client(settings) as client:
         store = client.app.state.store
         bot = store.create_bot("Ada", "PRIVATE INSTRUCTIONS", "codex", None)
         failed = _job(store, bot, "failed", error="provider said no " + SECRET_TEXT, kind="provider_error")
-        ok = _job(store, bot, "succeeded", source="chat")
-        store.create("a question", "codex", bot_id=bot.id, source="chat")
-        events = notify.build_events(store)
-    text = json.dumps(events)
-    assert "PRIVATE" not in text and "abcdefghijklmnop1234" not in text and "zzzzzzzz9999" not in text
-    assert "a question" not in text
-    assert events["failed"]["count"] == 1
-    (item,) = events["failed"]["items"]
-    assert item["bot"] == "Ada" and item["job"] == str(failed.id) and item["kind"] == "provider_error"
-    assert item["id"] == f"j:{failed.id}:{store.get(failed.id).attempts}" and len(item["reason"]) <= 120
-    assert "provider said no" in item["reason"] and "[redacted]" in item["reason"]
-    assert "done" not in events and str(ok.id) not in text  # done is off by default
-    assert events["backup_reason"].startswith("upload failed") and "zzzzzzzz9999" not in events["backup_reason"]
-    assert events["prefs"]["needs_you"] is True and events["needs_you"]["count"] == 0
+        _job(store, bot, "succeeded", source="chat")
+        _question(store, bot)
+        payload, upto, more = notify.build_batch(store)
+    text = json.dumps(payload)
+    for leak in ("PRIVATE", "abcdefghijklmnop1234", "zzzzzzzz9999", "password", "provider said no", "SECRET QUESTION"):
+        assert leak not in text
+    by = {e["cls"]: e for e in payload["events"]}
+    assert set(by) == {"failed", "needs_you"}  # done is off by default
+    assert by["failed"]["bot"] == "Ada" and by["failed"]["job"] == str(failed.id) and by["failed"]["kind"] == "provider_error"
+    assert by["failed"]["id"] == f"j:{failed.id}:{store.get(failed.id).attempts}"
+    assert by["needs_you"]["kind"] == "question_open" and by["needs_you"]["id"] == "q:q1:open"
+    assert payload["backup_reason"] == "stage_upload"
+    assert payload["prefs"]["needs_you"] is True and more is False and upto == 3
+    assert not any("reason" in e for e in payload["events"])
 
 
-def test_needs_you_items_carry_kind_and_bot_but_not_the_question_text(settings):
+def test_free_text_never_leaves_even_in_names_kinds_and_backup_errors(settings, tmp_path):
+    (tmp_path / "status.json").write_text(json.dumps({"state": "failed", "stage": "hunter2 and a sentence",
+                                                      "error": "password: hunter2 for alice@example.com"}))
+    with _client(settings) as client:
+        store = client.app.state.store
+        sentence = store.create_bot("my password is hunter2 please call 555-0100", "", "codex", None)
+        pw = store.create_bot("password: abc", "", "codex", None)
+        plain = store.create_bot("Ada-2", "", "codex", None)
+        _job(store, sentence, "failed", error="password: abc", kind="password: abc")
+        _job(store, pw, "failed", error="a sentence with private content.", kind="a sentence")
+        _job(store, plain, "failed", error="x", kind="auth")
+        payload, _, _ = notify.build_batch(store)
+    text = json.dumps(payload)
+    for leak in ("hunter2", "555", "password", "sentence", "alice", "private content"):
+        assert leak not in text
+    bots = {e["bot"] for e in payload["events"]}
+    assert "Ada-2" in bots and sum(b.startswith("bot-") for b in bots) == 2
+    assert {e["kind"] for e in payload["events"]} == {"other", "auth"}
+    assert payload["backup_reason"] == "failed"
+    assert notify.bot_label("id-1", "x" * 40).startswith("bot-") and notify.bot_label("id-1", "Ann") == "Ann"
+
+
+def test_a_job_that_failed_and_was_dismissed_within_a_minute_is_still_logged(settings):
+    """The trigger records the transition itself; no poll has to catch the state."""
     with _client(settings) as client:
         store = client.app.state.store
         bot = store.create_bot("Bea", "", "codex", None)
-        job = _job(store, bot, "failed", error="boom", kind="provider_error")  # a job failure is the "failed" class
-        # a pending question card
-        with closing(store._connect()) as db:
-            db.execute("INSERT INTO questions (id, bot_id, message_id, status, payload, blocking, created_at) "
-                       "VALUES (?,?,?,?,?,?,?)",
-                       ("q1", str(bot.id), 1, "open", json.dumps({"steps": [{"prompt": "SECRET QUESTION TEXT"}]}),
-                        0, now().isoformat()))
-        events = notify.build_events(store)
-    assert events["needs_you"]["count"] >= 1
-    kinds = {i["kind"] for i in events["needs_you"]["items"]}
-    assert "question open" in kinds
-    assert "SECRET QUESTION TEXT" not in json.dumps(events)
-    assert all(not i["id"].startswith("j:") for i in events["needs_you"]["items"])
-    assert str(job.id) in json.dumps(events["failed"])
+        job = _job(store, bot, "failed", error="boom", kind="auth")
+        _set(store, "jobs", job.id, status="succeeded", dismissed_at=now().isoformat())  # gone from every list
+        rows = _rows(store)
+    assert [r["cls"] for r in rows] == ["failed", "done"]
 
 
-def test_disabled_classes_are_not_built(settings):
+def test_detector_logs_derived_needs_you_once_and_survives_resolution(settings):
     with _client(settings) as client:
         store = client.app.state.store
         bot = store.create_bot("Cy", "", "codex", None)
-        _job(store, bot, "failed", error="x", kind="auth")
-        notify.set_prefs(store, {"failed": False, "needs_you": False, "backup": False, "done": True})
-        _job(store, bot, "succeeded", source="chat")
-        events = notify.build_events(store)
-    assert "failed" not in events and "needs_you" not in events and "backup_reason" not in events
-    assert events["done"]["count"] == 1 and events["prefs"]["failed"] is False
+        _question(store, bot, "q9")
+        assert notify.record_needs_you(store) == 0  # the question trigger already logged it
+        assert [r["key"] for r in _rows(store)] == ["q:q9:open"]
+        with closing(store._connect()) as db:
+            db.execute("UPDATE questions SET status='answered' WHERE id='q9'")
+        assert [r["key"] for r in _rows(store)] == ["q:q9:open"]  # resolved items stay in the log until acked
+        notify.set_prefs(store, {"needs_you": False})
+        assert notify.record_needs_you(store) == 0
 
 
-def test_old_failures_leave_the_window_and_items_are_capped(settings):
+def test_batches_hold_the_cursor_until_the_worker_acks(settings):
     with _client(settings) as client:
         store = client.app.state.store
         bot = store.create_bot("Di", "", "codex", None)
-        old = _job(store, bot, "failed", error="old", kind="auth")
-        _set(store, "jobs", old.id, finished_at=(now() - timedelta(hours=30)).isoformat())
-        for _ in range(notify.MAX_ITEMS + 5):
-            _job(store, bot, "failed", error="new", kind="auth")
-        events = notify.build_events(store)
-    assert events["failed"]["count"] == notify.MAX_ITEMS + 5
-    assert len(events["failed"]["items"]) == notify.MAX_ITEMS
-    assert all(item["job"] != str(old.id) for item in events["failed"]["items"])
+        for _ in range(notify.BATCH + 30):
+            _job(store, bot, "failed", error="x", kind="auth")
+        first, upto, more = notify.build_batch(store)
+        assert len(first["events"]) == notify.BATCH and more is True and upto == notify.BATCH
+        again, _, _ = notify.build_batch(store)
+        assert [e["seq"] for e in again["events"]] == [e["seq"] for e in first["events"]]  # nothing moved: no ack yet
+        notify._ack(store, 40, upto)  # a partial ack (the Worker was full)
+        nxt, upto2, more2 = notify.build_batch(store)
+        assert nxt["events"][0]["seq"] == 41 and len(nxt["events"]) == 90 and more2 is False
+        notify._ack(store, 10**9, upto2)  # a bogus ack beyond what was sent is ignored
+        assert notify._cursor(store) == 40
+        notify._ack(store, upto2, upto2)
+        last, _, more3 = notify.build_batch(store)
+        assert last["events"] == [] and more3 is False
+
+
+def test_disabled_classes_are_skipped_not_sent(settings):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Ed", "", "codex", None)
+        _job(store, bot, "failed", error="x", kind="auth")
+        _job(store, bot, "succeeded", source="chat")
+        notify.set_prefs(store, {"failed": False, "backup": False, "done": True})
+        payload, upto, _ = notify.build_batch(store)
+    assert [e["cls"] for e in payload["events"]] == ["done"]
+    assert payload["backup_reason"] is None and upto == 2  # the failed event is covered by the cursor, not sent
+
+
+def test_events_survive_a_long_push_outage_and_are_delivered_in_order(settings, tmp_path, monkeypatch):
+    """500 events while every push fails; then the Worker takes 100 at a time (and only 60 once) and acks."""
+    monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: (_ for _ in ()).throw(httpx.ConnectError("down")))
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Fay", "", "codex", None)
+        for _ in range(500):
+            _job(store, bot, "failed", error="x", kind="auth")
+        notifier = notify.Notifier(store, url="https://w.example/heartbeat", secret_file=_secret(tmp_path))
+        for _ in range(3):
+            assert notifier.push_once() == (False, False)
+        total = len(_rows(store))  # 500 failures, plus the "failed three times in a row" needs-you item
+        assert total == 501 and notify._cursor(store) == 0
+        received, caps = [], iter([60] + [100] * 20)
+
+        def worker(url, json=None, **kw):
+            take = json["events"][: next(caps)]
+            received.extend(e["seq"] for e in take)
+            ack = take[-1]["seq"] if take else json["upto"]
+            return httpx.Response(200, json={"ack": ack})
+
+        monkeypatch.setattr(notify.httpx, "post", worker)
+        for _ in range(20):
+            ok, more = notifier.push_once()
+            assert ok
+            if not more:
+                break
+    assert received == list(range(1, total + 1)) and notify._cursor(store) == total
+
+
+def test_old_events_are_pruned_and_an_unconfigured_notifier_keeps_one_day(settings):
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Hal", "", "codex", None)
+        old = _job(store, bot, "failed", error="x", kind="auth")
+        _job(store, bot, "failed", error="x", kind="auth")
+        with closing(store._connect()) as db:
+            db.execute("UPDATE notify_events SET created_at=? WHERE ref=?", ("2020-01-01T00:00:00Z", str(old.id)))
+        notify.prune(store, notify.KEEP_UNCONFIGURED)
+        assert [r["ref"] for r in _rows(store)] != [str(old.id)] and len(_rows(store)) == 1
+
+
+def test_a_worker_that_acks_nothing_does_not_spin_the_loop(settings, tmp_path, monkeypatch):
+    monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: httpx.Response(200, json={"ack": 0}))
+    with _client(settings) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Gus", "", "codex", None)
+        for _ in range(notify.BATCH + 5):
+            _job(store, bot, "failed", error="x", kind="auth")
+        assert notify.Notifier(store, url="https://w.example/heartbeat", secret_file=_secret(tmp_path)).push_once() == (True, False)
 
 
 def test_events_url_and_unconfigured_notifier(settings):
@@ -165,10 +262,10 @@ def test_push_posts_the_summary_with_a_bearer_and_never_follows_redirects(settin
     with _client(settings) as client:
         notifier = notify.Notifier(client.app.state.store, url="https://w.example/heartbeat",
                                    secret_file=_secret(tmp_path))
-        assert notifier.push_once() is True
+        assert notifier.push_once()[0] is True
     assert seen["url"] == "https://w.example/events"
     assert seen["follow_redirects"] is False and seen["headers"]["Authorization"] == "Bearer s3cret-value"
-    assert set(seen["json"]) >= {"sent_at", "prefs", "needs_you", "failed", "backup_reason"}
+    assert set(seen["json"]) == {"sent_at", "epoch", "prefs", "backup_reason", "upto", "events"}
 
 
 def test_push_failures_are_quiet_sanitised_and_never_print_the_secret(settings, tmp_path, monkeypatch, caplog):
@@ -177,18 +274,18 @@ def test_push_failures_are_quiet_sanitised_and_never_print_the_secret(settings, 
         url = "https://w.example/heartbeat"
         for status in (302, 401, 500):
             monkeypatch.setattr(notify.httpx, "post", lambda *a, _s=status, **k: httpx.Response(_s))
-            assert notify.Notifier(store, url=url, secret_file=_secret(tmp_path)).push_once() is False
+            assert notify.Notifier(store, url=url, secret_file=_secret(tmp_path)).push_once()[0] is False
 
         def boom(*a, **k):
             raise httpx.ConnectError("could not reach https://w.example/events with s3cret-value")
 
         monkeypatch.setattr(notify.httpx, "post", boom)
-        assert notify.Notifier(store, url=url, secret_file=_secret(tmp_path)).push_once() is False
+        assert notify.Notifier(store, url=url, secret_file=_secret(tmp_path)).push_once()[0] is False
         # a missing file or a world-readable one: refused with a message that names no path, nothing sent
         sent = []
         monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: sent.append(1) or httpx.Response(200))
-        assert notify.Notifier(store, url=url, secret_file=tmp_path / "nope").push_once() is False
-        assert notify.Notifier(store, url=url, secret_file=_secret(tmp_path, mode=0o644)).push_once() is False
+        assert notify.Notifier(store, url=url, secret_file=tmp_path / "nope").push_once()[0] is False
+        assert notify.Notifier(store, url=url, secret_file=_secret(tmp_path, mode=0o644)).push_once()[0] is False
         assert sent == []
     log = caplog.text
     assert "s3cret-value" not in log and str(tmp_path) not in log
@@ -221,7 +318,7 @@ def test_push_does_not_follow_a_real_redirect(settings, tmp_path):
         with _client(settings) as client:
             notifier = notify.Notifier(client.app.state.store, url=f"http://127.0.0.1:{origin.server_port}/heartbeat",
                                        secret_file=_secret(tmp_path))
-            assert notifier.push_once() is False
+            assert notifier.push_once()[0] is False
     finally:
         sink.shutdown()
         origin.shutdown()
@@ -230,7 +327,7 @@ def test_push_does_not_follow_a_real_redirect(settings, tmp_path):
 
 def test_app_pushes_in_the_background_only_when_configured(settings, tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(notify.Notifier, "push_once", lambda self: calls.append(1) or True)
+    monkeypatch.setattr(notify.Notifier, "push_once", lambda self: calls.append(1) or (True, False))
     with _client(settings):
         pass
     assert calls == []  # no WATCHDOG_URL
