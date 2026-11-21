@@ -1006,7 +1006,7 @@ def create_app(
         if "description" in fields:
             fields["description"] = (fields["description"] or "").strip()
         for key in ("name", "instructions", "default_provider", "model", "icon", "cli_access", "notify", "allow_sudo",
-                    "scheduled_runs", "daily_budget", "digest", "bot_steer", "chat_only", "team_read", "team_private"):
+                    "scheduled_runs", "daily_budget", "digest", "bot_steer", "chat_only", "team_read", "team_messaging", "team_private"):
             if key in fields and fields[key] is None:
                 del fields[key]
         if "daily_budget" in fields:
@@ -1902,12 +1902,23 @@ def create_app(
 
     @app.post("/v1/bots/{bot_ref}/message-agent")
     async def message_agent(bot_ref: str, body: AgentMessageCreate, binding: Job | None = Depends(agent_auth)) -> dict:  # noqa: B008
+        return await _deliver(bot_ref, body, binding, "message")
+
+    def _send_gate(binding: Job, sender, target, kind: str) -> bool:
+        """B12: every job send goes through team.send_gate (here, and for the inbox-file path in the scheduler)."""
+        try:
+            return team.send_gate(store, scheduler.rules, binding, str(target.id), kind)
+        except team.TeamError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+    async def _deliver(bot_ref: str, body: AgentMessageCreate, binding: Job | None, kind: str) -> dict:
         sender = store.find_bot(bot_ref)
         target = store.find_bot(body.to)
         if not sender or not target:
             raise HTTPException(status_code=404, detail="bot not found")
         if binding and binding.bot_id != sender.id:
             raise HTTPException(status_code=403, detail="token is bound to another bot")
+        card = _send_gate(binding, sender, target, kind) if binding and sender.id != target.id else False
         blocked = _steer_blocked(target)
         try:
             _, _, item = scheduler.turns.post_agent_message(
@@ -1916,6 +1927,8 @@ def create_app(
         except TurnError as exc:
             status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        if binding:
+            team.log_send(store, binding, str(target.id), kind, card)
         if item.get("delivery") == "steer":
             item["note"] = (f"Delivered to {target.name} while it works; it reads it within its current task and "
                             "answers with a message to you if you asked something (it appears in your chat).")
@@ -2019,8 +2032,8 @@ def create_app(
         team.log_read(store, job, "team_read", target_id, result["count"])
         return result
 
-    async def _team_send(job: Job, body: AgentMessageCreate) -> dict:
-        item = await message_agent(str(job.bot_id), AgentMessageCreate(to=body.to, body=body.body, mode=body.mode), job)
+    async def _team_send(job: Job, body: AgentMessageCreate, kind: str = "message") -> dict:
+        item = await _deliver(str(job.bot_id), AgentMessageCreate(to=body.to, body=body.body, mode=body.mode), job, kind)
         return {key: item[key] for key in ("id", "status", "mode", "delivery", "note", "hop") if key in item}
 
     @app.post("/v1/agent/team/message")
@@ -2037,7 +2050,7 @@ def create_app(
         lanes = settings.run_lanes
         reserved = team.reserve_wait(store, job, target.id, lanes, body.timeout_s)
         try:
-            item = await _team_send(job, body)
+            item = await _team_send(job, body, "ask")
             delivery = item.get("delivery")
             waiting = reserved and (delivery == "steer" or (
                 delivery == "start" and team.lane_free(store, lanes, str(store.get_agent_message(item["id"])["job_id"]))))

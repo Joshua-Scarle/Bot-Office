@@ -459,6 +459,26 @@ class Rules:
         return any(row["kind"] == "preset" and row["pattern"] == "network" and row["effect"] == "allow"
                    for row in rows)
 
+    def team_send_mode(self, job: Job, tool: str = "") -> str:
+        """off | ask | allow for a teammate send by *job*'s bot: its ``team_messaging`` setting, with an explicit
+        ``outbound ask`` rule (in this job's scope; the implicit unattended default is not a rule) turning allow
+        into ask, and off winning. The caller applies owner never/ask rules on the tool itself."""
+        bot = self.store.get_bot(job.bot_id) if job.bot_id else None
+        scope = "unattended" if self.strict(job) else "attended"
+        with closing(self.store._connect()) as db:
+            rows = list(self._rules(db, str(job.bot_id) if job.bot_id else None, scope))
+            if (job.source or "api") in UNATTENDED_SOURCES:  # the other scope's ask rules judge such a run too
+                rows += [rule for rule in self._rules(db, str(job.bot_id) if job.bot_id else None,
+                                                      "attended" if scope == "unattended" else "unattended")
+                         if rule["effect"] == "ask"]
+        explicit = any(rule["kind"] == "preset" and rule["pattern"] == "outbound" and rule["effect"] == "ask"
+                       for rule in rows)
+        return team.combine_send_mode(getattr(bot, "team_messaging", None), explicit)
+
+    def _team_job(self, job: Job) -> bool:
+        with closing(self.store._connect()) as db:
+            return team.is_team_job(db, job)
+
     # --- the decision ---
 
     def evaluate(self, job: Job, action: Action) -> tuple[str, str | None, str]:
@@ -494,9 +514,21 @@ class Rules:
         sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
+        if first_party and action.tool.removeprefix(team.TOOL_PREFIX) in team.SEND_TOOLS:
+            # B12: the sender's own setting decides whether a send goes out (reads stay open)
+            mode = self.team_send_mode(job, action.tool)
+            if mode == "off":
+                return "never", "team_send", "team messaging is off for this bot (its team_messaging setting)"
+            if mode == "ask":
+                return "ask", "team_send", "this bot's teammate messages wait for your approval"
+        # B12: a turn another bot started (or steered) takes nothing from a teammate's request: outbound and
+        # destructive actions need a card this turn raised itself, whatever a rule or run profile says
+        team_turn = bool(hits or "allow" in effects) and not first_party and self._team_job(job)
         if "ask" in effects:
             return "ask", preset, "a rule asks first"
-        if "allow" in effects and not (job.source in STRICT_SOURCES and hits):
+        if team_turn and hits:
+            return "ask", preset, f"{preset} action in a turn started by another bot"
+        if "allow" in effects and not team_turn and not (job.source in STRICT_SOURCES and hits):
             return "allow", preset, "a rule allows it"
         if first_party:
             return "allow", None, "first-party teammate tool"

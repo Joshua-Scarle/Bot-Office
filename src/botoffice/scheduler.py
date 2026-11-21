@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from . import attachments, autocontinue, baseline, continuation, failures, git_guard, isolation, needs_you, procs
+from . import attachments, autocontinue, baseline, continuation, failures, git_guard, isolation, needs_you, procs, team
 from . import safefs
 from . import slash as slash_mod
 from . import usage as budgets
@@ -512,7 +512,13 @@ class Scheduler:
                 job_id, token = data.get("job_id"), data.pop("agent_token", None)
                 if not isinstance(job_id, str) or not isinstance(token, str) or not self.store.valid_desk_agent_token(job_id, sender.id, token):
                     raise TurnError("invalid originating job token")
+                job = self.store.get(job_id)
+                card = team.send_gate(self.store, self.rules, job, str(target.id), "message") if job and sender.id != target.id else False
                 self.turns.post_agent_message(sender, target, text, data["job_id"])
+                if job:
+                    team.log_send(self.store, job, str(target.id), "message", card)
+            except team.TeamError as exc:
+                self.store.add_message(sender.id, "system", f"Could not send message: {exc.detail}", source="inbox")
             except InboxLimitError as exc:
                 log.warning("inbox file from bot %s dropped: %s", sender.id, exc)
             except TurnError as exc:

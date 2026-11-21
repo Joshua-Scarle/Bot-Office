@@ -50,6 +50,7 @@ BOT_FIELDS = {
     "bot_steer",
     "chat_only",
     "team_read",
+    "team_messaging",
     "team_private",
 }
 IDENTITY_MIGRATION = "crewdeck-identity-v1"
@@ -616,7 +617,8 @@ def message_author(values: dict) -> tuple[str, str | None]:
 PRESET_LABELS = {"outbound": "Outbound action in an unattended run", "destructive":
                  "Destructive action in an unattended run", None: "An action rule you set",
                  "git-guard": "Protected action: default branch, merge, force-push, delete or repo settings",
-                 "nested-agent": "Nested agent with permissions bypassed"}
+                 "nested-agent": "Nested agent with permissions bypassed",
+                 "team_send": "Message to a teammate bot"}
 
 
 def approval_card(store: JobStore, item: dict) -> dict:
@@ -788,6 +790,8 @@ class JobStore:
                 # 0.12.18 teammate tools: team_read section|all|none; team_private hides the bot from reads
                 ("team_read", "TEXT NOT NULL DEFAULT 'section'"),
                 ("team_private", "INTEGER NOT NULL DEFAULT 0"),
+                # B12: sending to teammates, off | ask | allow
+                ("team_messaging", "TEXT NOT NULL DEFAULT 'allow'"),
             ))
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             team.init_schema(db)

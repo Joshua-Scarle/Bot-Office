@@ -121,7 +121,8 @@ def _line(entry: dict) -> str:
 def render(tool: str, data: dict, bot: str = "") -> str:
     if tool == "team_list":
         lines = [_line(entry) for entry in data.get("bots", [])] or ["(no other bots)"]
-        return wrap_untrusted("team_list", "\n".join(lines))
+        text = wrap_untrusted("team_list", "\n".join(lines))
+        return text + ("\nCoverage: " + data["coverage"] if isinstance(data.get("coverage"), str) else "")
     if tool == "team_status":
         return wrap_untrusted(f"team_status:{bot}", json.dumps(
             {key: value for key, value in data.items() if key != "untrusted"}, indent=1, ensure_ascii=False))
