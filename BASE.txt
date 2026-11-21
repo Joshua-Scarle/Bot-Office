@@ -1,0 +1,4 @@
+Base: master e3bf3a7 (0.12.18 guard hotfix).
+Engineer 7 feature/e7-team-tool (b866483) was tried as base but does not merge cleanly onto current master
+(CONFLICT in src/botoffice/rules.py), so this branch is on master and has no team.py / team-tool rules exemption.
+The claude.py --mcp-config block (providers/claude.py) is minimal so it can later union team.mcp_config.

@@ -299,6 +299,8 @@ button.file-chip:hover { border-color: var(--accent, #6385ad); }
 /* Settings dialog */
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(520px, calc(100vw - 24px)); }
 #settings-dialog { width: min(780px, calc(100vw - 24px)); }
+.connector-row { display: grid; gap: 6px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+.connector-row input[type="password"] { width: 100%; }
 .settings-content { padding: 18px; display: grid; gap: 14px; max-height: calc(100vh - 48px); overflow-y: auto; }
 .settings-head { justify-content: space-between; }
 .settings-section { border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 8px; }
@@ -614,6 +616,12 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <p class="muted" id="approval-gates"></p>
       <p class="approval-warn" id="approval-unpausable" role="note" hidden></p>
       <div class="tools-bar"><button id="approvals-save" type="button" class="primary">Save</button><span id="approvals-state" class="muted" role="status"></span></div>
+    </section>
+    <section class="settings-section" id="set-connectors" aria-labelledby="set-connectors-title">
+      <h3 id="set-connectors-title">Connectors</h3>
+      <p class="muted">Official hosted connectors your Claude bots can use: Railway and Cloudflare. Press Connect to sign in on the provider's own page; the browser comes back to this page through your SSH tunnel and Bot-Office keeps the tokens in a private folder outside its code. Turn a connector on per bot. Reads only by default.</p>
+      <div id="connectors-list"></div>
+      <div class="tools-bar"><span id="connectors-state" class="muted" role="status"></span></div>
     </section>
     <section class="settings-section" id="set-engines" aria-labelledby="set-engines-title">
       <h3 id="set-engines-title">Engines</h3>
@@ -4466,12 +4474,74 @@ async function changeApprovals(change, done) {
     return true;
   } catch (e) { $("approvals-state").textContent = e.message; return false; }
 }
+// E8 connectors: status and per-bot switches; a pasted token is never shown again and leaves the DOM on save
+const CONNECTOR_STATUS = {not_connected: "not connected", unchecked: "connected, not checked", ok: "healthy", needs_login: "needs sign-in", error: "not answering"};
+function showConnectors(data) {
+  $("connectors-list").replaceChildren(...data.connectors.map((c) => {
+    const box = el("div", "connector-row");
+    const head = el("div", "tools-bar");
+    head.append(el("strong", "", c.label), el("span", "muted", CONNECTOR_STATUS[c.status] || c.status +
+      (c.last_error_class ? " (" + c.last_error_class + ")" : "") + (c.last_health_at ? ", checked " + c.last_health_at : "")));
+    const connect = el("button", "primary", "Connect");
+    connect.type = "button";
+    connect.onclick = () => connectorAction(c, "oauth/start", "Finish signing in in the new tab, then press Check now.");
+    const check = el("button", "mini", "Check now");
+    check.type = "button";
+    check.onclick = () => connectorAction(c, "health", "Checked.");
+    const revoke = el("button", "mini", "Disconnect");
+    revoke.type = "button";
+    revoke.disabled = c.status === "not_connected";
+    revoke.onclick = () => connectorAction(c, "revoke", "Disconnected.");
+    head.append(connect, check, revoke);
+    const paste = el("details");
+    paste.append(el("summary", "", "Paste a token instead (fallback)"));
+    const input = el("input");
+    input.type = "password"; input.autocomplete = "off"; input.maxLength = 8192; input.placeholder = "Token";
+    input.setAttribute("aria-label", c.label + " token");
+    input.setAttribute("autocomplete", "off");
+    const save = el("button", "mini", "Save token");
+    save.type = "button";
+    save.onclick = async () => {
+      const token = input.value;
+      input.value = "";
+      if (!token) return;
+      try { await api("/v1/connectors/" + c.id + "/token", {method: "POST", body: JSON.stringify({token})}); $("connectors-state").textContent = "Token saved."; await loadConnectors(); }
+      catch (e) { $("connectors-state").textContent = e.message; }
+    };
+    paste.append(input, save, el("p", "muted", "Saved tokens are never shown again."));
+    box.append(head, paste);
+    for (const b of c.bots) {
+      const row = el("div", "tools-bar");
+      const on = el("input"); on.type = "checkbox"; on.checked = b.enabled;
+      const label = el("label", "check"); label.append(on, document.createTextNode("Let " + b.name + " use " + c.label));
+      const write = el("input"); write.type = "checkbox"; write.checked = b.write_enabled; write.disabled = !b.enabled;
+      const writeLabel = el("label", "check muted");
+      writeLabel.append(write, document.createTextNode("Allow changes (off; approval cards unverified live)"));
+      const send = async (change) => { try { await api("/v1/connectors/" + c.id + "/bots/" + b.bot_id, {method: "PUT", body: JSON.stringify(change)}); await loadConnectors(); } catch (e) { $("connectors-state").textContent = e.message; } };
+      on.onchange = () => send({enabled: on.checked});
+      write.onchange = () => send({write_enabled: write.checked});
+      row.append(label, writeLabel);
+      box.append(row);
+    }
+    return box;
+  }));
+}
+async function connectorAction(c, path, done) {
+  try {
+    const result = await api("/v1/connectors/" + c.id + "/" + path, {method: "POST"});
+    if (result.authorize_url) window.open(result.authorize_url, "_blank", "noopener");
+    $("connectors-state").textContent = done;
+    await loadConnectors();
+  } catch (e) { $("connectors-state").textContent = e.message; }
+}
+async function loadConnectors() { showConnectors(await api("/v1/connectors")); }
 async function loadSettings() {
   const [rules, system, settings, engines] = await Promise.all([
     api("/v1/rules-for-all-bots"), api("/v1/system-prompt"), api("/v1/settings"),
     api("/v1/providers").catch(() => [])]);
   showLayer("rules", rules); showLayer("system", system); showBehavior(settings); showNotify(settings); showApprovals(settings.approvals);
   showEngines(engines);
+  loadConnectors().catch((e) => { $("connectors-state").textContent = e.message; });
 }
 function showEngines(engines) {
   $("engines-list").replaceChildren(...engines.map((e) => {

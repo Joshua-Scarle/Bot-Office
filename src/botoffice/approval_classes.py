@@ -18,7 +18,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import git_guard
+from . import connectors, git_guard
 from .store import JobStore
 
 KEY = "approval_classes"
@@ -155,6 +155,11 @@ BUILTIN: tuple[ApprovalClass, ...] = (
         "devices", "Controlling printers and the screen",
         "3D printer control (PrusaLink, OctoPrint) and clicking or typing on a desktop (desk click/type/key).",
         False, shell=_shell(r"\b(?:prusa-?link|octoprint(?:-cli)?|octocmd)\b", r"\bdesk\s+(?:click|type|key)\b")),
+    ApprovalClass(
+        "connector_writes", "Changes through Railway and Cloudflare",
+        "Any Railway or Cloudflare connector tool that is not a known read (redeploy, delete, set, execute...). "
+        "Writes are also off per bot until you turn them on in Settings, Connectors.", True,
+        tools=re.compile(connectors.write_tool_regex(), re.IGNORECASE), mcp_only=True),
     ApprovalClass(
         "connectors", "Any connector action",
         "Every tool call through a connector (MCP server), including ones that only read.", False,

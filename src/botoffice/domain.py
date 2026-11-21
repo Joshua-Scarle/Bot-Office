@@ -117,6 +117,10 @@ class Job(BaseModel):
     allow_sudo: bool = Field(default=False, exclude=True)
     # 0.12.4 fix2: the controller holds a GitHub token, so the run's git asks for it (bin/bot-office-credential)
     github_credential: bool = Field(default=False, exclude=True)
+    # E8 connectors (connectors.plan_for_job): the job's MCP servers and tool lists (no secrets), and the
+    # ${VAR} token values for the spawn environment only
+    connector_plan: dict | None = Field(default=None, exclude=True)
+    connector_env: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
 
     @property
     def execution(self) -> int:

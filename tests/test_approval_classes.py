@@ -88,7 +88,7 @@ def test_settings_lists_defaults_and_switches_classes(tmp_path):
     store, bot, rules = setup(tmp_path)
     current = approval_classes.settings(store)
     on = {item["key"] for item in current["classes"] if item["enabled"]}
-    assert on == {"send", "purchase", "release", "system", "delete"}
+    assert on == {"send", "purchase", "release", "system", "delete", "connector_writes"}  # E8 adds connector_writes
     assert current["timeout_min"] == approval_classes.TIMEOUT_DEFAULT
     approval_classes.update(store, enabled={"release": False, "remote": True})
     job = running(store, bot)

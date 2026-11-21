@@ -5,6 +5,7 @@ import json
 import shlex
 from pathlib import Path
 
+from .. import connectors
 from ..compaction import COMPACT_POLICY, compact_token_limit
 from .cli import CliAdapter
 
@@ -94,6 +95,16 @@ class ClaudeAdapter(CliAdapter):
         if job is not None and job.bot_id is not None:
             args += ["--add-dir", str(self._bot_dir(workspace, job) / "attachments")]
             args += ["--add-dir", str(self._bot_dir(workspace, job) / "uploads")]  # files of any type the owner sent
+        if job is not None and connectors.isolate_mcp():
+            # Job-scoped MCP only: --strict-mcp-config ignores ~/.claude.json and every other user/project
+            # MCP config (the host's railway-mcp-readonly stays put, not attached to bots). The document holds
+            # ${VAR} references, never a token. E7's team tool unions here: extend_mcp_config(job, team.mcp_config(job))
+            args += ["--mcp-config", json.dumps(connectors.extend_mcp_config(job) or {"mcpServers": {}}),
+                     "--strict-mcp-config"]
+            if connectors.allowed_tools(job):
+                args += ["--allowedTools", ",".join(connectors.allowed_tools(job))]
+            if connectors.disallowed_tools(job):
+                args += ["--disallowedTools", ",".join(connectors.disallowed_tools(job))]
         if session:
             args += ["--resume", session]
         model = self._job_model(job)

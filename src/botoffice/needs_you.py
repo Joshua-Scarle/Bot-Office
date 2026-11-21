@@ -12,7 +12,7 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 
-from . import continuation, git_guard
+from . import connectors, continuation, git_guard
 from .assignments import utc_time
 from .catalog import ENGINE_LABELS
 from .cron import to_cron_time
@@ -189,6 +189,7 @@ def needs_you(store: JobStore) -> list[dict]:
                 "ask": f"{bot['name']}'s watcher \"{row['name']}\" was paused: {row['paused_reason']}",
                 "at": row["last_fired_at"], "actions": ["resume"],
             })
+    items += connectors.needs_you_items(store)  # E8: a connector that needs sign-in or fails its health check
     return items
 
 

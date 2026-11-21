@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .. import attachments, failures, isolation, procs, safefs
+from .. import attachments, connectors, failures, isolation, procs, safefs
 from ..catalog import (
     STATIC_MODELS,
     default_effort,
@@ -301,6 +301,7 @@ class CliAdapter:
                     # bot-task's default assignment ("current")
                     env["BOT_OFFICE_ASSIGNMENT_ID"] = str(job.assignment_id)
                 env.update(git_env(job))
+                env.update(connectors.job_env(job))  # E8: ${VAR} tokens for the MCP headers; never argv
                 if job.gate_command:
                     # attended/unattended for bin/bot-office-gate, written by the controller
                     env["BOT_OFFICE_GATE_FILE"] = str(workspace / ".bot-office-gate.json")

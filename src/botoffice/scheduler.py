@@ -19,7 +19,7 @@ from pathlib import Path
 from uuid import UUID
 
 from . import attachments, autocontinue, baseline, continuation, failures, git_guard, isolation, needs_you, procs
-from . import safefs
+from . import approval_classes, connectors, safefs
 from . import slash as slash_mod
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
@@ -281,6 +281,7 @@ class Scheduler:
         if self.settings.token_file:
             paths.append(self.settings.token_file)
         paths.append(github_token_path(self.settings))
+        paths.append(connectors.store_dir())  # E8: connector tokens
         if self.settings.private_dir:
             paths.append(self.settings.private_dir)
         return tuple(dict.fromkeys(str(path) for path in paths))
@@ -658,6 +659,12 @@ class Scheduler:
                     "agent_token": self.store.issue_agent_token(job),
                     "cli_access": bot.cli_access, "resume_prompt": job.resume_prompt,
                     **self.gate_fields(job, bot, workspace)})
+                if job.provider == "claude":
+                    # E8: this bot's enabled connectors (a token refresh may hit the network: off the loop)
+                    plan, plan_env = await asyncio.to_thread(
+                        connectors.plan_for_job, self.store, str(bot.id), unattended=run_job.unattended,
+                        can_pause=approval_classes.can_pause(job.provider, bot.cli_access))
+                    run_job = run_job.model_copy(update={"connector_plan": plan, "connector_env": plan_env})
                 if turn_slash and slash_turn:
                     # a slash command turn is the CLI's own command line, not the wrapped Bot Office prompt
                     line = (slash_mod.slash_job_text(turn_slash["name"], turn_slash["args"]) if turn_slash["mode"] == "raw"

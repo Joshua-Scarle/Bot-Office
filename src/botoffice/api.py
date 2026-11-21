@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
+from . import approval_classes, attachments, avatars, baseline, connectors_api, continuation, git_guard, github_access, grok_bridge, health
 from . import isolation, needs_you, notify, safefs, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
@@ -1506,6 +1506,8 @@ def create_app(
             except approval_classes.ApprovalClassError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
         return await get_settings()
+
+    connectors_api.register(app, auth, store, settings)  # E8: Settings, Connectors
 
     @app.get("/v1/desktops", dependencies=[Depends(auth)])
     async def list_desktops() -> list[dict]:

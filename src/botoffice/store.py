@@ -16,7 +16,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from . import attachments as attachment_files
-from . import avatars, continuation, failures, sections
+from . import avatars, connectors, continuation, failures, sections
 from . import history as chat_history
 from . import usage as budgets
 from .catalog import DEFAULT_ICON, DEFAULT_ICONS, default_effort, default_model
@@ -980,6 +980,7 @@ class JobStore:
                     VALUES ('q:' || NEW.id || ':open', 'needs_you', NEW.bot_id, NULL, 'question_open',
                             strftime('%Y-%m-%dT%H:%M:%SZ','now')); END""")
             _init_control_tables(db)
+            connectors.init_tables(db)  # E8: connector_state, connector_bots (ids and codes only)
             _init_notify_triggers(db)
 
     def _import_bridge_json(self, db: sqlite3.Connection) -> None:
