@@ -92,6 +92,7 @@ class Scheduler:
         self.settings = settings
         self.providers = providers
         self.clock = clock
+        self.on_needs_login: Callable[[], None] | None = None  # 0.12.8: the engine sign-in cache hooks in here
         self.memory = Memory(settings.data_dir)
         self.turns = Turns(store, settings, providers)
         self.assignments = Assignments(store)
@@ -673,6 +674,8 @@ class Scheduler:
             retryable = bool(result.failure_kind)
             if status == JobStatus.NEEDS_LOGIN:
                 result.failure_kind = failures.AUTH
+                if self.on_needs_login is not None:
+                    self.on_needs_login()
             elif status == JobStatus.FAILED and not result.failure_kind:
                 result.failure_kind = failures.classify(result.error, result.exit_code)
             self._finish(

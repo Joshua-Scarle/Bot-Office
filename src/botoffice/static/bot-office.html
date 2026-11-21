@@ -596,6 +596,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <h3 id="set-engines-title">Engines</h3>
       <p class="muted">The official CLIs your bots run on, with your own subscriptions. Pick a bot's engine and model in its own settings.</p>
       <div id="engines-list"></div>
+      <div class="tools-bar"><button id="engines-recheck" type="button" class="ghost">Check sign-in again</button><span id="engines-state" class="muted" role="status"></span></div>
     </section>
     <section class="settings-section" id="set-voice" aria-labelledby="set-voice-title">
       <h3 id="set-voice-title">Voice</h3>
@@ -4303,12 +4304,23 @@ async function loadSettings() {
     api("/v1/rules-for-all-bots"), api("/v1/system-prompt"), api("/v1/settings"),
     api("/v1/providers").catch(() => [])]);
   showLayer("rules", rules); showLayer("system", system); showBehavior(settings); showApprovals(settings.approvals);
+  showEngines(engines);
+}
+function showEngines(engines) {
   $("engines-list").replaceChildren(...engines.map((e) => {
     const row = el("div", "engine-row");
     row.append(el("span", "", ENGINE_LABELS[e.name] || e.name), el("span", "muted", ENGINE_STATUS[e.login_status] || e.login_status));
     return row;
   }));
 }
+// 0.12.8: the list comes from a cache (up to a minute old); this asks the engines now
+$("engines-recheck").onclick = async () => {
+  const button = $("engines-recheck");
+  button.disabled = true; $("engines-state").textContent = "Checking...";
+  try { showEngines(await api("/v1/providers?refresh=1")); $("engines-state").textContent = "Checked just now."; }
+  catch (e) { if (e instanceof AuthError) return handleError(e); $("engines-state").textContent = e.message; }
+  finally { button.disabled = false; }
+};
 $("office-settings").onclick = async () => {
   for (const id of ["rules-state", "system-state", "behavior-state", "approvals-state"]) $(id).textContent = "";
   $("set-advanced").open = false;
