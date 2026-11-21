@@ -401,6 +401,7 @@ EVENT_KEEPALIVE_SECONDS = 15.0
 EVENT_GRACE_SECONDS = 3.0
 SNAPSHOT_LIMIT = 2000
 EDIT_CANCEL_WAIT_SECONDS = 15.0
+EDIT_CANCEL_REASON = "cancelled to edit your message"
 STT_MAX_BYTES = 4 * 1024 * 1024  # ~125 s of 16 kHz 16-bit mono
 STT_MIN_SECONDS, STT_MAX_SECONDS = 0.3, 120.0
 STT_PER_MINUTE = 20
@@ -556,7 +557,7 @@ def create_app(
         for job_id in job_ids:
             job = store.get(job_id)
             if job:
-                scheduler.cancel(job)
+                scheduler.cancel(job, "its task was stopped or dropped")
 
     def _steer_blocked(bot: Bot):
         """For store.post_steer_explained: why this engine cannot take a message while *job* runs."""
@@ -741,10 +742,10 @@ def create_app(
         if not before:
             raise HTTPException(status_code=404, detail="job not found")
         if before.status == JobStatus.RUNNING:
-            scheduler.cancel(before)
+            scheduler.cancel(before, "cancelled by you")
             job = store.get(job_id)
         else:
-            job = store.cancel(job_id)
+            job = store.cancel(job_id, reason="cancelled by you")
         assert job is not None
         return job
 
@@ -1074,7 +1075,7 @@ def create_app(
         async with attachment_global_lock, attachment_lock(bot_id):
             _bot(bot_id)
             for job in store.delete_bot(bot_id):
-                scheduler.cancel(job)
+                scheduler.cancel(job, "bot deleted")
             try:
                 await attachment_io(memory.delete_bot_dir, bot_id)
             except (OSError, ValueError) as exc:
@@ -1980,10 +1981,10 @@ def create_app(
                 for job in pending:
                     cancelled.append(str(job.id))
                     if job.status == JobStatus.RUNNING:
-                        scheduler.cancel(job)
+                        scheduler.cancel(job, EDIT_CANCEL_REASON)
                         signalled.add(str(job.id))
                     else:
-                        store.cancel(job.id, queue_steers=False)  # defer_steers_for_edit handles them
+                        store.cancel(job.id, queue_steers=False, reason=EDIT_CANCEL_REASON)  # defer_steers_for_edit handles them
                 deadline = asyncio.get_running_loop().time() + EDIT_CANCEL_WAIT_SECONDS
                 while waiting := [job for job in store.pending_jobs(bot_id) if str(job.id) in cancelled]:
                     if asyncio.get_running_loop().time() >= deadline:
@@ -1991,7 +1992,7 @@ def create_app(
                         return _edit_failed(EditError(409, "a job did not stop in time; try again", still), cancelled)
                     for job in waiting:  # a queued job may have been claimed meanwhile
                         if job.status == JobStatus.RUNNING and str(job.id) not in signalled:
-                            scheduler.cancel(job)
+                            scheduler.cancel(job, EDIT_CANCEL_REASON)
                             signalled.add(str(job.id))
                     await asyncio.sleep(0.05)
             try:

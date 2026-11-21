@@ -598,6 +598,9 @@ class JobStore:
                 ("held_kind", "TEXT"),
                 # 0.11.14: slash command turn (JSON name/args/mode), see slash.py
                 ("slash", "TEXT"),
+                # 0.12.9: when the job first started; started_at is rewritten by every retry or restart
+                # re-run, so created_at -> started_at also counted the retry backoff
+                ("first_started_at", "TEXT"),
             ))
             if "priority" in added_jobs:
                 # jobs queued before 0.9.0 keep their place behind Joshua's turns
@@ -764,6 +767,11 @@ class JobStore:
             db.execute("CREATE INDEX IF NOT EXISTS job_attempts_time ON job_attempts(automatic, finished_at)")
             # 0.11.0: what each retried run reported (tokens, cost), so budgets count every run
             add_columns(db, "job_attempts", (("usage_json", "TEXT"),))
+            # every start-up, so an interrupted migration or a rollback to older code (which does not set
+            # the column) still converges; a no-op once every started job has it
+            db.execute("UPDATE jobs SET first_started_at=COALESCE((SELECT MIN(a.started_at) FROM job_attempts a "
+                       "WHERE a.job_id=jobs.id AND a.started_at IS NOT NULL), started_at) "
+                       "WHERE first_started_at IS NULL AND started_at IS NOT NULL")
             if "assignment_minutes" in added_jobs and "assignment_id" not in added_jobs:
                 # pre-release 0.10.0 data charged turn and minutes at settlement: settled jobs are
                 # fully charged, finished unsettled ones still owe the turn claim now charges
@@ -1017,7 +1025,7 @@ class JobStore:
 
     @staticmethod
     def _job(row: sqlite3.Row | None) -> Job | None:
-        return _model(Job, row, ("created_at", "started_at", "finished_at", "not_before"))
+        return _model(Job, row, ("created_at", "started_at", "first_started_at", "finished_at", "not_before"))
 
     def create(
         self,
@@ -1390,7 +1398,7 @@ class JobStore:
             queued_steers.extend(made)  # only after the commit: a rolled-back recovery logs nothing
         return affected
 
-    def cancel(self, job_id: UUID | str, *, queue_steers: bool = True) -> Job | None:
+    def cancel(self, job_id: UUID | str, *, queue_steers: bool = True, reason: str = "cancelled") -> Job | None:
         """Cancel a queued job. Steers still pending on it become queued turns (unless the caller,
         an edit/rewind, archives or queues them itself)."""
         with closing(self._connect()) as db:
@@ -1400,7 +1408,7 @@ class JobStore:
             if job and job.status == JobStatus.QUEUED:
                 db.execute(
                     "UPDATE jobs SET status=?, finished_at=?, error=? WHERE id=?",
-                    (JobStatus.CANCELLED.value, now().isoformat(), "cancelled", str(job_id)),
+                    (JobStatus.CANCELLED.value, now().isoformat(), reason, str(job_id)),
                 )
                 if queue_steers:
                     self._queue_steers(db, str(job_id))
@@ -1462,9 +1470,11 @@ class JobStore:
                                "VALUES (?,?,?,?,?,?,'[]')", (bot_id, "system", "assignment",
                                                              f"Assignment turn not run: {refused}.", job_id,
                                                              now().isoformat()))
+            started = now().isoformat()
             db.execute(
-                "UPDATE jobs SET status=?, slot=?, started_at=? WHERE id=? AND status=?",
-                (JobStatus.RUNNING.value, slot, now().isoformat(), job_id, JobStatus.QUEUED.value),
+                "UPDATE jobs SET status=?, slot=?, started_at=?, first_started_at=COALESCE(first_started_at, ?) "
+                "WHERE id=? AND status=?",
+                (JobStatus.RUNNING.value, slot, started, started, job_id, JobStatus.QUEUED.value),
             )
             db.commit()
         return self.get(job_id)

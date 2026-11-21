@@ -2,7 +2,7 @@
 
 **Display name:** Bot-Office.
 **Slug / package / CLI identifier:** `bot-office` (use `botoffice` where a hyphen is not allowed, including the Python package and `python -m botoffice`).
-**Status of this tree:** Version 0.12.8. What changed is recorded below: [0.12.8](#what-changed-in-0128), [0.12.7](#what-changed-in-0127), [0.12.6](#what-changed-in-0126), [0.12.5](#what-changed-in-0125), [0.12.4](#what-changed-in-0124), [0.12.3](#what-changed-in-0123), [0.12.2](#what-changed-in-0122), [0.12.1](#what-changed-in-0121), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
+**Status of this tree:** Version 0.12.9. What changed is recorded below: [0.12.9](#what-changed-in-0129), [0.12.8](#what-changed-in-0128), [0.12.7](#what-changed-in-0127), [0.12.6](#what-changed-in-0126), [0.12.5](#what-changed-in-0125), [0.12.4](#what-changed-in-0124), [0.12.3](#what-changed-in-0123), [0.12.2](#what-changed-in-0122), [0.12.1](#what-changed-in-0121), [0.12.0](#what-changed-in-0120), [0.11.15](#what-changed-in-01115-deployed-2026-11-19), [0.11.14](#what-changed-in-01114-deployed-2026-11-19), [0.11.13](#what-changed-in-01113-deployed-2026-11-19), [0.11.12](#what-changed-in-01112), [0.11.10](#what-changed-in-01110), [0.11.9](#what-changed-in-0119), [0.11.8](#what-changed-in-0118), [0.11.7](#what-changed-in-0117), [0.11.6](#what-changed-in-0116), [0.11.5](#what-changed-in-0115-deployed), [0.11.4](#what-changed-in-0114-deployed), [0.11.3](#what-changed-in-0113-deployed), [0.11.2](#what-changed-in-0112-deployed), [0.11.1](#what-changed-in-0111), [0.11.0](#what-changed-in-0110), [0.10.0](#what-changed-in-0100), [0.9.3](#what-changed-in-093) and [0.9.0](#what-changed-in-090).
 
 Bot-Office (formerly Crewdeck, formerly Agent Desk) is a provider-agnostic, self-hosted workspace for persistent agent employees. You talk to named bots in a browser GUI, and you can work with the same bots from a CLI on the same machine. It is meant as an easy-to-set-up alternative to Grok Bot, not as a hosted multi-user service.
 
@@ -138,6 +138,22 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.12.9
+
+Engine reliability. Step 1 was a read-only diagnosis of the live database (14 days of Antigravity, Cursor and OpenCode jobs, their events and chat lines); the numbers below are from that run.
+
+**What the audit numbers really were**
+
+- **Antigravity "created-to-started p90 188.9 s" was a misattributed metric.** `jobs.started_at` is overwritten every time a retry or restart re-run claims the job, so `created_at → started_at` also counted the retry backoff (2 min, 10 min, 3 days for a usage limit). The first start of all 31 Antigravity jobs came 0.0–0.1 s after creation. New: `jobs.first_started_at` (also in the job JSON) is set once at the first claim and backfilled from the recorded attempts; use it for created-to-started.
+- **Cursor "p90 55.1 s" was real, but it is gone.** Every Cursor job that waited more than 5 s (6 of 88) was a chat message queued behind the same bot's running turn on 14–16 Nov, before 0.11.7 added steering into a running turn. Since 17 Nov no Cursor chat turn has waited more than 0.1 s. No desktop-slot wait and no deferral were found for any of these engines (lanes, not slots, limit concurrency).
+- **The cancels were mostly not product bugs.** Antigravity 7 of 31: 5 came from test bots ("ZZ stress …", deleted bots) and 4 of those were the `--model gemini-3.8-flash-high/-low … conflicts with --effort` error that 0.11.15 already fixed (no occurrence since); 1 was a 503 "No capacity" from Google's side that ran out its two retries; 2 were timeouts or Stop from the user. Cursor 10: 6 on 14–15 Nov were a new message superseding the running turn (pre-steering behaviour), 4 were jobs parked for three days by a "Weekly usage limit" and then cancelled by the user or by the test bot's deletion.
+- **CLI start-up is the real remaining delay, and it is the external CLI.** Spawn to the first output event: Antigravity p50 3.5 s / p90 16.4 s, Cursor p50 10.4 s / p90 20.5 s, OpenCode p50 8.7 s / p90 11.8 s (non-test bots). That is the CLI starting and the model's first token; Bot Office only launches the official CLI, so nothing is pre-warmed or worked around.
+
+**What changed**
+
+- `jobs.first_started_at` as above (additive column, backfilled on first start-up).
+- Every cancel now records who stopped it instead of a bare "cancelled": "cancelled by you" (Stop), "cancelled to edit your message", "bot deleted", "its task was dropped", "watchdog: …" (unchanged). This is the text in the job's `error` and in its `done` event, so a cancel can be attributed from the database.
 
 ## What changed in 0.12.8
 

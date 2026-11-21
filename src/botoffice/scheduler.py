@@ -1158,11 +1158,14 @@ class Scheduler:
                 self._cancel_reasons.setdefault(str(job.id), "its task was dropped")
                 self.cancel(job)
 
-    def cancel(self, job: Job) -> None:
+    def cancel(self, job: Job, reason: str | None = None) -> None:
+        """Stop a running job; *reason* (who and why) is what its cancelled row and chat show."""
         if job.status == JobStatus.RUNNING:
             lane = next((lane for lane, job_id in self._job_ids.items() if job_id == str(job.id)), None)
             task = self._tasks.get(lane) if lane is not None else None
             if task:
+                if reason:
+                    self._cancel_reasons.setdefault(str(job.id), reason)
                 task.cancel()
 
     def slots(self) -> list[dict[str, object]]:
