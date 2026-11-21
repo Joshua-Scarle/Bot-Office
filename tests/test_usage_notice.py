@@ -2,6 +2,7 @@
 provider (POST /v1/jobs/{id}/switch-provider). Never automatic."""
 import asyncio
 import re
+import time
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -245,6 +246,11 @@ def test_needs_you_polling_does_not_spawn_login_checks_each_time(settings, monke
         store.requeue(parked.id, datetime.now(UTC) + timedelta(hours=1), failures.USAGE_LIMIT, error="limit",
                       reply_text=None, max_per_hour=10)
         needs_you.post_usage_notices(store)
+        for _ in range(200):  # the startup warm probe also runs the login check; let it finish first
+            if app.state.provider_status._value is not None:
+                break
+            time.sleep(0.05)
+        calls.clear()
         for _ in range(5):
             [item] = [i for i in client.get("/v1/needs-you", headers=H).json() if i["kind"] == "usage_limit"]
             assert item["options"] == [{"provider": "claude", "label": "Claude"}]
