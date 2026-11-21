@@ -85,6 +85,8 @@ def _clean(store, memory, bot_id, bot_dir: Path, gen: int, engines: Iterable[str
         os.mkdir(name, isolation.dir_mode(), dir_fd=root_fd)  # exclusive: a name that exists is an error
         archive_fd = _open(name, root_fd)
         fds.append(archive_fd)
+        if os.listdir(archive_fd):  # the directory just made was swapped for another one: never move into it
+            raise OSError(f"reset archive {name} was replaced during the cleanup")
         for item in ARCHIVED:
             _move(bot_fd, item, archive_fd)
         # INDEX.md lists the earlier messages' text and images
