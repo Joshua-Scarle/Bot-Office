@@ -139,6 +139,17 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## Unreleased (this branch)
+
+Bots can work on your own computers, with one card per task. See `docs/COMPUTERS.md` and `agent/README.md`.
+
+- **Device companion.** `botoffice-agent` (MIT, in `agent/`, release files built separately) runs on the computer and connects out through an SSH tunnel (its `127.0.0.1:18787` reaches the server's `127.0.0.1:8787`) to `/v1/machines/ws`; it never listens. Pairing is a one-time code from Settings > Computers, then you compare the fingerprint and press **Activate**. Bots use `bin/machine` (`list`, `request`, `ls`, `read`, `pull`, `shot`, `push`, `run`); everything that comes back is wrapped as untrusted data.
+- **Session grants.** A bot's first call in a task raises one card (bot, computer, task, scope, how long). After **Allow for this task**, calls in that scope run without more cards until the job ends, you press **End grant**, or the cap passes (4 h by default, 1 min to 24 h in Settings > Computers). Scopes nest: read < files < shell; a wider call raises one widen card on the same grant, and a still wider call replaces a waiting card rather than widening it under you. Per computer: **Always ask** (default), **Remember for this bot** (30 days, with Forget) or **Always allow** (still a capped, audited task grant).
+- **Every call is still checked** when it runs: live grant, scope, running job, active computer, "Controlling a computer" on. The computer checks its own path and command deny-lists before a card and again before running; nothing the server sends can change them. Optional per-computer switches: bubblewrap sandbox for commands, and one confirm pop-up on the computer per grant.
+- **Kill switches.** End grant (card, sidebar banner, Settings) stops the grant's calls at once and kills running commands (process group, TERM then KILL); the job ending does the same. Revoke kills the token and the agent exits. **Stop all computer access** ends every grant, denies every waiting card and switches the class off until Resume. Agents older than 0.2 are turned away (`outdated_agent`).
+- **Records.** `machine_audit` keeps every pairing, card, decision, grant and call (Settings > Computers > Audit); the computer keeps its own `audit.jsonl`. Neither stores file contents or command output.
+- **Rollback and limits.** Additive schema (new `machine*` tables and `machine_*` meta keys; older code ignores them). Before rolling the code back, deny any pending approval with `source='machine'` so no card is left that older code cannot resolve. The command deny-list is a tripwire, not a sandbox; turn the sandbox on for a real boundary. A file being renamed into place on the computer cannot be stopped half-way.
+
 ## What changed in 0.12.19
 
 **Teammate tools: a restricted Claude bot can now see and ask its teammates.** A restricted Claude run refuses every shell command, so `bot-msg` and `bot-task` were out of reach. Each Claude turn of a bot now gets a small first-party MCP server, `botoffice` (`bin/bot-office-team-mcp`, stdlib only, started by Claude over stdio for that job), with five tools:
