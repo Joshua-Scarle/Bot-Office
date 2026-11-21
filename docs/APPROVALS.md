@@ -20,6 +20,37 @@ Rely on isolation, access settings and the owner's `never` action rules for what
 
 Order of decisions: protected secrets are always refused; then the git guard and the Sending class, which no rule or setting opens (below); then the owner's action rules (`never` > `ask` > `allow`); then the approval classes; then, for unattended runs under the strict profile (watcher runs, and scheduled runs of bots set to "gated"), every outbound or destructive action asks as before. An owner `allow` rule for an action therefore beats a class.
 
+Which rules apply (0.12.18): a chat or API run uses the `attended` and `all` rules. A run nobody is watching (routine, wake-up, assignment, bot-to-bot inbox, watcher trigger) uses its own profile's rules (`unattended` under the strict profile, else `attended`) plus `all`, **and also the other scope's `never` and `ask` rules**: the strictest wins, and only its own scope's `allow` rules open anything. So an `unattended` rule set to ask applies to a default bot's wake-ups and routines too.
+
+## Scheduled runs start with no approval (0.12.18)
+
+A wake-up, routine or other scheduled run is judged by the bot's rules when it fires, never by what was approved when it was scheduled:
+
+- an approval's grant is bound to the resume turn of the job that asked (only that turn, once, within 24 hours); a push pass (10 minutes) and a GitHub ticket (2 minutes) are bound to their job. A woken job is a new job with no origin job, so none of these reach it, whatever its note or prompt says ("send the approved update");
+- an outbound or destructive action in it goes through the rules as above: with `ask` it raises a fresh card at fire time;
+- its rules say so: "This run was started by a scheduled wake. Earlier approvals do not carry over; any send or destructive action needs a fresh approval." (a routine run gets the same line naming a routine; the resume turn after an approval, which does hold that one grant, does not);
+- creating a wake-up is never blocked.
+
+## Nested agent CLIs (0.12.18)
+
+Bots keep full CLI access, so a bot can start another agent CLI from its shell. Started with its permission checks off, that child runs any tool without asking, out of sight of the bot's own gate hook. The gate therefore treats such a launch as an action of its own, the rule preset **`nested-agent`** ("Nested agent with permissions bypassed" on the card):
+
+| CLI | Flags that count |
+| --- | --- |
+| `claude` (also `npx @anthropic-ai/claude-code`) | `--permission-mode bypassPermissions` (not `acceptEdits` or `plan`), `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions` |
+| `codex` (also `npx @openai/codex`) | `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `--full-auto`, `-s`/`--sandbox danger-full-access`, `-c`/`--config approval_policy=never` or `sandbox_mode=danger-full-access`, `-a`/`--ask-for-approval never` |
+| `gemini`, `opencode` | `--yolo`, `-y`, `--dangerously-skip-permissions`, gemini `--approval-mode yolo` |
+| `cursor-agent`, `agent` | `--force`, `-f`, `--yolo` |
+| `aider` | `--yes-always`, `--yes` |
+
+The launch is found by path (`/usr/local/bin/claude`), behind wrappers (`env`, `nohup`, `setsid`, `timeout`, `nice`, `ionice`, `stdbuf`, `xargs`, `sudo`, `exec`, `npx`, `bunx`, `pnpm dlx`, `uvx`, `pipx run`), in `bash -c` / `sh -c` / `eval`, `$( )` and backticks, a here-document fed to a shell, and string literals of inline code (`python -c "subprocess.run(['claude', '--dangerously-skip-permissions'])"`). A mention is not a launch: `grep bypassPermissions file`, `echo claude --yolo`, `man claude`, a here-document written to a file, a commit message.
+
+The owner's rules decide, and the bot's `outbound` and `destructive` preset rules also govern it (a bypassed agent can do both): `ask` raises the card and the launch is refused until approved (then it runs once, in the resume turn), `allow` runs it, `never` refuses it. A `preset nested-agent` rule targets only these launches. With no rule it runs in attended and full-profile runs and asks in strict-profile runs, like the other presets; it is not part of the always-on git guard, so an owner `allow` rule can open it.
+
+A nested CLI started **without** a bypass flag is not stopped. It keeps its own permission prompts (headless, it cannot run a gated tool without them) and inherits the run's environment: PATH with Bot-Office's `bin/` first (the git, gh, curl and mail shims), the job's `BOT_OFFICE_*` settings and the `GIT_CONFIG_*` pairs that set `core.hooksPath` (git's pre-push check still sees its pushes). Changing those variables, `env -i` or `env -u` already asks (the git guard). What a child does **not** inherit is its parent's gate hook: Claude Code's hook is a per-invocation `--settings` flag and Codex's a per-invocation `-c hooks...`, and Bot-Office does not patch, wrap or proxy the CLIs, so a nested `claude` or `codex` does not call `bin/bot-office-gate` for its own tool calls (a nested `cursor-agent` started in the workspace may pick up its `.cursor/hooks.json`; this is not relied on). No PATH shim is added for agent CLIs: the card on the bypass launch is the check.
+
+Defence in depth, not a sandbox: a bypass launch from a script file the bot wrote and then runs, a renamed or copied CLI binary, an alias, flags assembled at run time, or a bypass set in the child CLI's own config file (`~/.claude/settings.json` `defaultMode`, `~/.codex/config.toml`) are not seen. The airtight design (each run in its own sandbox or Unix user) is separate work. Code: `src/botoffice/nested_agents.py`, used by `rules.presets_hit`.
+
 ## Classes
 
 | Class | Default | Matches |
