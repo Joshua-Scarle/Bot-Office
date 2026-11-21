@@ -42,7 +42,7 @@ Your own classes match a command pattern or a tool-name pattern (regular express
 
 ## The git guard (always asks)
 
-Some actions are not a class and have no switch. In every run kind (chat, routine, wake-up and auto-continue, assignment, bot-to-bot inbox, watcher trigger; strict profile or not), for every bot whatever its CLI access, they stop on an Approve / Deny card first:
+Some actions are not a class and have no switch. In every run kind (chat, routine, wake-up and auto-continue, assignment, bot-to-bot inbox, watcher trigger; strict profile or not), for every bot whatever its CLI access, they stop on an Approve / Deny card first when the guard sees them. It is defence in depth, not an inescapable boundary for bots with full CLI access running as the same Unix user (see [What is and isn't covered](#what-is-and-isnt-covered)):
 
 - `git push` to the default branch (the branch the clone's `refs/remotes/<remote>/HEAD` names, and always `main`, `master`, `trunk`), including `HEAD:main`, `+x:main`, `:main`, `--all`, `--mirror`, and a plain `git push` made while on that branch (or with `push.default=matching`, an upstream on it, or a remote refspec); a push whose branch cannot be known, or to a remote whose default branch is not known, asks too
 - any force push (`-f`, `--force`, `--force-with-lease`, `+refspec`), `git push --delete` / `:ref`, `git push --no-verify`, `git branch -d/-D`, `git tag -d`, deleting the default branch
