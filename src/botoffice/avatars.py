@@ -47,7 +47,11 @@ PRESET_SEEDS = tuple(f"preset-{n}" for n in range(PRESET_COUNT))
 # the emoji after a rollback. The names are the contract (the UI holds the drawings; a test keeps both lists equal).
 CHAR_PREFIX = "char|"
 CHAR_SHAPES = ("square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond",
-               "squircle", "ghost", "shield", "triangle")   # 0.12.12 added the last four (new shapes go at the end)
+               "squircle", "droplet", "shield", "triangle")   # 0.12.12 added the last four; 0.13: "droplet" took the slot of "ghost"
+# 0.12.12 shipped a "ghost" shape that read too much like an arcade character, so it was replaced (same list slot, so a
+# hash that landed on it now lands on the droplet and every other derived shape is unchanged). A stored
+# "char|ghost|<color>" still means something: it is read as the droplet, by the server and by the page.
+CHAR_SHAPE_ALIASES = {"ghost": "droplet"}
 CHAR_COLORS = ("blue", "violet", "pink", "red", "orange", "yellow", "green", "teal", "cyan", "slate")
 CHAR_EXPRESSIONS = ("idle", "working", "waiting", "done", "error", "sleeping")
 
@@ -64,7 +68,8 @@ def valid_seed(seed: str) -> bool:
 
 
 def character_seed(shape: str, color: str) -> str | None:
-    """``char|<shape>|<color>`` for a known shape and color, else None."""
+    """``char|<shape>|<color>`` for a known shape and color, else None. A retired shape name maps to its replacement."""
+    shape = CHAR_SHAPE_ALIASES.get(shape, shape)
     if shape in CHAR_SHAPES and color in CHAR_COLORS:
         return f"{CHAR_PREFIX}{shape}|{color}"
     return None
@@ -72,6 +77,17 @@ def character_seed(shape: str, color: str) -> str | None:
 
 def is_character(seed) -> bool:
     return isinstance(seed, str) and seed.startswith(CHAR_PREFIX)
+
+
+def migrate_character_seed(seed) -> str | None:
+    """The current form of a stored ``char|<retired shape>|<color>`` (same color), or None when *seed* needs no change
+    (not a character, a current shape, or a color we do not know: those are left exactly as stored)."""
+    if not is_character(seed):
+        return None
+    parts = seed.split("|")
+    if len(parts) != 3 or parts[1] not in CHAR_SHAPE_ALIASES or parts[2] not in CHAR_COLORS:
+        return None
+    return f"{CHAR_PREFIX}{CHAR_SHAPE_ALIASES[parts[1]]}|{parts[2]}"
 
 
 def default_character(bot_id, used=()) -> str:

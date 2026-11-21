@@ -52,10 +52,18 @@ def ensure_schema(db: sqlite3.Connection) -> None:
     ensure_hidden(db)
 
 
+_BLANKS = "\u115f\u1160\u3164\uffa0\u2800"   # invisible fillers that are not format characters (Hangul fillers, braille blank)
+
+
+def _strip_marks(text: str) -> str:
+    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc", "Mn", "Me") and ch not in _BLANKS)
+
+
 def reserved_key(name: str) -> str:
-    """Case-, width-, invisible-character- and combining-mark-insensitive form used to compare against the reserved names."""
-    text = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", name).casefold())   # casefold can add marks, so decompose again
-    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc", "Mn", "Me")).strip()
+    """Case-, width-, invisible-character- and combining-mark-insensitive form used to compare against the reserved names.
+    Marks go before AND after casefolding: casefold turns U+0345 (a mark) into a letter and can add marks of its own."""
+    text = _strip_marks(unicodedata.normalize("NFKD", name))
+    return _strip_marks(unicodedata.normalize("NFKD", text.casefold())).strip()
 
 
 def ensure_hidden(db: sqlite3.Connection) -> None:

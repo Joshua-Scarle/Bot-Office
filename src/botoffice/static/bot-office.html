@@ -916,7 +916,8 @@ async function iconUrl(bot) {
 
 
 /* ---- character avatars (0.12.2): our own shapes, drawn inline; the face follows the bot's status ---- */
-const CHAR_SHAPES = ["square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond", "squircle", "ghost", "shield", "triangle"];
+const CHAR_SHAPES = ["square", "circle", "blob", "hexagon", "cloud", "pill", "star", "diamond", "squircle", "droplet", "shield", "triangle"];
+const CHAR_ALIASES = {ghost: "droplet"};   // retired shape names: a stored "char|ghost|<color>" draws as the droplet
 const CHAR_COLORS = {blue: "#3b82f6", violet: "#8b5cf6", pink: "#ec4899", red: "#ef4444", orange: "#f97316", yellow: "#facc15",
   green: "#22c55e", teal: "#14b8a6", cyan: "#22d3ee", slate: "#94a3b8"};
 const EXPRESSIONS = ["idle", "working", "waiting", "done", "error", "sleeping"];
@@ -925,7 +926,7 @@ const DONE_MS = 20000;
 state.doneUntil = new Map(); state.doneTimer = null;
 // face centre y and half the eye gap, per shape (so the eyes sit inside every body)
 const CHAR_FACE = {square: [24, 7], circle: [24, 7], blob: [24, 7], hexagon: [24, 7], cloud: [26, 6.5], pill: [24, 8], star: [26, 5.5], diamond: [24, 6],
-  squircle: [24, 7], ghost: [22, 7], shield: [22, 7], triangle: [29, 5.5]};
+  squircle: [24, 7], droplet: [30, 6.5], shield: [22, 7], triangle: [29, 5.5]};
 const SVG_NS = "http:" + "//www.w3.org/2000/svg";   // split: the page must contain no literal URL
 function svgEl(tag, attrs, cls) {
   const node = document.createElementNS(SVG_NS, tag);
@@ -959,7 +960,7 @@ function squirclePath() {   // |x|^4 + |y|^4 = r^4: rounder than the square, fla
   }
   return d + "Z";
 }
-const GHOST_PATH = "M8 41V22a16 16 0 0 1 32 0V41L36 37L32 41L28 37L24 41L20 37L16 41L12 37Z";
+const DROPLET_PATH = "M24 6C24 6 38 19 38 30a14 14 0 0 1-28 0C10 19 24 6 24 6Z";   // a round belly with one soft tip
 const SHIELD_PATH = "M24 6L39 11V24C39 33 33 39 24 43C15 39 9 33 9 24V11Z";
 const BLOB_PATH = polar(180, 16.6, 3.0, 6, -Math.PI / 2);   // the "blob" shape: exactly 6 round lobes, one pointing up
 function charBody(shape, fill) {
@@ -975,7 +976,7 @@ function charBody(shape, fill) {
   else if (shape === "pill") g.append(svgEl("rect", {x: 3.5, y: 11, width: 41, height: 26, rx: 13}));
   else if (shape === "star") g.append(svgEl("polygon", {points: starPoints(), ...round, "stroke-width": 5}));
   else if (shape === "squircle") g.append(svgEl("path", {d: squirclePath()}));
-  else if (shape === "ghost") g.append(svgEl("path", {d: GHOST_PATH, ...round, "stroke-width": 2}));
+  else if (shape === "droplet") g.append(svgEl("path", {d: DROPLET_PATH, ...round, "stroke-width": 3}));
   else if (shape === "shield") g.append(svgEl("path", {d: SHIELD_PATH, ...round, "stroke-width": 3}));
   else if (shape === "triangle") g.append(svgEl("polygon", {points: "24,10 40,37 8,37", ...round, "stroke-width": 7}));
   else if (shape === "diamond") g.append(svgEl("rect", {x: 10, y: 10, width: 28, height: 28, rx: 7, transform: "rotate(45 24 24)"}));
@@ -1010,7 +1011,7 @@ function charSvg(shape, color, expr, label) {
 // "char|<shape>|<color>" (the bot's avatar_seed) or the picker's "<shape>:<color>" -> {shape, color}; null for anything else
 function parseChar(seed) {
   const m = /^(?:char\|([a-z]+)\|([a-z]+)|([a-z]+):([a-z]+))$/.exec(String(seed || ""));
-  const shape = m && (m[1] || m[3]), color = m && (m[2] || m[4]);
+  const raw = m && (m[1] || m[3]), shape = CHAR_ALIASES[raw] || raw, color = m && (m[2] || m[4]);
   return m && CHAR_SHAPES.includes(shape) && Object.hasOwn(CHAR_COLORS, color) ? {shape, color} : null;
 }
 function charSeed(ch) { return "char|" + ch.shape + "|" + ch.color; }

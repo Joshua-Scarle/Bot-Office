@@ -1373,7 +1373,7 @@ def create_app(
     @app.get("/v1/avatar-characters", dependencies=[Depends(auth)])
     async def avatar_characters() -> dict:
         return {"shapes": list(avatars.CHAR_SHAPES), "colors": list(avatars.CHAR_COLORS),
-                "expressions": list(avatars.CHAR_EXPRESSIONS)}
+                "expressions": list(avatars.CHAR_EXPRESSIONS), "aliases": dict(avatars.CHAR_SHAPE_ALIASES)}
 
     @app.get("/v1/avatar-presets", dependencies=[Depends(auth)])
     async def avatar_presets() -> dict:

@@ -55,6 +55,7 @@ EFFORT_MIGRATION = "crewdeck-effort-v1"
 READS_MIGRATION = "reads-seeded-v1"
 AVATARS_MIGRATION = "avatars.default_assigned"
 AVATAR_CHARS_MIGRATION = "avatars.characters_default"      # 0.12.12: generated patterns -> derived characters
+AVATAR_GHOST_BACKUP = "avatars.ghost_backup"              # JSON {bot_id: old "char|ghost|<color>" seed}, to undo the droplet re-key
 AVATAR_PATTERN_BACKUP = "avatars.pattern_backup"            # JSON {bot_id: old pattern seed}, to undo that migration
 # 0.9.0: Grok bridge rate/hop state moved from JSON files into SQLite (imported once)
 BRIDGE_IMPORT = "bridge_json_import"
@@ -944,6 +945,7 @@ class JobStore:
             sections.ensure_schema(db)
             self._migrate_avatars(db)
             self._migrate_avatar_characters(db)
+            self._migrate_retired_shapes(db)
             chat_history.ensure_fts(db, lambda d, key: d.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES (?,?)", (key, now().isoformat())))
 
@@ -1148,6 +1150,30 @@ class JobStore:
             if old:
                 db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (AVATAR_PATTERN_BACKUP, json.dumps(old)))
             db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (AVATAR_CHARS_MIGRATION, now().isoformat()))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_retired_shapes(db: sqlite3.Connection) -> None:
+        """Every startup, idempotent: a stored ``char|ghost|<color>`` becomes ``char|droplet|<color>`` (same color). Only
+        ``avatar_seed`` of those bots changes. The old values are merged into ``meta`` (``avatars.ghost_backup``)
+        first. With nothing to change (the normal case) it writes nothing."""
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            changes = {}
+            for row in db.execute("SELECT id, avatar_seed FROM bots WHERE avatar_seed LIKE 'char|%'").fetchall():
+                new = avatars.migrate_character_seed(row["avatar_seed"])
+                if new is not None:
+                    changes[row["id"]] = (row["avatar_seed"], new)
+            if changes:
+                found = db.execute("SELECT value FROM meta WHERE key=?", (AVATAR_GHOST_BACKUP,)).fetchone()
+                backup = json.loads(found[0]) if found else {}
+                for bot_id, (old, new) in changes.items():
+                    backup.setdefault(bot_id, old)
+                    db.execute("UPDATE bots SET avatar_seed=? WHERE id=?", (new, bot_id))
+                db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (AVATAR_GHOST_BACKUP, json.dumps(backup)))
             db.commit()
         except BaseException:
             db.rollback()
