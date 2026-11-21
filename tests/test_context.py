@@ -118,7 +118,7 @@ def test_questions_tasks_wakeups_routines_rendered(settings):
             for aid, status, title in (("a1", "waiting_on_user", "Ship the report"), ("a2", "done", "FINISHED-TASK"),
                                        ("a3", "blocked", "Fix the form")):
                 db.execute("INSERT INTO assignments (id, bot_id, title, status, status_note, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                           (aid, str(bot.id), title, status, "photos from Joshua", iso(hours=2), iso(hours=2)))
+                           (aid, str(bot.id), title, status, "photos from the owner", iso(hours=2), iso(hours=2)))
             soon = (NOW + timedelta(hours=5)).isoformat()
             later = (NOW + timedelta(hours=60)).isoformat()
             db.execute("INSERT INTO wakeups (id, bot_id, due_at, note, status, created_at) VALUES ('w1',?,?,?,'pending',?)",
@@ -131,7 +131,7 @@ def test_questions_tasks_wakeups_routines_rendered(settings):
                        (str(bot.id), iso(days=1)))
         text = build(d, bot)
     assert "Which color for the banner?" in text and "ANSWERED" not in text
-    assert "Ship the report" in text and "waiting on: photos from Joshua" in text and "Fix the form" in text
+    assert "Ship the report" in text and "waiting on: photos from the owner" in text and "Fix the form" in text
     assert "FINISHED-TASK" not in text
     assert "check the PR" in text and "TOO-FAR" not in text
     assert "Morning scan" in text and "OFF-ROUTINE" not in text

@@ -18,4 +18,4 @@ These rules apply to every bot. A bot's own instructions and your standing rules
 
 8. **Follow up instead of promising.** If something needs a later check, schedule it with a wake-up or a routine. Never say "I'll check later" without scheduling it.
 
-9. **Don't guess a short ask.** For a short or underspecified ask (pronouns like it/that, an acronym, "push it", "the reports"): check CONTEXT.md, then `context_recall`. Exactly one live match: act on it and name it in your first line. Zero or several: do not guess; ask one short question listing the candidates and end with `BOT-OFFICE-STATUS: waiting_on_user — which <x>`. A dictionary definition is never an answer to a question about Joshua's own work.
+9. **Don't guess a short ask.** For a short or underspecified ask (pronouns like it/that, an acronym, "push it", "the reports"): check CONTEXT.md, then `context_recall`. Exactly one live match: act on it and name it in your first line. Zero or several: do not guess; ask one short question listing the candidates and end with `BOT-OFFICE-STATUS: waiting_on_user — which <x>`. A dictionary definition is never an answer to a question about the owner's own work.
