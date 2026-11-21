@@ -386,6 +386,8 @@ def test_page_frames_scripts_only_behind_an_unchecked_switch_and_never_with_same
     assert re.findall(r'setAttribute\("sandbox", ([^)]*)\)', html) == ['scripts ? "allow-scripts" : ""']
     # off at every open and never remembered
     assert "run.checked = false" in html
+    assert "latest++" in html and "mine !== latest" in html  # a stale or in-flight link never starts scripts after close or off
+    assert html.index("body.replaceChildren(note)") < html.index("await api(\"/v1/bots/\" + botId + \"/attachments/\" + encodeURIComponent(id) + \"/view-link\"")
     start = html.index("async function previewFile")
     body = html[start:html.index("async function downloadFile")]
     assert "localStorage" not in body and "sessionStorage" not in body

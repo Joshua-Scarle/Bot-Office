@@ -2434,6 +2434,8 @@ async function previewFile(botId, id, name, kind) {
     run.checked = false; $("file-preview-run-label").hidden = false;
     const load = async () => {
       const scripts = run.checked, mine = ++latest;
+      body.replaceChildren(note); dialog.classList.remove("running"); // the old frame goes at once, not when the new link arrives
+      note.className = "hint"; note.textContent = "Loading...";
       const link = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "/view-link" + (scripts ? "?scripts=true" : ""), {method: "POST"});
       if (mine !== latest) return; // a newer switch press wins
       const frame = el("iframe", "file-preview-page"); frame.title = name; frame.setAttribute("sandbox", scripts ? "allow-scripts" : ""); frame.referrerPolicy = "no-referrer";
@@ -2447,7 +2449,7 @@ async function previewFile(botId, id, name, kind) {
     };
     run.onchange = () => load().catch((error) => { run.checked = false; body.replaceChildren(); dialog.classList.remove("running"); setStatus("Could not reload the view: " + error.message, true); });
     await load();
-    dialog.onclose = () => { body.replaceChildren(); run.checked = false; dialog.classList.remove("running"); };
+    dialog.onclose = () => { latest++; body.replaceChildren(); run.checked = false; dialog.classList.remove("running"); }; // latest++: a link still in flight is dropped
     $("file-preview-download").onclick = () => downloadFile(botId, id, name);
     dialog.showModal();
     return;
