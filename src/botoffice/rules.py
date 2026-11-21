@@ -462,7 +462,8 @@ class Rules:
     def team_send_mode(self, job: Job, tool: str = "") -> str:
         """off | ask | allow for a teammate send by *job*'s bot: its ``team_messaging`` setting, with an explicit
         ``outbound ask`` rule (in this job's scope; the implicit unattended default is not a rule) turning allow
-        into ask, and off winning. The caller applies owner never/ask rules on the tool itself."""
+        into ask, and off winning. Owner never/ask rules that match the send *tool* count too (never -> off), so the
+        routes that skip the gate's tool call apply them as well."""
         bot = self.store.get_bot(job.bot_id) if job.bot_id else None
         scope = "unattended" if self.strict(job) else "attended"
         with closing(self.store._connect()) as db:
@@ -473,7 +474,17 @@ class Rules:
                          if rule["effect"] == "ask"]
         explicit = any(rule["kind"] == "preset" and rule["pattern"] == "outbound" and rule["effect"] == "ask"
                        for rule in rows)
-        return team.combine_send_mode(getattr(bot, "team_messaging", None), explicit)
+        mode = team.combine_send_mode(getattr(bot, "team_messaging", None), explicit)
+        if tool and mode != "off":
+            both = rows + [rule for rule in self._rules_all(job) if rule["effect"] == "never"]
+            hit = {rule["effect"] for rule in both if _rule_matches(rule, Action(tool=tool), [])}
+            mode = "off" if "never" in hit else "ask" if "ask" in hit else mode
+        return mode
+
+    def _rules_all(self, job: Job) -> list[sqlite3.Row]:
+        with closing(self.store._connect()) as db:
+            return list(self._rules(db, str(job.bot_id) if job.bot_id else None, "unattended")
+                        + self._rules(db, str(job.bot_id) if job.bot_id else None, "attended"))
 
     def _team_job(self, job: Job) -> bool:
         with closing(self.store._connect()) as db:
