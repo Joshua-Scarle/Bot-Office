@@ -532,7 +532,9 @@ class Rules:
         if "ask" in effects:
             return "ask", preset, "a rule asks first"
         if team_turn and hits:
-            return "ask", preset, f"{preset} action in a turn started by another bot"
+            from . import approval_classes
+            chosen = approval_classes.match(self.store, action.tool, action.command)  # the card keeps its class label
+            return "ask", chosen.key if chosen is not None else preset, f"{preset} action in a turn started by another bot"
         if "allow" in effects and not team_turn and not (job.source in STRICT_SOURCES and hits):
             return "allow", preset, "a rule allows it"
         if first_party:

@@ -144,8 +144,10 @@ def test_scheduled_runs_full_keeps_0_10_behaviour_and_triggers_stay_strict(tmp_p
     for source in ("routine", "wakeup", "assignment", "inbox", "chat"):
         job = running(store, bot, source)
         assert not rules_mod.is_unattended(job, "full") and not rules.strict(job)
-        assert rules.decide(job, bash("git push origin feature")).decision == "allow"
-        assert rules.decide(job, bash("rm -rf build")).decision == "allow"
+        # B12: a turn another bot started takes nothing from that bot's request: outbound and destructive ask
+        expected = "ask" if source == "inbox" else "allow"
+        assert rules.decide(job, bash("git push origin feature")).effect == expected
+        assert rules.decide(job, bash("rm -rf build")).effect == "allow"  # inside the workspace: not a gated action
         # 0.11.10: the owner's approval classes (on by default: release, system...) ask in every run
         assert rules.decide(job, bash("git push origin main")).preset == "git-guard"
         assert rules.decide(job, bash("sudo systemctl restart x")).preset == "system"
