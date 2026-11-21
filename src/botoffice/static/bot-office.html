@@ -253,7 +253,8 @@ button.file-chip:hover { border-color: var(--accent, #6385ad); }
 .file-preview-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
 #file-preview-body { padding: 12px 16px; }
 .file-preview-text { margin: 0; max-height: 68vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-.file-preview-pdf { width: 100%; height: 70vh; border: 0; background: #fff; }
+.file-preview-pdf, .file-preview-page { width: 100%; height: 70vh; border: 0; background: #fff; }
+.file-preview-actions { display: flex; gap: 8px; }
 .file-chip .file-size { color: var(--muted); white-space: nowrap; flex: none; }
 .attachment-item.is-file { padding-right: 18px; }
 .attachment-item img, .chat-image { max-width: 120px; max-height: 90px; border-radius: 8px; object-fit: contain; cursor: pointer; }
@@ -726,7 +727,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <menu><button value="cancel" id="slash-confirm-cancel">Cancel</button><button value="ok" id="slash-confirm-ok" class="primary">Confirm</button></menu>
   </form>
 </dialog>
-<dialog id="file-preview"><div class="file-preview-head"><strong id="file-preview-title"></strong><button type="button" id="file-preview-close">Close</button></div><div id="file-preview-body"></div></dialog>
+<dialog id="file-preview"><div class="file-preview-head"><strong id="file-preview-title"></strong><span class="file-preview-actions"><button type="button" id="file-preview-download">Download</button><button type="button" id="file-preview-close">Close</button></span></div><div id="file-preview-body"></div></dialog>
 <dialog id="image-view"><button type="button" id="image-close">Close</button><div><img id="image-full" alt="Attached image"></div></dialog>
 <script>
 "use strict";
@@ -2420,6 +2421,18 @@ async function previewFile(botId, id, name, kind) {
   const dialog = $("file-preview"), body = $("file-preview-body");
   $("file-preview-title").textContent = name;
   body.replaceChildren();
+  if (kind === "html" || kind === "svg") {
+    // HTML and SVG are never parsed by this page: a signed, two-minute link is framed with an empty sandbox attribute
+    // (an opaque origin, no scripts) and the response itself carries a CSP sandbox header
+    const link = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "/view-link", {method: "POST"});
+    const frame = el("iframe", "file-preview-page"); frame.title = name; frame.setAttribute("sandbox", ""); frame.referrerPolicy = "no-referrer";
+    frame.src = link.url;
+    body.append(frame, el("p", "hint", "Shown in a sandbox: scripts do not run and nothing is loaded from the web. Download the file to open it normally."));
+    dialog.onclose = () => body.replaceChildren();
+    $("file-preview-download").onclick = () => downloadFile(botId, id, name);
+    dialog.showModal();
+    return;
+  }
   const blob = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id), {timeoutMs: 0});
   let revoke = null;
   if (kind === "text") {
@@ -2437,10 +2450,19 @@ async function previewFile(botId, id, name, kind) {
     body.append(el("p", "hint", "This file cannot be previewed. Download it instead."));
   }
   dialog.onclose = () => { if (revoke) URL.revokeObjectURL(revoke); body.replaceChildren(); };
+  $("file-preview-download").onclick = () => downloadFile(botId, id, name);
   dialog.showModal();
 }
+async function downloadFile(botId, id, name) {
+  try {
+    const blob = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "?download=1", {timeoutMs: 0});
+    const url = URL.createObjectURL(new Blob([blob], {type: "application/octet-stream"}));
+    const link = document.createElement("a"); link.href = url; link.download = name; document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch (error) { setStatus("Could not download " + name + ": " + error.message, true); }
+}
 // a file in the chat: a chip with icon, name and size; clicking downloads it (never opened in the page).
-// A PDF or plain-text file also gets a Preview button; html, svg and everything else are download only.
+// A PDF, plain-text, HTML or SVG file also gets a Preview button (HTML and SVG in a sandboxed frame); everything else is download only.
 function chatFileChip(botId, id) {
   const name = FILE_ID.exec(id)[1];
   const group = el("span", "file-group");
@@ -2453,7 +2475,7 @@ function chatFileChip(botId, id) {
   const addPreview = (info) => {
     size.textContent = formatBytes(info.size);
     if (!info.preview || group.querySelector(".file-preview-btn")) return;
-    const view = el("button", "ghost file-preview-btn", "Preview");
+    const view = el("button", "ghost file-preview-btn", info.preview === "html" || info.preview === "svg" ? "View" : "Preview");
     view.type = "button"; view.setAttribute("aria-label", "Preview file " + name);
     view.onclick = () => previewFile(botId, id, name, info.preview).catch((error) => setStatus("Could not preview " + name + ": " + error.message, true));
     group.append(view);
@@ -2461,14 +2483,7 @@ function chatFileChip(botId, id) {
   const known = fileInfoCache.get(key);
   if (known !== undefined) addPreview(known);
   else api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "/info").then((info) => { fileInfoCache.set(key, info); addPreview(info); }).catch(() => {});
-  chip.onclick = async () => {
-    try {
-      const blob = await api("/v1/bots/" + botId + "/attachments/" + encodeURIComponent(id) + "?download=1", {timeoutMs: 0});
-      const url = URL.createObjectURL(new Blob([blob], {type: "application/octet-stream"}));
-      const link = document.createElement("a"); link.href = url; link.download = name; document.body.append(link); link.click(); link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-    } catch (error) { setStatus("Could not download " + name + ": " + error.message, true); }
-  };
+  chip.onclick = () => downloadFile(botId, id, name);
   return group;
 }
 async function imageUrl(botId, id) {
@@ -2821,7 +2836,11 @@ async function loadMessages() {
   if (echoStillNeeded(state.echo, messages, id)) $("thread").append(...state.echo.nodes);  // sending, or stored but not listed yet
   const anchor = state.anchor, stick = state.stickBottom;
   state.anchor = null; state.stickBottom = false;
-  const target = jumpTarget ? $("thread").querySelector('[data-mid="' + jumpTarget + '"]') : null;
+  let target = jumpTarget ? $("thread").querySelector('[data-mid="' + jumpTarget + '"]') : null;
+  if (jumpTarget && !target) {  // a Bot Office status line is not shown in the chat: land on the message just before it
+    let best = 0;
+    for (const node of $("thread").querySelectorAll("[data-mid]")) { const n = Number(node.dataset.mid); if (n <= jumpTarget && n > best) { best = n; target = node; } }
+  }
   if (target) {
     const at = target.getBoundingClientRect(), view = box.getBoundingClientRect();
     box.scrollTop += at.top - view.top - Math.max(0, (box.clientHeight - at.height) / 2);
@@ -4798,7 +4817,7 @@ $("lock-btn").onclick = () => lock("");
 
 if (getToken()) start(); else lock("");
 /* ---- 0.12.5: message search (Ctrl/Cmd+Shift+F) ---- */
-const search = { scope: "bot", seq: 0, timer: null, last: 0, shown: null };
+const search = { scope: "bot", seq: 0, timer: null, count: 0, ids: new Set(), shown: null };
 function snippetNodes(text) {
   return text.split(/(\x02[^\x03]*\x03)/).map((part) => {
     if (part.charCodeAt(0) === 2) return el("mark", "", part.replace(/[\x02\x03]/g, ""));
@@ -4832,7 +4851,7 @@ function renderSearch(hits, more, note, append) {
     const bot = state.bots.find((b) => b.id === hit.bot_id);
     const meta = el("div", "hit-meta");
     if (bot) meta.append(smallAvatar(bot));
-    meta.append(el("strong", "", hit.bot_name), el("span", "", hit.role === "user" ? (hit.sender || "You") : hit.role === "assistant" ? "Bot" : "System"),
+    meta.append(el("strong", "", hit.bot_name), el("span", "", hit.hidden ? "Bot Office" : hit.role === "user" ? (hit.sender || "You") : hit.role === "assistant" ? "Bot" : "System"),
       el("span", "", new Date(hit.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })));
     const snip = el("div", "hit-snippet");
     snip.append(...snippetNodes(hit.snippet));
@@ -4851,15 +4870,18 @@ async function runSearch(more) {
   const q = $("search-input").value.trim();
   const seq = ++search.seq;
   if (!q) { search.shown = null; renderSearch([], false, "Type to search chat messages."); return; }
-  let url = "/v1/search/messages?q=" + encodeURIComponent(q) + (more ? "&before=" + search.last : "");
+  let url = "/v1/search/messages?q=" + encodeURIComponent(q) + (more ? "&offset=" + search.count : "");
   const bot = currentBot();
   if (search.scope === "bot" && bot) url += "&bot=" + bot.id;
   try {
     const res = await api(url);
     if (seq !== search.seq) return;  // a newer search superseded this one
-    if (res.hits.length) search.last = res.hits[res.hits.length - 1].id;
-    if (!more) search.shown = q + "|" + search.scope;
-    renderSearch(res.hits, res.has_more, !more && !res.hits.length ? "No messages match." : "", more);
+    // best match first, paged by offset: a message that arrived meanwhile can shift a page, so a repeat is dropped
+    if (!more) { search.ids = new Set(); search.count = 0; search.shown = q + "|" + search.scope; }
+    search.count += res.hits.length;
+    const fresh = res.hits.filter((hit) => !search.ids.has(hit.id));
+    fresh.forEach((hit) => search.ids.add(hit.id));
+    renderSearch(fresh, res.has_more, !more && !res.hits.length ? "No messages match." : "", more);
   } catch (err) { if (seq === search.seq) renderSearch([], false, err.message); }
 }
 function closeSearch() { if ($("search-dialog").open) $("search-dialog").close(); }

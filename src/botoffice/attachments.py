@@ -35,19 +35,31 @@ FILE_MAX_COUNT = 1000
 FILE_MAX_TOTAL = 1024 * 1024 * 1024
 
 # 0.12.4: how a stored file is served. Chosen from the stored extension only, never from what the bytes claim:
-# a PDF and plain text may be previewed; everything else (html, svg, xml, scripts as pages, archives...) is a download.
+# a PDF and plain text may be previewed; everything else (xml, scripts as pages, archives...) is a download.
+# 0.12.7: HTML and SVG are shown too, but only inside a sandboxed frame (no allow-same-origin) and with a CSP
+# ``sandbox`` header on the response itself; the chat page frames them, nothing else ever renders them.
 TEXT_EXTENSIONS = frozenset(
     "txt md markdown csv tsv json jsonl log yaml yml toml ini cfg conf env diff patch py js ts sh sql rst tex".split())
 
 
+# Response CSP of a stored HTML / SVG file: no allow-same-origin and no allow-scripts in ``sandbox`` (an opaque
+# origin that may not run script), nothing fetched from anywhere but data: and inline style.
+VIEW_CSP = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'"
+
+
 def serve_type(name: str) -> tuple[str, str | None]:
-    """(Content-Type, preview kind) for a stored file id: ``pdf`` or ``text`` may be shown inline, ``None`` never."""
+    """(Content-Type, preview kind) for a stored file id: ``pdf``, ``text``, ``html`` or ``svg`` may be shown
+    inline (the last two only sandboxed), ``None`` never."""
     label = display_name(name)
     ext = label.rpartition(".")[2].lower() if "." in label else ""
     if ext == "pdf":
         return "application/pdf", "pdf"
     if ext in TEXT_EXTENSIONS:
         return "text/plain; charset=utf-8", "text"
+    if ext in ("html", "htm"):
+        return "text/html; charset=utf-8", "html"
+    if ext == "svg":
+        return "image/svg+xml", "svg"
     return "application/octet-stream", None
 
 
@@ -215,15 +227,105 @@ def _inside(path: Path, roots: list[Path]) -> bool:
     return any(root == path or root in path.parents for root in roots)
 
 
+# 0.12.7: a sidecar file may come from anywhere the service can read, except this hard denylist. The check runs on
+# the lexical path (``..`` resolved) and on the real path (every symlink followed), and once more on the opened
+# descriptor, so neither a link nor a ``../`` nor a swap after the check reaches a protected file.
+DENY_HOME_DIRS = (".ssh", ".gnupg", ".aws", ".kube", ".docker", ".claude", ".codex", ".cursor", ".gemini", ".opencode",
+                  ".config/rclone", ".config/gcloud", ".config/gh", ".config/opencode", ".config/Antigravity",
+                  ".config/Cursor", ".local/share/opencode", ".local/share/keyrings")
+DENY_HOME_FILES = (".claude.json", ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".pgpass", ".bash_history")
+DENY_SYSTEM = ("/workspace/secure", "/proc", "/sys", "/dev", "/etc/shadow", "/etc/gshadow", "/etc/ssh", "/etc/sudoers",
+               "/etc/sudoers.d", "/root")
+DENY_PARTS = frozenset((".ssh", ".gnupg", ".aws", ".kube"))
+DENY_NAMES = frozenset((
+    ".netrc", ".git-credentials", ".pgpass", ".pypirc", "rclone.conf", "credentials", "credentials.json",
+    "auth.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "token"))
+DENY_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx", ".env")
+
+
+class Denied(ValueError):
+    """The path is on the hard denylist (an attachment from there is refused, whatever the bot says)."""
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def denylist(data_dir: Path, private_dir: Path | None = None, home: Path | None = None) -> tuple[list[Path], list[Path]]:
+    """(protected directories, protected files) for this install. Every entry is also kept in resolved form."""
+    home = home or Path.home()
+    dirs = [data_dir, *([private_dir] if private_dir else []), *(home / d for d in DENY_HOME_DIRS),
+            *(Path(d) for d in DENY_SYSTEM)]
+    files = [home / f for f in DENY_HOME_FILES]
+    for base in (data_dir, private_dir):
+        if base:
+            files += [base / "token", base / "agentdesk.sqlite3"]
+    both = lambda items: list(dict.fromkeys([*items, *(i.resolve() for i in items)]))  # noqa: E731
+    return both(dirs), both(files)
+
+
+def _name_denied(path: Path) -> bool:
+    name = path.name.lower()
+    return (name in DENY_NAMES or name.startswith(".env") or name.endswith(DENY_SUFFIXES)
+            or any(part in DENY_PARTS for part in path.parts))
+
+
+def is_denied(path: Path, dirs: list[Path], files: list[Path]) -> bool:
+    return (any(_is_under(path, d) for d in dirs) or path in files or _name_denied(path))
+
+
+def _read_outside(path: str, workspace: Path, limit: int, dirs: list[Path], files: list[Path],
+                  own: list[Path]) -> tuple[Path, bytes]:
+    """Read a regular file from anywhere that is not denylisted. Symlinks are resolved first and the denylist is
+    applied to the lexical path and to the real one; the final open refuses a symlink and rechecks the real path of the
+    descriptor and its identity against the protected files. *own* (the job workspace and the bot's folders) are the
+    places a link may start from: only where it leads is judged."""
+    if not path or _is_remote(path) or "\x00" in path:
+        raise ValueError("not a local path")
+    joined = workspace / os.path.expanduser(path)
+    lexical = Path(os.path.abspath(joined))
+    real = Path(os.path.realpath(joined))
+    if (not _inside(lexical, own) and is_denied(lexical, dirs, files)) or is_denied(real, dirs, files):
+        raise Denied("protected location")
+    fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
+            raise ValueError("invalid file")
+        try:
+            now = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        except OSError:
+            now = real
+        if now != real and is_denied(now, dirs, files):
+            raise Denied("protected location")
+        for protected in files:  # a hard link to a protected file has another name but the same identity
+            try:
+                other = os.stat(protected)
+            except OSError:
+                continue
+            if (other.st_dev, other.st_ino) == (info.st_dev, info.st_ino):
+                raise Denied("protected location")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            data = stream.read(limit + 1)
+        if not data or len(data) > limit:
+            raise ValueError("invalid file size")
+        return real, data
+    finally:
+        os.close(fd)
+
+
 def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: str,
-                     referenced: dict[str, set[str]], source_bot_id=None) -> tuple[str, list[str]]:
+                     referenced: dict[str, set[str]], source_bot_id=None,
+                     private_dir: Path | None = None) -> tuple[str, list[str]]:
     """Copy valid final-reply and sidecar attachments and remove successfully attached image markup.
 
     ``![](path)`` in the reply is image-only. A sidecar entry (``bot-office-attach``) may be any file: an image
     goes to the image store, anything else to the file store (0.12.4). The copies go into *bot_id*'s store.
     *source_bot_id* is the bot that wrote the reply when that is another bot (the bot-to-bot copy): its
-    workspace and files are the readable roots. A non-image file must lie in the job workspace or in the
-    bot's attachments/ or uploads/ folder, never elsewhere in the bot directory."""
+    workspace and files are the readable roots. A sidecar file may lie anywhere the service can read (0.12.7:
+    outside the workspace too) except the hard denylist (``denylist``: the data and controller dirs with the token,
+    database, bot memory and session files, ~/.ssh, credential and rclone configs, .env files, /workspace/secure...).
+    Inside the workspace and the bot's own attachments/ and uploads/ folders the old rules are unchanged (no symlinks)."""
     directory(data_dir, bot_id)  # validate the bot directory before trusting it as a root
     directory(data_dir, source_bot_id or bot_id)
     bot_root = data_dir / "bots" / str(source_bot_id or bot_id)
@@ -241,6 +343,8 @@ def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: 
     ids: list[str] = []
     quota = {False: False, True: False}  # by origin: reply markup (images) / sidecar (files)
     skipped = {False: 0, True: 0}
+    refused = 0  # sidecar files on the denylist
+    deny_dirs, deny_files = denylist(data_dir, private_dir)
     # candidates past the cap are never opened; remote URLs stay as the bot wrote them
     for path, from_sidecar in paths[MAX_CANDIDATES:]:
         skipped[from_sidecar] += not _is_remote(path)
@@ -251,8 +355,20 @@ def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: 
                 skipped[rest_sidecar] += not _is_remote(rest)
             break
         try:
+            outside = False
             if from_sidecar:
-                resolved, data = _read_local(path, roots, max_file_bytes())
+                if path.startswith("~"):
+                    path = os.path.expanduser(path)
+                try:
+                    resolved, data = _read_local(path, roots, max_file_bytes())
+                except (OSError, ValueError):
+                    # a plain path under the workspace or the bot's folders keeps the old rules (and the old refusal);
+                    # anywhere else, or a symlink that leads out of them, is allowed unless it is on the denylist
+                    joined = roots[0] / path
+                    if _inside(Path(os.path.abspath(joined)), roots) and _inside(Path(os.path.realpath(joined)), roots):
+                        raise
+                    resolved, data = _read_outside(path, workspace, max_file_bytes(), deny_dirs, deny_files, roots)
+                    outside = True
             else:
                 resolved, data = _read_local(path, roots, sniff=True)
             if resolved in saved:
@@ -260,8 +376,10 @@ def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: 
             mime = sniff_image(data)
             if mime and len(data) <= MAX_BYTES:
                 name = save(data_dir, bot_id, data, mime, referenced)
-            elif from_sidecar and _inside(resolved, file_roots):
+            elif from_sidecar and (outside or _inside(resolved, file_roots)):
                 name = save_file(data_dir, bot_id, data, resolved.name, referenced)
+            elif from_sidecar:
+                raise Denied("inside the bot directory")  # memory, session and other bots' files are never attachable
             else:
                 raise ValueError("not an image")
             ids.append(name)
@@ -269,6 +387,8 @@ def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: 
             saved.add(resolved)
         except OverflowError:
             quota[from_sidecar] = True
+        except Denied:
+            refused += 1
         except (OSError, ValueError):
             if not _is_remote(path):
                 skipped[from_sidecar] += 1
@@ -283,6 +403,8 @@ def collect_outgoing(data_dir: Path, bot_id, workspace: Path, audit: str, text: 
         text += "\n\nAn image could not be attached because the image storage quota is full."
     if quota[True]:
         text += "\n\nA file could not be attached because the storage quota is full."
+    if refused:
+        text += f"\n\n{refused} {'file was' if refused == 1 else 'files were'} not attached: a protected location."
     for from_sidecar, kind in ((False, "image"), (True, "file")):
         count = skipped[from_sidecar]
         if count:

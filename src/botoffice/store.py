@@ -2436,11 +2436,13 @@ class JobStore:
             return self._hydrate(db, bot_id, rows), older, newer
 
     def search_messages(self, query: str, *, bot_id: UUID | str | None = None, limit: int = 30,
-                        before: int | None = None) -> tuple[list[dict], bool]:
-        """Newest-first search of visible chat messages, one bot or all (FTS5, LIKE where it is missing)."""
+                        before: int | None = None, offset: int = 0) -> tuple[list[dict], bool]:
+        """Best-match-first search of chat messages, attachment names and Bot Office status lines, one bot or all
+        (FTS5 bm25, LIKE where it is missing)."""
         with closing(self._connect()) as db:
             return chat_history.search(db, query, bot_id=str(bot_id) if bot_id else None,
-                                       limit=max(1, min(int(limit), 100)), before=before)
+                                       limit=max(1, min(int(limit), 100)), before=before,
+                                       offset=max(0, int(offset)))
 
     def get_message(self, message_id: int) -> Message | None:
         with closing(self._connect()) as db:

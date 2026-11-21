@@ -389,6 +389,7 @@ class SearchHit(BaseModel):
     role: Literal["user", "assistant", "system"]
     sender: str | None = None
     created_at: datetime
+    hidden: bool = False  # a Bot Office status line (wake-up, continuation): not shown in the chat
     snippet: str
 
 
