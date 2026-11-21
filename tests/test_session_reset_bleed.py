@@ -328,3 +328,32 @@ def test_swapping_the_archive_or_an_ancestor_during_cleanup_cannot_divert_the_mo
     archived = list(real.glob("reset-archive*/*/WORKING.md"))
     assert len(archived) == 1 and archived[0].read_text() == A_WORKING
     assert not (real / "WORKING.md").exists() and not (real / "worklog.md").exists()
+
+
+def test_a_generation_directory_replaced_during_cleanup_is_refused(settings, monkeypatch):
+    """A directory swapped in for the one just created (it could hold files a move would overwrite) is not used:
+    the cleanup stays owed and nothing is moved into it."""
+    import botoffice.context_reset as cleanup
+
+    store, scheduler, bot, runs, bot_dir = _setup(settings, "claude")
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    (bot_dir / "WORKING.md").write_text(A_WORKING)
+    real_open = cleanup._open
+
+    def swapping(name, parent, *, create=False):
+        if name != "reset-archive":
+            import shutil
+
+            path = next((bot_dir / "reset-archive").iterdir())
+            shutil.rmtree(path)
+            path.mkdir()
+            (path / "WORKING.md").write_text("planted")
+        return real_open(name, parent, create=create)
+
+    monkeypatch.setattr(cleanup, "_open", swapping)
+    assert store.reset_context(bot.id) is not None
+    with pytest.raises(OSError):
+        cleanup.reconcile_context(store, scheduler.memory, bot.id)
+    assert store.context_cleanup_pending(bot.id) is not None
+    assert (bot_dir / "WORKING.md").read_text() == A_WORKING  # not moved, not overwritten
+    assert [p.read_text() for p in bot_dir.glob("reset-archive/*/WORKING.md")] == ["planted"]
