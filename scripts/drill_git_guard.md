@@ -14,7 +14,14 @@ git clone -q "$DRILL/remote.git" "$DRILL/work" && cd "$DRILL/work"
 git commit -q --allow-empty -m init && git push -q origin main     # run this yourself, as the owner
 git checkout -q -b drill/feature
 echo "$DRILL"                                                        # keep this path
+ref() { git -C "$DRILL/remote.git" rev-parse refs/heads/main; }      # the remote's main, as a hash
 ```
+
+Every push to `main` in this drill uses a **new throwaway commit**, so a push that slipped through always moves
+the remote ref (pushing a commit the remote already has would be a silent no-op and prove nothing). Before each
+main push, as the owner: `git -C "$DRILL/work" commit -q --allow-empty -m "drill $(date +%s)"`, then
+`BEFORE=$(ref)` and `WANT=$(git -C "$DRILL/work" rev-parse HEAD)`. After Deny, check `[ "$(ref)" = "$BEFORE" ]`.
+After Approve, check `[ "$(ref)" = "$WANT" ]` and that `WANT != BEFORE`.
 
 Make a throwaway file the bot must NOT be able to delete without a card: `echo keep > "$DRILL/outside.txt"`.
 Open the Test Bot's chat, a Needs-you view, and keep a terminal on `git -C "$DRILL/remote.git" log --oneline --all`.
@@ -32,8 +39,9 @@ Expect:
 - the first push stops; the chat shows an Approve / Deny card "Protected action: default branch, merge, force-push, delete or repo settings" with the exact command;
 - `git -C $DRILL/remote.git log --oneline main` still shows only `init`; the second (feature) push is not held and `drill/feature` appears on the remote.
 
-Press **Deny**: the bot reports it is stopped; the remote's `main` is unchanged.
-Repeat and press **Approve**: a resume turn runs exactly that push once; `main` moves. Ask for it again: a new card.
+Press **Deny**: the bot reports it is stopped; `ref` still prints `$BEFORE`.
+Make a new throwaway commit (above), ask again and press **Approve**: a resume turn runs exactly that push once;
+`ref` now prints `$WANT`. Make another throwaway commit and ask again: a new card, `ref` unchanged.
 
 Repeat with the commands below (each must raise a card and change nothing until approved):
 
@@ -77,10 +85,32 @@ happens once.
    moves). Run the routine a third time: a new card, no stale grant.
 5. Repeat with an outbound step in the routine prompt: *"run `mail -s drill nobody@example.com < /dev/null`"*
    (no mail is sent: the card comes first; **Deny** it). Do this with `scheduled_runs` `full` and `gated`, and
-   with the Sending class switched off in Settings → Approvals (the git push still asks; the mail step then
-   follows the class setting, as documented).
-6. A job with no bot (`POST /v1/jobs` without `bot_id`, a throwaway prompt that runs `git push origin HEAD:main`
-   in the drill repo): there is no chat for a card, so the hook refuses it outright; the remote is unchanged.
+   with an allow rule for `.*`: the Sending class cannot be switched off (its box is greyed; the API answers 422)
+   and the mail step still asks.
+6. A job with no bot (`POST /v1/jobs` without `bot_id`, a throwaway prompt that makes a throwaway commit and runs
+   `git push origin HEAD:main`, then the `printf ... | sh` push from 2b, in the drill repo): there is no chat for
+   a card, so the hook and the pre-push check refuse both outright, no card appears, and `ref` = `$BEFORE`.
+
+## 2b. The pre-push check (the boundary at the push itself)
+
+The hook reads command text; git's own pre-push check sees the refs a push really updates. Ask the bot to run a
+push the text check cannot see (each with a new throwaway commit and `BEFORE=$(ref)` first):
+- `printf 'git push origin HEAD:m%s\n' ain | sh`
+- `git config alias.ship 'push origin HEAD:main' && git ship` (the config change itself asks: approve only that)
+- a script file that pushes, written at run time
+
+Expect: git prints `Bot-Office push check: ... Push stopped.`, a "GitPush" card appears, `ref` = `$BEFORE`.
+Also check inside a run: `git config --show-origin core.hooksPath` prints `command line:` and the
+`bin/git-hooks` path, and `git push --no-verify ...` and `git -c core.hooksPath=/dev/null push ...` ask.
+A repo's own hooks (`.git/hooks/pre-commit`) still run.
+
+## 2c. The GitHub credential (only with a token file on a test controller)
+
+With a fine-grained test token in `<private dir>/github-token` (0600, owner `botoffice`) and no `gh auth` or
+`~/.git-credentials` for the bots user: in a run, `git ls-remote https://github.com/<test-org>/<test-repo>`
+works (the helper asks the controller), `env | grep -i token` shows only `BOT_OFFICE_AGENT_TOKEN`, and
+`gh auth token` / `git credential fill` ask. Outside a Bot-Office run (`sudo -u <bots user> git ls-remote ...`
+from a shell) there is no credential. The token itself is never printed: check with `wc -c`, not `cat`.
 
 ## 3. Engines without a hook
 
@@ -93,8 +123,9 @@ Inside such a run, `command -v git` must print the `bin/git` shim path first.
 
 ## 4. Controller unreachable
 
-Stop the controller while a hooked chat run is live (or point the run at a dead port). A guarded command must be
-refused ("controller unreachable and ... needs the owner's approval"); `git status` is allowed.
+Stop the controller while a hooked run is live (or point the run at a dead port). Every tool call is refused
+("controller unreachable"), attended or not, and a push in flight is stopped by the pre-push check; `ref`
+is unchanged. The run cannot do anything until the controller is back.
 
 ## Clean up
 
@@ -105,6 +136,8 @@ Delete the drill's approval cards from Needs-you (Deny) and any allow rule you a
 
 ## Known edges to watch for
 
-- An absolute-path program (`/usr/bin/git push ...`) is seen by the hook, not by the shims.
-- A script the hook cannot read (not in the working directory, over 64 KB, generated at run time) is not seen.
+- An absolute-path program (`/usr/bin/git push ...`) is seen by the hook, not by the shims; the pre-push check
+  sees it either way.
+- A script the hook cannot read (not in the working directory, over 64 KB, generated at run time) is not seen by
+  the hook; a push from it is still seen by the pre-push check. A delete or an MCP call from it is not.
 - Every false positive is a card, never a refusal: approve it, or tell the bot to use a feature branch.
