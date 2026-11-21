@@ -103,6 +103,7 @@ from .domain import (
     TextBody,
     Wakeup,
 )
+from .provider_status import ProviderStatusCache
 from .providers.antigravity import AntigravityAdapter
 from .providers.base import ProviderAdapter
 from .providers.claude import ClaudeAdapter
@@ -493,9 +494,14 @@ def create_app(
         store.initialize()
         await asyncio.to_thread(attachments.prune, settings.data_dir, store.attachment_references())
         await scheduler.start()
+        warm = asyncio.create_task(provider_status.warm(), name="botoffice-provider-warm")
         on_terminate(scheduler.begin_shutdown)
         reaper = asyncio.create_task(reap_voice(), name="botoffice-voice-reaper")
         yield
+        warm.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await warm
+        await provider_status.close()
         reaper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await reaper
@@ -770,10 +776,18 @@ def create_app(
                 login = "error"
         return ProviderInfo(name=name, enabled=enabled, login_status=login)
 
+    async def _probe_providers() -> list[ProviderInfo]:
+        return list(await asyncio.gather(*(_provider_info(name) for name in (*ENGINES, "grok"))))
+
+    provider_status = ProviderStatusCache(_probe_providers)
+    app.state.provider_status = provider_status
+    # a job that ends "needs sign-in" means the cached "signed in" is wrong: look again at the next request
+    scheduler.on_needs_login = provider_status.invalidate
+
     @app.get("/v1/providers", response_model=list[ProviderInfo], dependencies=[Depends(auth)])
-    async def get_providers() -> list[ProviderInfo]:
-        names = (*ENGINES, "grok")
-        return list(await asyncio.gather(*(_provider_info(name) for name in names)))
+    async def get_providers(refresh: bool = False) -> list[ProviderInfo]:
+        """Engine sign-in status, from a cache (60 s, renewed in the background); ``?refresh=1`` probes now."""
+        return await provider_status.get(refresh=refresh)
 
     @app.get("/v1/model-choices", response_model=list[EngineChoice], dependencies=[Depends(auth)])
     async def get_model_choices(refresh: bool = False) -> list[EngineChoice]:
