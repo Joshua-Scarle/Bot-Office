@@ -149,6 +149,8 @@ A scripts link only runs inside the Bot Office viewer.
 - **Unchanged.** Plain (scripts off) links, whatever the header says, and the bearer download route behave exactly as before. The denylist, off-by-default, per-open opt-in, `sandbox="allow-scripts"` only and never `allow-same-origin` are untouched.
 - This closes the 0.12.10 residual (a scripts link in its own tab could navigate away). The self-navigation limit inside the viewer in browsers other than Chromium is unchanged.
 
+Deployed 2026-11-21, no job running or queued at the restart (rechecked in the same command). Backups: tag `backup/pre-0.12.11-20261121-162813` and `~/backups/agentdesk.sqlite3.pre-0.12.11-20261121-162813`. Live check on a throwaway bot (deleted afterwards, integrity ok, no orphan rows) with a self-made HTML file, in headless Chromium against the real page: switch off, the script did not run; switch on, the script ran inside the frame (`sandbox="allow-scripts"`); the same scripts link opened as its own tab got `403 text/plain` and no script ran; a client with no `Sec-Fetch-Dest` header got the same 403. Review: a second-CLI review (Codex gpt-6.1-terra, high, read-only; the diff and source were passed inline because its file sandbox does not start on this host) found no bypass; one P3 (tests set the header by hand, no browser test) covered by the live browser check above, and a `Vary: Sec-Fetch-Dest` header was added on scripts responses as hardening. Rollback: check out tag `backup/pre-0.12.11-20261121-162813` and restart; no schema change, so the DB needs no restore.
+
 ## What changed in 0.12.10
 
 A **Run scripts** switch in the HTML viewer, for interactive reports.
