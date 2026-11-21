@@ -1211,14 +1211,23 @@ def create_app(
                 "expires_in": VIEW_SECONDS, "scripts": scripts}
 
     @app.get("/v1/bots/{bot_id}/attachments/{attachment_id}/view")
-    async def view_attachment(bot_id: UUID, attachment_id: str, exp: int = 0, sig: str = "", scripts: int = 0) -> Response:
+    async def view_attachment(request: Request, bot_id: UUID, attachment_id: str, exp: int = 0, sig: str = "", scripts: int = 0) -> Response:
         """An HTML or SVG file for the page's sandboxed iframe. Authorised by the signed link, not the bearer.
         The response carries ``Content-Security-Policy: sandbox`` (no allow-same-origin, no scripts, no network), and the
         page frames it with an empty ``sandbox`` attribute as well. A link signed with ``scripts=1`` (the signature
-        covers the flag, so it cannot be added to a plain link) swaps in ``allow-scripts`` only, still without network."""
+        covers the flag, so it cannot be added to a plain link) swaps in ``allow-scripts`` only, still without network.
+        0.12.11: a scripts link is served only when the browser says it loads it into a frame (``Sec-Fetch-Dest:
+        iframe`` or ``frame``). Opened as its own page (``document``, any other destination) it gets a plain-text 403
+        and nothing runs. A missing header (old browser, curl, other client) is refused too: fail closed, since only
+        a browser that sends the header can show the link is framed. Plain links are not affected."""
         run = scripts == 1
         if exp < int(time.time()) or not hmac.compare_digest(sig.encode(), _view_signature(bot_id, attachment_id, exp, run).encode()):
             raise HTTPException(status_code=403, detail="link expired or invalid")
+        if run and request.headers.get("sec-fetch-dest", "").strip().lower() not in ("iframe", "frame"):
+            return Response("Scripts run only inside the Bot Office viewer. Open the file there and switch on Run scripts.\n",
+                            status_code=403, media_type="text/plain", headers={
+                                "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store",
+                                "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; sandbox"})
         served, preview = attachments.serve_type(attachment_id)
         if not attachments.is_file_id(attachment_id) or preview not in ("html", "svg"):
             raise HTTPException(status_code=404, detail="attachment not found")
@@ -1226,10 +1235,13 @@ def create_app(
             data = await asyncio.to_thread(attachments.read, settings.data_dir, bot_id, attachment_id)
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=404, detail="attachment not found") from exc
-        return Response(data, media_type=served, headers={
+        headers = {
             "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
             "Content-Security-Policy": (attachments.VIEW_CSP_SCRIPTS if run else attachments.VIEW_CSP) + "; frame-ancestors 'self'",
-            "Content-Disposition": f'inline; filename="{attachments.display_name(attachment_id)}"'})
+            "Content-Disposition": f'inline; filename="{attachments.display_name(attachment_id)}"'}
+        if run:
+            headers["X-Frame-Options"] = "SAMEORIGIN"
+        return Response(data, media_type=served, headers=headers)
 
     def _png_response(request: Request, data: bytes, mime: str, versioned: bool) -> Response:
         tag = avatars.etag(data)

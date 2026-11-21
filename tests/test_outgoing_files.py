@@ -325,6 +325,9 @@ def test_env_and_key_files_are_refused_even_inside_the_workspace(turn):
     assert "6 files were not attached: a protected location." in message.text
 
 
+FRAME = {"Sec-Fetch-Dest": "iframe"}  # what a browser sends when the page frames the link
+
+
 def _csp_parts(got):
     return [part.strip() for part in got.headers["content-security-policy"].split(";")]
 
@@ -346,7 +349,7 @@ def test_run_scripts_link_adds_allow_scripts_only_never_same_origin(client_bot):
     info = up(client, bot, "app.html", PAGE)
     link = client.post(info["url"] + "/view-link", headers=H, params={"scripts": "true"}).json()
     assert link["scripts"] is True and "scripts=1" in link["url"]
-    got = client.get(link["url"])
+    got = client.get(link["url"], headers=FRAME)
     assert got.status_code == 200 and got.content == PAGE
     parts = _csp_parts(got)
     assert parts[0].split() == ["sandbox", "allow-scripts"]
@@ -362,18 +365,72 @@ def test_scripts_flag_is_signed_and_cannot_be_added_to_a_plain_link(client_bot):
     client, bot = client_bot
     info = up(client, bot, "app.html", PAGE)
     plain = client.post(info["url"] + "/view-link", headers=H).json()["url"]
-    assert client.get(plain + "&scripts=1").status_code == 403
+    assert client.get(plain + "&scripts=1", headers=FRAME).status_code == 403
     on = client.post(info["url"] + "/view-link", headers=H, params={"scripts": "true"}).json()["url"]
-    assert client.get(on.replace("&scripts=1", "")).status_code == 403  # nor taken off, which would only confuse
-    assert client.get(on.replace("scripts=1", "scripts=2")).status_code == 403
-    assert client.get(on).status_code == 200
+    assert client.get(on.replace("&scripts=1", ""), headers=FRAME).status_code == 403  # nor taken off, which would only confuse
+    assert client.get(on.replace("scripts=1", "scripts=2"), headers=FRAME).status_code == 403
+    assert client.get(on, headers=FRAME).status_code == 200
 
 
 def test_svg_run_scripts_uses_the_same_policy(client_bot):
     client, bot = client_bot
     info = up(client, bot, "pic.svg", PAGE)
-    got = client.get(client.post(info["url"] + "/view-link", headers=H, params={"scripts": "true"}).json()["url"])
+    got = client.get(client.post(info["url"] + "/view-link", headers=H, params={"scripts": "true"}).json()["url"], headers=FRAME)
     assert _csp_parts(got)[0].split() == ["sandbox", "allow-scripts"] and got.headers["content-type"] == "image/svg+xml"
+
+
+def _scripts_url(client, bot, name="app.html", body=PAGE):
+    info = up(client, bot, name, body)
+    return info, client.post(info["url"] + "/view-link", headers=H, params={"scripts": "true"}).json()["url"]
+
+
+@pytest.mark.parametrize("dest", ["document", "empty", "object", "embed", "script", "image", "worker", "style", "iframe-x", ""])
+def test_scripts_link_opened_directly_or_from_anything_but_a_frame_is_refused(client_bot, dest):
+    client, bot = client_bot
+    _, url = _scripts_url(client, bot)
+    got = client.get(url, headers={"Sec-Fetch-Dest": dest, "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none"})
+    assert got.status_code == 403 and got.headers["content-type"].startswith("text/plain")
+    assert got.content != PAGE and b"<script" not in got.content and b"<html" not in got.content.lower()
+    assert got.headers["x-content-type-options"] == "nosniff" and "no-store" in got.headers["cache-control"]
+    assert "sandbox" in got.headers["content-security-policy"] and "allow-scripts" not in got.headers["content-security-policy"]
+
+
+def test_scripts_link_without_a_fetch_dest_header_fails_closed(client_bot):
+    client, bot = client_bot
+    _, url = _scripts_url(client, bot)
+    got = client.get(url)  # old browser, curl, or any client that sends no Sec-Fetch-Dest
+    assert got.status_code == 403 and got.headers["content-type"].startswith("text/plain") and got.content != PAGE
+
+
+@pytest.mark.parametrize("dest", ["iframe", "frame", "IFRAME", " iframe "])
+def test_scripts_link_in_a_frame_is_served_with_frame_ancestors_and_xfo(client_bot, dest):
+    client, bot = client_bot
+    _, url = _scripts_url(client, bot)
+    got = client.get(url, headers={"Sec-Fetch-Dest": dest})
+    assert got.status_code == 200 and got.content == PAGE and got.headers["content-type"].startswith("text/html")
+    assert "frame-ancestors 'self'" in _csp_parts(got) and got.headers["x-frame-options"] == "SAMEORIGIN"
+    assert _csp_parts(got)[0].split() == ["sandbox", "allow-scripts"]
+
+
+def test_the_refusal_is_checked_after_the_signature_and_svg_follows_the_same_rule(client_bot):
+    client, bot = client_bot
+    _, url = _scripts_url(client, bot, "pic.svg")
+    assert client.get(url).status_code == 403 and client.get(url, headers=FRAME).status_code == 200
+    assert client.get(url.replace("sig=", "sig=x"), headers=FRAME).status_code == 403
+    assert client.get(url.replace("sig=", "sig=x")).status_code == 403
+
+
+def test_plain_links_do_not_care_about_fetch_dest(client_bot):
+    client, bot = client_bot
+    info = up(client, bot, "app.html", PAGE)
+    url = client.post(info["url"] + "/view-link", headers=H).json()["url"]
+    for headers in ({}, {"Sec-Fetch-Dest": "document"}, FRAME):
+        got = client.get(url, headers=headers)
+        assert got.status_code == 200 and got.content == PAGE and _csp_parts(got)[0] == "sandbox"
+        assert "x-frame-options" not in got.headers  # exactly as in 0.12.10
+    # the bearer download route is unchanged
+    dl = client.get(info["url"], headers=H)
+    assert dl.headers["content-type"] == "application/octet-stream" and dl.headers["content-disposition"].startswith("attachment;")
 
 
 def test_page_frames_scripts_only_behind_an_unchecked_switch_and_never_with_same_origin():
