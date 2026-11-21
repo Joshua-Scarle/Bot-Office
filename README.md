@@ -139,6 +139,14 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.20
+**Reset session now gives a clean session.** After `POST /v1/bots/{id}/session/reset` (the Reset button), the bot's next prompt carries nothing of the earlier work: no recent chat messages, no `history.md`, no `worklog.md`, no `WORKING.md`, no "Last job directories" in `SELF.md`, no `attachments/INDEX.md`, no stable Cursor/Antigravity work directory, and no edit/rewind seed from before the reset. Before this, only the CLI's own session id was forgotten, so earlier jobs still leaked back through those files.
+- **Archived, not deleted.** Those files move into `bots/<id>/reset-archive/<generation>-<time>/` (every engine's saved session pointer is archived too). The moves use directory file descriptors, so a link planted over `reset-archive` or the bot directory mid-cleanup cannot divert them.
+- **Kept.** `memory.md`, `instructions.md`, the task list and the owner's chat (the owner's view is unchanged; only prompts and files stop carrying it). Whether memory and the task list should also reset is an open design question; this release changes neither.
+- **409 while busy**, **500 while cleanup is pending.** A reset is refused with 409 while the bot has a queued or running job. If the file cleanup fails, the reset is recorded (the new `context_resets` table: message floor, job floor as a timestamp, generation) and the API answers 500; no job of that bot runs until the cleanup has finished (the scheduler retries it first), so nothing runs on the old state.
+- **Rollback.** The old code does not know `context_resets` and ignores the floor, so after a rollback a bot reset under 0.12.20 shows its earlier chat and job directories again. Roll back only with the bots idle, and expect that bleed for bots reset in between. The extra table is harmless to old code; nothing needs undoing.
+- Not changed: old job directories and `reset-archive/` stay on disk; whether a real CLI with file access could read them is not verified.
+
 ## What changed in 0.12.19
 
 **Teammate tools: a restricted Claude bot can now see and ask its teammates.** A restricted Claude run refuses every shell command, so `bot-msg` and `bot-task` were out of reach. Each Claude turn of a bot now gets a small first-party MCP server, `botoffice` (`bin/bot-office-team-mcp`, stdlib only, started by Claude over stdio for that job), with five tools:
