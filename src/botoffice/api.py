@@ -216,6 +216,10 @@ class AgentMessageCreate(BaseModel):
     timeout: float = Field(default=30, gt=0, le=120)
 
 
+class TeamAsk(AgentMessageCreate):
+    timeout_s: int = Field(default=team.ASK_DEFAULT_S, ge=5, le=team.ASK_MAX_S)
+
+
 class AgentAssignmentCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     goal: str = Field(default="", max_length=20_000)
@@ -2001,6 +2005,44 @@ def create_app(
     @app.post("/v1/agent/team/message")
     async def agent_team_message(body: AgentMessageCreate, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
         return await _team_send(job, body)
+
+    @app.post("/v1/agent/team/ask")
+    async def agent_team_ask(body: TeamAsk, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        """Ask and wait for the answer, bounded and lane-safe (team.py explains the guard); otherwise the
+        message is sent as usual and ``pending`` says to end the turn: the reply wakes the asker."""
+        target = store.find_bot(body.to)
+        if not target:
+            raise HTTPException(status_code=404, detail="bot not found")
+        lanes = settings.run_lanes
+        reserved = team.reserve_wait(store, job, target.id, lanes, body.timeout_s)
+        try:
+            item = await _team_send(job, body)
+            delivery = item.get("delivery")
+            waiting = reserved and (delivery == "steer" or (
+                delivery == "start" and team.lane_free(store, lanes, str(store.get_agent_message(item["id"])["job_id"]))))
+            found = None
+            if waiting:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + body.timeout_s
+                while True:
+                    found = team.find_reply(store, item["id"])
+                    current = store.get(job.id)
+                    if found or loop.time() >= deadline or current is None or str(current.status) != "running":
+                        break
+                    await asyncio.sleep(min(0.5, max(0.0, deadline - loop.time())))
+            if found:
+                store.claim_reply_wake(item["id"], "answered in turn")
+                return {"id": item["id"], "status": found["status"], "delivery": delivery, "reply": found["reply"],
+                        "untrusted": True}
+            why = ("it did not answer within the time limit" if waiting else
+                   "waiting here could starve the run lanes or the bot is not free" if not reserved or delivery != "steer"
+                   else "no answer yet")
+            return {"id": item["id"], "status": "pending", "delivery": delivery, "note":
+                    f"No answer in this turn ({why}). Do not wait or poll: end your turn with "
+                    "BOT-OFFICE-STATUS: waiting_on_bot; the reply will wake you."}
+        finally:
+            if reserved:
+                team.release_wait(store, job)
 
     @app.post(
         "/v1/bots/{bot_id}/messages",

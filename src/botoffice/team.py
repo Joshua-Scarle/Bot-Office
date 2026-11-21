@@ -263,3 +263,70 @@ def log_read(store, job, kind: str, target_id: str, count: int) -> None:
                 break
             except sqlite3.IntegrityError:
                 continue
+
+
+# ---- team_ask: bounded wait with a lane guard -------------------------------------------------------------
+# A waiting asker holds one of the run lanes (its own job stays "running") and a lane is also what the
+# asked bot's turn needs. So the wait is only taken when it cannot starve the lanes:
+#   * at most ``lanes - 1`` jobs wait at once (counted in SQLite, so a restart or a second worker agrees);
+#   * never on a bot that is itself ask-waiting (two bots asking each other would just burn the timeout);
+#   * for a message that has to start its own turn, only when a lane is free right now and no other queued
+#     job is ahead of it; a message to a busy bot that cannot take it live is never waited on.
+# Every wait is bounded (ASK_MAX_S) and its row expires, so a crashed controller or a vanished asker frees
+# its slot. Anything else returns pending and the reply wakes the asker later (existing reply wake).
+
+def _purge_waits(db: sqlite3.Connection) -> None:
+    db.execute("DELETE FROM team_ask_waits WHERE expires_at<? OR NOT EXISTS "
+               "(SELECT 1 FROM jobs j WHERE j.id=team_ask_waits.job_id AND j.status='running')", (time.time(),))
+
+
+def reserve_wait(store, job, target_id: str, lanes: int, timeout_s: float) -> bool:
+    """Take one of the ``lanes - 1`` wait slots for *job* before it sends; False when none is free."""
+    with closing(store._connect()) as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            _purge_waits(db)
+            waiting = db.execute("SELECT COUNT(*) FROM team_ask_waits").fetchone()[0]
+            busy_target = db.execute("SELECT 1 FROM team_ask_waits WHERE bot_id=?", (str(target_id),)).fetchone()
+            if waiting >= lanes - 1 or busy_target or db.execute(
+                    "SELECT 1 FROM team_ask_waits WHERE job_id=?", (str(job.id),)).fetchone():
+                db.rollback()
+                return False
+            db.execute("INSERT INTO team_ask_waits (job_id, bot_id, target_bot, expires_at) VALUES (?,?,?,?)",
+                       (str(job.id), str(job.bot_id), str(target_id), time.time() + timeout_s + 10))
+            db.commit()
+            return True
+        except BaseException:
+            db.rollback()
+            raise
+
+
+def release_wait(store, job) -> None:
+    with closing(store._connect()) as db:
+        db.execute("DELETE FROM team_ask_waits WHERE job_id=?", (str(job.id),))
+
+
+def lane_free(store, lanes: int, job_id: str) -> bool:
+    """A lane is free for the turn just queued as *job_id*: running + queued-ahead leaves room for it."""
+    with closing(store._connect()) as db:
+        running = db.execute("SELECT COUNT(*) FROM jobs WHERE status='running'").fetchone()[0]
+        mine = db.execute("SELECT created_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+        ahead = db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND id<>? AND created_at<=?",
+                           (job_id, mine["created_at"] if mine else "")).fetchone()[0]
+    return running + ahead < lanes
+
+
+def find_reply(store, message_id: str) -> dict | None:
+    """The answer to an agent message, or None while there is none: the receiver's own message back (a
+    steered ask), or the finished turn's reply (a queued/started one)."""
+    with closing(store._connect()) as db:
+        back = db.execute("SELECT m.body FROM agent_message_links l JOIN agent_messages m ON m.id=l.message_id "
+                          "WHERE l.reply_to=? ORDER BY m.created_at LIMIT 1", (message_id,)).fetchone()
+    if back is not None:
+        return {"status": "answered", "reply": back["body"]}
+    item = store.get_agent_message(message_id)
+    if item and item.get("status") in ("done", "not_done"):
+        return {"status": "answered", "reply": item.get("reply") or ""}
+    if item and item.get("status") == "failed":
+        return {"status": "failed", "reply": ""}
+    return None
