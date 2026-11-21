@@ -23,6 +23,7 @@ HIT_CHARS = 600
 NAME_CHARS = 60  # a hit's bot name, so one hit is always far below MAX_CHARS
 SLOTS = threading.BoundedSemaphore(2)  # searches running at once; held by the worker thread itself
 SLOT_WAIT_S = 5.0
+ADMIT = threading.BoundedSemaphore(4)  # searches admitted (running or waiting for a slot); more is refused before any thread is used
 QUERY_CHARS = 200
 SECONDS = 2.0  # one search is cut off after this long (a progress handler), whatever the index holds
 SNIPPET_TOKENS = 40
@@ -114,6 +115,14 @@ def run(store, job, query: str, scope: str = "self", limit: int = 10) -> dict:
         return _run(store, job, query, scope, limit)
     finally:
         SLOTS.release()
+
+
+def run_admitted(store, job, query: str, scope: str = "self", limit: int = 10) -> dict:
+    """Worker body of the route: the caller took an ``ADMIT`` ticket; it is returned here, in the worker."""
+    try:
+        return run(store, job, query, scope, limit)
+    finally:
+        ADMIT.release()
 
 
 def _run(store, job, query: str, scope: str, limit: int) -> dict:

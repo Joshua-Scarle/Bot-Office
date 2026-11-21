@@ -2073,7 +2073,14 @@ def create_app(
                            limit: int = Query(default=10, ge=1, le=recall.MAX_HITS),
                            job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
         try:
-            return await asyncio.to_thread(recall.run, store, job, q, scope, limit)  # off the event loop; recall.SLOTS bounds the workers
+            if not recall.ADMIT.acquire(blocking=False):  # bounded before any thread is used
+                raise recall.RecallError(503, "recall is busy, try again")
+            try:
+                work = asyncio.to_thread(recall.run_admitted, store, job, q, scope, limit)  # off the event loop; the worker returns the ticket
+            except BaseException:
+                recall.ADMIT.release()
+                raise
+            return await work
         except recall.RecallError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 

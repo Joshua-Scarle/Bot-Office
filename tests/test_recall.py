@@ -205,3 +205,19 @@ def test_slots_are_held_by_the_worker_and_busy_is_503(settings, monkeypatch):
             for _ in taken:
                 recall.SLOTS.release()
         assert get(d, h, "fig").status_code == 200
+
+
+def test_admission_is_bounded_before_any_thread(settings):
+    with Desk(settings) as d:
+        bot = d.bot("Reader")
+        add_message(d.store, bot, "user", "plum note")
+        _, h = run_job(d.store, bot)
+        taken = [recall.ADMIT.acquire() for _ in range(4)]
+        try:
+            assert get(d, h, "plum").status_code == 503
+        finally:
+            for _ in taken:
+                recall.ADMIT.release()
+        assert get(d, h, "plum").status_code == 200
+        assert recall.ADMIT.acquire(blocking=False)  # the ticket of the finished search was returned
+        recall.ADMIT.release()
