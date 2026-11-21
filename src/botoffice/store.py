@@ -232,6 +232,8 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS approvals_grant ON approvals(bot_id, input_hash, status)")
     # 0.12.4 fix3: the exact updates (repo, ref, operation, old/new sha) a push approval covers
     add_columns(db, "approvals", (("push_plan", "TEXT"),))
+    from . import machines  # E6-1: paired computers (machines, pairing codes, grants, requests, audit)
+    machines.init_tables(db)
     db.execute(
         """CREATE TABLE IF NOT EXISTS gate_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, job_id TEXT, provider TEXT, decision TEXT NOT NULL,
@@ -623,9 +625,13 @@ def approval_card(store: JobStore, item: dict) -> dict:
     """0.11.10: what the chat's Approve / Deny card shows for one approval."""
     from . import approval_classes
     label = approval_classes.label(store, item["preset"]) or PRESET_LABELS.get(item["preset"]) or item["preset"]
-    return {"id": item["id"], "status": item["status"], "label": label, "summary": item["summary"],
+    card = {"id": item["id"], "status": item["status"], "label": label, "summary": item["summary"],
             "tool": item["tool"], "scope": item["scope"], "expires_at": item["expires_at"],
             "decided_at": item["decided_at"], "resumed": bool(item["resume_job_id"])}
+    if item.get("source") == "machine":  # E6-1: the computer, tool and canonical arguments
+        from . import machines
+        card.update(machines.card(store, item))
+    return card
 
 
 def _model(cls, row: sqlite3.Row | None, dates: tuple[str, ...]):

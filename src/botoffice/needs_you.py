@@ -267,8 +267,10 @@ def _push_update(row) -> str:
 def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None) -> None:
     """0.11.0: approval cards (Approve once / Deny; Re-run once expired) and tripwire alerts."""
     since = (now() - FAILED_WINDOW).isoformat()
+    # an expired machine approval (E6-1) was a deny: no Re-run
     for row in db.execute("SELECT * FROM approvals WHERE status='pending' OR (status='expired' AND "
-                          "resume_job_id IS NULL AND created_at>=?) ORDER BY id DESC LIMIT 50", (since,)):
+                          "resume_job_id IS NULL AND source<>'machine' AND created_at>=?) ORDER BY id DESC LIMIT 50",
+                          (since,)):
         bot = bots.get(row["bot_id"])
         if bot is None:
             continue

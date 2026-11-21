@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
 from . import isolation, needs_you, notify, safefs, team, vnc
+from . import machines_api
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -1618,6 +1619,9 @@ def create_app(
             raise HTTPException(status_code=401, detail="a running job's agent token is required")
         return job
 
+    # E6-1: paired computers (Settings > Computers, bin/machine); machine approvals are decided there
+    machine_routes = machines_api.register(app, store=store, settings=settings, auth=auth, agent_scope=agent_scope)
+
     @app.post("/v1/agent/ask", status_code=201)
     async def agent_ask(request: Request, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
         from . import questions
@@ -2731,11 +2735,15 @@ def create_app(
     @app.post("/v1/approvals/{approval_id}/approve", dependencies=[Depends(auth)])
     async def approve(approval_id: int) -> dict:
         """Approve once (also Re-run of an expired request): one-shot grant + resume turn."""
+        if (handled := machine_routes.decide(approval_id, "approve")) is not None:
+            return handled
         rules.expire()
         return _approval_call(rules.approve, approval_id, assignments)
 
     @app.post("/v1/approvals/{approval_id}/deny", dependencies=[Depends(auth)])
     async def deny(approval_id: int) -> dict:
+        if (handled := machine_routes.decide(approval_id, "deny")) is not None:
+            return handled
         return _approval_call(rules.deny, approval_id)
 
     @app.post("/v1/gate-alerts/{alert_id}/dismiss", status_code=204, dependencies=[Depends(auth)])

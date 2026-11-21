@@ -809,8 +809,10 @@ class Rules:
         with closing(self.store._connect()) as db:
             stamp = now().isoformat()
             count = 0
+            # machine approvals (E6-1) time out in machines.expire: a deny, never a Re-run
             for row in db.execute("SELECT id, bot_id, summary FROM approvals WHERE status='pending' "
-                                  "AND expires_at IS NOT NULL AND expires_at<=?", (stamp,)).fetchall():
+                                  "AND expires_at IS NOT NULL AND expires_at<=? AND source<>'machine'",
+                                  (stamp,)).fetchall():
                 if db.execute("UPDATE approvals SET status='expired', decided_at=? WHERE id=? AND status='pending'",
                               (stamp, row["id"])).rowcount:
                     count += 1
