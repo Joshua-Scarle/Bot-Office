@@ -1062,7 +1062,7 @@ class Scheduler:
             with self.store.chat_lock:
                 before = self.memory.read_working(job.bot_id)
                 # read with room for the tags; the limit applies to the stripped text
-                text = cap_working(freshness.strip(self._read_text(working, 2 * MAX_MEMORY_BYTES), before))
+                text = cap_working(freshness.strip(self._read_text(working, MAX_MEMORY_BYTES), before))
                 if text != before and self.store.snapshot_working(job.bot_id, job.id, before):
                     bot = self.store.get_bot(job.bot_id)
                     self.memory.write_working(job.bot_id, text, who=bot.name if bot else "a bot")
@@ -1153,8 +1153,9 @@ class Scheduler:
         edits = []
         for name, target, base in (("memory.md", self.memory.bot_path(job.bot_id), old_memory),
                                    ("shared-memory.md", self.memory.shared_path, old_shared)):
-            ours = self._read_own_file(workspace / name, 2 * MAX_MEMORY_BYTES)  # room for the tags
-            ours = freshness.strip(ours, base)[:MAX_MEMORY_BYTES] if ours is not None else None
+            # a tagged copy is at most MAX_MEMORY_BYTES (freshness.MAX_TAGGED), so it reads back whole
+            ours = self._read_own_file(workspace / name, MAX_MEMORY_BYTES)
+            ours = freshness.strip(ours, base) if ours is not None else None
             if ours is not None and ours != base:
                 edits.append((target, base, ours))
         return edits

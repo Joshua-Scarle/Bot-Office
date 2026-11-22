@@ -174,6 +174,7 @@ def test_agent_can_check_approval_cards_live(settings):
         assert both[0] == {"id": ids[1], "status": "approved"}  # another bot's card: status only
         assert both[1] == {"id": 999, "status": "not_found"}
         assert client.get("/v1/agent/approvals", params={"ids": str(2**64)}, headers=headers).status_code == 400
+        assert client.get("/v1/agent/approvals", params={"ids": "²"}, headers=headers).status_code == 400
 
 
 def test_backfill_dates_notes_from_edit_events_then_stated_dates(tmp_path):
@@ -222,3 +223,15 @@ def test_large_memory_read_back_is_not_truncated_by_the_tags(settings):
     _, job = scheduler.turns.post_message(bot, "hi")
     asyncio.run(scheduler._execute(0, store.claim(("desktop-1",), {"codex"})))
     assert scheduler.memory.read_bot(bot.id) == big
+
+
+def test_strip_handles_trailing_spaces_and_leaves_fences_alone():
+    assert freshness.strip("- a ⟦Nov 21 · 1d · you⟧  \n") == "- a  \n"
+    fenced = "```\nexample ⟦Nov 21 · 1d · you⟧\n```\n"
+    assert freshness.strip(fenced) == fenced
+
+
+def test_too_large_to_tag_is_shown_as_stored(tmp_path, monkeypatch):
+    monkeypatch.setattr(freshness, "MAX_TAGGED", 50)
+    text = "- one\n- two\n- three\n- four\n"
+    assert freshness.annotate(text, tmp_path / "memory.md", NOW) == text

@@ -783,7 +783,7 @@ def self_extra(store: JobStore, bot: Bot, job: Job, working: str, moment: dateti
 
 
 STALE_GAP = timedelta(hours=6)
-WORKING_TAG_BUDGET = 1500  # characters of ⟦⟧ tags allowed in the inline WORKING.md
+WORKING_TAG_BUDGET = 600  # characters of ⟦⟧ tags allowed in the inline WORKING.md
 
 
 def pending_cards_line(store: JobStore, bot: Bot) -> str:
@@ -809,7 +809,7 @@ def time_note(store: JobStore, bot: Bot, job: Job, moment: datetime) -> str:
     with contextlib.suppress(Exception), contextlib.closing(store._connect()) as db:
         # the latest finished turn: other jobs, or an earlier attempt of this one (a retry)
         row = db.execute("SELECT MAX(last) AS last FROM (SELECT MAX(finished_at) AS last FROM jobs WHERE bot_id=? "
-                         "AND id!=? UNION ALL SELECT MAX(finished_at) FROM job_attempts WHERE job_id=?)",
+                         "AND id!=? AND started_at IS NOT NULL UNION ALL SELECT MAX(finished_at) FROM job_attempts WHERE job_id=?)",
                          (str(bot.id), str(job.id), str(job.id))).fetchone()
         last = context._when(row["last"]) if row and row["last"] else None
         if last is not None and moment - last >= STALE_GAP:

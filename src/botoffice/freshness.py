@@ -32,8 +32,7 @@ from . import isolation, safefs
 OLD_DAYS = 14
 LEDGER_SUFFIX = ".ages.json"
 _MON = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
-_TAG = re.compile(r" ⟦[~≤]?" + _MON + r" \d{1,2} · [~≥]?\d+d(?: OLD)? · [^⟦⟧\n]{1,60}?(?: · EXPIRED)?(?: · SUPERSEDED)?⟧$",
-                  re.MULTILINE)
+_TAG = re.compile(r" ⟦[~≤]?" + _MON + r" \d{1,2} · [~≥]?\d+d(?: OLD)? · [^⟦⟧\n]{1,60}?(?: · EXPIRED)?(?: · SUPERSEDED)?⟧(?=[ \t]*$)")
 HEADER_START = "<!-- Bot-Office note ages:"
 _HEADER = re.compile(r"\A" + re.escape(HEADER_START) + r"[^\n]*-->\n")
 _BULLET = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
@@ -107,7 +106,7 @@ def _valid(entry: object) -> bool:
 def _load_all(path: Path) -> tuple[dict[str, dict], dict[str, dict]]:
     try:
         raw = safefs.read_text(ledger_path(path))
-        data = json.loads(raw) if raw and len(raw) < 2_000_000 else {}
+        data = json.loads(raw) if raw and len(raw) < 50_000_000 else {}
     except (OSError, ValueError):
         return {}, {}
     if not isinstance(data, dict):
@@ -212,6 +211,9 @@ def taggable(text: str) -> bool:
     return "⟦" not in text and "⟧" not in text and HEADER_START not in text
 
 
+MAX_TAGGED = 1_000_000  # = memory.MAX_MEMORY_BYTES: a tagged copy always reads back whole
+
+
 def annotate(text: str, path: Path, now: datetime | None = None, self_name: str | None = None,
              with_header: bool = True) -> str:
     """*text* (the content of *path*) with a ⟦date · age · by⟧ tag per note and a header line.
@@ -228,7 +230,8 @@ def annotate(text: str, path: Path, now: datetime | None = None, self_name: str 
                 continue
             body = [lines[i] for i in members]
             lines[first] = lines[first] + _tag(ledger.get(_key(body)), fallback, now, "\n".join(body), self_name)
-        return (header(now) if with_header else "") + "\n".join(lines)
+        tagged = (header(now) if with_header else "") + "\n".join(lines)
+        return tagged if len(tagged) <= MAX_TAGGED else text  # too large to tag: shown as stored
     except Exception:  # noqa: BLE001 - a tagging bug must never fail the turn
         return text
 
@@ -238,7 +241,12 @@ def strip(text: str, base: str = "") -> str:
     text the workspace copy was made from; if it was not taggable nothing was added, so nothing is removed."""
     if base and not taggable(base):
         return text
-    return _TAG.sub("", _HEADER.sub("", text, count=1))
+    out, fence = [], False
+    for line in _HEADER.sub("", text, count=1).split("\n"):
+        if line.strip().startswith(("```", "~~~")):
+            fence = not fence
+        out.append(line if fence else _TAG.sub("", line))  # never inside a code fence (none are added there)
+    return "\n".join(out)
 
 
 def saved_at(path: Path) -> str:

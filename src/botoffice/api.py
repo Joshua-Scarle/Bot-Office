@@ -1791,6 +1791,8 @@ def create_app(
             status = item.get("status")
             if status == "pending" and item.get("expires_at") and str(item["expires_at"]) <= moment:
                 status = "expired"
+            elif status == "approved" and item.get("grant_expires_at") and str(item["grant_expires_at"]) <= moment:
+                status = "approved, grant expired"
             if str(item.get("bot_id")) != str(job.bot_id):
                 return {"id": item["id"], "status": status}
             out = {key: item.get(key) for key in ("id", "created_at", "decided_at", "expires_at")}
@@ -1800,7 +1802,7 @@ def create_app(
                 wanted = []
                 for part in ids.replace(",", " ").split()[:20]:
                     number = part.lstrip("#")
-                    if not number.isdigit() or not 0 < int(number) < 2**63:
+                    if not re.fullmatch(r"[0-9]{1,18}", number) or int(number) == 0:
                         raise HTTPException(status_code=400, detail=f"not an approval number: {part[:20]}")
                     wanted.append(int(number))
                 found = {row["id"]: dict(row) for n in wanted
