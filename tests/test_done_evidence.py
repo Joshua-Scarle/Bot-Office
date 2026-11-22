@@ -11,6 +11,7 @@ from botoffice.domain import JobStatus
 from botoffice.scheduler import Scheduler
 from botoffice.store import JobStore
 from test_baseline import RecordingAdapter
+from test_checked_evidence import Turn, _claude_tool_line, turn
 from test_incomplete import H, Replying, chat, run_turn
 
 B1_REPLY = """I can't tell you. This trial copy has no view of what the leads or DPEs have asked for, so I can't answer from real data.
@@ -40,8 +41,11 @@ def test_failed_check_evidence_is_unverified_but_kept(reason):
     "ran pytest tests/test_x.py, 12 passed", "ran pytest, 0 failed", "ran the build: no errors, exit 0",
     "the failing test now passes, ran pytest tests/test_x.py", "checked the output file, matches", "nothing new",
     "ran pytest, 1 failed; fixed it and reran pytest, all passed"])
-def test_real_checks_are_verified(reason):
-    assert failures.judge_evidence("done", reason) == (1, reason)
+def test_real_checks_are_verified_only_when_bot_office_checked_them(reason):
+    # 0.12.20: naming a check is not enough; it counts when Bot-Office checked what it cites ("nothing new" aside)
+    assert failures.judge_evidence("done", reason, "file x.md exists") == (
+        (1, reason) if reason == "nothing new" else (1, f"{reason} (Bot-Office checked: file x.md exists)"))
+    assert failures.judge_evidence("done", reason)[0] == (1 if reason == "nothing new" else 0)
 
 
 def test_done_with_failed_check_is_recorded_done_unverified(settings):
@@ -81,16 +85,20 @@ def test_status_reason_alone_is_enough(settings):
     "Fixed the bug; I could not reproduce the failure after the change.\nBOT-OFFICE-STATUS: done — ran pytest, 12 passed",
     "Done.\nBOT-OFFICE-STATUS: done — ran pytest tests/test_x.py, 12 passed, no data loss"])
 def test_a_real_done_is_not_downgraded(settings, reply):
-    _, _, job = run_turn(settings, reply)
-    assert job.status == JobStatus.SUCCEEDED and job.outcome == "done" and job.verified == 1
+    # the turn's own tool output has the "12 passed" the evidence cites
+    log = _claude_tool_line("collected 12 items\n== 12 passed in 1.02s ==")
+    _, _, job = turn(settings, Turn(reply, log=log + "\n"))
+    assert job.status == JobStatus.SUCCEEDED and job.outcome == "done"
+    assert job.verified == (0 if "read the logs" in reply else 1)  # reading logs back is nothing Bot-Office can check
 
 
 @pytest.mark.parametrize("reply", [
     "I couldn't access the old log, so I used the new log and completed the review.\nBOT-OFFICE-STATUS: done — checked the new log thoroughly",
     "No data was lost; the migration is complete.\nBOT-OFFICE-STATUS: done — checked the migrated records"])
 def test_resolved_obstacles_and_negative_findings_stay_done(settings, reply):
+    # done, not downgraded to blocked; the evidence names nothing Bot-Office can check, so it is not verified
     _, _, job = run_turn(settings, reply)
-    assert job.status == JobStatus.SUCCEEDED and job.outcome == "done" and job.verified == 1
+    assert job.status == JobStatus.SUCCEEDED and job.outcome == "done" and job.verified == 0
 
 
 def test_inability_in_the_middle_of_a_long_report_is_left_alone(settings):

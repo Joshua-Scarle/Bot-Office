@@ -52,8 +52,11 @@ MAX_BOT_ROUTINES = 10
 BOT_ROUTINE_MIN_GAP = timedelta(minutes=15)
 # what a turn (BOT-OFFICE-STATUS line) or ``bot-task status`` may report
 # what a done without evidence is told, and the note when it says done again without any
-EVIDENCE_ASK = 'say how you verified it (bot-task done --evidence "...")'
-NO_EVIDENCE_NOTE = "says it is done; no evidence of how it was verified. Check it and mark it done, or reply"
+# 0.12.20: evidence counts only when Bot-Office can check what it cites (evidence.check)
+EVIDENCE_ASK = ('cite something Bot-Office can check: a file you wrote in your workspace, a commit, a link, or the '
+                'test result ("12 passed") of a command you ran (bot-task done --evidence "...")')
+NO_EVIDENCE_NOTE = ("says it is done; no evidence Bot-Office could check (a file, a commit, a link or test output). "
+                    "Not verified: check it and mark it done, or reply")
 REPORT_STATES = ("done", "continue", "not_done", "blocked", "waiting_on_user", "waiting_on_bot")
 EDITABLE = ("title", "goal", "done_when", "due_at", "budget_turns", "budget_minutes", "verify", "escalate")
 # 0.11.4 task lists: what the owner may also set, and what a bot may edit (the assignee on
@@ -125,6 +128,11 @@ def latest_evidence(db: sqlite3.Connection, assignment_id: str, minimum: int = 1
         "AND id > ? ORDER BY id DESC LIMIT 1",
         (assignment_id, minimum, became_active(db, assignment_id))).fetchone()
     return row["note"] if row else None
+
+
+def checked_note(evidence: str, checked: str) -> str:
+    """An evidence event's note: what the bot cited and what Bot-Office checked of it."""
+    return f"{evidence[:800]} (Bot-Office checked: {checked[:190]})"
 
 
 def with_evidence(note: str, evidence: str | None) -> str:
@@ -930,12 +938,15 @@ class Assignments:
         return [self.task(key) for key in ids]
 
     def report(self, assignment_id: UUID | str, bot_id: UUID | str, job_id: UUID | str, state: str,
-               note: str = "", evidence: str = "") -> Assignment:
+               note: str = "", evidence: str = "", checked: str | None = None) -> Assignment:
         """``bot-task status`` / ``bot-task done --evidence``. During a turn of this assignment the report
         is kept for the loop (the turn's own status line, if any, comes later and wins); otherwise it
-        applies now. *evidence* (how the work was verified) is kept as an ``evidence`` event. Out of
-        its turn, a done without evidence (setting on) is refused (409), and so is any continue
-        (``_check_continue``): only the owner starts or resumes a task from outside its turn."""
+        applies now. *evidence* (how the work was verified) is kept as an ``evidence`` event when
+        Bot-Office could check what it cites (*checked*: what evidence.check found), else as an
+        ``evidence_unchecked`` event, which never counts (0.12.20; it is checked again when the turn ends,
+        ``recheck_evidence``). Out of its turn, a done without checked evidence (setting on) is refused
+        (409), and so is any continue (``_check_continue``): only the owner starts or resumes a task from
+        outside its turn."""
         if state not in REPORT_STATES:
             raise AssignmentError(400, f"state must be one of {', '.join(REPORT_STATES)}")
         actor = actor_of(bot_id)
@@ -953,8 +964,10 @@ class Assignments:
                 if evidence and len(evidence) < int(settings["evidence_min"]):
                     raise AssignmentError(400, f"evidence is too short (at least {settings['evidence_min']} "
                                                "characters): say what you ran or checked and what it showed")
-                if evidence:
-                    self._event(db, row["id"], "evidence", evidence[:1000], str(job_id), actor=actor)
+                if evidence and checked:
+                    self._event(db, row["id"], "evidence", checked_note(evidence, checked), str(job_id), actor=actor)
+                elif evidence:
+                    self._event(db, row["id"], "evidence_unchecked", evidence[:1000], str(job_id), actor=actor)
                 if not own_turn and state == "done" and settings["evidence"] \
                         and self._evidence(db, row["id"]) is None:
                     raise AssignmentError(409, f"not marked done: {EVIDENCE_ASK}")
@@ -976,6 +989,22 @@ class Assignments:
                 db.rollback()
                 raise
         return self.get(assignment_id)
+
+    def recheck_evidence(self, job_id: UUID | str, check: Callable[[str], str | None]) -> int:
+        """0.12.20: when a turn ends, its ``evidence_unchecked`` events are checked again (*check*, outside
+        any transaction: it may wait for a link): the CLI's log with this turn's command output exists only
+        now, and a file may have been written after the report. One that checks out becomes ``evidence``
+        (before the turn is settled). Returns how many did."""
+        with closing(self.store._connect()) as db:
+            rows = db.execute("SELECT id, note FROM assignment_events WHERE job_id=? AND kind='evidence_unchecked' "
+                              "ORDER BY id", (str(job_id),)).fetchall()
+        found = [(row["id"], checked_note(row["note"], what)) for row in rows if (what := check(row["note"]))]
+        if found:
+            with closing(self._tx()) as db:
+                db.executemany("UPDATE assignment_events SET kind='evidence', note=? WHERE id=? "
+                               "AND kind='evidence_unchecked'", [(note, key) for key, note in found])
+                db.commit()
+        return len(found)
 
     @staticmethod
     def _check_continue(db: sqlite3.Connection, row: sqlite3.Row, job_id: str, own_turn: bool) -> None:

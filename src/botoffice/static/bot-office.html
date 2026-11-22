@@ -2226,7 +2226,7 @@ function jobRow(job, view, current) {
   if (job.error) box.append(el("div", "drawer-meta bad", clip(job.error, 300)));
   if (job.status === "succeeded" && (job.outcome === "unverified" || (job.outcome === "done" && job.verified === 0))) {
     head.append(el("span", "pill notverified", "Not verified"));
-    if (job.evidence) box.append(el("div", "drawer-meta", "Cited, but it does not show a passing check: " + clip(job.evidence, 300)));
+    if (job.evidence) box.append(el("div", "drawer-meta", "Cited, but Bot-Office could not check it, or it does not show a passing check: " + clip(job.evidence, 300)));
   } else if (job.status === "succeeded" && job.outcome === "done" && job.evidence)
     box.append(el("div", "drawer-meta", "Verified by: " + clip(job.evidence, 300)));
   if (view) box.append(stepsDetails(view));
@@ -2897,7 +2897,7 @@ async function loadMessages() {
       };
       wrap.append(more);
     }
-    if (m.unverified && m.evidence) wrap.append(el("div", "foot notverified", "Not verified: the evidence given does not show a passing check (\"" + clip(m.evidence, 300) + "\")."));
+    if (m.unverified && m.evidence) wrap.append(el("div", "foot notverified", "Not verified: Bot-Office could not check the evidence given, or it does not show a passing check (\"" + clip(m.evidence, 300) + "\"). It counts when it names a file in the bot's workspace, a commit, a link that answers, or test output from this turn."));
     else if (m.unverified) wrap.append(el("div", "foot notverified", "Not verified: no evidence of what was checked (a test, a command's output, a live check or a file)."));
     else if (m.evidence) wrap.append(el("div", "foot verified", "Verified by: " + m.evidence));
     if (m.cut_chars > 0) wrap.append(cutNotice(m, body));

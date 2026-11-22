@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from botoffice import failures
 from botoffice.api import create_app
 from botoffice.scheduler import REPLY_LIMIT
+from test_checked_evidence import Turn, _claude_tool_line, turn
 from test_incomplete import H, Replying, run_turn
 
 HTML = (__import__("pathlib").Path(__file__).parents[1] / "src/botoffice/static/bot-office.html").read_text()
@@ -15,10 +16,13 @@ def reply(store, bot):
 
 def test_judge_evidence():
     assert failures.judge_evidence("done", "") == (0, "")
-    assert failures.judge_evidence("done", "ok") == (0, "")
-    assert failures.judge_evidence("done", "all done now") == (0, "")  # 0.12.20: words that name no check
+    # 0.12.20: evidence Bot-Office cannot check is not verified, and kept so the page shows what was cited
+    assert failures.judge_evidence("done", "ok") == (0, "ok")
+    assert failures.judge_evidence("done", "all done now") == (0, "all done now")
     assert failures.judge_evidence("done", "nothing new") == (1, "nothing new")
-    assert failures.judge_evidence("done", "ran pytest tests/test_x.py: 12 passed") == (1, "ran pytest tests/test_x.py: 12 passed")
+    assert failures.judge_evidence("done", "ran pytest tests/test_x.py: 12 passed") == (0, "ran pytest tests/test_x.py: 12 passed")
+    assert failures.judge_evidence("done", "ran pytest tests/test_x.py: 12 passed", "test output 12 passed") == (
+        1, "ran pytest tests/test_x.py: 12 passed (Bot-Office checked: test output 12 passed)")
     assert failures.judge_evidence("blocked", "need key") == (None, "")
 
 
@@ -30,10 +34,18 @@ def test_done_without_evidence_is_marked_unverified(settings):
 
 
 def test_done_with_evidence_shows_it(settings):
-    store, bot, job = run_turn(settings, "Fixed it.\n\nBOT-OFFICE-STATUS: done — ran pytest tests/test_x.py, 12 passed")
-    assert job.outcome == "done" and job.verified == 1 and job.evidence == "ran pytest tests/test_x.py, 12 passed"
+    store, bot, job = turn(settings, Turn("Fixed it.\n\nBOT-OFFICE-STATUS: done — ran pytest tests/test_x.py, 12 passed",
+                                          log=_claude_tool_line("== 12 passed in 0.50s ==") + "\n"))
+    shown = "ran pytest tests/test_x.py, 12 passed"
+    assert job.outcome == "done" and job.verified == 1 and job.evidence.startswith(shown + " (Bot-Office checked: ")
     message = reply(store, bot)
-    assert message.unverified is False and message.evidence == "ran pytest tests/test_x.py, 12 passed"
+    assert message.unverified is False and message.evidence == job.evidence
+
+
+def test_done_with_evidence_it_cannot_check_is_not_verified(settings):
+    store, bot, job = run_turn(settings, "Fixed it.\n\nBOT-OFFICE-STATUS: done — ran pytest tests/test_x.py, 12 passed")
+    assert job.outcome == "done" and job.verified == 0  # no such test output in this turn's log
+    assert reply(store, bot).unverified is True
 
 
 def test_missing_status_line_stays_unverified(settings):

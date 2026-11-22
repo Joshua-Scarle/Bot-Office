@@ -116,6 +116,13 @@ class ClaudeParser(StreamParser):
         self._has_text = False
         self._new_message = False
         self._compact: dict[str, Any] | None = None
+        # 0.12.20: a message stopped by the output-token limit. Claude's result is only the last message, so
+        # after a cut reply it is the short follow-up ("I hit the output limit"); the reply is the text from
+        # the cut message on (all text of this invocation, and where the current message starts in it)
+        self._streamed = False
+        self._all_text = ""
+        self._message_at = 0
+        self._cut_at: int | None = None
 
     def _text(self, text: str) -> list[Event]:
         if not text:
@@ -124,7 +131,12 @@ class ClaudeParser(StreamParser):
             text = "\n\n" + text
         self._new_message = False
         self._has_text = True
+        self._all_text += text
         return [("text", {"text": text})]
+
+    def _stopped(self, reason: Any) -> None:
+        if reason == "max_tokens" and self._cut_at is None:
+            self._cut_at = self._message_at
 
     def feed(self, obj: Any) -> list[Event]:
         if not isinstance(obj, dict) or obj.get("parent_tool_use_id"):
@@ -133,8 +145,12 @@ class ClaudeParser(StreamParser):
         if kind == "stream_event":
             event = obj.get("event") or {}
             etype = event.get("type")
+            self._streamed = True
             if etype == "message_start":
                 self._new_message = True
+                self._message_at = len(self._all_text)
+            elif etype == "message_delta":
+                self._stopped((event.get("delta") or {}).get("stop_reason"))
             elif etype == "content_block_delta":
                 delta = event.get("delta") or {}
                 if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
@@ -146,6 +162,8 @@ class ClaudeParser(StreamParser):
             return []
         if kind == "assistant":
             events: list[Event] = []
+            if not self._streamed:
+                self._message_at = len(self._all_text)  # without partials each message arrives whole here
             content = (obj.get("message") or {}).get("content")
             for block in content if isinstance(content, list) else []:
                 if not isinstance(block, dict):
@@ -167,6 +185,7 @@ class ClaudeParser(StreamParser):
                     )
             self._partial_text = self._partial_thinking = False
             self._new_message = True
+            self._stopped((obj.get("message") or {}).get("stop_reason"))
             return events
         if kind == "system" and obj.get("subtype") == "compact_boundary":
             meta = obj.get("compact_metadata")
@@ -184,6 +203,9 @@ class ClaudeParser(StreamParser):
                     self.api_status = obj["api_error_status"]
                 return [("error", {"message": _clip(self.error_text, 500)})]
             if isinstance(result, str):
+                cut = self._all_text[self._cut_at:].strip() if self._cut_at is not None else ""
+                if len(cut) > len(result.strip()):
+                    result = cut  # the cut reply and what followed it, not the follow-up alone
                 self.final_text = result
                 return [("final", {"text": result})]
         return []

@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
 from . import grouping, isolation, needs_you, notify, safefs, team, vnc
+from . import evidence as evidence_check
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -1714,6 +1715,13 @@ def create_app(
         # whose text an event note is: anything not the owner's is data, never the owner's instructions
         return [{**event, "bot_written": event.get("actor") != "user"} for event in events]
 
+    async def _checked_evidence(evidence: str, job: Job) -> str | None:
+        # 0.12.20: Bot-Office checks what the evidence cites, off the event loop (a link has a bounded timeout)
+        if not evidence:
+            return None
+        return await asyncio.to_thread(evidence_check.check, evidence,
+                                       evidence_check.job_scope(settings.data_dir, store, job))
+
     def _agent_assignment_id(job: Job, ref: str) -> str:
         if ref in ("current", "-"):
             if not job.assignment_id:
@@ -1747,8 +1755,10 @@ def create_app(
 
     @app.post("/v1/agent/assignments/{ref}/status", response_model=Assignment)
     async def agent_assignment_status(ref: str, body: AgentStatus, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
+        evidence = body.evidence.strip()
         return _assignment_call(assignments.report, _agent_assignment_id(job, ref), job.bot_id, job.id,
-                                body.state.strip().lower(), body.note.strip(), body.evidence.strip())
+                                body.state.strip().lower(), body.note.strip(), evidence,
+                                await _checked_evidence(evidence, job))
 
     @app.post("/v1/agent/assignments/{ref}/checkpoint", response_model=Assignment)
     async def agent_assignment_checkpoint(ref: str, body: AgentText, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
@@ -1828,8 +1838,9 @@ def create_app(
 
     @app.post("/v1/agent/tasks/{ref}/status", response_model=Task)
     async def agent_task_status(ref: str, body: AgentStatus, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
+        evidence = body.evidence.strip()
         item = assignments.report(_agent_task_id(job, ref), job.bot_id, job.id, body.state.strip().lower(),
-                                  body.note.strip(), body.evidence.strip())
+                                  body.note.strip(), evidence, await _checked_evidence(evidence, job))
         return assignments.task(item.id)
 
     @app.post("/v1/agent/tasks/{ref}/drop", response_model=Task)

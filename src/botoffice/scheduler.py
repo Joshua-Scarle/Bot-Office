@@ -19,6 +19,7 @@ from pathlib import Path
 from uuid import UUID
 
 from . import attachments, autocontinue, baseline, continuation, failures, git_guard, isolation, needs_you, procs
+from . import evidence as evidence_check
 from . import safefs
 from . import slash as slash_mod
 from . import usage as budgets
@@ -723,9 +724,12 @@ class Scheduler:
                     self.on_needs_login()
             elif status == JobStatus.FAILED and not result.failure_kind:
                 result.failure_kind = failures.classify(result.error, result.exit_code)
+            # 0.12.20: what the done's evidence cites is checked off the event loop (a link has a bounded timeout)
+            checked = (await asyncio.to_thread(self._check_done, job, workspace, result, sink)
+                       if status == JobStatus.SUCCEEDED and job.bot_id else None)
             self._finish(
                 job, workspace, status, exit_code=result.exit_code, log_path=log_path, error=result.error,
-                result=result, retryable=retryable,
+                result=result, retryable=retryable, checked=checked,
             )
         except asyncio.CancelledError:
             if self._stopping:
@@ -801,6 +805,7 @@ class Scheduler:
         error: str | None = None,
         result: RunResult | None = None,
         retryable: bool = True,
+        checked: tuple[str, str | None] | None = None,
     ) -> None:
         reply = workspace / "reply.txt"
         kind = result.failure_kind if result and status != JobStatus.SUCCEEDED else None
@@ -809,10 +814,7 @@ class Scheduler:
         if sink is not None:
             with contextlib.suppress(Exception):
                 sink.flush()  # before a re-queue clears the draft
-        # full audit copy: the model's reply.txt, else the assembled stream text
-        audit = self._read_text(reply, 10**9).strip() if job.bot_id and not (result and result.reply_file_stale) else ""
-        if not audit and sink is not None:
-            audit = sink.assembled
+        audit = self._reply_text(job, workspace, result, sink)
         with contextlib.suppress(OSError):
             log_path.chmod(0o600)
         outcome = None
@@ -827,7 +829,11 @@ class Scheduler:
             if state != "unverified":
                 stated = (state, reason)
             outcome = f"{state}: {reason}" if reason and state != "done" else state
-            verified, evidence = failures.judge_evidence(state, reason)
+            if state == "done" and job.bot_id and (checked is None or checked[0] != reason):
+                # not checked before (or the reason changed): no network here, this runs on the event loop
+                checked = (reason, evidence_check.check(reason, evidence_check.job_scope(
+                    self.settings.data_dir, self.store, job, network=False)))
+            verified, evidence = failures.judge_evidence(state, reason, checked[1] if checked else None)
             if state in failures.NOT_DONE_LABELS:
                 status, kind = JobStatus.INCOMPLETE, failures.INCOMPLETE
                 error = f"{failures.NOT_DONE_LABELS[state]}: {reason or 'no reason given'}"
@@ -1026,6 +1032,35 @@ class Scheduler:
             summary += f", and {count - len(events)} more"
         self.memory.append_worklog(job.bot_id, f"{moment} · {status.value} · {job.source} · {asked} → {answered}"
                                    + (f" · tasks: {summary}" if summary else ""))
+
+    def _reply_text(self, job: Job, workspace: Path, result: RunResult | None, sink: EventSink | None) -> str:
+        """The full audit copy of a turn's reply: the model's reply.txt, else the assembled stream text.
+        0.12.20: when the CLI's final text is only a short note that the reply hit an output or token limit
+        (Claude reports just the last message as its result), the streamed draft holds the real work and
+        is the reply: it is then published cut with the notice, and kept whole on the job."""
+        reply = workspace / "reply.txt"
+        audit = self._read_text(reply, 10**9).strip() if job.bot_id and not (result and result.reply_file_stale) else ""
+        if not audit and sink is not None:
+            audit = sink.assembled
+            draft = sink.draft.strip()
+            if len(audit) <= REPLY_LIMIT < len(draft) and failures.LIMIT_NOTE.search(audit):
+                audit = draft
+        return audit
+
+    def _check_done(self, job: Job, workspace: Path, result: RunResult | None,
+                    sink: EventSink | None) -> tuple[str, str | None] | None:
+        """0.12.20, run in a worker thread: (the reason of a done status line, what evidence.check found
+        for it). Task evidence this turn gave (``bot-task done --evidence``) that could not be checked
+        then is checked again first: the CLI's log, with its command output, exists only now."""
+        scope = evidence_check.job_scope(self.settings.data_dir, self.store, job)
+        try:
+            self.assignments.recheck_evidence(job.id, lambda text: evidence_check.check(text, scope))
+        except Exception:
+            log.exception("task evidence of job %s could not be checked again", job.id)
+        _, state, reason = failures.split_status(self._reply_text(job, workspace, result, sink))
+        if state != "done" or not reason.strip():
+            return None
+        return reason, evidence_check.check(reason, scope)
 
     @staticmethod
     def _read_text(path: Path, limit: int) -> str:

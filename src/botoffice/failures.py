@@ -72,14 +72,13 @@ def split_status(reply: str) -> tuple[str, str, str]:
 
 
 # 0.12.16: a "done" counts as verified only when its status line says what was checked and how.
-# 0.12.20: and the words must name a check, and the check must not be a failed one.
+# 0.12.20: and Bot-Office itself must find what it cites (evidence.check: a file in the bot's workspace, a
+# commit, a link that answers, or test output in this job's own command output), and no cited check failed.
 NO_OP_DONE = re.compile(r"(?:nothing|no)\s+(?:new|to report|changed|to do|found)\b", re.IGNORECASE)
-MIN_EVIDENCE_WORDS = 3
-CHECK_WORDS = re.compile(
-    r"\b(?:ran|run|runs|running|tests?|tested|pytest|unittest|lint|linted|build|built|compiled|passed|passes|passing|"
-    r"checked?|checks?|verified|verify|confirmed?|curl|diff|grep|read|reread|opened|inspected|compared|reviewed|"
-    r"measured|queried|listed|counted|matches|matched|output|exit(?:ed)?|logs?|screenshots?|live|http|status|"
-    r"returned|reproduced|rendered|loaded|fetched|replayed|asserted?|validated?|benchmark(?:ed)?)\b", re.IGNORECASE)
+# 0.12.20: a short final note that the reply was cut by the engine's output limit (the draft is the real reply)
+LIMIT_NOTE = re.compile(
+    r"\b(?:output|token|length|response|reply|message|character)s?[\s-]+(?:token[\s-]+)?(?:limit|maximum|cap)\b"
+    r"|\bmax(?:imum)?[_\s-]?(?:output[_\s-])?tokens?\b|\b(?:was|got|been|is)\s+(?:cut\s+off|truncated)\b", re.IGNORECASE)
 # a check that did not succeed: "3 failed", "tests failed", a traceback, a non-zero exit, an HTTP 4xx/5xx ...
 _NEGATED = re.compile(r"\b(?:0|no|zero|without|not\s+any)\s+(?:test\s+|new\s+)?(?:failures?|failed|failing|fails?|errors?)\b", re.IGNORECASE)
 FAILED_COUNT = re.compile(r"\b[1-9]\d*\s+(?:tests?\s+|checks?\s+)?(?:failed|failing|failures?|errors?)\b", re.IGNORECASE)
@@ -104,13 +103,13 @@ def failed_check(text: str) -> bool:
     return not REPAIRED.search(text, start)
 
 
-def judge_evidence(state: str, reason: str) -> tuple[int | None, str]:
+def judge_evidence(state: str, reason: str, checked: str | None = None) -> tuple[int | None, str]:
     """(verified, evidence) for a finished turn that ended with *state*. verified is None for states
     that claim nothing (not_done, blocked, no status line: that one is "unverified" already); 1 for a
-    done whose reason names a check (three words or more, with a word like ran / tested / checked /
-    output, and no failed result), or a quiet "nothing new"; 0 for a bare done, words that name no check,
-    or a cited check that failed. evidence is the text shown with it; a failed one keeps its text so the
-    owner can see what was cited."""
+    done whose reason cites something Bot-Office checked (*checked*: what evidence.check found), or a
+    quiet "nothing new"; 0 for a bare done, a reason whose files, commits, links or test results could not
+    be checked ("red lunch widget"), or a cited check that failed. evidence is the text shown with it: the
+    cited text (kept when it is not verified, so the owner can see what was cited), plus what was checked."""
     if state != "done":
         return None, ""
     reason = reason.strip()
@@ -118,9 +117,9 @@ def judge_evidence(state: str, reason: str) -> tuple[int | None, str]:
         return 0, reason
     if NO_OP_DONE.match(reason):
         return 1, reason
-    if len(reason.split()) < MIN_EVIDENCE_WORDS or not CHECK_WORDS.search(reason):
-        return 0, ""
-    return 1, reason
+    if not checked:
+        return 0, reason
+    return 1, f"{reason} (Bot-Office checked: {checked})"
 
 
 # 0.12.20: a reply that says the work could not be done is not a done. Checked on the status reason and the

@@ -351,7 +351,7 @@ def test_done_with_evidence_closes(settings):
 
     def done_with_evidence(job):
         holder["scheduler"].assignments.report(job.assignment_id, job.bot_id, job.id, "done",
-                                               evidence="pytest -q: 12 passed")
+                                               evidence="pytest -q: 12 passed", checked="test output 12 passed")
         return "Finished.\nBOT-OFFICE-STATUS: done"
 
     store, scheduler, _, _, item = task_setup(settings, done_with_evidence)
@@ -374,7 +374,12 @@ def test_out_of_turn_done_needs_evidence(settings):
     with pytest.raises(AssignmentError) as refused:
         scheduler.assignments.report(item.id, bot.id, chat.id, "done")
     assert refused.value.status == 409 and "--evidence" in refused.value.detail
-    scheduler.assignments.report(item.id, bot.id, chat.id, "done", evidence="opened the file; 3 pages")
+    # 0.12.20: evidence Bot-Office could not check (the API passes what evidence.check found) is refused too
+    with pytest.raises(AssignmentError) as unchecked:
+        scheduler.assignments.report(item.id, bot.id, chat.id, "done", evidence="opened the file; 3 pages")
+    assert unchecked.value.status == 409 and scheduler.assignments.get(item.id).status != "done"
+    scheduler.assignments.report(item.id, bot.id, chat.id, "done", evidence="opened notes.pdf; 3 pages",
+                                 checked="file notes.pdf exists")
     assert scheduler.assignments.get(item.id).status == "done"
 
 
@@ -493,6 +498,9 @@ def test_bot_task_done_sends_the_evidence(tmp_path):
 
 
 
+CHECKED = "test output 14 passed"
+
+
 def test_evidence_must_be_fresh_and_long_enough_and_is_shown(settings):
     """Evidence given before the task last became active (rewound, reopened, resumed) does
     not count, nor one shorter than evidence_min; the accepted evidence is in the done note, and
@@ -504,7 +512,7 @@ def test_evidence_must_be_fresh_and_long_enough_and_is_shown(settings):
     with pytest.raises(AssignmentError) as short:
         book.report(item.id, bot.id, chat.id, "done", evidence="ok")
     assert short.value.status == 400 and "at least 12" in short.value.detail
-    book.report(item.id, bot.id, chat.id, "done", evidence="pytest -q: 14 passed")
+    book.report(item.id, bot.id, chat.id, "done", evidence="pytest -q: 14 passed", checked=CHECKED)
     done = book.get(item.id)
     assert done.status == "done" and "evidence: pytest -q: 14 passed" in done.status_note
     assert any("evidence: pytest -q: 14 passed" in line for line in system_lines(store, bot))
@@ -518,11 +526,12 @@ def test_evidence_must_be_fresh_and_long_enough_and_is_shown(settings):
     item2 = book.get(item.id)
     assert item2.status == "waiting_on_user"
     [entry] = [i for i in needs_you(store) if i.get("assignment_id") == str(item.id)]
-    assert entry["evidence"] == "pytest -q: 14 passed" and 'last evidence given: "pytest -q: 14 passed"' in entry["ask"]
+    shown = f"pytest -q: 14 passed (Bot-Office checked: {CHECKED})"
+    assert entry["evidence"] == shown and f'last evidence given: "{shown}"' in entry["ask"]
     # the minimum is a setting
     save(store, evidence_min=2)
     book.update(item.id, {"status": "active"})
-    book.report(item.id, bot.id, chat.id, "done", evidence="ok")
+    book.report(item.id, bot.id, chat.id, "done", evidence="ok", checked="file ok exists")
     assert book.get(item.id).status == "done"
 
 
