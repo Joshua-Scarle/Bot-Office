@@ -215,10 +215,16 @@ def _writes_and_runs(text: str) -> str | None:
     except (RecursionError, ValueError, IndexError):
         commands = [[text]]
     for words in commands:
-        for word in words:
+        for position, word in enumerate(words):
             base = posixpath.basename(word).lower()
+            # 0.12.23: a path runs only as the program (first word, or after a wrapper or runner
+            # anywhere before it); `cat > outbox/notes.md` names a path it writes, it runs none
+            runs_path = "/" in word and (all(_ASSIGN.match(before) for before in words[:position]) or any(
+                posixpath.basename(before).lower() in WRAPPERS or posixpath.basename(before).lower() in
+                git_guard.RUNNERS or posixpath.basename(before).lower() in git_guard.SHELLS
+                for before in words[:position]))
             if (base in git_guard.SHELLS or git_guard.INTERPRETERS.match(base) or word in (".", "source")
-                    or "/" in word):
+                    or runs_path):
                 hit = _coarse(text)
                 return f"{hit}, in a command that writes a file and runs one" if hit else None
     return None

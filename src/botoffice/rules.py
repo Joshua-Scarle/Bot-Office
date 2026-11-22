@@ -31,6 +31,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import posixpath
 import re
 import shlex
 import sqlite3
@@ -93,12 +94,54 @@ OUTBOUND = (
     re.compile(r"\bgh\s+(?:release|gist|repo|secret|variable|label|workflow)\s+"
                r"(?:create|delete|edit|upload|set|run|enable|disable|fork|rename|archive)\b"),
     re.compile(r"\b(?:sendmail|mutt|msmtp|swaks|mailx)\b|(?:^|[;&|]\s*)mail\s"),
-    re.compile(r"\bdesk\s+grok\s+send\b"),
     re.compile(r"\bdesk\s+(?:click|type|key)\b"),
     re.compile(r"\b(?:prusa-?link|octoprint(?:-cli)?|octocmd)\b"),
     re.compile(r"\b(?:ssh|scp|sftp)\s"),
     re.compile(r"\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\b(?:docker|podman)\s+push\b"),
 )
+# 0.12.23: `desk grok send --kind result|fyi` reports to the team's own Grok bots (a result or an FYI),
+# not to people: not outbound. A question or blocker, any other form, or a mention it cannot read
+# plainly as such a command (quoted, wrapped, inside another command's text) stays outbound.
+_GROK_SEND = re.compile(r"\bdesk\s+grok\s+send\b")
+GROK_REPORT_KINDS = ("result", "fyi")
+
+
+def _grok_report(words: list[str]) -> bool:
+    """*words* is one plain `desk grok send` command with --kind result or fyi and no --from."""
+    if len(words) < 3 or posixpath.basename(words[0]) != "desk" or words[1:3] != ["grok", "send"]:
+        return False
+    kinds, index = [], 3
+    while index < len(words):
+        word = words[index]
+        if word == "--kind" and index + 1 < len(words):
+            kinds.append(words[index + 1]); index += 2; continue
+        if word.startswith("--kind="):
+            kinds.append(word.split("=", 1)[1]); index += 1; continue
+        if word in ("--to", "--text", "--thread") and index + 1 < len(words):
+            index += 2; continue
+        if word.startswith(("--to=", "--text=", "--thread=")):
+            index += 1; continue
+        return False  # --from, a stray word or option: not the plain report form
+    return len(kinds) == 1 and kinds[0] in GROK_REPORT_KINDS
+
+
+def grok_send_outbound(command: str) -> bool:
+    """The command has a `desk grok send` that is not a plain result/FYI report (fail closed)."""
+    found = len(_GROK_SEND.findall(command))
+    if not found:
+        return False
+    try:
+        commands, nested = git_guard.split_words(command)
+    except (RecursionError, ValueError, IndexError):
+        return True
+    if nested:
+        return True
+    reports = sum(1 for words in commands if _grok_report(words))
+    # every mention must be one of those plain commands (a mention in --text or a wrapper: outbound)
+    return reports != found or any(_GROK_SEND.search(" ".join(words)) and not _grok_report(words)
+                                   for words in commands)
+
+
 _HTTP_WRITE = re.compile(r"(?:\s-X\s*['\"]?(?:POST|PUT|PATCH|DELETE)|\s(?:-d|--data\S*|-F|--form|--upload-file|-T"
                          r"|--post-data|--post-file|--method|--json)\b)", re.IGNORECASE)
 _HTTP_TOOL = re.compile(r"\b(?:curl|wget|http|xh)\b")
@@ -371,7 +414,7 @@ def presets_hit(action: Action, first_party: bool = False) -> list[str]:
         hits += ["outbound", "destructive"]
     elif command:
         after = {kind for kind, start, tail in _AFTER if _after(start, tail, command)}
-        if "outbound" in after or any(pattern.search(command) for pattern in OUTBOUND) or (
+        if "outbound" in after or any(pattern.search(command) for pattern in OUTBOUND) or grok_send_outbound(command) or (
                 _HTTP_TOOL.search(command) and _HTTP_WRITE.search(command) and _non_loopback_hosts(command)):
             hits.append("outbound")
         rm_outside = _RM_RECURSIVE.search(command) and _rm_outside(command)
@@ -558,10 +601,16 @@ class Rules:
         sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
-        if "ask" in effects:
+        # 0.12.23: a specific allow rule (a shell, path, tool or domain pattern for this exact kind of
+        # action) outranks a generic ask *preset* rule (outbound, destructive, nested-agent). An ask
+        # rule with its own pattern (git push, merge, deploy, HTTP writes, mail) still wins, and so do
+        # never rules, the git guard and the send class above. Trigger runs keep the strict profile.
+        specific = any(rule["effect"] == "allow" and rule["kind"] != "preset" for rule in rules)
+        asks = [rule for rule in rules if rule["effect"] == "ask" and not (specific and rule["kind"] == "preset")]
+        if asks:
             return "ask", preset, "a rule asks first"
         if "allow" in effects and not (job.source in STRICT_SOURCES and hits):
-            return "allow", preset, "a rule allows it"
+            return "allow", preset, "a specific rule allows it" if "ask" in effects else "a rule allows it"
         if first_party:
             return "allow", None, "first-party teammate tool"
         from . import approval_classes
