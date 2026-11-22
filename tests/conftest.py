@@ -51,3 +51,10 @@ def _fake_host_cgroup(monkeypatch, tmp_path_factory):
         return fake if proc == procs.PROC else real(proc, root)
 
     monkeypatch.setattr(procs, "own_cgroup", own_cgroup)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sudo_review(monkeypatch):
+    """0.12.28: tests never start a real `claude -p` reviewer; no answer falls back to the card."""
+    from botoffice import sudo_review
+    monkeypatch.setattr(sudo_review, "run_claude", lambda prompt, timeout=sudo_review.TIMEOUT: None)

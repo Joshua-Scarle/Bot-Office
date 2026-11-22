@@ -139,6 +139,17 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.28
+
+**Every bot can use sudo, through an automatic review.** (Owner decision, Nov 22: "give full sudo to everyone with only certain external actions being blocked. Use auto-review tho, not just willy nilly use.")
+
+- **Auto-review instead of a card.** A `sudo` command that no never rule, secrets tripwire, git guard, send class or ask rule (push, merge, deploy, HTTP writes, mail) has stopped goes to a reviewer: `claude -p` (`BOT_OFFICE_SUDO_REVIEW_MODEL`, default `claude-haiku-5-5`) with no tools, settings or MCP judges it against the bot's task and fixed rules and answers allow or block. Allow runs it with no card; block refuses it with the reason. No readable answer within 14 s falls back to the owner's card, as before. A verdict is reused for the same command in the same job for 10 minutes. It runs before any allow rule, so a broad allow rule never lets sudo through unreviewed.
+- **Still the owner's card (no model asked):** changing users, groups or sudo rights (`su`, `sudo -i/-s/-u`), SSH keys and settings, the firewall, secrets and credentials, deleting data (`rm`, `dd of=`, `mkfs`, `DROP`, prune...), production deploys, push, merge and mail, shutdown or reboot, networking changes, Bot-Office itself, login-shell files, and any sudo command over 2000 characters (`HARD_STOPS` in `src/botoffice/sudo_review.py`). Outbound and nested-agent hits, trigger runs and other enabled classes (purchases, devices...) also keep their card.
+- **Per bot:** `sudo_review` (on for every bot; `PATCH /v1/bots/{id}` with the master token; an app admin cannot change it). Off: sudo asks for a card, as before. `allow_sudo` (the isolated layout's no_new_privs switch) is unchanged.
+- **Log:** every sudo command the gate sees, with its outcome (allowed, blocked, card, review-failed) and the reviewer's verdict and reason, is appended to `sudo-review.jsonl` next to the DB (0600, rotated at 5 MB); reviewed ones also appear in the gate log with preset `sudo-review`.
+- **Limits.** A text check, not a sandbox: sudo inside a script file is not seen (the reviewer is told to block what it cannot see). Unattended Codex runs use Codex's own sandbox, where sudo does not work.
+- **Rollback.** One additive column (`bots.sudo_review`, ignored by older code). Check out the `backup/pre-0.12.28-*` tag and restart; sudo then asks for a card again.
+
 ## What changed in 0.12.27
 
 **Memory is a snapshot: bots see how old each note is and check the live source before relying on it.** (Owner report, Nov 22: "Bots seem to quickly fall out of date and don't realize that their context or memories can become outdated".)

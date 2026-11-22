@@ -203,6 +203,8 @@ class Bot(BaseModel):
     team_private: bool = False
     # 0.12.26: app-level admin, set only by the owner (master token). See api "admin" routes
     app_admin: bool = False
+    # 0.12.28: sudo goes to the auto-review instead of a card (off: the card, as before). Owner only
+    sudo_review: bool = True
     # unread state for the owner (filled by GET /v1/bots and the read/unread endpoints)
     unread_count: int = 0
     unread_since: datetime | None = None
@@ -292,6 +294,7 @@ class BotUpdate(_BotFields):
     team_read: Literal["section", "all", "none"] | None = None
     team_private: bool | None = None
     app_admin: bool | None = None  # master token only (this model is never used by an agent route)
+    sudo_review: bool | None = None  # master token only
 
 
 class ModelOption(BaseModel):

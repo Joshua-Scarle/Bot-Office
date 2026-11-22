@@ -290,9 +290,11 @@ def active(store: JobStore) -> list[ApprovalClass]:
     return result
 
 
-def match(store: JobStore, tool: str, command: str) -> ApprovalClass | None:
-    """The first switched-on class this tool call falls in, or None."""
+def match(store: JobStore, tool: str, command: str, skip: tuple[str, ...] = ()) -> ApprovalClass | None:
+    """The first switched-on class this tool call falls in, or None (*skip*: class keys to pass over)."""
     for item in active(store):
+        if item.key in skip:
+            continue
         try:
             if item.matches(tool, command):
                 return item

@@ -52,6 +52,7 @@ BOT_FIELDS = {
     "team_read",
     "team_private",
     "app_admin",
+    "sudo_review",
 }
 IDENTITY_MIGRATION = "crewdeck-identity-v1"
 EFFORT_MIGRATION = "crewdeck-effort-v1"
@@ -792,6 +793,9 @@ class JobStore:
                 # 0.12.26: app-level admin (owner sets it; master token only). Manages bots, tasks and
                 # routines across the office through the agent API; never sudo, rules or approvals
                 ("app_admin", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.12.28: this bot's sudo commands go to the auto-review (sudo_review.py) instead of a
+                # card; on for every bot (the owner's choice, 2026-11-22). Off: sudo asks for a card as before
+                ("sudo_review", "INTEGER NOT NULL DEFAULT 1"),
             ))
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             team.init_schema(db)

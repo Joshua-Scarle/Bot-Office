@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from . import git_guard, github_access, nested_agents, team
+from . import git_guard, github_access, nested_agents, sudo_review, team
 from .domain import Job
 from .store import JobStore, now
 
@@ -618,6 +618,8 @@ class Rules:
         self._approved: dict[str, list[tuple[float, str, str | None]]] = {}
         self._lock = threading.Lock()
         self.tickets = github_access.Tickets()
+        # 0.12.28: the sudo auto-review (sudo_review.py); its log sits next to the DB
+        self.sudo = sudo_review.Reviewer(Path(store.path).parent / "sudo-review.jsonl")
 
     # --- rules CRUD (master token only) ---
 
@@ -729,6 +731,13 @@ class Rules:
             overridable and rule["kind"] == "preset" and rule["id"] not in foreign_ids)]
         if asks:
             return "ask", preset, "a rule asks first"
+        # 0.12.28: sudo, once no never rule, guard, send class or ask rule above stopped it, goes to the
+        # auto-review (or the owner's card for the hard-stop list); before any allow rule, so a broad
+        # allow never runs sudo unreviewed. Trigger runs, outbound or nested-agent hits and bots with
+        # sudo_review off keep the card below.
+        review = self._sudo_route(job, action, hits)
+        if review is not None:
+            return review
         if ("allow" in effects or overridable) and not (job.source in STRICT_SOURCES and hits):
             return "allow", preset, "a specific rule allows it" if overridable else "a rule allows it"
         if first_party:
@@ -741,7 +750,53 @@ class Rules:
             return "ask", preset, f"{preset} action in an unattended {job.source} run"
         return "allow", preset, ""
 
+    def _sudo_route(self, job: Job, action: Action, hits: list[str]) -> tuple[str, str | None, str] | None:
+        if not _is_shell(action) or not sudo_review.is_sudo(action.command):
+            return None
+        if job.source in STRICT_SOURCES or set(hits) - {"destructive"} or not job.bot_id:
+            return None
+        bot = self.store.get_bot(job.bot_id)
+        if bot is None or not getattr(bot, "sudo_review", True):
+            return None
+        stop = sudo_review.hard_stop(action.command)
+        if stop:
+            return "ask", "system", f"sudo for {stop} waits for your approval"
+        from . import approval_classes
+        chosen = approval_classes.match(self.store, action.tool, action.command, skip=("system", "delete"))
+        if chosen is not None:  # another enabled class (purchases, devices ...) keeps its card
+            return "ask", chosen.key, f"{chosen.label.lower()} waits for your approval"
+        return "review", sudo_review.PRESET, "sudo goes to the auto-review"
+
+    def _sudo_review(self, job: Job, action: Action) -> tuple[str, str]:
+        bot = self.store.get_bot(job.bot_id) if job.bot_id else None
+        return self.sudo.review(str(job.id), action.fingerprint, bot_name=getattr(bot, "name", "") or "",
+                                bot_description=getattr(bot, "description", "") or "", task=job.prompt or "",
+                                command=action.command, cwd=action.cwd)
+
+    def _sudo_log(self, job: Job, action: Action, outcome: str, why: str, verdict: str = "",
+                  reason: str = "") -> bool:
+        bot = self.store.get_bot(job.bot_id) if job.bot_id else None
+        return self.sudo.log({"at": now().isoformat(), "bot_id": str(job.bot_id) if job.bot_id else None,
+                       "bot": getattr(bot, "name", None), "job_id": str(job.id), "source": job.source,
+                       "command": action.command[:APPROVAL_LIMIT], "cwd": action.cwd,
+                       "outcome": outcome, "why": why, "verdict": verdict or None, "reason": reason or None})
+
     def decide(self, job: Job, event: dict, provider: str = "") -> Decision:
+        decision = self._decide(job, event, provider)
+        if event and readable(event):
+            action = parse_event(event)
+            if _is_shell(action) and sudo_review.is_sudo(action.command) and decision.preset != sudo_review.PRESET:
+                # every sudo command is logged, whatever stopped or allowed it (the review logs its own)
+                outcome = "allowed" if decision.decision == "allow" else (
+                    "card" if decision.effect == "ask" else "blocked")
+                logged = self._sudo_log(job, action, outcome, f"{decision.effect}: {decision.preset or ''}"
+                                        f" {decision.reason[:160]}".strip())
+                if decision.decision == "allow" and not logged:  # no unlogged sudo
+                    return Decision("deny", "never", "Blocked by Bot-Office: the sudo log could not be written, so "
+                                    "sudo is refused until it can. Tell the user.", decision.preset)
+        return decision
+
+    def _decide(self, job: Job, event: dict, provider: str = "") -> Decision:
         if not readable(event):
             # fail closed: an event the gate cannot read is never allowed (garbage, truncated, unknown shape)
             action = Action(tool="unknown", text=_short(repr(event), 200))
@@ -755,6 +810,22 @@ class Rules:
                 action.data.get("default_source") == "remote":
             git_guard.learn_default(action.cwd, str(action.data.get("remote") or ""),
                                     str(action.data.get("default_branch") or "") or None)
+        if effect == "review":
+            verdict, reason = self._sudo_review(job, action)
+            if verdict == "allow" and self._sudo_log(job, action, "allowed", "auto-review", verdict, reason):
+                self._log(job, provider, "allow", "review", preset, action, None, note=f"auto-review allowed: {reason}")
+                return Decision("allow", "allow", f"auto-review allowed it: {reason}", preset)
+            if verdict == "allow":  # the sudo log could not be written: no unlogged sudo, the card instead
+                verdict, reason = "error", "the sudo log could not be written"
+            if verdict == "block":
+                self._log(job, provider, "deny", "review", preset, action, None, note=f"auto-review blocked: {reason}")
+                self._sudo_log(job, action, "blocked", "auto-review", verdict, reason)
+                return Decision("deny", "never", (
+                    f"Blocked by Bot-Office's sudo auto-review: {reason}. Do not retry it or work around it; if "
+                    "the task really needs it, say why in your reply so the user can decide."), preset)
+            # no readable verdict in time: the owner's card, as before 0.12.28
+            self._sudo_log(job, action, "review-failed", "auto-review", verdict, reason)
+            effect, preset, why = "ask", "system", "sudo (the auto-review could not answer) waits for your approval"
         if effect == "allow":
             return Decision("allow", "allow", why, preset)
         if effect == "never":
@@ -920,6 +991,7 @@ class Rules:
             self._passes.pop(str(job_id), None)
             self._approved.pop(str(job_id), None)
         self.tickets.forget(str(job_id))
+        self.sudo.forget_job(str(job_id))
 
     def log_credential(self, job: Job, ticket: github_access.Ticket) -> None:
         """A GitHub token handed out for a ticket: the operation and repository the controller bound
