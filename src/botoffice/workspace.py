@@ -180,10 +180,25 @@ def build_self(bot: Bot, job: Job, timeout: int | None = None, *, extra: str = "
 - Commands: `bot-msg [--queue] <bot-name-or-id> "<message>"` messages another bot: it reaches the bot right away, even mid-task, or with --queue at its next turn (its answer arrives in your chat); `desk` (see DESKTOP.md); `bot-task` (assignments, wake-ups, your own routines; `bot-task help`). Ask the owner with `desk ask` or `bot-office-ask` and a JSON object with options, optional multiSelect and steps. Use `desk say "<short note>"` to message the owner mid-turn (rule 11). Prefer deciding over asking; do not use your engine’s own question tool. Show an image in chat with `![description](path)` in your final reply. Send the owner a file of any type (PDF, CSV, zip, document, code, HTML...) with `desk attach <file>` / `bot-office-attach <file>` before you finish: it may be anywhere you can read except protected places (tokens, keys, .env files, Bot-Office's own data and other bots' files; refused), but a copy in this job workspace is the safest; up to 6 per reply, 50 MiB each; it appears as a download chip (HTML and SVG also get a sandboxed View button), and an image as a picture.
 - Limits: a turn stops after {minutes}; bot-to-bot: one message per bot pair per 10 seconds, at most 3 back-and-forth messages per exchange; Grok bridge: 30 sends per day, one per minute per bot.
 - Assignments: at most 20 turns / 120 minutes each unless the user sets more. {task_rules()}
-- Automatic continuation: {continuing}
+- Automatic continuation: {continuing}{admin_line(bot)}
 - Wake-ups: 5 minutes to 30 days ahead, at most 5 pending and 24 fired per day. Your own routines: at most 10, at least 15 minutes apart.
 - Files here: RULES-FOR-ALL-BOTS.md and SYSTEM-PROMPT.md (how every bot works, set by the user), instructions.md (your profile, set by the user), memory.md, shared-memory.md, WORKING.md, worklog.md (your recent turns, one line each, newest last), history.md.
 {extra}"""
+
+
+def admin_line(bot: Bot) -> str:
+    """0.12.26: the SELF.md line of a bot the owner made an app admin (empty for every other bot)."""
+    if not getattr(bot, "app_admin", False):
+        return ""
+    return ("\n- App admin (set by the owner): you manage the office inside Bot-Office. You read every bot that is "
+            "not private; edit other bots' profile and work settings (`bot-task admin edit-bot`: name, description, "
+            "icon, model, effort, timeout, notify, digest, steer, chat-only); give a bot a task and start it "
+            "(`bot-task add --for BOT --start`); edit and drop (with a note) bot-made tasks on other lists; list, add, "
+            "edit and remove other bots' bot-made routines (`bot-task routine ... --bot/--for`). Not included: the "
+            "owner's own tasks and routines, private bots, other admins, bots with sudo, engine and instructions, "
+            "access/sudo/scheduled-run/budget/visibility settings, action rules, approvals and the server itself. Approval cards, never-rules and the secrets "
+            "tripwire apply to you as to every bot. Only registered bots (`desk team list`) can hold tasks; inbox "
+            "senders such as CLI engineer runs are not bots.")
 
 
 def task_rules() -> str:

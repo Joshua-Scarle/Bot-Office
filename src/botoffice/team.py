@@ -108,6 +108,8 @@ def can_read(reader: dict, target: dict, sections: dict[str, str]) -> bool:
     section and any bot when either side has no section."""
     if str(reader["id"]) == str(target["id"]) or target["team_private"]:
         return False
+    if reader.get("app_admin"):  # 0.12.26: an app admin reads every bot that is not private
+        return True
     mode = reader["team_read"] or "section"
     if mode == "all":
         return True
@@ -192,7 +194,10 @@ def team_list(db: sqlite3.Connection, reader_id: str) -> dict:
         else:
             entry["readable"] = False
         bots.append(entry)
-    return {"untrusted": True, "you": reader["name"], "team_read": reader["team_read"] or "section", "bots": bots}
+    return {"untrusted": True, "you": reader["name"], "team_read": reader["team_read"] or "section",
+            "app_admin": bool(reader["app_admin"]), "bots": bots,
+            "note": "Only registered bots are listed. Senders such as CLI engineer runs post to inboxes but are "
+                    "not bots: they cannot be messaged or given tasks here."}
 
 
 def team_status(db: sqlite3.Connection, reader: sqlite3.Row, target: sqlite3.Row) -> dict:

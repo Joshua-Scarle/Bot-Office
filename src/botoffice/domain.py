@@ -201,6 +201,8 @@ class Bot(BaseModel):
     # (section: its own section and unsectioned bots; all; none), and whether others may read it at all
     team_read: Literal["section", "all", "none"] = "section"
     team_private: bool = False
+    # 0.12.26: app-level admin, set only by the owner (master token). See api "admin" routes
+    app_admin: bool = False
     # unread state for the owner (filled by GET /v1/bots and the read/unread endpoints)
     unread_count: int = 0
     unread_since: datetime | None = None
@@ -289,6 +291,7 @@ class BotUpdate(_BotFields):
     chat_only: bool | None = None
     team_read: Literal["section", "all", "none"] | None = None
     team_private: bool | None = None
+    app_admin: bool | None = None  # master token only (this model is never used by an agent route)
 
 
 class ModelOption(BaseModel):

@@ -121,7 +121,10 @@ def _line(entry: dict) -> str:
 def render(tool: str, data: dict, bot: str = "") -> str:
     if tool == "team_list":
         lines = [_line(entry) for entry in data.get("bots", [])] or ["(no other bots)"]
-        return wrap_untrusted("team_list", "\n".join(lines))
+        head = ("You are an app admin: you read every bot that is not private, and manage bots, tasks and "
+                "routines (bot-task admin).\n" if data.get("app_admin") else "")
+        tail = "\n(Only registered bots are listed; CLI engineer runs that post to inboxes are not bots.)"
+        return head + wrap_untrusted("team_list", "\n".join(lines)) + tail
     if tool == "team_status":
         return wrap_untrusted(f"team_status:{bot}", json.dumps(
             {key: value for key, value in data.items() if key != "untrusted"}, indent=1, ensure_ascii=False))

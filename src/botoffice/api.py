@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
 from . import grouping, isolation, needs_you, notify, recall, safefs, team, vnc
@@ -236,6 +236,22 @@ class AgentAssignmentCreate(BaseModel):
 TASK_STAGES = {"not_started", "in_progress", "completed", "dropped"}
 
 
+class AgentAdminBotUpdate(BaseModel):
+    """0.12.26: what an app admin may change on a bot. Anything else (access, sudo, scheduled-run
+    profile, budgets, team visibility, admin) is refused by the model (extra fields are an error)."""
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+    icon: str | None = Field(default=None, max_length=16)
+    model: str | None = Field(default=None, max_length=100)
+    effort: str | None = Field(default=None, max_length=16)
+    job_timeout: int | None = Field(default=None, ge=60, le=3600)
+    notify: bool | None = None
+    digest: bool | None = None
+    bot_steer: bool | None = None
+    chat_only: bool | None = None
+
+
 class AgentTaskCreate(AgentAssignmentCreate):
     # 0.11.4: lands open unless the bot asks to start one on its own list (or a child it delegates)
     start: bool = False
@@ -355,6 +371,7 @@ class AgentWakeup(BaseModel):
 
 class AgentRoutine(BaseModel):
     name: str | None = Field(default=None, max_length=80)
+    for_bot: str | None = Field(default=None, max_length=200)  # 0.12.26: app admin only
     cron: str = Field(min_length=1, max_length=100)
     prompt: str = Field(min_length=1, max_length=20_000)
     enabled: bool = True
@@ -1006,7 +1023,8 @@ def create_app(
         if "description" in fields:
             fields["description"] = (fields["description"] or "").strip()
         for key in ("name", "instructions", "default_provider", "model", "icon", "cli_access", "notify", "allow_sudo",
-                    "scheduled_runs", "daily_budget", "digest", "bot_steer", "chat_only", "team_read", "team_private"):
+                    "scheduled_runs", "daily_budget", "digest", "bot_steer", "chat_only", "team_read", "team_private",
+                    "app_admin"):
             if key in fields and fields[key] is None:
                 del fields[key]
         if "daily_budget" in fields:
@@ -1022,6 +1040,8 @@ def create_app(
             fields["chat_only"] = int(fields["chat_only"])
         if "team_private" in fields:
             fields["team_private"] = int(fields["team_private"])
+        if "app_admin" in fields:
+            fields["app_admin"] = int(fields["app_admin"])
         if fields.get("job_timeout") is not None and fields["job_timeout"] > settings.max_turn_timeout:
             raise HTTPException(status_code=422, detail=f"job_timeout must be at most {settings.max_turn_timeout} seconds")
         if "notify" in fields:
@@ -1634,6 +1654,47 @@ def create_app(
             raise HTTPException(status_code=401, detail="a running job's agent token is required")
         return job
 
+    def _target_bot(ref: str) -> Bot:
+        """Another bot by name, id or alias; the 404 says that only registered bots can hold tasks
+        (inbox senders such as CLI engineer runs are not bots)."""
+        found = store.find_bot(ref.strip())
+        if not found:
+            raise HTTPException(status_code=404, detail=(
+                f"bot not found: no registered bot is named {ref.strip()[:80]!r}. `desk team list` shows the "
+                "bots; an inbox sender (for example a CLI engineer run) is not a bot and cannot be given tasks"))
+        return found
+
+    def _admin(job: Job, target: Bot | None = None) -> Bot:
+        """The caller's bot if it is an app admin, else 403; with *target*, also 403 unless the admin may
+        reach that bot: never a private bot, another admin or a bot with owner-granted sudo."""
+        bot = store.get_bot(job.bot_id)
+        if bot is None or not bot.app_admin:
+            raise HTTPException(status_code=403, detail="only an app admin bot may do this (the owner sets app_admin)")
+        if target is not None and target.id != bot.id:
+            if target.team_private or target.app_admin or target.allow_sudo:
+                raise HTTPException(status_code=403, detail="a private bot, another admin or a bot with sudo is "
+                                                            "changed only by the owner")
+        return bot
+
+    @app.patch("/v1/agent/bots/{bot_ref}", response_model=Bot)
+    async def agent_admin_update_bot(bot_ref: str, body: AgentAdminBotUpdate,
+                                     job: Job = Depends(agent_scope)) -> Bot:  # noqa: B008
+        """0.12.26: an app admin edits a bot's profile and work settings. Never its engine, instructions
+        (the owner's voice), access or safety settings (cli_access, allow_sudo, scheduled_runs, budgets,
+        team visibility, app_admin), and never a private bot, another admin or a bot with sudo; those stay
+        with the owner (master token)."""
+        _admin(job)
+        target = _target_bot(bot_ref)
+        _admin(job, target)
+        fields = body.model_dump(exclude_unset=True)
+        if not fields:
+            raise HTTPException(status_code=400, detail="nothing to change")
+        try:
+            update = BotUpdate(**fields)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=jsonable_encoder(exc.errors(include_url=False))) from exc
+        return await update_bot(target.id, update)
+
     @app.post("/v1/agent/bots", response_model=Bot, status_code=201)
     async def agent_create_bot(body: BotCreate, job: Job = Depends(agent_scope)) -> Bot:  # noqa: B008
         """0.12.20: a running bot creates a bot; it lands in the creator's group unless a group is given."""
@@ -1728,10 +1789,7 @@ def create_app(
     async def agent_create_assignment(body: AgentAssignmentCreate, job: Job = Depends(agent_scope)) -> Assignment:  # noqa: B008
         target = None
         if body.for_bot:
-            found = store.find_bot(body.for_bot)
-            if not found:
-                raise HTTPException(status_code=404, detail="bot not found")
-            target = found.id
+            target = _target_bot(body.for_bot).id
         parent = _agent_assignment_id(job, body.parent_id) if body.parent_id else None
         fields = body.model_dump(exclude={"for_bot", "parent_id"})
         return _assignment_call(assignments.agent_create, job.bot_id, fields, for_bot=target, parent_id=parent)
@@ -1800,10 +1858,7 @@ def create_app(
     async def agent_create_task(body: AgentTaskCreate, job: Job = Depends(agent_scope)) -> Task:  # noqa: B008
         target = None
         if body.for_bot:
-            found = store.find_bot(body.for_bot)
-            if not found:
-                raise HTTPException(status_code=404, detail="bot not found")
-            target = found.id
+            target = _target_bot(body.for_bot).id
         parent = _agent_task_id(job, body.parent_id) if body.parent_id else None
         fields = body.model_dump(exclude={"for_bot", "parent_id"})
         item = assignments.agent_create(job.bot_id, fields, for_bot=target, parent_id=parent, job_id=job.id)
@@ -1865,8 +1920,14 @@ def create_app(
         routine = store.get_routine(routine_id)
         if routine is None:
             raise HTTPException(status_code=404, detail="routine not found")
-        if routine.bot_id != job.bot_id or routine.created_by != "bot":
-            raise HTTPException(status_code=403, detail="a bot changes only the routines it made itself")
+        if routine.created_by != "bot":
+            raise HTTPException(status_code=403, detail="the owner's routines are changed only by the owner")
+        if routine.bot_id != job.bot_id:
+            owner = store.get_bot(routine.bot_id)
+            caller = store.get_bot(job.bot_id)
+            if owner is None or caller is None or not caller.app_admin:
+                raise HTTPException(status_code=403, detail="a bot changes only the routines it made itself")
+            _admin(job, owner)
         return routine
 
     def _routine_gap(cron: str) -> None:
@@ -1875,14 +1936,26 @@ def create_app(
             raise HTTPException(status_code=400, detail="a bot's routine must fire at most every 15 minutes")
 
     @app.get("/v1/agent/routines")
-    async def agent_list_routines(job: Job = Depends(agent_scope)) -> list[Routine]:  # noqa: B008
+    async def agent_list_routines(bot: str | None = None, job: Job = Depends(agent_scope)) -> list[Routine]:  # noqa: B008
+        """Your routines; an app admin (0.12.26) may list another bot's with ``bot=<name or id>``."""
+        if bot:
+            target = _target_bot(bot)
+            if target.id != job.bot_id:
+                _admin(job, target)
+                return [r for r in store.list_routines(target.id) if r.created_by == "bot"]
         return store.list_routines(job.bot_id)
 
     @app.post("/v1/agent/routines", response_model=Routine, status_code=201)
     async def agent_create_routine(body: AgentRoutine, job: Job = Depends(agent_scope)) -> Routine:  # noqa: B008
         _routine_gap(body.cron)
+        owner = job.bot_id
+        if body.for_bot:
+            target = _target_bot(body.for_bot)
+            if target.id != job.bot_id:
+                _admin(job, target)  # 0.12.26: an app admin makes a routine for another bot (still "made by bot")
+                owner = target.id
         try:
-            return store.create_routine(job.bot_id, body.cron, body.prompt, body.enabled, name=body.name,
+            return store.create_routine(owner, body.cron, body.prompt, body.enabled, name=body.name,
                                         created_by="bot", max_bot_routines=MAX_BOT_ROUTINES)
         except OverflowError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc

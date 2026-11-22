@@ -51,6 +51,7 @@ BOT_FIELDS = {
     "chat_only",
     "team_read",
     "team_private",
+    "app_admin",
 }
 IDENTITY_MIGRATION = "crewdeck-identity-v1"
 EFFORT_MIGRATION = "crewdeck-effort-v1"
@@ -788,6 +789,9 @@ class JobStore:
                 # 0.12.18 teammate tools: team_read section|all|none; team_private hides the bot from reads
                 ("team_read", "TEXT NOT NULL DEFAULT 'section'"),
                 ("team_private", "INTEGER NOT NULL DEFAULT 0"),
+                # 0.12.26: app-level admin (owner sets it; master token only). Manages bots, tasks and
+                # routines across the office through the agent API; never sudo, rules or approvals
+                ("app_admin", "INTEGER NOT NULL DEFAULT 0"),
             ))
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             team.init_schema(db)

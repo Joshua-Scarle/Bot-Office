@@ -443,7 +443,8 @@ class Assignments:
 
     def create(self, bot_id: UUID | str, fields: dict, *, created_by: str = "user",
                parent_id: UUID | str | None = None, max_children: int | None = None, origin: str = "form",
-               source_job_id: UUID | str | None = None, parent_owner: UUID | str | None = None) -> Assignment:
+               source_job_id: UUID | str | None = None, parent_owner: UUID | str | None = None,
+               admin_start: UUID | str | None = None) -> Assignment:
         """A new task on *bot_id*'s list. With *parent_owner* (a bot adding a subtask) the parent is
         checked in the insert's transaction: it exists, is that bot's, is open and not too deep."""
         start = bool(fields.pop("start", False))
@@ -461,6 +462,8 @@ class Assignments:
                     self._check_allowance(db, created_by, fields.get("budget_turns", BOT_BUDGET_TURNS))
                 if parent_owner is not None and parent_id:
                     self._check_parent(db, parent_id, parent_owner)
+                if start and admin_start is not None and not self._admin_reach(db, admin_start, bot_id):
+                    start = False  # 0.12.26: the admin start is re-checked in the insert's transaction
                 if max_children is not None and parent_id and db.execute(
                     "SELECT COUNT(*) FROM assignments WHERE parent_id=? AND status NOT IN ('done','dropped')",
                     (str(parent_id),)).fetchone()[0] >= max_children:
@@ -782,15 +785,37 @@ class Assignments:
             # another bot's list: it does not reorder it or jump its queue
             fields.pop("position", None)
             fields["priority"] = cross_bot_priority(fields.get("priority") or choice(TASK_DEFAULT_PRIORITY))
-        if target != str(bot_id) and not (parent_id and choice(CROSS_BOT_SUBTASK_START) == "allow"):
-            fields["start"] = False
+        admin_start = None
         with closing(self.store._connect()) as db:
+            # an app admin (0.12.26) may start the task it gives another bot (assigning work); create()
+            # checks that again inside its transaction
+            if target != str(bot_id) and not (parent_id and choice(CROSS_BOT_SUBTASK_START) == "allow"):
+                if self._admin_reach(db, bot_id, target):
+                    admin_start = bot_id
+                else:
+                    fields["start"] = False
             if self._chat_only(db, target):
                 fields["start"] = False  # a chat-only bot gets no loop turns; the owner starts it
         # the parent and the open-children cap are checked inside the insert's transaction
         return self.create(target, fields, created_by=actor_of(bot_id), parent_id=parent_id,
                            max_children=MAX_CHILDREN if parent_id else None, origin="bot", source_job_id=job_id,
-                           parent_owner=bot_id if parent_id else None)
+                           parent_owner=bot_id if parent_id else None, admin_start=admin_start)
+
+    @staticmethod
+    def _is_admin(db: sqlite3.Connection, bot_id: UUID | str) -> bool:
+        """0.12.26: the owner made this bot an app admin (bots.app_admin, master token only)."""
+        row = db.execute("SELECT app_admin FROM bots WHERE id=?", (str(bot_id),)).fetchone()
+        return bool(row and row[0])
+
+    @staticmethod
+    def _admin_reach(db: sqlite3.Connection, admin_id: UUID | str, target_id: UUID | str) -> bool:
+        """May the app admin *admin_id* use its admin powers on *target_id*'s list? Not on a private bot,
+        another admin or a bot the owner gave sudo (those stay the owner's). False for a non-admin."""
+        if not Assignments._is_admin(db, admin_id):
+            return False
+        row = db.execute("SELECT team_private, app_admin, allow_sudo FROM bots WHERE id=?", (str(target_id),)).fetchone()
+        return bool(row) and not row["team_private"] and not row["allow_sudo"] and (
+            not row["app_admin"] or str(target_id) == str(admin_id))
 
     def _assignee_row(self, db: sqlite3.Connection, assignment_id: UUID | str, bot_id: UUID | str) -> sqlite3.Row:
         row = self._row(db, assignment_id)
@@ -823,7 +848,8 @@ class Assignments:
                             raise AssignmentError(403, "only the user changes the done-when of a task the user created")
                         if choice(BOT_EDIT_OWNER_TASKS) == "off" and {"title", "goal"} & set(fields):
                             raise AssignmentError(403, "only the user changes the title and goal of a task the user created")
-                elif row["created_by"] == actor:
+                elif row["created_by"] == actor or (row["created_by"] != "user" and self._admin_reach(db, bot_id, row["bot_id"])):
+                    # its own hand-off, or (0.12.26, app admin) any bot-made task; the owner's tasks stay the owner's
                     allowed = BOT_TASK_FIELDS
                     if fields.get("priority"):
                         fields["priority"] = cross_bot_priority(fields["priority"])
@@ -861,6 +887,9 @@ class Assignments:
                     raise AssignmentError(409, f"task is {row['status']}")
                 if row["created_by"] == actor:
                     pass
+                elif row["bot_id"] != str(bot_id) and row["created_by"] != "user" and self._admin_reach(db, bot_id, row["bot_id"]):
+                    if not note:  # 0.12.26: an app admin drops another bot's bot-made task, saying why
+                        raise AssignmentError(400, "an admin dropping another bot's task needs a note saying why")
                 elif row["bot_id"] == str(bot_id):
                     if row["created_by"] == "user":
                         if drop_rule() != "with_note":
