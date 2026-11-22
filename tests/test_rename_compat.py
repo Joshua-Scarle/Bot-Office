@@ -7,7 +7,7 @@ from botoffice.desk import resolve_slot
 
 
 def test_agentdesk_is_a_compat_alias_for_botoffice():
-    assert agentdesk.__version__ == botoffice.__version__ == "0.12.19"
+    assert agentdesk.__version__ == botoffice.__version__ == "0.12.20"
 
 
 def test_first_env_prefers_bot_office_names(monkeypatch):
