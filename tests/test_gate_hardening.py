@@ -226,15 +226,120 @@ def test_gate_script_url_check(url, ok):
     assert GATE["_loopback"](url) is ok
 
 
-def test_fingerprint_names_job_workspace_by_role():
-    # the resume turn after an approval runs in a new job workspace: the grant must still match
-    def at(cwd):
-        event = bash("codex exec -")
+def test_fingerprint_names_only_the_jobs_own_workspace_by_role():
+    # the resume turn after an approval runs in a new job workspace: the grant must still match there,
+    # but not in another job's workspace or a sibling path (Codex review rounds 1-6)
+    a, b, other = ("73fe95b9-3562-49e0-bb24-33473aff9092", "471410be-de46-4de6-91c2-0c41b0dd8aca",
+                   "0b4c6f2e-9a1d-4c55-8f0e-2d7e6a3b9c10")
+    root = "/srv/data/workspaces"
+
+    def at(job, cwd, command="codex exec -"):
+        event = bash(command)
         event["cwd"] = cwd
-        return parse_event(event).fingerprint
-    a = "/srv/data/workspaces/73fe95b9-3562-49e0-bb24-33473aff9092"
-    b = "/srv/data/workspaces/471410be-de46-4de6-91c2-0c41b0dd8aca"
-    assert at(a) == at(b)
-    assert at(a + "/sub") == at(b + "/sub") != at(a)
-    assert at("/home/u/repo-one") != at("/home/u/repo-two")
-    assert at("/srv/data/workspaces/not-a-uuid") != at("/srv/data/workspaces/other")
+        action = parse_event(event)
+        action.workspace = f"{root}/{job}" if job else ""
+        return action.fingerprint
+    assert at(a, f"{root}/{a}") == at(b, f"{root}/{b}")
+    assert at(a, f"{root}/{a}/sub") == at(b, f"{root}/{b}/sub") != at(a, f"{root}/{a}")
+    assert at(a, f"{root}/{a}") != at(b, f"{root}/{other}")  # another job's workspace stays exact
+    assert at(a, f"{root}/{a}") != at("", f"{root}/{b}")
+    assert at(a, "/home/u/repo-one") != at(b, "/home/u/repo-two")
+    assert at(a, f"/tmp/workspaces/{a}") != at(b, f"/tmp/workspaces/{b}")  # not under data_dir
+    assert at(a, f"/tmp{root}/{a}/f") != at(b, f"/tmp{root}/{b}/f")  # a path that merely contains it
+    assert at(a, "/x", f"cat /tmp{root}/{a}/f") != at(b, "/x", f"cat /tmp{root}/{b}/f")
+    assert at(a, "/x", f"cat x{root}/{a}") != at(b, "/x", f"cat x{root}/{b}")
+    assert at(a, "/x", f"cat --in={root}/{a}/f") != at(b, "/x", f"cat --in={root}/{b}/f")  # exact: fail closed
+    assert at(a, f"{root}/{a.upper()}") != at(b, f"{root}/{b.upper()}")  # another directory on Linux
+    # the workspace named in the command
+    assert at(a, "/x", f"cat {root}/{a}/out.md") == at(b, "/x", f"cat {root}/{b}/out.md")
+    assert at(a, "/x", f"cat {root}/{a}/out.md") != at(b, "/x", f"cat {root}/{other}/out.md")
+    assert at(a, "/x", f"cd {root}/{a}; ls {root}/{a}/o") == at(b, "/x", f"cd {root}/{b}; ls {root}/{b}/o")
+    assert at(a, "/x", f"(cd {root}/{a}&&ls)") == at(b, "/x", f"(cd {root}/{b}&&ls)")
+    assert at(a, "/x", f"cd '{root}/{a}' && ls") == at(b, "/x", f"cd '{root}/{b}' && ls")
+    assert at(a, "/x", f'cd "{root}/{a}"') == at(b, "/x", f'cd "{root}/{b}"')
+    assert at(a, "/x", f"cat '{root}/{a};x'") != at(b, "/x", f"cat '{root}/{b};x'")
+    # a sibling path is not the workspace
+    for suffix in (".bak", "0", "-x", "_x", "~", ":x", ",backup", ")", "]", "}", "\\x", ";x", " backup",
+                   "' backup'", '" backup"', "'x'"):
+        assert at(a, f"{root}/{a}{suffix}") != at(b, f"{root}/{b}{suffix}")
+        if suffix not in (" backup", ")", ";x"):  # unquoted, those end the shell word: the workspace itself
+            assert at(a, "/x", f"cat {root}/{a}{suffix}/f") != at(b, "/x", f"cat {root}/{b}{suffix}/f")
+    # a literal path cannot spell the marker
+    for literal in ("%W", "<job-workspace>", "%25W"):
+        assert at(a, f"{root}/{a}/f") != at(b, literal + "/f")
+        assert at(a, "/x", f"cat {root}/{a}") != at(b, "/x", f"cat {literal}")
+
+    def mcp(job, target):
+        action = parse_event({"tool_name": "mcp__fs__read", "tool_input": {"target": target, "n": [target]}})
+        action.workspace = f"{root}/{job}"
+        return action.fingerprint
+    assert mcp(a, f"{root}/{a}/o.md") == mcp(b, f"{root}/{b}/o.md")
+    for suffix in (" backup", '"', "'", ".bak"):  # a structured value is the whole path
+        assert mcp(a, f"{root}/{a}{suffix}") != mcp(b, f"{root}/{b}{suffix}")
+    def write(job, content):
+        action = parse_event({"tool_name": "Write", "tool_input": {"file_path": f"{root}/{job}/r.md",
+                                                                   "content": content}})
+        action.workspace = f"{root}/{job}"
+        return action.fingerprint
+    assert write(a, "same") == write(b, "same")
+    assert write(a, f"{root}/{a}/report") != write(b, f"{root}/{b}/report")  # the bytes written stay exact
+    for prefix in ("/tmp", "x", " ", "file://"):
+        assert mcp(a, f"{prefix}{root}/{a}/o.md") != mcp(b, f"{prefix}{root}/{b}/o.md")
+
+
+def test_decide_binds_the_action_to_its_job_workspace(tmp_path, monkeypatch):
+    seen = []
+
+    def evaluate(self, job, action):
+        seen.append(action.workspace)
+        return "allow", None, ""
+    monkeypatch.setattr(Rules, "evaluate", evaluate)
+    job = type("J", (), {"id": "73fe95b9-3562-49e0-bb24-33473aff9092", "bot_id": None})()
+    Rules(JobStore(tmp_path / "db.sqlite3"), workspaces=tmp_path / "workspaces").decide(job, bash("ls"))
+    Rules(JobStore(tmp_path / "db2.sqlite3")).decide(job, bash("ls"))
+    assert seen == [str(tmp_path / "workspaces" / "73fe95b9-3562-49e0-bb24-33473aff9092"), ""]
+
+
+def test_an_approved_grant_is_consumed_in_the_resume_turns_own_workspace(tmp_path):
+    # end to end: the origin asks from its workspace, the resume turn runs the same command from its
+    # own new one and consumes the grant; the origin's workspace (now another job's) does not match
+    store, bot = make_store(tmp_path)
+    root = tmp_path / "workspaces"
+    rules = Rules(store, workspaces=root)
+
+    def at(job, where, command="git push origin main"):
+        event = bash(command.format(W=root / str(where)))
+        event["cwd"] = str(root / str(where))
+        return rules.decide(job, event)
+    origin = running(store, bot)
+    approval = at(origin, origin.id, "git -C {W} push origin main").approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE)
+    resume = store.get(rules.approve(approval)["resume_job_id"])
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET status='running' WHERE id=?", (str(resume.id),))
+    resume = store.get(resume.id)
+    assert at(resume, origin.id, "git -C {W} push origin main").decision == "deny"
+    assert rules.get(approval)["status"] == "approved"
+    granted = at(resume, resume.id, "git -C {W} push origin main")
+    assert granted.decision == "allow" and granted.approval_id == approval
+    assert rules.get(approval)["consumed_by"] == str(resume.id)
+
+
+def test_fingerprint_resolves_the_workspaces_root_but_never_the_job_directory(tmp_path):
+    # a linked data_dir still names the job's workspace by role; a job directory swapped for a link
+    # does not make the link's target the workspace
+    real = tmp_path / "real"
+    (real / "workspaces").mkdir(parents=True)
+    (tmp_path / "data").symlink_to(real)
+    a, b = "73fe95b9-3562-49e0-bb24-33473aff9092", "471410be-de46-4de6-91c2-0c41b0dd8aca"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (real / "workspaces" / b).symlink_to(elsewhere)
+
+    def read(job, path):
+        action = parse_event({"tool_name": "Read", "tool_input": {"file_path": path}})
+        action.workspace = str(tmp_path / "data" / "workspaces" / job)
+        return action.fingerprint
+    assert read(a, f"{real}/workspaces/{a}/f") == read(b, f"{tmp_path}/data/workspaces/{b}/f")
+    assert read(a, f"{real}/workspaces/{a}/f") != read(b, f"{elsewhere}/f")
+

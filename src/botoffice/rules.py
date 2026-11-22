@@ -147,6 +147,7 @@ class Action:
     text: str = ""  # the input's location strings (no content fields), for the secrets tripwire
     data: dict = field(default_factory=dict)  # the tool's input, for the git guard (connector tools)
     cwd: str | None = None  # the CLI's working directory (the bot's workspace), when the hook says
+    workspace: str = ""  # the job's own workspace, <data_dir>/workspaces/<job id> (decide sets it)
 
     @property
     def detail(self) -> str:
@@ -174,8 +175,10 @@ class Action:
         data = self.data
         if _is_shell(self):
             data = {key: value for key, value in data.items() if key not in _SHELL_COSMETIC}
-        body = json.dumps([self.tool.lower(), self.command.strip(), sorted(self.paths), sorted(self.urls),
-                           _norm_dir(self.cwd), _canonical(data)])
+        own, own_command = _own_workspace(self.workspace)
+        body = json.dumps([self.tool.lower(), own_command(self.command.strip()), sorted(own(p) for p in self.paths),
+                           sorted(own(u) for u in self.urls), own(_norm_dir(self.cwd)),
+                           _canonical(_map_strings(data, own))])
         return hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -190,21 +193,68 @@ def _canonical(value: Any) -> str:
         return repr(value)
 
 
-# a job's own workspace (<data_dir>/workspaces/<job uuid>): each turn, including the resume turn
-# after an approval, runs in a new one, so the fingerprint names it by role, not by uuid
-_JOB_WORKSPACE = re.compile(r"^(?P<root>.*/workspaces)/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-                            r"(?P<rest>/.*)?$")
-
-
 def _norm_dir(path: str | None) -> str:
     import posixpath
-    if not path:
-        return ""
-    path = posixpath.normpath(path)
-    match = _JOB_WORKSPACE.match(path)
-    if match:
-        return f"{match['root']}/<job-workspace>{match['rest'] or ''}"
-    return path
+    return posixpath.normpath(path) if path else ""
+
+
+def _own_workspace(workspace: str):
+    """The job's own workspace (<data_dir>/workspaces/<job id>, exactly as the scheduler makes it, or
+    its resolved path) named by role in the cwd, command, paths, urls and arguments: each turn,
+    including the resume turn after an approval, runs in a new one. Only that directory is renamed,
+    and only where a value starts with it and ends there or goes on with "/" (any other character may
+    name another path); in a shell command, only when every occurrence is so placed in its shell word.
+    Anything else stays exact (no match: a new card, fail closed). "%" is escaped first, so no
+    literal input spells the marker "%W". Returns the renamers for plain strings and for a command."""
+    if not workspace:
+        return _escape_marker, _escape_marker
+    forms = {workspace.rstrip("/")}
+    try:  # resolve the controller's workspaces root only: the job directory itself is never followed
+        forms.add(str(Path(workspace).parent.resolve() / Path(workspace).name))
+    except (OSError, RuntimeError):
+        pass
+    named = "(?:" + "|".join(re.escape(_escape_marker(form)) for form in sorted(forms, key=len, reverse=True)) + ")"
+    exact = re.compile("^" + named + r"(?=/|$)")
+    anywhere = re.compile(named)
+    in_command = re.compile(r"(?<![^\s'\";&|()<>])" + named + r"(?=$|[/\s'\";&|()<>])")
+
+    def own(value: str) -> str:
+        return exact.sub("%W", _escape_marker(value))
+
+    def own_command(command: str) -> str:
+        command = _escape_marker(command)
+        found = len(anywhere.findall(command))
+        if not found:
+            return command
+        try:
+            lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            words = list(lexer)  # unquoted ;&|()<> end a word
+        except ValueError:
+            return command
+        if sum(len(exact.findall(word)) for word in words) != found or len(in_command.findall(command)) != found:
+            return command
+        return in_command.sub("%W", command)
+    return own, own_command
+
+
+def _escape_marker(value: str) -> str:
+    return value.replace("%", "%25")
+
+
+def _map_strings(value: Any, rename, depth: int = 0) -> Any:
+    """The tool's arguments with every string value renamed, except content fields (CONTENT_KEYS:
+    the bytes written stay exact)."""
+    if depth > 20:
+        return value
+    if isinstance(value, str):
+        return rename(value)
+    if isinstance(value, dict):
+        return {key: item if key in CONTENT_KEYS else _map_strings(item, rename, depth + 1)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_map_strings(item, rename, depth + 1) for item in value]
+    return value
 
 
 def _strings(value: Any, out: list[str], depth: int = 0) -> None:
@@ -416,8 +466,10 @@ def _related(one: str, other: str) -> bool:
 
 
 class Rules:
-    def __init__(self, store: JobStore, approval_ttl_min: int = 30, extra_secrets: tuple[str, ...] = ()):
+    def __init__(self, store: JobStore, approval_ttl_min: int = 30, extra_secrets: tuple[str, ...] = (),
+                 workspaces: Path | None = None):
         self.store = store
+        self.workspaces = workspaces  # <data_dir>/workspaces: a job's own workspace is named by role
         self.approval_ttl = timedelta(minutes=approval_ttl_min)
         self.extra_secrets = extra_secrets
         # job id -> [(expiry, the exact updates approved)]: see _give_pass
@@ -527,6 +579,8 @@ class Rules:
             self._log(job, provider, "deny", "never", None, action, None)
             return Decision("deny", "never", "Blocked by Bot-Office: the tool call could not be read, so it is refused.")
         action = parse_event(event)
+        if self.workspaces is not None:
+            action.workspace = str(self.workspaces / str(job.id))
         effect, preset, why = self.evaluate(job, action)
         if action.tool == git_guard.PUSH_TOOL and isinstance(action.data, dict) and \
                 action.data.get("default_source") == "remote":
