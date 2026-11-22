@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 from collections.abc import Callable
@@ -107,7 +108,10 @@ class Turns:
         except ValueError as exc:
             raise TurnError(str(exc)) from exc
         if target.default_provider == "claude" and result[2].get("delivery") != "steer":
-            self._log_claude_use(result[1])  # a steer is part of a turn already logged
+            # a steer is part of a turn already logged. Best effort: the message is stored, so nothing after this
+            # may raise (a raise reads as "not delivered" and would free its team send reservation and card)
+            with contextlib.suppress(OSError):
+                self._log_claude_use(result[1])
         return result
 
     def post_message(
