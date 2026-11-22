@@ -28,7 +28,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
-from . import grouping, isolation, needs_you, notify, recall, safefs, team, vnc
+from . import failures, grouping, isolation, needs_you, notify, recall, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -1780,6 +1780,46 @@ def create_app(
             return str(UUID(ref))
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="assignment not found") from exc
+
+    @app.get("/v1/agent/approvals")
+    async def agent_approvals(ids: str = "", job: Job = Depends(agent_scope)) -> list[dict]:  # noqa: B008
+        """0.12.24 live source: the bot's own approval cards (no ids: the latest 20), or the current
+        status of the cards named in *ids* (another bot's card: its status only). Read-only: a pending
+        card past its expiry reads as expired (the watchdog persists that)."""
+        moment = datetime.now(UTC).isoformat()
+        def shape(item: dict) -> dict:
+            status = item.get("status")
+            if status == "pending" and item.get("expires_at") and str(item["expires_at"]) <= moment:
+                status = "expired"
+            elif status == "approved" and item.get("grant_expires_at") and str(item["grant_expires_at"]) <= moment:
+                status = "approved, grant expired"
+            if str(item.get("bot_id")) != str(job.bot_id):
+                return {"id": item["id"], "status": status}
+            out = {key: item.get(key) for key in ("id", "created_at", "decided_at", "expires_at")}
+            return {**out, "status": status, "mine": True, "summary": failures.clip(item.get("summary") or "", 200)}
+        with closing(store._connect()) as db:
+            if ids.strip():
+                wanted = []
+                for part in ids.replace(",", " ").split()[:20]:
+                    number = part.lstrip("#")
+                    if not re.fullmatch(r"[0-9]{1,18}", number) or int(number) == 0:
+                        raise HTTPException(status_code=400, detail=f"not an approval number: {part[:20]}")
+                    wanted.append(int(number))
+                found = {row["id"]: dict(row) for n in wanted
+                         for row in db.execute("SELECT * FROM approvals WHERE id=?", (n,))}
+                # another bot's card only if this bot may read that bot (team ACL); else it does not exist
+                reader = db.execute("SELECT * FROM bots WHERE id=?", (str(job.bot_id),)).fetchone()
+                sections = team.section_map(db)
+                def visible(item: dict) -> bool:
+                    if str(item.get("bot_id")) == str(job.bot_id):
+                        return True
+                    target = db.execute("SELECT * FROM bots WHERE id=?", (str(item.get("bot_id")),)).fetchone()
+                    return bool(reader and target and team.can_read(dict(reader), dict(target), sections))
+                return [shape(found[n]) if n in found and visible(found[n]) else {"id": n, "status": "not_found"}
+                        for n in wanted]
+            rows = db.execute("SELECT * FROM approvals WHERE bot_id=? ORDER BY id DESC LIMIT 20",
+                              (str(job.bot_id),)).fetchall()
+        return [shape(dict(row)) for row in rows]
 
     @app.get("/v1/agent/assignments")
     async def agent_list_assignments(job: Job = Depends(agent_scope)) -> list[Assignment]:  # noqa: B008

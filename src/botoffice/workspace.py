@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import attachments, baseline as baseline_mod, context, continuation, failures, isolation, safefs
+from . import attachments, baseline as baseline_mod, context, continuation, failures, freshness, isolation, safefs
 from .assignments import BOT_ASSIGNMENTS_PER_DAY, BOT_BUDGET_MINUTES, BOT_BUDGET_TURNS, Assignments, _limit, drop_rule
 from .cron import _matches, parse_cron, to_cron_time
 from .catalog import ENGINE_LABELS
@@ -380,7 +380,8 @@ def layers_block(layers: dict[str, str]) -> str:
 
 
 def build_prompt(bot: Bot, job: Job, working: str = "", recent: str = "", seed: str | None = None,
-                 handoff: tuple[str, str] | None = None, layers: dict[str, str] | None = None) -> str:
+                 handoff: tuple[str, str] | None = None, layers: dict[str, str] | None = None,
+                 working_saved: str = "") -> str:
     """Prompt for a fresh session: rules plus small context (WORKING.md and the last few messages).
 
     *seed* (first fresh session after an edit) replaces the recent messages: the complete
@@ -424,7 +425,7 @@ turns), {history_hint}, DESKTOP.md (desktop helper). Before interpreting a short
 {layers_block(layers or {})}
 {STANDING_RULES_NOTICE}
 
-Your WORKING.md (working state saved from earlier sessions):
+Your WORKING.md (working state saved from earlier sessions{f"; last saved {working_saved}" if working_saved else ""}):
 {working.strip() or "(empty)"}
 
 {chat}
@@ -774,9 +775,50 @@ def self_extra(store: JobStore, bot: Bot, job: Job, working: str, moment: dateti
     from . import approval_classes
     approvals = approval_classes.self_note(store, job.provider or bot.default_provider, bot.cli_access)
     extra += approvals
-    stable = json.dumps([stable_peers, peer_count, stable_routines, len(tasks), not_started, paths, approvals],
+    cards = pending_cards_line(store, bot)
+    extra += cards
+    stable = json.dumps([stable_peers, peer_count, stable_routines, len(tasks), not_started, paths, approvals, cards],
                         ensure_ascii=False)
     return extra, tasks, stable
+
+
+STALE_GAP = timedelta(hours=6)
+WORKING_TAG_BUDGET = 600  # characters of ⟦⟧ tags allowed in the inline WORKING.md
+
+
+def pending_cards_line(store: JobStore, bot: Bot) -> str:
+    """SELF.md, 0.12.24: the bot's approval cards that are pending right now (live, from the database)."""
+    try:
+        with contextlib.closing(store._connect()) as db:
+            rows = db.execute("SELECT id, created_at FROM approvals WHERE bot_id=? AND status='pending' "
+                              "AND (expires_at IS NULL OR expires_at>?) ORDER BY id",
+                              (str(bot.id), datetime.now(UTC).isoformat())).fetchall()
+    except Exception:  # noqa: BLE001
+        return ""
+    cards = ", ".join(f"#{row['id']} (since {context.et_label(row['created_at'])})" for row in rows[:10]) or "none"
+    if len(rows) > 10:
+        cards += f", and {len(rows) - 10} more"
+    return (f"- Your approval cards pending now (live, as this turn started): {cards}. "
+            "`bot-task approvals [N ...]` checks any card's current status.\n")
+
+
+def time_note(store: JobStore, bot: Bot, job: Job, moment: datetime) -> str:
+    """0.12.24: the current time, and how long since the bot's previous turn (a resumed session does not
+    know that time passed, so what it remembers may be out of date)."""
+    line = f"\nNow: {context.et_label(moment)}."
+    with contextlib.suppress(Exception), contextlib.closing(store._connect()) as db:
+        # the latest finished turn: other jobs, or an earlier attempt of this one (a retry)
+        row = db.execute("SELECT MAX(last) AS last FROM (SELECT MAX(finished_at) AS last FROM jobs WHERE bot_id=? "
+                         "AND id!=? AND started_at IS NOT NULL UNION ALL SELECT MAX(a.finished_at) FROM job_attempts a "
+                         "JOIN jobs j ON j.id=a.job_id WHERE j.bot_id=?)",
+                         (str(bot.id), str(job.id), str(bot.id))).fetchone()
+        last = context._when(row["last"]) if row and row["last"] else None
+        if last is not None and moment - last >= STALE_GAP:
+            gap = moment - last
+            span = f"{gap.days}d" if gap.days else f"{gap.seconds // 3600}h"
+            line += (f" Your previous turn ended {span} ago ({context.et_label(last)}): what you remember from it, "
+                     "or read in notes and handoffs, may be out of date.")
+    return line + "\n"
 
 
 def prepare_bot_workspace(
@@ -821,7 +863,15 @@ def prepare_bot_workspace(
     inline = None
     if current and seed is not None:
         inline = history if len(history.encode()) <= SEED_INLINE_BYTES else ""
-    working = cap_working(memory.read_working(bot.id))
+    working_raw = cap_working(memory.read_working(bot.id))
+    # 0.12.24 freshness: every note shown to the bot carries its date, age and author; stripped on save
+    now = moment or datetime.now(UTC)
+    working_file = freshness.annotate(working_raw, memory.working_path(bot.id), now, bot.name)
+    # inline: no header (it names the time) and a bounded overhead, so the prompt stays small and stable
+    working = freshness.annotate(working_raw, memory.working_path(bot.id), now, bot.name, with_header=False)
+    if len(working) > len(working_raw) + WORKING_TAG_BUDGET:
+        working = working_raw
+    saved = freshness.saved_at(memory.working_path(bot.id)) if working_raw.strip() else ""
     ids = current.attachments if current else []
     all_paths = _stable_paths(store, bot, ids)
     # only real images go to the provider's image input; uploaded files are named in the prompt as data
@@ -842,9 +892,11 @@ def prepare_bot_workspace(
     steered = steer_note([m for m in steers or [] if m.id not in seen], by_message)
     layers = baseline_mod.effective_layers(store)
     job.layer_texts = layers
-    prompt = build_prompt(bot, job, working, recent, inline, handoff, layers) + retry + steered + status_block + brief
+    clock = time_note(store, bot, job, now)
+    prompt = (build_prompt(bot, job, working, recent, inline, handoff, layers, saved) + clock + retry + steered
+              + status_block + brief)
     layer_notes = "".join(layer.resume_note(layers[layer.key], memory.bot_dir(bot.id)) for layer in baseline_mod.LAYERS)
-    resume_prompt = (build_resume_prompt(job) + retry + steered + status_block + settings_note(bot, memory.bot_dir(bot.id), stable_extra)
+    resume_prompt = (build_resume_prompt(job) + clock + retry + steered + status_block + settings_note(bot, memory.bot_dir(bot.id), stable_extra)
                      + rules_note(shared, memory.bot_dir(bot.id)) + layer_notes
                      + brief)
     note = "\n" + images_note(store, bot) + "\n" if indexed or all_paths else ""
@@ -868,8 +920,8 @@ def prepare_bot_workspace(
         **{layer.file_name: LAYER_HEADER.format(name=layer.file_name) + layers[layer.key]
            for layer in baseline_mod.LAYERS},
         "instructions.md": bot.instructions,
-        "memory.md": bot_memory,
-        "shared-memory.md": shared,
+        "memory.md": freshness.annotate(bot_memory, memory.bot_path(bot.id), now, bot.name),
+        "shared-memory.md": freshness.annotate(shared, memory.shared_path, now, bot.name),
         "history.md": history,
         "DESKTOP.md": DESKTOP_MD.format(slot=job.slot) if job.slot else NO_DESKTOP_MD,
         "SELF.md": build_self(bot, job, timeout, extra=extra),
@@ -877,7 +929,7 @@ def prepare_bot_workspace(
         "CONTEXT.md": context.build_file(store, bot.id, job.id),
         "prompt.txt": prompt,
         "prompt-resume.txt": resume_prompt,
-        WORKING_FILE: working,
+        WORKING_FILE: working_file,
     }
     for name, text in files.items():
         # a retried job reuses its workspace: replace any link the bot left, never write through it

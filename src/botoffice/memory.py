@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
-from . import isolation, safefs
+from . import freshness, isolation, safefs
 
 MAX_MEMORY_BYTES = 1_000_000
 WORKLOG_LINES = 300
@@ -166,10 +166,16 @@ class Memory:
     def read_bot(self, bot_id: UUID | str) -> str:
         return self._read(self.bot_path(bot_id))
 
-    def write_bot(self, bot_id: UUID | str, text: str) -> None:
+    def _write_dated(self, path: Path, text: str, who: str) -> None:
+        """Replace *path* (caller holds its lock) and date the notes that changed (freshness)."""
+        before, mtime = self._read(path), freshness._mtime(path)
+        _atomic_write(path, text)
+        freshness.record(path, before, text, who, mtime)
+
+    def write_bot(self, bot_id: UUID | str, text: str, who: str = freshness.OWNER) -> None:
         _private_dir(self.data_dir / "bots")
         with self._lock(self.bot_dir(bot_id)):
-            _atomic_write(self.bot_path(bot_id), text)
+            self._write_dated(self.bot_path(bot_id), text, who)
 
     def prepare_merge(self, path: Path, base: str, ours: str) -> tuple[str, Merge]:
         """The merge against the file as it is now, computed without the lock (run it off the
@@ -206,7 +212,9 @@ class Memory:
                 for text in conflicts:
                     merged = merged.rstrip("\n") + f"\n\n<!-- merged from job {job_id} -->\n{text}\n"
             if merged != current:
+                mtime = freshness._mtime(path)
                 _atomic_write(path, merged)
+                freshness.record(path, current, merged, who, mtime)
             return merged, conflict
 
     def worklog_path(self, bot_id: UUID | str) -> Path:
@@ -228,9 +236,10 @@ class Memory:
     def read_working(self, bot_id: UUID | str) -> str:
         return self._read(self.working_path(bot_id))
 
-    def write_working(self, bot_id: UUID | str, text: str) -> None:
+    def write_working(self, bot_id: UUID | str, text: str, who: str = "Bot-Office") -> None:
         _private_dir(self.data_dir / "bots")
-        _atomic_write(self.working_path(bot_id), text)
+        # no lock (as before 0.12.24): its callers hold the chat lock, and a lock failure must not drop a reply
+        self._write_dated(self.working_path(bot_id), text, who)
 
     def ensure_shared(self) -> None:
         if not self.shared_path.exists():
@@ -246,6 +255,6 @@ class Memory:
         with safefs.lock(directory, _dir_mode(directory)):
             yield
 
-    def write_shared(self, text: str) -> None:
+    def write_shared(self, text: str, who: str = freshness.OWNER) -> None:
         with self._lock(self.shared_path.parent):
-            _atomic_write(self.shared_path, text)
+            self._write_dated(self.shared_path, text, who)

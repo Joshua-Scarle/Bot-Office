@@ -19,7 +19,7 @@ from pathlib import Path
 from uuid import UUID
 
 from . import attachments, autocontinue, baseline, continuation, failures, git_guard, isolation, needs_you, procs
-from . import safefs
+from . import freshness, safefs
 from . import slash as slash_mod
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
@@ -561,7 +561,7 @@ class Scheduler:
             return
         restore = self.store.pending_working_restore(bot_id)
         if restore is not None and self.store.get_bot(bot_id):
-            self.memory.write_working(bot_id, restore)
+            self.memory.write_working(bot_id, restore, who="")  # restored: a known note keeps its date
         self.store.complete_session_reset(bot_id, generation)
 
     def _reap_tasks(self) -> None:
@@ -1058,11 +1058,14 @@ class Scheduler:
         if safefs.is_file(working):
             # bounded working state survives compaction and session loss, even after a failed
             # turn; dropped if an edit archived the turn, and snapshotted so an edit can roll it back
-            text = cap_working(self._read_text(working, MAX_MEMORY_BYTES))
+            # the ⟦date · age · by⟧ tags shown in the workspace are never stored (freshness)
             with self.store.chat_lock:
                 before = self.memory.read_working(job.bot_id)
+                # read with room for the tags; the limit applies to the stripped text
+                text = cap_working(freshness.strip(self._read_text(working, 2 * MAX_MEMORY_BYTES), before))
                 if text != before and self.store.snapshot_working(job.bot_id, job.id, before):
-                    self.memory.write_working(job.bot_id, text)
+                    bot = self.store.get_bot(job.bot_id)
+                    self.memory.write_working(job.bot_id, text, who=bot.name if bot else "a bot")
         if status not in (JobStatus.SUCCEEDED, JobStatus.INCOMPLETE):
             if status in (JobStatus.CANCELLED, JobStatus.NEEDS_LOGIN):
                 line = f"Job {status.value}: {failures.clip(error) or status.value}"
@@ -1150,7 +1153,10 @@ class Scheduler:
         edits = []
         for name, target, base in (("memory.md", self.memory.bot_path(job.bot_id), old_memory),
                                    ("shared-memory.md", self.memory.shared_path, old_shared)):
-            ours = self._read_own_file(workspace / name, MAX_MEMORY_BYTES)
+            # room for the tags (an untouched tagged copy is at most MAX_MEMORY_BYTES); the limit applies
+            # to the stripped text, so a bot's append near the limit is not cut short by the tags
+            ours = self._read_own_file(workspace / name, 2 * MAX_MEMORY_BYTES)
+            ours = freshness.strip(ours, base)[:MAX_MEMORY_BYTES] if ours is not None else None
             if ours is not None and ours != base:
                 edits.append((target, base, ours))
         return edits
