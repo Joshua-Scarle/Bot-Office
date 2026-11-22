@@ -225,10 +225,17 @@ def test_a_delivery_that_fails_frees_its_reservation(settings, monkeypatch):
 
         def broken(*args, **kwargs):
             raise RuntimeError("database is locked")
-        monkeypatch.setattr(d.app.state.scheduler.turns, "post_agent_message", broken)
+        turns = d.app.state.scheduler.turns
+        post = turns.post_agent_message
+        monkeypatch.setattr(turns, "post_agent_message", broken)
         with pytest.raises(RuntimeError):
             d.client.post(f"/v1/bots/{sender.id}/message-agent", headers=agent, json={"to": "Target", "body": "hi"})
         assert [s["status"] for s in sends(d)] == ["failed"]  # it did not go out, so it does not count
+        monkeypatch.setattr(turns, "post_agent_message", post)
+        monkeypatch.setattr(d.store, "get_agent_message", broken)  # fails after the message was committed
+        with pytest.raises(RuntimeError):
+            d.client.post(f"/v1/bots/{sender.id}/message-agent", headers=agent, json={"to": "Target", "body": "hi"})
+        assert [s["status"] for s in sends(d)] == ["failed", "sent"] and len(delivered(d)) == 1  # it went out: counts
 
 
 # ---- the registry -----------------------------------------------------------------------------------------
@@ -282,7 +289,10 @@ def test_a_new_read_tool_is_one_register_call(settings, extra_read_tool):
 
 def test_call_tool_validates_against_the_schema():
     class Client:
+        modes = []
+
         def message(self, bot, text, mode):
+            self.modes.append(mode)
             return {"id": "1", "status": "queued", "mode": mode}
     assert '"status": "queued"' in team_client.call_tool(Client(), "team_message", {"bot": "B", "text": "t"})
     for bad in ({"bot": "B"}, {"bot": "B", "text": "t", "mode": "shout"}, {"bot": 3, "text": "t"}):
@@ -303,3 +313,9 @@ def test_call_tool_validates_against_the_schema():
     team_client.call_tool(reader, "team_read", {"bot": "B", "limit": 0, "extra": "ignored"})
     team_client.call_tool(reader, "team_ask", {"bot": "B", "text": "t", "timeout_s": 999})
     assert reader.limit == 1 and reader.timeout_s == team.ASK_MAX_S  # clamped to the schema's bounds
+    team_client.call_tool(reader, "team_read", {"bot": "B", "limit": None})
+    assert reader.limit == 20  # JSON null is the default, never passed through
+    assert '"status": "queued"' in team_client.call_tool(Client(), "team_message", {"bot": "B", "text": "t", "mode": None})
+    assert Client.modes[-1] == "steer"
+    with pytest.raises(team_client.TeamClientError):
+        team_client.call_tool(Client(), "team_message", {"bot": None, "text": "t"})

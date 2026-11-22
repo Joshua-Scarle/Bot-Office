@@ -524,9 +524,13 @@ class Scheduler:
                     if job and sender.id != target.id else 0
                 try:
                     self.turns.post_agent_message(sender, target, text, data["job_id"])
-                except Exception:  # not delivered (refused or failed): the reservation stops counting
+                except TurnError:  # refused before anything was stored: the reservation stops counting
                     if slot:
                         team.settle_send(self.store, slot, False)
+                    raise
+                except Exception:  # failed: it stops counting unless the message was stored before the error
+                    if slot:
+                        team.settle_unless_stored(self.store, slot, text)
                     raise
             except team.TeamError as exc:
                 self.store.add_message(sender.id, "system", f"Could not send message: {exc.detail}", source="inbox")

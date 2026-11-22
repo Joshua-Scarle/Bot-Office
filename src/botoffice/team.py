@@ -573,6 +573,15 @@ def settle_send(store, row_id: int, delivered: bool) -> None:
             db.execute("UPDATE team_sends SET status='failed' WHERE id=?", (int(row_id),))
 
 
+def settle_unless_stored(store, row_id: int, text: str) -> None:
+    """After an unexpected error from the delivery: settle_send(..., False) only if the message was not stored. It
+    may have been committed before the error (a read-back failing), and then it still counts and keeps its card."""
+    with closing(store._connect()) as db:
+        db.execute("UPDATE team_sends SET status='failed' WHERE id=? AND NOT EXISTS (SELECT 1 FROM agent_messages a "
+                   "WHERE a.from_bot=team_sends.sender_bot AND a.to_bot=team_sends.target_bot AND a.body=? "
+                   "AND a.created_at>=team_sends.created_at)", (int(row_id), text))
+
+
 def send_gate(store, rules, job, target_id: str, kind: str, ref: str = "", text: str = "", delivery: str = "steer") -> int:
     """The one check every job send goes through (the HTTP routes and the inbox-file path): the sender's mode
     (its team_messaging setting, outbound ask rules, owner rules on the tool), then reserve_send. Returns the reserved

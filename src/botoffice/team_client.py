@@ -153,7 +153,9 @@ def call_tool(client: TeamClient, name: str, args: dict) -> str:
         raise TeamClientError(f"unknown tool {name}")
     values = []
     for key, spec in tool.properties.items():
-        value = args.get(key, tool.defaults.get(key))
+        value = args.get(key)
+        if value is None:  # missing or JSON null: the default
+            value = tool.defaults.get(key)
         kind = spec.get("type")
         if key in tool.required and (value is None or isinstance(value, str) and not value.strip()):
             raise TeamClientError(f"{key} is required")
