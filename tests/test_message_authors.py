@@ -69,7 +69,10 @@ def test_assignment_continue_steps_stay_out_of_the_chat(settings):
     shown = store.list_messages(bot.id)
     assert not [m for m in shown if m.text.startswith("Continue ")]
     assert not [m for m in shown if m.text.startswith("Not done (continuing)")]
-    assert [m.text for m in shown if m.role == "assistant"] == ["step one", "all done"]
+    # 0.12.24: a step that queued the next one is work in progress, not a chat message (kept, hidden)
+    assert [m.text for m in shown if m.role == "assistant"] == ["all done"]
+    assert [m.text for m in store.list_messages(bot.id, include_hidden=True)
+            if m.role == "assistant" and m.hidden] == ["step one"]
     assert all(m.author != "owner" for m in shown if m.role == "user")
     everything = store.list_messages(bot.id, include_archived=True)
     hidden = [m for m in everything if m.hidden]

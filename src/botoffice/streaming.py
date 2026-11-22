@@ -44,6 +44,7 @@ class EventSink:
         # the last segment can be the reply when the stream reports no final one
         self.segment = ""
         self._boundary = False
+        self._tool_last = False  # a tool call came after the last text
         self.streamed = False  # the engine streamed text or steps: its raw log is not a reply
         self.final_text: str | None = None
         self._pending: tuple[str, str] | None = None
@@ -61,10 +62,10 @@ class EventSink:
     @property
     def assembled(self) -> str:
         """Final reply if the stream reported one, else the last text segment (never the narration). Text
-        followed by a tool call or thinking with nothing after it was narration too: no reply then."""
+        followed by a tool call with no text after it was narration too: no reply then."""
         if self.final_text is not None:
             return self.final_text.strip()
-        return "" if self._boundary else self.segment.strip()
+        return "" if self._tool_last else self.segment.strip()
 
     # --- emitting ---
     def emit(self, kind: str, **data: Any) -> None:
@@ -87,9 +88,10 @@ class EventSink:
         self.flush()
         if kind == "text":
             self.draft = str(data.get("text") or "")
-            self.segment, self._boundary = self.draft, False  # a whole-message replace is one segment
+            self.segment, self._boundary, self._tool_last = self.draft, False, False  # a whole-message replace is one segment
         elif kind in ("tool", "thinking"):
             self._boundary = True
+            self._tool_last = self._tool_last or kind == "tool"
         elif kind == "final":
             self.final_text = str(data.get("text") or "")
         self._write(kind, data)
@@ -99,6 +101,7 @@ class EventSink:
     def _add_segment(self, text: str) -> None:
         if self._boundary:
             self.segment, self._boundary = "", False
+        self._tool_last = False
         self.segment += text
 
     def _schedule(self) -> None:

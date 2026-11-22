@@ -122,7 +122,8 @@ def test_partial_reply_without_final_separates_segments_once(settings):
     lines = [assistant("One.", partial=True), assistant("One."), TOOL, assistant("Two", partial=True),
              assistant(".", partial=True), assistant("Two."), {"type": "thinking", "text": "hm"}]
     job = stored_reply(settings, [TOOL, *lines])
-    assert job["status"] == "failed" and job["reply_text"] == "One.\n\nTwo."
+    # 0.12.24: with no final reply, the kept reply is the last segment: "One." came before a tool call
+    assert job["status"] == "failed" and job["reply_text"] == "Two."
 
 
 def test_final_event_and_reply_file_win_over_the_draft(settings):

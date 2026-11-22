@@ -57,7 +57,10 @@ def test_blocked_status_line_makes_the_job_incomplete(settings):
 def test_not_done_and_waiting_on_user(settings):
     store, bot, job = run_turn(settings, "Started.\nBOT-OFFICE-STATUS: not_done - tests still failing")
     # 0.11.10: not_done continues automatically, so the line is kept but not shown in the chat
-    assert job.status == JobStatus.INCOMPLETE and chat(store, bot)[-1] == ("assistant", "Started.")
+    # 0.12.24: so is its reply (a step of the work; the finishing turn reports the whole task)
+    assert job.status == JobStatus.INCOMPLETE and ("assistant", "Started.") not in chat(store, bot)
+    assert [(m.text, m.hidden) for m in store.list_messages(bot.id, include_hidden=True)
+            if m.role == "assistant"] == [("Started.", True)]
     assert [(m.role, m.text) for m in store.list_messages(bot.id, include_hidden=True)
             if m.role == "system"] == [("system", "Not done: tests still failing")]
 
