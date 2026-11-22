@@ -246,22 +246,58 @@ def test_admission_ticket_returns_when_the_work_never_started(settings):
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             loop.set_default_executor(pool)
             gate = threading.Event()
-            blocker = loop.run_in_executor(None, gate.wait)  # the only worker is busy, so the recall queues
-            task = asyncio.ensure_future(recall.run_async(d.store, job, "kiwi", "self", 5))
-            await asyncio.sleep(0.1)
-            assert _tickets_free() == 3  # admitted and queued
-            task.cancel()
-            await asyncio.sleep(0.1)
-            assert _tickets_free() == 4  # cancelled before it started: the ticket came back at once
-            gate.set()
+            try:
+                blocker = loop.run_in_executor(None, gate.wait)  # the only worker is busy, so the recall queues
+                task = asyncio.ensure_future(recall.run_async(d.store, job, "kiwi", "self", 5))
+                await asyncio.sleep(0.1)
+                assert _tickets_free() == 3  # admitted and queued
+                task.cancel()
+                await asyncio.sleep(0.1)
+                assert _tickets_free() == 4  # cancelled before it started: the ticket came back at once
+            finally:
+                gate.set()  # never leave the only worker blocked, whatever failed above
             await blocker
             assert (await recall.run_async(d.store, job, "kiwi", "self", 5))["count"] == 1
             assert _tickets_free() == 4
             pool.shutdown(wait=True)
-            try:  # a submission that fails (executor shut down) returns the ticket too
+            with pytest.raises(RuntimeError):  # a submission that fails (executor shut down) returns the ticket too
                 await recall.run_async(d.store, job, "kiwi", "self", 5)
-            except RuntimeError:
-                pass
             assert _tickets_free() == 4
+
+        asyncio.run(scenario())
+
+
+def test_admission_ticket_stays_held_while_a_cancelled_search_still_runs(settings, monkeypatch):
+    import asyncio
+    import threading
+
+    with Desk(settings) as d:
+        bot = d.bot("Reader")
+        add_message(d.store, bot, "user", "lime note")
+        job, _ = run_job(d.store, bot)
+        started, release = threading.Event(), threading.Event()
+
+        def slow(store, job, query, scope="self", limit=10):
+            started.set()
+            release.wait(10)
+            return {"count": 0}
+
+        monkeypatch.setattr(recall, "run", slow)
+
+        async def scenario() -> None:
+            task = asyncio.ensure_future(recall.run_async(d.store, job, "lime", "self", 5))
+            try:
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+                task.cancel()
+                await asyncio.sleep(0.1)
+                assert _tickets_free() == 3  # the worker is still running: its ticket is not freed by the cancel
+            finally:
+                release.set()
+            for _ in range(100):
+                if _tickets_free() == 4:
+                    break
+                await asyncio.sleep(0.05)
+            assert _tickets_free() == 4  # returned by the worker when it ended
 
         asyncio.run(scenario())
