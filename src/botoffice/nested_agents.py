@@ -201,6 +201,7 @@ def _coarse(text: str) -> str | None:
     return None
 
 
+_REDIRECT_OPERAND = re.compile(r"(?<![<>&\d])\d?[<>][<>|&]*[ \t]*(?:'[^'\n]*'|\"[^\"\n]*\"|[^\s;&|<>()'\"]+)")
 _WRITES = re.compile(r">|<<|\btee\b|\b(?:cp|mv|install|dd)\b|\bopen\s*\([^)]{0,300}['\"][wax]|write_text|writeFile|\.write\(", re.S)
 
 
@@ -211,14 +212,26 @@ def _writes_and_runs(text: str) -> str | None:
     if not _WRITES.search(text[:git_guard.SCAN_LIMIT]) or not _coarse_text_hit(text):
         return None
     try:
-        commands, _ = git_guard.split_words(git_guard._heredocs(text)[0] if "<<" in text else text)
+        plain = git_guard._heredocs(text)[0] if "<<" in text else text
+        # 0.12.24: redirect operands are not argv (`cat > outbox/notes.md`, `>log ./run.sh`)
+        commands, _ = git_guard.split_words(_REDIRECT_OPERAND.sub(" ", plain))
     except (RecursionError, ValueError, IndexError):
         commands = [[text]]
     for words in commands:
+        program, wrapped = True, False  # the next word is in program position; a wrapper came before
         for word in words:
             base = posixpath.basename(word).lower()
+            # a path runs only as the program (first word, after assignments, shell keywords, or
+            # anywhere after a wrapper, runner or shell); elsewhere it is an argument
+            runs_path = "/" in word and (program or wrapped)
+            if _ASSIGN.match(word) or word in _SYNTAX:
+                pass
+            elif base in WRAPPERS or base in git_guard.RUNNERS or base in git_guard.SHELLS:
+                wrapped, program = True, False
+            else:
+                program = False
             if (base in git_guard.SHELLS or git_guard.INTERPRETERS.match(base) or word in (".", "source")
-                    or "/" in word):
+                    or runs_path):
                 hit = _coarse(text)
                 return f"{hit}, in a command that writes a file and runs one" if hit else None
     return None

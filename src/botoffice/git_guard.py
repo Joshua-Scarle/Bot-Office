@@ -120,6 +120,8 @@ class Ctx:
     moved_out: bool = False  # without a root: a `cd` left for somewhere not known to be inside
     commands: int = 0
     sends: list = None  # fix3 #4: why a part of the command sends something out (the "send" class)
+    # 0.12.24: a redirect next to an agent name (`<<<claude`): the word list may not be what runs
+    no_subscription: bool = False
 
     def __post_init__(self):
         if self.sends is None:
@@ -279,6 +281,8 @@ def scan_text(text: str, ctx: Ctx, depth: int = 0) -> None:
     """Raise _Hit if any command in shell *text* is guarded."""
     if depth > MAX_DEPTH:
         _hit("a command nested too deeply to check")
+    if _REDIRECTED_AGENT.search(text):
+        ctx.no_subscription = True
     if "<<" in text:
         text, documents = _heredocs(text)
         for header, body in documents:
@@ -348,7 +352,8 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
             for item in rest:
                 _hook_env(item.split("=", 1)[0].lstrip("-"))
             if program == "env" and any(a in ("-i", "--ignore-environment", "-") or a.startswith("-u") or
-                                        a.startswith("--unset") for a in rest):
+                                        a.startswith("--unset") for a in rest) and not (
+                    subscription_env(rest) and not ctx.no_subscription):
                 _hit("env that clears the run's environment (the push check and the GitHub credential path)")
         if program in ("bot-office-credential", "bot-office-git-hook") or program.startswith("git-credential"):
             _hit("calling Bot-Office's GitHub credential helper or push check directly")
@@ -382,6 +387,42 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
                 if any(ch.isspace() for ch in item):
                     scan_text(item, ctx, depth + 1)
     return
+
+
+# 0.12.24: the owner's subscription rule. A nested claude/codex review run drops the API key so the
+# child bills the subscription login: `env -u ANTHROPIC_API_KEY claude ...` keeps the rest of the
+# run's environment (the push check, the credential path), so it is not "clearing" it.
+SUBSCRIPTION_UNSET = "ANTHROPIC_API_KEY"
+SUBSCRIPTION_AGENTS = ("claude", "codex")
+# the split drops redirect operators and keeps their operand as a word: `env -u K <<<claude -i x`
+# would read as `env -u K claude -i x` while bash runs `env -u K -i x`. So there is no exemption
+# when a redirect operand names an agent CLI or is quoted, escaped or built from pieces
+_CQ = r"['\"\\]*"  # quote or escape pieces bash removes from a word
+_AGENT_PIECES = (rf"(?:c{_CQ}l{_CQ}a{_CQ}u{_CQ}d{_CQ}e|c{_CQ}o{_CQ}d{_CQ}e{_CQ}x)")
+_REDIRECTED_AGENT = re.compile(
+    rf"(?<![<>|&])(?:<<-?[ \t]*[\w'\"\\.-]*?{_AGENT_PIECES}"  # a here-document delimiter naming the agent
+    rf"|(?!<<-?[ \t]*['\"]?[A-Za-z_])[<>][<>|&]*[ \t]*"  # any other redirect (a here-document is set aside)
+    rf"(?=['\"\\`(]|\$['\"]|[\w./~-]*(?:claude|codex)|[\w./~-]+['\"\\$`]))")
+
+
+def subscription_env(rest: list[str]) -> bool:
+    """*rest* (the words after ``env``) only unsets ANTHROPIC_API_KEY, once or more, and then runs
+    claude or codex directly: no -i/-, no other unset, no VAR=value, no other option or program."""
+    index, unset = 0, False
+    while index < len(rest):
+        word = rest[index]
+        if word in ("-u", "--unset") and index + 1 < len(rest):
+            name, index = rest[index + 1], index + 2
+        elif word.startswith("--unset="):
+            name, index = word[len("--unset="):], index + 1
+        elif word.startswith("-u") and len(word) > 2:
+            name, index = word[2:], index + 1
+        else:
+            break
+        if name != SUBSCRIPTION_UNSET:
+            return False
+        unset = True
+    return unset and index < len(rest) and rest[index] in SUBSCRIPTION_AGENTS
 
 
 def _hook_env(name: str) -> None:

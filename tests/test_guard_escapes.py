@@ -252,7 +252,7 @@ def fire_wake(store, bot, scheduled_by, note):
 
 
 # a send the always-on send class stops, and an outbound action only the bot's ask rule stops
-SENDS = ["desk grok send --to Duet --kind fyi --text 'the approved update'", "git push origin feature"]
+SENDS = ["desk grok send --to Duet --kind question --text 'the approved update'", "git push origin feature"]
 
 
 @pytest.mark.parametrize("consumed", [False, True])
