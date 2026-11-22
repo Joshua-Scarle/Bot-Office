@@ -139,6 +139,16 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.24
+
+**Bots message the owner on purpose, the way Grok Bot does; the CLI's step-by-step stream stays in Activity.**
+
+- **Chat bubble.** While a bot works, its bubble shows only the working indicator (status line, elapsed time, Stop, Details). Text a CLI writes between tool calls ("Now running the tests...") is no longer streamed into the chat: it is a 💬 step in Activity → Steps, next to the tool calls, and in the job log (`GET /v1/jobs/{id}/events`).
+- **What reaches the chat.** The final reply; `desk say` notes (a short acknowledgement at the start of longer work, then only a result, blocker, decision or changed plan); question cards and approval cards. A reply with no final answer reported by the engine is its last text segment, never the narration before a tool call.
+- **Continued work.** A chat turn that ends `not_done` and is continued automatically, and an assignment step that queues its next step, keep their replies off the chat (hidden, on the job). The turn that finishes reports the whole task. A turn that stops (needs the owner, a cap, a budget) stays visible.
+- **Prompts.** System prompt (Turns, Replies), reply rule and rule 11 say the same. Prompt budget 1396/1400 words.
+- **Rollback.** No schema change and no migration. Check out the `backup/pre-0.12.24-*` tag and restart.
+
 ## What changed in 0.12.23
 
 **Replies are shorter for routine work and open with what the owner needs; research keeps full detail.**

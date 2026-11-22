@@ -80,7 +80,8 @@ AUTO_CONTINUE_PROMPT = (
     "Automatic continuation {n} of {max}: your previous turn ended not_done, so carry on with the same task "
     "from where you stopped (WORKING.md and your last reply have the state). Keep going until it is done, you "
     "are stuck and need the user, or a rule or instruction tells you to stop. Do not start work beyond that "
-    "task. If it is still unfinished when you stop, end with the BOT-OFFICE-STATUS line.")
+    "task. If it is still unfinished when you stop, end with the BOT-OFFICE-STATUS line. The owner did not see "
+    "your previous reply: your final reply reports the whole task.")
 
 
 class Scheduler:
@@ -1000,6 +1001,11 @@ class Scheduler:
                        (str(new_job.id),))
             db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='system' AND text LIKE 'Not done%'",
                        (str(job.id),))
+            # 0.12.24: the not_done turn's reply is a step of the work, not a message to the owner: it
+            # stays on the job (Activity), and the turn that finishes reports the whole task. Progress
+            # notes the bot sent on purpose (desk say) stay in the chat
+            db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='assistant' AND kind='message'"
+                       " AND (source IS NULL OR source!='inbox')", (str(job.id),))
 
         try:
             self.turns.post_message(bot, text, source=job.source, sender="Bot-Office",
