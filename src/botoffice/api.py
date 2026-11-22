@@ -1929,6 +1929,10 @@ def create_app(
                 team.settle_send(store, slot, False)
             status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        except Exception:  # any other failure (e.g. a database error) did not deliver either: free the slot and card
+            if slot:
+                team.settle_send(store, slot, False)
+            raise
         if item.get("delivery") == "steer":
             item["note"] = (f"Delivered to {target.name} while it works; it reads it within its current task and "
                             "answers with a message to you if you asked something (it appears in your chat).")

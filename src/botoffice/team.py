@@ -59,7 +59,9 @@ class TeamTool:
     client: str = ""  # the TeamClient method; it takes the properties in their order as arguments
     defaults: dict = field(default_factory=dict)
     flags: dict = field(default_factory=dict)  # desk team: "--flag" -> property
-    send: str = ""  # a send tool: its team_sends kind ("message", "ask"); empty for a read
+    # a send tool: its team_sends kind ("message", "ask"). Empty declares a read: it is exempt from the send gate,
+    # so a tool whose client method reaches another bot must set it
+    send: str = ""
 
     def schema(self) -> dict:
         schema = {"type": "object", "properties": self.properties}

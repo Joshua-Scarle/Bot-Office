@@ -145,7 +145,9 @@ def render(tool: str, data: dict, bot: str = "") -> str:
 
 def call_tool(client: TeamClient, name: str, args: dict) -> str:
     """Run the registered tool *name* (team.REGISTRY) with the MCP-style *args*: each argument is checked against
-    the tool's schema (required strings non-empty, types, enums), then the TeamClient method gets them in order."""
+    the tool's schema (required ones present and strings non-empty, types, enums; integers are clamped to the
+    schema's minimum/maximum), then the TeamClient method gets them in order. Arguments not in the schema are
+    ignored: they never reach the client."""
     tool = team.REGISTRY.get(name)
     if tool is None or not tool.client:
         raise TeamClientError(f"unknown tool {name}")
@@ -153,13 +155,15 @@ def call_tool(client: TeamClient, name: str, args: dict) -> str:
     for key, spec in tool.properties.items():
         value = args.get(key, tool.defaults.get(key))
         kind = spec.get("type")
-        if key in tool.required and (not isinstance(value, str) or not value.strip()):
+        if key in tool.required and (value is None or isinstance(value, str) and not value.strip()):
             raise TeamClientError(f"{key} is required")
         if value is not None and (kind == "string" and not isinstance(value, str) or kind == "integer" and (
                 isinstance(value, bool) or not isinstance(value, int))):
             raise TeamClientError(f"{key} must be {'an integer' if kind == 'integer' else 'a string'}")
         if value is not None and "enum" in spec and value not in spec["enum"]:
             raise TeamClientError(f"{key} must be {' or '.join(spec['enum'])}")
+        if kind == "integer" and value is not None:
+            value = min(max(value, spec.get("minimum", value)), spec.get("maximum", value))
         values.append(value)
     return render(name, getattr(client, tool.client)(*values), args.get("bot") or "")
 

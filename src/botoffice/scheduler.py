@@ -504,9 +504,10 @@ class Scheduler:
                 safefs.unlink(path)
             return
         if "from_bot_id" not in data:
-            if info is not None and info.st_uid == isolation.bots_uid():
+            if isolation.active() is not None and (info is None or isolation.bots_uid() in (None, info.st_uid)):
                 # B12: a bot's file must name its bot and job (desk message does), so it passes the send gate
-                # (team_messaging, rate limit, audit) and the receiver sees who sent it; an unsigned one is dropped
+                # (team_messaging, rate limit, audit) and the receiver sees who sent it; an unsigned one is dropped.
+                # Fails closed in the isolated layout: an unknown owner or an unresolvable bots user drops it too
                 log.warning("inbox file %s from the bots user without a sender dropped", path.name)
                 return
             self._post_turn(to, text, "inbox")
@@ -523,7 +524,7 @@ class Scheduler:
                     if job and sender.id != target.id else 0
                 try:
                     self.turns.post_agent_message(sender, target, text, data["job_id"])
-                except TurnError:
+                except Exception:  # not delivered (refused or failed): the reservation stops counting
                     if slot:
                         team.settle_send(self.store, slot, False)
                     raise

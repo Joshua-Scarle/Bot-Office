@@ -204,12 +204,31 @@ def test_unsigned_inbox_file_from_the_bots_user_is_dropped(settings, tmp_path, m
     with Desk(settings) as d:
         target = d.bot("Target")
         before = len(d.store.list_messages(target.id))
-        monkeypatch.setattr(isolation, "bots_uid", lambda: os.getuid())  # isolated: the bots user wrote it
+        monkeypatch.setattr(isolation, "active", lambda: object())  # the isolated layout
+        monkeypatch.setattr(isolation, "bots_uid", lambda: os.getuid())  # the bots user wrote it
         drop_file(d, tmp_path, {"to": "Target", "text": "no sender named"})
+        monkeypatch.setattr(isolation, "bots_uid", lambda: None)  # bots user unresolvable: fails closed
+        drop_file(d, tmp_path, {"to": "Target", "text": "unknown bots user"})
         assert len(d.store.list_messages(target.id)) == before
-        monkeypatch.setattr(isolation, "bots_uid", lambda: None)  # the owner's tools (single-user layout): unchanged
+        monkeypatch.setattr(isolation, "bots_uid", lambda: os.getuid() + 1)  # the controller's own file: delivered
+        drop_file(d, tmp_path, {"to": "Target", "text": "from the controller"})
+        monkeypatch.setattr(isolation, "active", lambda: None)  # the owner's tools (single-user layout): unchanged
         drop_file(d, tmp_path, {"to": "Target", "text": "from the owner's script"})
-        assert any(m.text == "from the owner's script" for m in d.store.list_messages(target.id))
+        texts = [m.text for m in d.store.list_messages(target.id)]
+        assert "from the controller" in texts and "from the owner's script" in texts
+
+
+def test_a_delivery_that_fails_frees_its_reservation(settings, monkeypatch):
+    with Desk(settings) as d:
+        sender, _ = d.bot("Sender"), d.bot("Target")
+        job, agent = wake_job(d, sender)
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("database is locked")
+        monkeypatch.setattr(d.app.state.scheduler.turns, "post_agent_message", broken)
+        with pytest.raises(RuntimeError):
+            d.client.post(f"/v1/bots/{sender.id}/message-agent", headers=agent, json={"to": "Target", "body": "hi"})
+        assert [s["status"] for s in sends(d)] == ["failed"]  # it did not go out, so it does not count
 
 
 # ---- the registry -----------------------------------------------------------------------------------------
@@ -271,3 +290,16 @@ def test_call_tool_validates_against_the_schema():
             team_client.call_tool(Client(), "team_message", bad)
     with pytest.raises(team_client.TeamClientError):
         team_client.call_tool(Client(), "team_read", {"bot": "B", "limit": True})
+
+    class Reader:
+        def read(self, bot, limit, since):
+            self.limit = limit
+            return {"untrusted": True, "messages": []}
+
+        def ask(self, bot, text, timeout_s):
+            self.timeout_s = timeout_s
+            return {"status": "pending"}
+    reader = Reader()
+    team_client.call_tool(reader, "team_read", {"bot": "B", "limit": 0, "extra": "ignored"})
+    team_client.call_tool(reader, "team_ask", {"bot": "B", "text": "t", "timeout_s": 999})
+    assert reader.limit == 1 and reader.timeout_s == team.ASK_MAX_S  # clamped to the schema's bounds
