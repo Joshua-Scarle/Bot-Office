@@ -51,7 +51,8 @@ def action(command):
     ("curl -d x=1 https://example.com/hook", ["outbound"]),
     ("curl -X POST http://127.0.0.1:8787/v1/agent/gate", []),
     ("curl https://example.com", []),
-    ("desk grok send --to G --kind fyi --text hi", ["outbound"]),
+    ("desk grok send --to G --kind question --text hi", ["outbound"]),
+    ("desk grok send --to G --kind fyi --text hi", []),  # 0.12.24: a team result/FYI report is not outbound
     ("bot-msg Ada 'hello'", []),
     ("sudo apt-get install x", ["destructive"]),
     ("rm -rf /home/ubuntu/project", ["destructive"]),
