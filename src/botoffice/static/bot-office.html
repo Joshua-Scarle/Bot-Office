@@ -705,7 +705,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <p class="hint" id="f-model-hint">Only signed-in engines are listed. Claude and Codex continue their session on a same-engine model change. A different engine, or a restricted Codex or Cursor turn, starts a fresh session seeded with recent context.</p>
     <label>Instructions<textarea id="f-instructions" maxlength="50000" placeholder="Profile and standing instructions"></textarea></label>
     <div class="danger-zone" id="delete-zone">
-      <div><button type="button" id="delete-start" class="danger">Delete bot…</button></div>
+      <div><button type="button" id="retire-go">Retire bot</button> <button type="button" id="delete-start" class="danger">Delete bot…</button></div>
       <div id="delete-confirm" hidden>
         <p>This permanently deletes <strong id="del-name"></strong>: its chat history, routines, memory and icon. Shared memory and other bots are kept.</p>
         <label>Type the bot's name to confirm<input id="del-typed"></label>
@@ -4278,6 +4278,16 @@ $("delete-start").onclick = () => {
   $("delete-confirm").hidden = false;
   $("delete-start").hidden = true;
   $("del-typed").focus();
+};
+$("retire-go").onclick = async () => {
+  const bot = state.editing;
+  if (!bot) return;
+  try {
+    await api("/v1/bots/" + bot.id + "/retire", { method: "POST" });
+    $("bot-dialog").close();
+    await loadSections();
+    setStatus("Retired " + bot.name + ".");
+  } catch (e) { handleError(e, $("dialog-error")); }
 };
 $("delete-cancel").onclick = () => { $("delete-confirm").hidden = true; $("delete-start").hidden = false; };
 $("del-typed").oninput = () => { $("delete-go").disabled = !state.editing || $("del-typed").value.trim() !== state.editing.name; };

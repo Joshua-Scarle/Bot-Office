@@ -139,6 +139,13 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.20
+
+- Every new bot now lands in its sidebar group on its own, whichever way it was made: the UI or `POST /v1/bots`, a bot creating a bot through `POST /v1/agent/bots` (job token), or any intake that calls `botoffice.grouping.place_new_bot`. The group is, in order: an explicit `group` (section name or id), the creating bot's group (`created_by`, or the job's bot), the name prefix (first word against section names and aliases such as MS, MPG, Web, BT, DevOps, Bot-Office, case-insensitive), then "Unsorted" (created if missing). A failed placement never fails the creation.
+- New `POST /v1/bots/{id}/retire` and a "Retire bot" button in the bot dialog move a bot to the "Retired" section and keep it. Delete is unchanged.
+- Existing bots are not moved. `scripts/regroup_existing_bots.py` prints what a prefix regroup would do (`--apply` to do it); it is a one-off and nothing runs it.
+- Deploy note: no schema change; restart only. Roll back by redeploying the previous tag.
+
 ## What changed in 0.12.19
 
 **Teammate tools: a restricted Claude bot can now see and ask its teammates.** A restricted Claude run refuses every shell command, so `bot-msg` and `bot-task` were out of reach. Each Claude turn of a bot now gets a small first-party MCP server, `botoffice` (`bin/bot-office-team-mcp`, stdlib only, started by Claude over stdio for that job), with five tools:

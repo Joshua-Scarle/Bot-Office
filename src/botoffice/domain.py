@@ -270,6 +270,8 @@ class BotCreate(_BotFields):
     instructions: str = Field(default="", max_length=50_000)
     default_provider: BotProvider = "codex"
     chat_only: bool = False
+    group: str | None = Field(default=None, max_length=60)        # 0.12.20: section name or id; else inferred
+    created_by: str | None = Field(default=None, max_length=80)   # creator bot id or name (its group is inherited)
 
 
 class BotUpdate(_BotFields):

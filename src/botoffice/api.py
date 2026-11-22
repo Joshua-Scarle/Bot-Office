@@ -28,7 +28,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
-from . import isolation, needs_you, notify, safefs, team, vnc
+from . import grouping, isolation, needs_you, notify, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -895,8 +895,7 @@ def create_app(
         if error := model_error(engine, model):
             raise HTTPException(status_code=400, detail=error)
 
-    @app.post("/v1/bots", response_model=Bot, status_code=201, dependencies=[Depends(auth)])
-    async def create_bot(body: BotCreate) -> Bot:
+    def _make_bot(body: BotCreate, creator_bot_id=None) -> Bot:
         _check_model(body.default_provider, body.model)
         _check_effort(body.default_provider, body.effort)
         try:
@@ -916,7 +915,24 @@ def create_app(
         if body.chat_only:
             bot = store.update_bot(bot.id, chat_only=1)
         memory.write_bot(bot.id, "")
+        if creator_bot_id is None and body.created_by:
+            creator = store.find_bot(body.created_by)
+            creator_bot_id = creator.id if creator else None
+        grouping.place_new_bot(store, bot, body.group, creator_bot_id)
         return _with_steering([bot])[0]
+
+    @app.post("/v1/bots", response_model=Bot, status_code=201, dependencies=[Depends(auth)])
+    async def create_bot(body: BotCreate) -> Bot:
+        return _make_bot(body)
+
+    @app.post("/v1/bots/{bot_id}/retire", dependencies=[Depends(auth)])
+    async def retire_bot(bot_id: UUID) -> dict:
+        """0.12.20: move the bot to the "Retired" section (nothing is deleted)."""
+        _bot(bot_id)
+        try:
+            return {"section_id": grouping.retire_bot(store, bot_id)}
+        except sections_mod.SectionError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
     def _with_steering(bots: list[Bot]) -> list[Bot]:
         """Set each bot's ``steering``: how a message sent while it works reaches the CLI."""
@@ -1617,6 +1633,11 @@ def create_app(
         if not job or not job.bot_id:
             raise HTTPException(status_code=401, detail="a running job's agent token is required")
         return job
+
+    @app.post("/v1/agent/bots", response_model=Bot, status_code=201)
+    async def agent_create_bot(body: BotCreate, job: Job = Depends(agent_scope)) -> Bot:  # noqa: B008
+        """0.12.20: a running bot creates a bot; it lands in the creator's group unless a group is given."""
+        return _make_bot(body, creator_bot_id=job.bot_id)
 
     @app.post("/v1/agent/ask", status_code=201)
     async def agent_ask(request: Request, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008

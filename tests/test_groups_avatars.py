@@ -22,7 +22,7 @@ def client(settings):
 
 
 def mk(client, name):
-    r = client.post("/v1/bots", headers=H, json={"name": name})
+    r = client.post("/v1/bots", headers=H, json={"name": name, "group": "Ungrouped"})   # 0.12.20: new bots are auto-grouped; these tests start ungrouped
     assert r.status_code == 201, r.text
     return r.json()
 
