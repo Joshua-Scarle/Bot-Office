@@ -26,7 +26,7 @@
 //
 // Rate limiting only delays: pending entries merge into one digest. An incident that recovers before its
 // mail went out is still mailed, marked as already recovered.
-import { CLASSES, DEFAULT_PREFS, RECIPIENT, evaluate, unjudged, classOf, buildRaw } from "./logic.js";
+import { CLASSES, DEFAULT_PREFS, allowedRecipient, isAllowedRecipient, evaluate, unjudged, classOf, buildRaw } from "./logic.js";
 
 export const MIN_GAP_MS = 10 * 60 * 1000; // between two mails of the same class
 export const SLOW_GAP_MS = 60 * 60 * 1000; // the gap once SOFT_CAP mails went out in 24 h (a flapping guard)
@@ -92,9 +92,9 @@ export function outageEnd(inc, now) {
 export class Engine {
   #chain = Promise.resolve();
   #draining = false;
-  constructor({ storage, send, now = () => Date.now(), newId = () => crypto.randomUUID(), from = "", to = "", sendTimeoutMs = SEND_TIMEOUT_MS }) {
-    if (to && String(to).trim().toLowerCase() !== RECIPIENT) throw new Error("recipient is not the allowed address");
-    Object.assign(this, { storage, send, clock: now, newId, from, to: to ? RECIPIENT : "", sendTimeoutMs });
+  constructor({ storage, send, now = () => Date.now(), newId = () => crypto.randomUUID(), from = "", to = "", allowed = null, sendTimeoutMs = SEND_TIMEOUT_MS }) {
+    if (to && !isAllowedRecipient(to, allowed)) throw new Error("recipient is not the allowed address");
+    Object.assign(this, { storage, send, clock: now, newId, from, to: to ? allowed : "", sendTimeoutMs });
   }
 
   /** One state operation at a time, each reading state afresh from storage. */
@@ -285,7 +285,7 @@ export class Engine {
 
 export function makeSender(env, EmailMessage) {
   return async ({ from, to, raw }) => {
-    if (String(to).trim().toLowerCase() !== RECIPIENT) throw Object.assign(new Error("recipient refused"), { name: "RecipientRefused" });
+    if (!isAllowedRecipient(to, allowedRecipient(env))) throw Object.assign(new Error("recipient refused"), { name: "RecipientRefused" });
     await env.ALERT_EMAIL.send(new EmailMessage(from, to, raw));
   };
 }

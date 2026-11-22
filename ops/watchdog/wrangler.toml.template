@@ -16,9 +16,10 @@ new_sqlite_classes = ["Watchdog"]
 
 [[send_email]]
 name = "ALERT_EMAIL"
-destination_address = "you@example.test"   # the sole recipient: Cloudflare refuses any other, and the Worker checks it at start
+destination_address = "<ALERT_RECIPIENT>"   # the sole recipient: Cloudflare refuses any other; must equal ALLOWED_RECIPIENT
 
 [vars]
-ALERT_TO = "you@example.test"   # must be exactly this; the Worker refuses to run (503) otherwise
+ALLOWED_RECIPIENT = "<ALERT_RECIPIENT>"   # the one address the Worker may mail; missing or not one plain address = refuses to run (503)
+ALERT_TO = "<ALERT_RECIPIENT>"   # must equal ALLOWED_RECIPIENT; the Worker refuses to run (503) otherwise
 ALERT_FROM = "watchdog@<YOUR_DOMAIN_WITH_EMAIL_ROUTING>"
 # HEARTBEAT_SECRET is a Worker secret: wrangler secret put HEARTBEAT_SECRET

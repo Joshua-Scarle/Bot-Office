@@ -1,6 +1,6 @@
 // Bot Office watchdog. The Worker authenticates; one Durable Object ("main") owns all state and mail.
 import { EmailMessage } from "cloudflare:email";
-import { sanitize, sanitizeEvents, configError } from "./logic.js";
+import { sanitize, sanitizeEvents, configError, allowedRecipient } from "./logic.js";
 import { Engine, makeSender } from "./engine.js";
 
 const MAX_BODY = 32 * 1024;
@@ -51,7 +51,7 @@ const stub = (env) => env.WATCHDOG.get(env.WATCHDOG.idFromName("main"));
 export class Watchdog {
   constructor(state, env) {
     this.configError = configError(env);
-    this.engine = this.configError ? null : new Engine({ storage: state.storage, send: makeSender(env, EmailMessage), from: env.ALERT_FROM || "", to: env.ALERT_TO || "" });
+    this.engine = this.configError ? null : new Engine({ storage: state.storage, send: makeSender(env, EmailMessage), from: env.ALERT_FROM || "", to: env.ALERT_TO || "", allowed: allowedRecipient(env) });
   }
 
   /** Mail goes out here, never inside a request: a slow mail server cannot hold up a heartbeat. */

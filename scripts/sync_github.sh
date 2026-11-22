@@ -2,8 +2,11 @@
 # Push master (and optionally the deployed branch) to origin after a secret scan.
 # Idempotent: nothing to push means nothing happens. Plain push only, never forced.
 #   scripts/sync_github.sh [--quiet] [branch ...]     master is always included
-# A branch whose new commits (those not on origin) contain a gitleaks finding is NOT pushed;
-# the script exits 2 and logs the branch. Needs gitleaks (~/.local/bin/gitleaks or PATH).
+# A branch whose new commits (those not on origin) contain a gitleaks finding or a denylisted value
+# (scripts/check_denylist.sh: personal values and private-file text from the out-of-repo list
+# ~/.config/bot-office/push-denylist.txt, plus forbidden paths) is NOT pushed; the script exits 2 and logs
+# the branch, never the value. A missing denylist blocks everything (fail closed).
+# Needs gitleaks (~/.local/bin/gitleaks or PATH). The pre-push hook repeats both checks.
 set -u
 REPO="${BOT_OFFICE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 GL="${GITLEAKS:-$(command -v gitleaks || echo "$HOME/.local/bin/gitleaks")}"
@@ -21,6 +24,9 @@ for b in master "$@"; do
   base=origin/master; git rev-parse -q --verify "origin/$b" >/dev/null && base="origin/$b"
   if [ "$(git rev-list --count "$base..$b")" = 0 ] && git rev-parse -q --verify "origin/$b" >/dev/null; then
     [ "$QUIET" = 1 ] || echo "$b: in sync"; continue
+  fi
+  if ! "$REPO/scripts/check_denylist.sh" --commits "refs/heads/$b" --not --remotes=origin 2>>"$LOG"; then
+    log "BLOCKED $b: denylisted value or forbidden path in commits not on origin (not pushed; run scripts/check_denylist.sh --commits $b --not --remotes=origin)"; rc=2; continue
   fi
   if ! "$GL" git "$REPO" --log-opts="$base..refs/heads/$b" --redact --no-banner -l error -v >/dev/null 2>&1; then
     log "BLOCKED $b: gitleaks finding in commits $base..$b (not pushed; run gitleaks locally to see it)"; rc=2; continue

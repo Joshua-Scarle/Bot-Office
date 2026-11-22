@@ -14,7 +14,7 @@ function env(over = {}) {
   const sent = [], store = new Map();
   const state = { storage: { async get(k) { return store.get(k); }, async put(k, v) { store.set(k, structuredClone(v)); }, async setAlarm() {} } };
   const bind = { sent };
-  const conf = { ALERT_TO: "you@example.test", ALERT_FROM: "w@example.test", ALERT_EMAIL: { send: async (m) => sent.push(m) } };
+  const conf = { ALLOWED_RECIPIENT: "you@example.test", ALERT_TO: "you@example.test", ALERT_FROM: "w@example.test", ALERT_EMAIL: { send: async (m) => sent.push(m) } };
   const dobj = new Watchdog(state, { ...conf, ...over });
   return Object.assign(bind, {
     ...conf, ...over,
@@ -77,17 +77,44 @@ test("the Worker refuses any recipient other than the one allowed address, at st
     assert.equal((await e.dobj.fetch(new Request("https://x/tick", { method: "POST" }))).status, 503);
   }
   assert.equal((await worker.fetch(post("/events", {}, "wrong"), env({ ALERT_TO: "evil@example.test" }))).status, 401); // auth first
-  const mixed = env({ ALERT_TO: "  you@example.test " }); // case and spaces only: still the same address
+  const mixed = env({ ALERT_TO: "  YOU@Example.TEST " }); // case and spaces only: still the same address
   assert.equal((await worker.fetch(post("/heartbeat", { controller_reachable: false }), mixed)).status, 200);
 });
 
 test("the mail sender and the engine themselves refuse another address (defence in depth)", async () => {
   const { makeSender, Engine } = await import("../src/engine.js");
   const sent = [];
-  const send = makeSender({ ALERT_EMAIL: { send: async (m) => sent.push(m) } }, class { constructor(f, t, r) { this.to = t; } });
+  const send = makeSender({ ALLOWED_RECIPIENT: "you@example.test", ALERT_EMAIL: { send: async (m) => sent.push(m) } }, class { constructor(f, t, r) { this.to = t; } });
   await assert.rejects(send({ from: "w@example.test", to: "evil@example.test", raw: "x" }), /refused/);
   assert.equal(sent.length, 0);
-  assert.throws(() => new Engine({ storage: {}, send, from: "w@example.test", to: "evil@example.test" }), /allowed/);
+  await send({ from: "w@example.test", to: "you@example.test", raw: "x" });
+  assert.equal(sent.length, 1);
+  assert.throws(() => new Engine({ storage: {}, send, from: "w@example.test", to: "evil@example.test", allowed: "you@example.test" }), /allowed/);
+  // no configured recipient: the sender and the engine refuse every address, including the usual one
+  const bare = makeSender({ ALERT_EMAIL: { send: async (m) => sent.push(m) } }, class {});
+  await assert.rejects(bare({ from: "w@example.test", to: "you@example.test", raw: "x" }), /refused/);
+  assert.throws(() => new Engine({ storage: {}, send, from: "w@example.test", to: "you@example.test" }), /allowed/);
+  assert.equal(sent.length, 1);
+});
+
+test("ALLOWED_RECIPIENT comes from config, must be exactly one plain address, and fails closed", async () => {
+  const { allowedRecipient, configError } = await import("../src/logic.js");
+  assert.equal(allowedRecipient({ ALLOWED_RECIPIENT: "  You@Example.TEST " }), "you@example.test");
+  for (const bad of [undefined, "", "   ", "you@example.test,evil@example.test", "you@example.test evil@example.test", "a; b@example.test", "not-an-address", 42]) {
+    assert.equal(allowedRecipient({ ALLOWED_RECIPIENT: bad }), null);
+    const e = env({ ALLOWED_RECIPIENT: bad });
+    assert.equal((await worker.fetch(post("/heartbeat", { controller_reachable: false }), e)).status, 503);
+    await assert.rejects(worker.scheduled({}, e), /misconfigured/);
+    await e.dobj.alarm();
+    assert.equal(e.sent.length, 0);
+  }
+  assert.match(configError({ ALERT_TO: "you@example.test", ALERT_FROM: "w@example.test" }), /ALLOWED_RECIPIENT/);
+  // another configured address works the same way: the recipient is config, not code
+  const other = env({ ALLOWED_RECIPIENT: "ops@example.test", ALERT_TO: "ops@example.test" });
+  assert.equal((await worker.fetch(post("/heartbeat", { controller_reachable: false }), other)).status, 200);
+  assert.equal((await worker.fetch(post("/heartbeat", { controller_reachable: false }), env({ ALLOWED_RECIPIENT: "ops@example.test" }))).status, 503);
+  // configError never echoes a configured value
+  assert.ok(!/example\.test/.test(configError({ ALLOWED_RECIPIENT: "a@example.test", ALERT_TO: "b@example.test" })));
 });
 
 test("/status needs the secret and reports counts only", async () => {

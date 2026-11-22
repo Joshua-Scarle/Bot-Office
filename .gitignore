@@ -9,3 +9,8 @@ __pycache__/
 .env.*
 *.sqlite3
 *.db
+
+# Never published (see README "Keeping GitHub in step"): owner standing rules, installed copies, shared data
+policy-pack/RULES.md
+tests/fixtures/installed-RULES-*
+data/shared/

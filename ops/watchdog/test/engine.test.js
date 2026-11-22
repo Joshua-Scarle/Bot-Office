@@ -37,7 +37,7 @@ function rig({ failSend = 0, sendDelay = 0, sendTimeoutMs = 50 } = {}) {
     if (ctl.failSend > 0) { ctl.failSend--; throw new Error("send failed"); }
     sent.push(msg);
   };
-  const mk = (st = storage) => new Engine({ storage: st, send, now: () => clock.t, newId: () => `id${++n}`, from: "w@example.test", to: "you@example.test", sendTimeoutMs });
+  const mk = (st = storage) => new Engine({ storage: st, send, now: () => clock.t, newId: () => `id${++n}`, from: "w@example.test", to: "you@example.test", allowed: "you@example.test", sendTimeoutMs });
   const engine = mk();
   const r = {
     storage, sent, clock, ctl, engine, mk,

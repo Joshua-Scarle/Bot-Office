@@ -1,0 +1,4 @@
+#!/bin/sh
+# Bot Office: refuse a commit that adds a denylisted value or a forbidden path (scripts/check_denylist.sh).
+# Installed into the shared .git/hooks by scripts/install_git_hooks.sh, so it covers every worktree.
+exec "$(git rev-parse --git-common-dir)/hooks/bo-check-denylist" --staged

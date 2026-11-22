@@ -1,0 +1,22 @@
+#!/bin/sh
+# Bot Office pre-push: (1) CLI runs must never push; a human/Lead-approved push sets BO_ALLOW_PUSH=1 for that
+# one command. (2) Every commit being pushed that is not already on origin must pass the denylist check and
+# gitleaks (repo .gitleaks.toml from the main checkout). Installed by scripts/install_git_hooks.sh.
+if [ "$BO_ALLOW_PUSH" != "1" ]; then
+  echo "pre-push: pushing is disabled for Bot Office automation (set BO_ALLOW_PUSH=1 only with Lead approval)." >&2
+  exit 1
+fi
+HOOKS="$(git rev-parse --git-common-dir)/hooks"
+MAIN="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
+GL="${GITLEAKS:-$(command -v gitleaks || echo "$HOME/.local/bin/gitleaks")}"
+Z=0000000000000000000000000000000000000000
+rc=0
+while read -r lref lsha rref rsha; do
+  [ "$lsha" = "$Z" ] && continue   # branch delete: nothing new is published
+  "$HOOKS/bo-check-denylist" --commits "$lsha" --not --remotes=origin || { echo "pre-push: $lref blocked by the denylist check" >&2; rc=1; continue; }
+  if [ ! -x "$GL" ]; then echo "pre-push: gitleaks not found; refusing (fail closed)" >&2; rc=1; continue; fi
+  set -- git "$MAIN" --log-opts="$lsha --not --remotes=origin" --redact --no-banner -l error
+  [ -f "$MAIN/.gitleaks.toml" ] && set -- "$@" -c "$MAIN/.gitleaks.toml"
+  "$GL" "$@" >/dev/null 2>&1 || { echo "pre-push: $lref blocked: gitleaks finding (run gitleaks locally to see it)" >&2; rc=1; }
+done
+exit $rc

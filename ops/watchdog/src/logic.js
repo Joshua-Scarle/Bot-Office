@@ -38,15 +38,30 @@ export function unjudged(problems, hb) {
   return hb && hb.data && hb.data.backup_state === "unjudged" ? ["backup"] : [];
 }
 
-/** The one address this Worker may ever mail. Any other ALERT_TO is refused at start. */
-export const RECIPIENT = "you@example.test";
+const PLAIN_ADDRESS = /^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,}$/;
+const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "");
 
-/** Config problems as a short fixed string, or null when the Worker may run: ALERT_TO must be exactly
- *  RECIPIENT (and the send_email binding present), ALERT_FROM a plain address. Never echoes a value. */
+/** The one address this Worker may ever mail, read from config (`ALLOWED_RECIPIENT`, set in the local,
+ *  uncommitted wrangler.toml or as a Worker secret). Exactly one plain address, or null: no lists, no
+ *  default. A Worker without it refuses to run, so a missing value fails closed and never mails anyone. */
+export function allowedRecipient(env) {
+  const a = norm(env && env.ALLOWED_RECIPIENT);
+  return PLAIN_ADDRESS.test(a) ? a : null;
+}
+
+/** True only when `to` is exactly the allowed recipient (case and surrounding spaces aside). */
+export function isAllowedRecipient(to, allowed) {
+  return Boolean(allowed) && norm(to) === allowed;
+}
+
+/** Config problems as a short fixed string, or null when the Worker may run: ALLOWED_RECIPIENT must be one
+ *  plain address, ALERT_TO exactly that address (and the send_email binding present), ALERT_FROM a plain
+ *  address. Never echoes a value. */
 export function configError(env) {
-  const to = typeof env.ALERT_TO === "string" ? env.ALERT_TO.trim().toLowerCase() : "";
-  if (to !== RECIPIENT) return "ALERT_TO is not the allowed recipient";
-  if (typeof env.ALERT_FROM !== "string" || !/^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,}$/.test(env.ALERT_FROM)) return "ALERT_FROM is not a plain address";
+  const allowed = allowedRecipient(env);
+  if (!allowed) return "ALLOWED_RECIPIENT is not one plain address";
+  if (!isAllowedRecipient(env.ALERT_TO, allowed)) return "ALERT_TO is not the allowed recipient";
+  if (typeof env.ALERT_FROM !== "string" || !PLAIN_ADDRESS.test(env.ALERT_FROM)) return "ALERT_FROM is not a plain address";
   return null;
 }
 

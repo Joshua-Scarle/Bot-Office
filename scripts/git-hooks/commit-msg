@@ -1,0 +1,3 @@
+#!/bin/sh
+# Bot Office: refuse a commit whose message carries a denylisted value. Installed by scripts/install_git_hooks.sh.
+exec "$(git rev-parse --git-common-dir)/hooks/bo-check-denylist" --message "$1"
