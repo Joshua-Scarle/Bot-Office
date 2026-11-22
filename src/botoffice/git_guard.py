@@ -397,7 +397,12 @@ SUBSCRIPTION_AGENTS = ("claude", "codex")
 # the split drops redirect operators and keeps their operand as a word: `env -u K <<<claude -i x`
 # would read as `env -u K claude -i x` while bash runs `env -u K -i x`. So there is no exemption
 # when a redirect operand names an agent CLI or is quoted, escaped or built from pieces
-_REDIRECTED_AGENT = re.compile(r"(?<![<>|&])[<>][<>|&]*[ \t]*(?=['\"\\`(]|\$['\"]|[\w./~-]*(?:claude|codex)|[\w./~-]+['\"\\$`])")
+_CQ = r"['\"\\]*"  # quote or escape pieces bash removes from a word
+_AGENT_PIECES = (rf"(?:c{_CQ}l{_CQ}a{_CQ}u{_CQ}d{_CQ}e|c{_CQ}o{_CQ}d{_CQ}e{_CQ}x)")
+_REDIRECTED_AGENT = re.compile(
+    rf"(?<![<>|&])(?:<<-?[ \t]*[\w'\"\\.-]*?{_AGENT_PIECES}"  # a here-document delimiter naming the agent
+    rf"|(?!<<-?[ \t]*['\"]?[A-Za-z_])[<>][<>|&]*[ \t]*"  # any other redirect (a here-document is set aside)
+    rf"(?=['\"\\`(]|\$['\"]|[\w./~-]*(?:claude|codex)|[\w./~-]+['\"\\$`]))")
 
 
 def subscription_env(rest: list[str]) -> bool:

@@ -23,12 +23,15 @@ NEW = [
 ]
 OLD_ALLOWS = []  # earlier drafts of this script, removed if present
 OLD_SEND = r"(?i)\b(mail|mailx|sendmail|msmtp|mutt|swaks)\b|desk\s+grok\s+send|\b(slack|telegram|twilio)\b.*\b(send|post|message)\b"
-NEW_SEND = r"(?i)\b(mail|mailx|sendmail|msmtp|mutt|swaks)\b|\b(slack|telegram|twilio)\b.*\b(send|post|message)\b"
+# desk grok send still asks here unless --kind result/fyi follows in the same command (the outbound
+# preset then checks the literal report form); a question or blocker asks as before
+NEW_SEND = OLD_SEND.replace(r"desk\s+grok\s+send", r"desk\s+grok\s+send(?![^\n;&|]{0,2000}--kind[\s=]+['\"]?(?:result|fyi)\b)", 1)
 OLD_DEPLOY = (r"(?i)\bdeploy|\brailway\s+up\b|\bkubectl\s+(apply|rollout|delete)\b|\bterraform\s+apply\b|\bvercel\b.*--prod|"
               r"\bnetlify\s+deploy|\bfly(ctl)?\s+deploy|\bsystemctl\s+(restart|reload|start)\b|\bansible-playbook\b")
-# the old rule with one change: the words "deployment(s)", "deployed", "deploying" (prose, a
-# bot-task goal) no longer match; `deploy`, `./deploy.sh`, `deployment.sh`, `npm run deploy` still do
-NEW_DEPLOY = OLD_DEPLOY.replace(r"(?i)\bdeploy|", r"(?i)\bdeploy(?!(?:ments?|ed|ing)(?![\w.-]))|", 1)
+# the old rule with one change: "deployment(s)", "deployed", "deploying" as prose (after a word and a
+# space, before another word: a bot-task goal) no longer match; `deploy`, `./deploy.sh`,
+# `./deployment`, `npm run deployment`, `npm run deploy` still do
+NEW_DEPLOY = OLD_DEPLOY.replace(r"(?i)\bdeploy|", r"(?i)\bdeploy(?!(?<=[a-z] deploy)(?:ments?|ed|ing) [^\s-])|", 1)
 assert NEW_DEPLOY != OLD_DEPLOY
 
 

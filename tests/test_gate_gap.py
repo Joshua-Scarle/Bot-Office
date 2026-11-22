@@ -197,6 +197,22 @@ def test_an_unanchored_allow_does_not_override_a_preset_ask(tmp_path):
     assert judge(gate, job, "scp ~/bot-office-reports/x host.example.com:/srv")[0] == "ask"
 
 
+def test_grok_questions_ask_even_without_the_outbound_preset(tmp_path):
+    gate, job, _ = setup(tmp_path, rules=[rule for rule in E8 if rule[0] != "preset"])
+    assert judge(gate, job, "desk grok send --to Lead --kind question --text 'Can you review the draft?'")[0] == "ask"
+    assert judge(gate, job, GROK_REPORT)[0] == "allow"
+
+
+def test_a_brief_written_by_heredoc_then_the_review(tmp_path):
+    gate, job, _ = setup(tmp_path)
+    command = ("cat > ~/bo-work/x/brief.md <<'EOF'\nRead-only code review.\nEOF\nenv -u ANTHROPIC_API_KEY claude -p --model m "
+               "--permission-mode bypassPermissions < ~/bo-work/x/brief.md")
+    assert judge(gate, job, command)[0] == "allow"
+    for evil in ("env -u ANTHROPIC_API_KEY <<claude -i true\nx\nclaude\n", "env -u ANTHROPIC_API_KEY <<'cl'aude -i t\nclaude\n",
+                 "env -u ANTHROPIC_API_KEY <<<c\\laude -i true"):
+        assert git_guard.classify("Bash", evil, {"command": evil}, "/srv"), evil
+
+
 def test_never_rule_stays_supreme(tmp_path):
     gate, job, bot = setup(tmp_path)
     gate.add_rule(bot_id=bot.id, effect="never", kind="shell", pattern=r"codex\s+exec")
@@ -288,7 +304,7 @@ def test_write_then_run_still_caught(command):
 @pytest.mark.parametrize("command,hit", [
     (BOT_TASK, False),
     ("grep -n deployment logs.txt", False),
-    ('echo "deployments, deployed, deploying"', False),
+    ('echo "the deployment is up and deployed today"', False),
     ("./deploy.sh prod", True),
     ("  ./deploy.sh", True),
     ("APP_ENV=production ./deploy.sh", True),
@@ -296,6 +312,9 @@ def test_write_then_run_still_caught(command):
     ("bash -e ./deploy.sh", True),
     ("npm --prefix app run deploy", True),
     ("./deployment.sh", True),
+    ("./deployment", True),
+    ("npm run deployment", True),
+    ("npm run deployment --prod", True),
     ("deploy --prod", True),
     ("make deploy", True),
     ("railway up", True),
