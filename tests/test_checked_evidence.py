@@ -562,11 +562,66 @@ def test_a_repository_with_linked_object_directories_does_not_count(settings, li
     json.dumps({"type": "user", "message": {"content": [
         {"type": "tool_result", "is_error": True, "content": "Exit code 1\n12 passed"}]}}),
     json.dumps({"type": "tool_use", "part": {"tool": "bash", "state": {"status": "error", "output": "12 passed"}}}),
+    _claude_tool_line("3 tests failed\n12 passed"),  # failure counts in other words, anywhere in the result
+    _claude_tool_line("12 passed\n1 test case failing"),
+    _claude_tool_line("Tests run: 14, Failures: 2, Errors: 0\n12 passed"),
+    _claude_tool_line("12 passed\nFAILED (failures=2)"),
 ])
 def test_a_failed_run_does_not_count_even_with_a_passing_count(tmp_path, line):
     log = tmp_path / "job.log"
     log.write_text(line + "\n")
     assert evidence.check("ran pytest: 12 passed", evidence.Scope(roots=[tmp_path], log_path=log, network=False)) is None
+
+
+def test_a_clean_result_with_zero_failures_still_counts(tmp_path):
+    log = tmp_path / "job.log"
+    log.write_text(_claude_tool_line("Tests run: 12, Failures: 0, Errors: 0\n12 passed, 0 failed, 1 xfailed") + "\n")
+    assert evidence.check("ran pytest: 12 passed", evidence.Scope(roots=[tmp_path], log_path=log, network=False))
+
+
+@pytest.mark.parametrize("remote", ["ext", "path-uploadpack", "file-uploadpack", "ssh-command"])
+def test_a_repository_config_never_runs_a_command(tmp_path, remote):
+    # the repository is the bot's: as a partial clone, a missing object would be fetched through its remote
+    root = tmp_path / "ws"
+    repo = root / "r"
+    repo.mkdir(parents=True)
+    git(repo, "init", "-q")
+    marker = tmp_path / "marker"
+    transport = {"ext": [("remote.origin.url", f"ext::sh -c touch% {marker}")],
+                 "path-uploadpack": [("remote.origin.url", str(tmp_path)), ("remote.origin.uploadpack", f"touch {marker}; false")],
+                 "file-uploadpack": [("remote.origin.url", f"file://{tmp_path}"),
+                                     ("remote.origin.uploadpack", f"touch {marker}; false")],
+                 "ssh-command": [("remote.origin.url", "ssh://x/y"), ("core.sshCommand", f"touch {marker}; false")]}[remote]
+    for key, value in [("core.repositoryformatversion", "1"), ("extensions.partialClone", "origin"),
+                       ("remote.origin.promisor", "true"), ("protocol.allow", "always"), ("protocol.ext.allow", "always"),
+                       ("protocol.file.allow", "always"), ("protocol.ssh.allow", "always"), *transport]:
+        git(repo, "config", key, value)
+    sha = "1234567890abcdef1234567890abcdef12345678"
+    assert evidence.check(f"commit {sha}", evidence.Scope(roots=[root], network=False)) is None
+    assert not marker.exists()
+
+
+@pytest.mark.continuation_defaults
+@pytest.mark.parametrize("route", ["tasks", "assignments"])
+@pytest.mark.parametrize("body", [{"note": "I couldn't reach the shop, so nothing was ordered", "evidence": "wrote shelf.md"},
+                                  {"evidence": "could not verify the order; the list is in shelf.md"}])
+def test_a_task_report_that_admits_it_could_not_do_it_is_never_done(settings, route, body):
+    with TestClient(create_app(settings, {"codex": idle()})) as client:
+        store = client.app.state.store
+        bot = store.create_bot("Ada", "", "codex", None)
+        item = client.post(f"/v1/bots/{bot.id}/assignments", headers=H, json={"title": "Shelf list"}).json()
+        store.create("chat", "codex", bot_id=bot.id, source="chat")
+        job = store.claim(["desktop-1"], {"codex"})
+        agent = {"Authorization": "Bearer " + store.issue_agent_token(job)}
+        workspace = settings.data_dir / "workspaces" / str(job.id)
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "shelf.md").write_text("- jars\n")  # a real file is cited, but the work was not done
+        client.post(f"/v1/agent/{route}/{item['id']}/status", headers=agent, json={"state": "done", **body})
+        task = client.get(f"/v1/bots/{bot.id}/assignments", headers=H).json()[0]
+        assert task["status"] != "done"
+        # nothing it cited is kept as evidence that could count for a later done
+        bare = client.post(f"/v1/agent/{route}/{item['id']}/status", headers=agent, json={"state": "done"})
+        assert bare.status_code == 409 and "cite something Bot-Office can check" in bare.text, bare.text
 
 
 def test_a_quiet_nothing_new_done_is_neither_verified_nor_flagged(settings):

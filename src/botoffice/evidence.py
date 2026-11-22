@@ -54,7 +54,9 @@ LOG_LIMIT = 64 * 1024 * 1024  # bytes of a job's log that are searched for test 
 URL_RE = re.compile(r"\bhttps?://[^\s<>\"'`]+", re.IGNORECASE)
 SHA_RE = re.compile(r"(?<![0-9A-Za-z/._-])[0-9a-f]{7,40}(?![0-9A-Za-z_-])", re.IGNORECASE)
 PASSED_RE = re.compile(r"\b(\d+)\s+(passed|passing)\b", re.IGNORECASE)
-FAILED_ON_LINE = re.compile(r"\b[1-9]\d*\s+(?:failed|failing|failures?|errors?)\b", re.IGNORECASE)
+# a failure count anywhere in a tool result ("3 failed", "3 tests failed", "1 test case failing", "failures=2")
+FAILED_ON_LINE = re.compile(r"\b[1-9]\d*\s+(?:[a-z]+\s+){0,2}?(?:failed|failing|failures?|errors?)\b"
+                            r"|\b(?:failed|failures?|errors?)\s*[:=]\s*[1-9]", re.IGNORECASE)
 _EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,10}$")
 _LINE_SUFFIX = re.compile(r":\d+(?::\d+)?$")
 _EDGE = "\"'`()[]{}<>,;:!?*"
@@ -117,6 +119,8 @@ def check(text: str, scope: Scope) -> str | None:
     """What Bot-Office could check in *text* (a short description), or None when nothing it cites exists."""
     text = (text or "").strip()
     if not text or failures.failed_check(text):  # "tests failed; see report.txt" names a failure, not a check
+        return None
+    if failures.admitted_incomplete(text, text):  # "I couldn't do it; wrote report.md" is not evidence of a done
         return None
     return (_check_tests(text, scope) or _check_files(text, scope) or _check_commits(text, scope)
             or (_check_urls(text, scope) if scope.network else None))
@@ -245,7 +249,11 @@ def _repos(scope: Scope) -> list[tuple[Path, tuple[str, ...]]]:
 def git_env() -> dict[str, str]:
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C",
-            "GIT_NO_REPLACE_OBJECTS": "1"}
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            # the repository's own config is the bot's: a partial clone would fetch a missing object through
+            # its remote (ext::, uploadpack, sshCommand: a command). No transport is allowed (this overrides
+            # any protocol.*.allow in that config), and no lazy fetch (Git 2.45+)
+            "GIT_ALLOW_PROTOCOL": "none", "GIT_NO_LAZY_FETCH": "1", "GIT_PROTOCOL_FROM_USER": "0"}
 
 
 def _no_links(fd: int, limit: int = OBJECT_ENTRIES) -> bool:

@@ -949,6 +949,12 @@ class Assignments:
         outside its turn."""
         if state not in REPORT_STATES:
             raise AssignmentError(400, f"state must be one of {', '.join(REPORT_STATES)}")
+        if state == "done":
+            # 0.12.20: "I couldn't do it" is never done, whatever it cites (as a turn's status line,
+            # failures.judge_done); what it cited is not kept as evidence, so it cannot count later
+            state, admitted = failures.judge_done(f"{note}\n\n{evidence}", state, note or evidence)
+            if state != "done":
+                note, evidence, checked = admitted, "", None
         actor = actor_of(bot_id)
         with closing(self._tx()) as db:
             try:
