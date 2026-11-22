@@ -46,7 +46,7 @@ def _prepare(store, scheduler, bot, job):
 
 def test_default_layers_are_short_and_split_cleanly():
     rules, system = RULES.default_text(), SYSTEM.default_text()
-    assert len(rules.split()) < 540 and len(rules.split()) + len(system.split()) < 1500  # 0.12.24: +90 words for memory-is-a-snapshot; 0.12.17: +30 words for the done-needs-evidence rule; S5: +75 for the ask-when-ambiguous rule
+    assert len(rules.split()) < 540 and len(rules.split()) + len(system.split()) < 1500  # 0.12.27: +90 words for memory-is-a-snapshot; 0.12.17: +30 words for the done-needs-evidence rule; S5: +75 for the ask-when-ambiguous rule
     # the owner's own words, in substance
     for needed in ("Keep working on your task until", "the goal is met", "stuck and need the user's help",
                    "another rule or instruction tells you to stop", "not an endless goal",
