@@ -139,6 +139,20 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.26
+
+**App admin: the owner can let one bot manage the office inside Bot-Office.** A new per-bot flag `app_admin` (off by default) is set only with the master token: `PATCH /v1/bots/{id}` `{"app_admin": true}`. No bot can set it, on itself or on a bot it creates. An admin bot, with its job token:
+
+- reads every bot that is not private, another admin or a sudo bot (`desk team list`, teammate tools, recall), whatever its `team_read`;
+- edits other bots' profile and work settings: `bot-task admin edit-bot BOT` (`PATCH /v1/agent/bots/{bot}`), only name, description, icon, model, effort, timeout, notify, digest, steer and chat-only;
+- gives a bot a task and starts it (`bot-task add TITLE --for BOT --start`), edits bot-made tasks on any list, and drops them with a note;
+- lists, adds, edits and removes other bots' bot-made routines (`bot-task routine list --bot BOT`, `routine add --for BOT`, `edit`, `rm`); `bot-task admin check` says whether a bot is an admin.
+
+It never changes engine, instructions, `cli_access`, `allow_sudo`, `scheduled_runs`, budgets, `team_read`/`team_private` or `app_admin`, those fields are refused with 422. Its admin powers never reach a private bot, another admin or a bot the owner gave sudo, and never the owner's own tasks or routines. It cannot touch action rules, approvals, settings or the server. Never-rules, the secrets tripwire, the git guard and every approval class (push, merge, deploy, sends) apply to it as to every bot. The admin bot's SELF.md describes what it may do.
+
+- **"bot not found" says why.** `bot-task add --for NAME` with a name that is not a registered bot now answers 404 with the name and the reason: only registered bots (`desk team list`) hold tasks. An inbox sender, for example a CLI engineer run posting with `desk inbox post --from "Night Runner"`, is not a bot. `desk team list` says so under the list. That is why such a name got a 404 and is missing from the list. It was not a lookup bug.
+- **Rollback.** One additive column (`bots.app_admin`, default 0), which older code ignores. Check out the `backup/pre-0.12.26-*` tag and restart.
+
 ## What changed in 0.12.25
 
 **Bots message the owner on purpose, the way Grok Bot does; the CLI's step-by-step stream stays in Activity.**
