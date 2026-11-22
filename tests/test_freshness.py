@@ -173,6 +173,11 @@ def test_agent_can_check_approval_cards_live(settings):
         both = client.get("/v1/agent/approvals", params={"ids": f"#{ids[1]} 999"}, headers=headers).json()
         assert both[0] == {"id": ids[1], "status": "approved"}  # another bot's card: status only
         assert both[1] == {"id": 999, "status": "not_found"}
+        with closing(store._connect()) as db:
+            db.execute("UPDATE bots SET team_private=1 WHERE id=?", (str(bob.id),))
+            db.commit()
+        hidden = client.get("/v1/agent/approvals", params={"ids": str(ids[1])}, headers=headers).json()
+        assert hidden == [{"id": ids[1], "status": "not_found"}]  # a bot it may not read: no such card
         assert client.get("/v1/agent/approvals", params={"ids": str(2**64)}, headers=headers).status_code == 400
         assert client.get("/v1/agent/approvals", params={"ids": "²"}, headers=headers).status_code == 400
 
@@ -185,7 +190,7 @@ def test_backfill_dates_notes_from_edit_events_then_stated_dates(tmp_path):
     path.write_text("### Status (as of 25 October 2026)\n\n- Demo is in public beta\n- limit is 1500 now\n- plain fact\n")
     edit = (datetime(2026, 11, 21, 23, 0, tzinfo=UTC), "Lead Bot", "@@ -1 +1 @@\n+- limit is 1500 now\n")
     assert freshness.backfill(path, [edit], now=NOW) == 4
-    shown = freshness.annotate(path.read_text(), path, NOW, "MS Lead").split("\n")
+    shown = freshness.annotate(path.read_text(), path, NOW, "Other Lead").split("\n")
     assert "⟦~Oct 25 · ~28d OLD · date in note⟧" in shown[3]
     assert "⟦Nov 21 · 0d · Lead Bot⟧" in shown[4]
     assert "~Oct 25" in shown[5]  # inherits its heading's date

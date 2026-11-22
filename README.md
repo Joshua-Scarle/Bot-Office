@@ -141,7 +141,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 
 ## What changed in 0.12.27
 
-**Memory is a snapshot: bots see how old each note is and check the live source before relying on it.** (the owner, Nov 22: "Bots seem to quickly fall out of date and don't realize that their context or memories can become outdated".)
+**Memory is a snapshot: bots see how old each note is and check the live source before relying on it.** (Owner report, Nov 22: "Bots seem to quickly fall out of date and don't realize that their context or memories can become outdated".)
 
 - **Every note carries its age and source.** In each job workspace, every note in memory.md, shared-memory.md and WORKING.md ends with `⟦last written · age · by⟧` (`you`, `owner`, or the bot's name), plus `OLD` (14+ days), `EXPIRED` (the note says `(expires YYYY-MM-DD)` and that day passed) or `SUPERSEDED`. A controller-side ledger (`*.ages.json`) records this; editing a note re-dates it, and a restored note keeps its old date. Tags are removed before a job's edits are merged back, so stored files never carry them; a file with its own `⟦ ⟧` text, or too large to tag, is shown as stored. `scripts/backfill_note_ages.py` dated existing notes from recorded memory edits or the dates written in them (or their heading).
 - **Bots know what time it is.** Fresh and resumed prompts state the current time (ET); after a gap of 6+ hours a resumed session is told what it remembers may be out of date.

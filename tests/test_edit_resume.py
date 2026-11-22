@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from botoffice import freshness
 from botoffice.domain import Job, JobStatus, Slot
 from botoffice.providers.antigravity import AntigravityAdapter
 from botoffice.providers.claude import ClaudeAdapter
@@ -47,7 +48,7 @@ def _wire(adapter, name, runs):
 
     async def fake_exec(args, workspace, timeout, job, parser=None):
         runs.append(Run(list(args), job.prompt, (workspace / "history.md").read_text(),
-                        (workspace / "WORKING.md").read_text()))
+                        freshness.strip((workspace / "WORKING.md").read_text())))
         # the CLI announces its session: OLD until the edit, NEW for the fresh one after it
         parser.session_id = OLD[name] if len(runs) <= 2 else NEW[name]
         parser.final_text = "ok"

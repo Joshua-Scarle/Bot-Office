@@ -1807,7 +1807,16 @@ def create_app(
                     wanted.append(int(number))
                 found = {row["id"]: dict(row) for n in wanted
                          for row in db.execute("SELECT * FROM approvals WHERE id=?", (n,))}
-                return [shape(found[n]) if n in found else {"id": n, "status": "not_found"} for n in wanted]
+                # another bot's card only if this bot may read that bot (team ACL); else it does not exist
+                reader = db.execute("SELECT * FROM bots WHERE id=?", (str(job.bot_id),)).fetchone()
+                sections = team.section_map(db)
+                def visible(item: dict) -> bool:
+                    if str(item.get("bot_id")) == str(job.bot_id):
+                        return True
+                    target = db.execute("SELECT * FROM bots WHERE id=?", (str(item.get("bot_id")),)).fetchone()
+                    return bool(reader and target and team.can_read(dict(reader), dict(target), sections))
+                return [shape(found[n]) if n in found and visible(found[n]) else {"id": n, "status": "not_found"}
+                        for n in wanted]
             rows = db.execute("SELECT * FROM approvals WHERE bot_id=? ORDER BY id DESC LIMIT 20",
                               (str(job.bot_id),)).fetchall()
         return [shape(dict(row)) for row in rows]

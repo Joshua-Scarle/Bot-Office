@@ -30,7 +30,7 @@ def main(argv: list[str]) -> int:
     data_dir = settings.data_dir.resolve()
     memory = Memory(data_dir)
     safefs.add_root(data_dir)
-    db = sqlite3.connect(f"file:{data_dir / 'agentdesk.sqlite3'}?mode=ro", uri=True)
+    db = sqlite3.connect(f"file:{settings.db_path}?mode=ro", uri=True)  # private_dir when isolated
     db.row_factory = sqlite3.Row
     with closing(db):
         names = {row["id"]: row["name"] for row in db.execute("SELECT id, name FROM bots")}
