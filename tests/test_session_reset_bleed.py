@@ -130,6 +130,47 @@ def test_reset_then_unrelated_task_sees_nothing_of_the_earlier_one(settings, nam
     asyncio.run(scenario())
 
 
+MEMORY_SENTINEL = "Standing fact: the owner's printer is called GIRAFFE-7781"
+TASK_SENTINEL = "Keep the KESTREL-6630 shelf list current"
+
+
+@pytest.mark.parametrize("name", sorted(ADAPTERS))
+def test_memory_and_task_list_survive_a_reset(settings, name):
+    """Lead decision (Nov 21): memory.md and the task list survive an owner reset (as on Grok Bot); only the
+    conversation context is cleared. Memory and the task are set before task A and left untouched."""
+    async def scenario():
+        store, scheduler, bot, runs, bot_dir = _setup(settings, name)
+        client = TestClient(create_app(settings, {name: scheduler.providers[name]}, store=store))
+        # 1-2: a distinctive memory and an open assignment, set before any work
+        assert client.put(f"/v1/bots/{bot.id}/memory", headers=H, json={"text": MEMORY_SENTINEL}).status_code == 200
+        made = client.post(f"/v1/bots/{bot.id}/assignments", headers=H, json={"title": TASK_SENTINEL})
+        assert made.status_code == 201, made.text
+        # 3: task A leaves conversation markers in its reply and WORKING.md
+        scheduler.turns.post_message(bot, A_TASK)
+        await _turn(store, scheduler, name)
+        assert A_WORKING in scheduler.memory.read_working(bot.id)
+        # 4: reset, with memory and the assignment left alone
+        assert client.post(f"/v1/bots/{bot.id}/session/reset", headers=H).status_code == 200
+        # 5: an unrelated task B
+        scheduler.turns.post_message(bot, "List what you remember and what is on your task list.")
+        await _turn(store, scheduler, name)
+        b = runs[-1]
+        assert not b.resumed
+        # 6: memory is still there (memory.md in the workspace, which the fresh-session prompt says to read) and
+        # the open task is listed in the prompt
+        assert b.workspace_files["memory.md"] == MEMORY_SENTINEL and "memory.md" in b.prompt
+        assert TASK_SENTINEL in b.prompt
+        assert [a["title"] for a in client.get(f"/v1/bots/{bot.id}/assignments", headers=H).json()] == [TASK_SENTINEL]
+        # 7: nothing of A's conversation: prompt, history.md, worklog.md, WORKING.md, SELF.md job directories,
+        # attachments index and engine directories (every workspace and bot file outside reset-archive)
+        everything = _everything(b)
+        for word in A_WORDS:
+            assert word not in everything, word
+        assert b.workspace_files["WORKING.md"] == "" and b.workspace_files["worklog.md"] == ""
+
+    asyncio.run(scenario())
+
+
 def test_follow_up_in_the_same_session_still_sees_its_context(settings):
     async def scenario():
         store, scheduler, bot, runs, bot_dir = _setup(settings, "claude")
