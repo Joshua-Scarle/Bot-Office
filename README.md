@@ -139,6 +139,16 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.27
+
+**Memory is a snapshot: bots see how old each note is and check the live source before relying on it.** (the owner, Nov 22: "Bots seem to quickly fall out of date and don't realize that their context or memories can become outdated".)
+
+- **Every note carries its age and source.** In each job workspace, every note in memory.md, shared-memory.md and WORKING.md ends with `⟦last written · age · by⟧` (`you`, `owner`, or the bot's name), plus `OLD` (14+ days), `EXPIRED` (the note says `(expires YYYY-MM-DD)` and that day passed) or `SUPERSEDED`. A controller-side ledger (`*.ages.json`) records this; editing a note re-dates it, and a restored note keeps its old date. Tags are removed before a job's edits are merged back, so stored files never carry them; a file with its own `⟦ ⟧` text, or too large to tag, is shown as stored. `scripts/backfill_note_ages.py` dated existing notes from recorded memory edits or the dates written in them (or their heading).
+- **Bots know what time it is.** Fresh and resumed prompts state the current time (ET); after a gap of 6+ hours a resumed session is told what it remembers may be out of date.
+- **A live source for approval cards.** `bot-task approvals [N ...]` (`GET /v1/agent/approvals`): the bot's own cards, or the current status of any card (another bot's: status only). SELF.md lists the bot's pending cards each turn.
+- **System prompt:** memory, summaries and handoffs are dated snapshots; check the live source (repo, `bot-task`, desk/team commands, health, logs) before stating status or acting on a fact that can change; mark superseded facts. Compaction summaries date the state they keep.
+- **Rollback.** No schema change. Check out the `backup/pre-0.12.27-*` tag and restart; the `*.ages.json` files are then ignored.
+
 ## What changed in 0.12.26
 
 **App admin: the owner can let one bot manage the office inside Bot-Office.** A new per-bot flag `app_admin` (off by default) is set only with the master token: `PATCH /v1/bots/{id}` `{"app_admin": true}`. No bot can set it, on itself or on a bot it creates. An admin bot, with its job token:
