@@ -139,6 +139,14 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.23
+
+**Replies are shorter for routine work and open with what the owner needs; research keeps full detail.**
+
+- **System prompt, Replies section.** A reply opens with what the bot needs from the owner (a decision, approval or answer), or with the result when nothing is needed. Routine, clear-cut work (admin, setup, fixes, status, bot messages) gets a few short lines; background, steps and details stay in files unless asked. Research (experiments, data pipelines, analysis) keeps full detail: what was tried, what came out, how sure the bot is, what next. A plain question now goes first in the reply instead of at the end (the `BOT-OFFICE-STATUS` last line is unchanged).
+- **Who sees it.** Every bot on its next turn (a resumed session gets the one-line "system prompt changed" nudge). An owner override of the system prompt in Settings would replace it; none is set.
+- **Rollback.** Prompt text only: no schema change and no migration. Check out the `backup/pre-0.12.23-*` tag and restart.
+
 ## What changed in 0.12.22
 
 **An approved action is no longer asked again in the resume turn just because that turn runs in a new job workspace.**
