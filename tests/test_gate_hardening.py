@@ -224,3 +224,17 @@ def test_resume_turn_is_bound_inside_the_enqueue_transaction(tmp_path, monkeypat
 ])
 def test_gate_script_url_check(url, ok):
     assert GATE["_loopback"](url) is ok
+
+
+def test_fingerprint_names_job_workspace_by_role():
+    # the resume turn after an approval runs in a new job workspace: the grant must still match
+    def at(cwd):
+        event = bash("codex exec -")
+        event["cwd"] = cwd
+        return parse_event(event).fingerprint
+    a = "/srv/data/workspaces/73fe95b9-3562-49e0-bb24-33473aff9092"
+    b = "/srv/data/workspaces/471410be-de46-4de6-91c2-0c41b0dd8aca"
+    assert at(a) == at(b)
+    assert at(a + "/sub") == at(b + "/sub") != at(a)
+    assert at("/home/u/repo-one") != at("/home/u/repo-two")
+    assert at("/srv/data/workspaces/not-a-uuid") != at("/srv/data/workspaces/other")

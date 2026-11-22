@@ -190,9 +190,21 @@ def _canonical(value: Any) -> str:
         return repr(value)
 
 
+# a job's own workspace (<data_dir>/workspaces/<job uuid>): each turn, including the resume turn
+# after an approval, runs in a new one, so the fingerprint names it by role, not by uuid
+_JOB_WORKSPACE = re.compile(r"^(?P<root>.*/workspaces)/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                            r"(?P<rest>/.*)?$")
+
+
 def _norm_dir(path: str | None) -> str:
     import posixpath
-    return posixpath.normpath(path) if path else ""
+    if not path:
+        return ""
+    path = posixpath.normpath(path)
+    match = _JOB_WORKSPACE.match(path)
+    if match:
+        return f"{match['root']}/<job-workspace>{match['rest'] or ''}"
+    return path
 
 
 def _strings(value: Any, out: list[str], depth: int = 0) -> None:
