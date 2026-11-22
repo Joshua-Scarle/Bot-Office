@@ -477,7 +477,7 @@ def test_task_evidence_of_the_turn_does_not_cover_a_failed_status_line(settings)
 def test_nothing_new_is_quiet_only_as_the_whole_reason(reason):
     from botoffice import failures
 
-    assert failures.judge_evidence("done", "nothing new") == (1, "nothing new")
+    assert failures.judge_evidence("done", "nothing new") == (None, "")  # claims no work: neither verified nor flagged
     assert failures.judge_evidence("done", reason)[0] == 0
 
 
@@ -511,3 +511,91 @@ def test_a_limit_apology_in_reply_txt_does_not_replace_the_draft(settings):
     store, bot, job = turn(settings, Turn(APOLOGY, draft=draft, prepare=prepare))
     message = reply(store, bot)
     assert message.cut_chars > 0 and message.text.startswith("tick tick") and job.reply_text == draft.strip()
+
+
+# --- review r2 ------------------------------------------------------------------------------------------------
+
+def test_a_directory_between_the_data_dir_and_a_root_swapped_for_a_link_is_not_followed(tmp_path):
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    (outside / "cursor-workspace").mkdir(parents=True)
+    (outside / "cursor-workspace" / "passwd").write_text("root:x:0:0\n")
+    (data / "bots").mkdir(parents=True)
+    (data / "bots" / "b1").symlink_to(outside)  # the bot directory, not the root itself, is the link
+    root = data / "bots" / "b1" / "cursor-workspace"
+    assert evidence.check("checked `passwd`", evidence.Scope(roots=[root], base=data, network=False)) is None
+    (data / "bots" / "b2" / "cursor-workspace").mkdir(parents=True)
+    (data / "bots" / "b2" / "cursor-workspace" / "passwd").write_text("x\n")
+    real = evidence.Scope(roots=[data / "bots" / "b2" / "cursor-workspace"], base=data, network=False)
+    assert evidence.check("checked `passwd`", real)
+
+
+@pytest.mark.parametrize("link", ["pack", "prefix"])
+def test_a_repository_with_linked_object_directories_does_not_count(settings, link):
+    settings.ensure_dirs()
+    outer = settings.data_dir.parent / "outer"
+    outer.mkdir()
+    make_repo(outer)
+    head = (outer / "sha").read_text()
+    if link == "pack":
+        git(outer / "proj", "gc", "-q")  # the commit now lives in a pack
+    source = outer / "proj" / ".git" / "objects"
+
+    def prepare(workspace):
+        repo = workspace / "proj"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        objects = repo / ".git" / "objects"
+        if link == "pack":
+            os.rmdir(objects / "pack")
+            os.symlink(source / "pack", objects / "pack")
+        else:
+            os.symlink(source / head[:2], objects / head[:2])
+
+    _, _, job = turn(settings, Turn(f"Done.\nBOT-OFFICE-STATUS: done — commit {head[:10]}", prepare=prepare))
+    assert job.outcome == "done" and job.verified == 0
+
+
+@pytest.mark.parametrize("line", [
+    _claude_tool_line("FAILED tests/test_x.py::test_a\n3 failed\n12 passed"),  # failures on another line
+    json.dumps({"type": "item.completed", "item": {"type": "command_execution", "aggregated_output": "12 passed",
+                                                   "exit_code": 1}}),
+    json.dumps({"type": "user", "message": {"content": [
+        {"type": "tool_result", "is_error": True, "content": "Exit code 1\n12 passed"}]}}),
+    json.dumps({"type": "tool_use", "part": {"tool": "bash", "state": {"status": "error", "output": "12 passed"}}}),
+])
+def test_a_failed_run_does_not_count_even_with_a_passing_count(tmp_path, line):
+    log = tmp_path / "job.log"
+    log.write_text(line + "\n")
+    assert evidence.check("ran pytest: 12 passed", evidence.Scope(roots=[tmp_path], log_path=log, network=False)) is None
+
+
+def test_a_quiet_nothing_new_done_is_neither_verified_nor_flagged(settings):
+    store, bot, job = turn(settings, Turn("Checked the inbox.\nBOT-OFFICE-STATUS: done — nothing new"))
+    assert job.outcome == "done" and job.verified is None and not job.evidence
+    message = reply(store, bot)
+    assert message.unverified is False and message.evidence is None
+
+
+def test_stalled_dns_lookups_never_block_later_checks_or_shutdown(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    release = threading.Event()
+    monkeypatch.setattr(evidence, "URL_BUDGET", 0.3)
+    stalled = evidence.Scope(roots=[tmp_path], resolve=lambda *a, **k: release.wait(30) and [])
+    try:
+        for n in range(evidence.MAX_LINK_THREADS + 2):  # more stalled lookups than may run at once
+            start = time.monotonic()
+            assert evidence.check(f"see https://stall{n}.test/", stalled) is None
+            assert time.monotonic() - start < evidence.URL_BUDGET + 1.5  # each gives up within its budget
+        workers = [t for t in threading.enumerate() if t.name == "evidence-url"]
+        assert workers and all(t.daemon for t in workers)  # a stalled lookup never holds up shutdown
+        assert len(workers) <= evidence.MAX_LINK_THREADS
+    finally:
+        release.set()
+    deadline = time.monotonic() + 5
+    while any(t.name == "evidence-url" for t in threading.enumerate()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    # the lookups are gone: a later check runs again
+    answered = evidence.Scope(roots=[tmp_path], resolve=lambda *a, **k: [])
+    assert evidence.check("see https://later.test/", answered) is None

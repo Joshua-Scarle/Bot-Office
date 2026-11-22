@@ -106,9 +106,10 @@ def failed_check(text: str) -> bool:
 
 def judge_evidence(state: str, reason: str, checked: str | None = None) -> tuple[int | None, str]:
     """(verified, evidence) for a finished turn that ended with *state*. verified is None for states
-    that claim nothing (not_done, blocked, no status line: that one is "unverified" already); 1 for a
-    done whose reason cites something Bot-Office checked (*checked*: what evidence.check found), or a
-    quiet "nothing new"; 0 for a bare done, a reason whose files, commits, links or test results could not
+    that claim nothing (not_done, blocked, no status line: that one is "unverified" already, and a done
+    whose whole reason is "nothing new": it claims no work, so there is nothing to verify and nothing to
+    flag); 1 for a done whose reason cites something Bot-Office checked (*checked*: what evidence.check
+    found); 0 for a bare done, a reason whose files, commits, links or test results could not
     be checked ("red lunch widget"), or a cited check that failed. evidence is the text shown with it: the
     cited text (kept when it is not verified, so the owner can see what was cited), plus what was checked."""
     if state != "done":
@@ -117,7 +118,7 @@ def judge_evidence(state: str, reason: str, checked: str | None = None) -> tuple
     if failed_check(reason):
         return 0, reason
     if NO_OP_DONE.fullmatch(reason):
-        return 1, reason
+        return None, ""  # claims no work: nothing to verify, so neither verified nor "Not verified"
     if not checked:
         return 0, reason
     return 1, f"{reason} (Bot-Office checked: {checked})"

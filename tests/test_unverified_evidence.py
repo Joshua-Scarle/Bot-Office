@@ -19,7 +19,7 @@ def test_judge_evidence():
     # 0.12.20: evidence Bot-Office cannot check is not verified, and kept so the page shows what was cited
     assert failures.judge_evidence("done", "ok") == (0, "ok")
     assert failures.judge_evidence("done", "all done now") == (0, "all done now")
-    assert failures.judge_evidence("done", "nothing new") == (1, "nothing new")
+    assert failures.judge_evidence("done", "nothing new") == (None, "")  # claims no work: not verified, not flagged
     assert failures.judge_evidence("done", "ran pytest tests/test_x.py: 12 passed") == (0, "ran pytest tests/test_x.py: 12 passed")
     assert failures.judge_evidence("done", "ran pytest tests/test_x.py: 12 passed", "test output 12 passed") == (
         1, "ran pytest tests/test_x.py: 12 passed (Bot-Office checked: test output 12 passed)")

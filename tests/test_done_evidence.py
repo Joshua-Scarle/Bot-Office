@@ -44,8 +44,8 @@ def test_failed_check_evidence_is_unverified_but_kept(reason):
 def test_real_checks_are_verified_only_when_bot_office_checked_them(reason):
     # 0.12.20: naming a check is not enough; it counts when Bot-Office checked what it cites ("nothing new" aside)
     assert failures.judge_evidence("done", reason, "file x.md exists") == (
-        (1, reason) if reason == "nothing new" else (1, f"{reason} (Bot-Office checked: file x.md exists)"))
-    assert failures.judge_evidence("done", reason)[0] == (1 if reason == "nothing new" else 0)
+        (None, "") if reason == "nothing new" else (1, f"{reason} (Bot-Office checked: file x.md exists)"))
+    assert failures.judge_evidence("done", reason)[0] == (None if reason == "nothing new" else 0)
 
 
 def test_done_with_failed_check_is_recorded_done_unverified(settings):

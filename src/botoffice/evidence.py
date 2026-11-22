@@ -32,10 +32,9 @@ import socket
 import ssl
 import stat
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -48,6 +47,7 @@ URL_BUDGET = 8.0  # seconds for every link of one evidence text
 MAX_REDIRECTS = 3
 GIT_TIMEOUT = 5.0
 REPO_DEPTH = 3
+OBJECT_ENTRIES = 50_000  # entries of a repository's objects/ that are checked for links
 MAX_REPOS = 10
 LOG_LIMIT = 64 * 1024 * 1024  # bytes of a job's log that are searched for test output
 
@@ -69,8 +69,10 @@ OUTPUT_KEYS = {"tool_use_result", "aggregated_output", "output", "stdout", "stde
 # what the model wrote (a tool call's input or arguments, an assistant message) is never searched, even
 # where it has an "output" key
 INPUT_KEYS = {"input", "args", "arguments", "parameters"}
+EXIT_KEYS = ("exit_code", "exitCode", "exit_status", "returncode")
 
-_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="evidence-url")
+MAX_LINK_THREADS = 8  # link checks still running (a stalled DNS lookup cannot be cancelled); more: none start
+_link_threads = threading.BoundedSemaphore(MAX_LINK_THREADS)
 
 
 @dataclass
@@ -85,6 +87,9 @@ class Scope:
     owned: Callable[[str], bool] | None = None
     network: bool = True
     resolve: Callable[..., list] = field(default=socket.getaddrinfo, repr=False)
+    # Bot-Office's own directory the roots are in (the data dir): opened as is, and every component
+    # below it, the roots' own included, is opened without following links (None: the roots' parents)
+    base: Path | None = None
 
 
 def job_scope(data_dir: Path, store: object, job: object, *, network: bool = True) -> Scope:
@@ -104,7 +109,8 @@ def job_scope(data_dir: Path, store: object, job: object, *, network: bool = Tru
     log = Path(data_dir) / "logs" / f"{job.id}.log"
     return Scope(roots=[Path(data_dir) / "workspaces" / str(job.id), bot_dir / "cursor-workspace",
                         bot_dir / "antigravity-workspace"],
-                 log_path=log, workspaces=Path(data_dir) / "workspaces", owned=owned, network=network)
+                 log_path=log, workspaces=Path(data_dir) / "workspaces", owned=owned, network=network,
+                 base=Path(data_dir))
 
 
 def check(text: str, scope: Scope) -> str | None:
@@ -147,14 +153,25 @@ def _inside(path: str, root: Path) -> tuple[str, ...] | None:
     return tuple(parts) or None
 
 
-def open_dir(root: Path, parts: Iterable[str]) -> int | None:
-    """A descriptor of the directory root/parts..., opened one component at a time without following any
-    link (the root included: a root swapped for a link is refused); None when that fails."""
+def open_dir(root: Path, parts: Iterable[str], base: Path | None = None) -> int | None:
+    """A descriptor of the directory root/parts..., opened one component at a time from *base* (else the
+    root's parent) without following any link: a root, or a directory between *base* and it, swapped for
+    a link is refused. None when that fails or *root* is not below *base*."""
+    root = Path(root)
+    if base is None:
+        start, below = root.parent, (root.name,)
+    else:
+        try:
+            start, below = Path(base), root.relative_to(base).parts
+        except ValueError:
+            return None
+    if not below or ".." in below:
+        return None
     try:
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(start, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError:
         return None
-    for part in parts:
+    for part in (*below, *parts):
         try:
             nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
         except OSError:
@@ -165,11 +182,11 @@ def open_dir(root: Path, parts: Iterable[str]) -> int | None:
     return fd
 
 
-def regular_file(root: Path, parts: Iterable[str]) -> int | None:
+def regular_file(root: Path, parts: Iterable[str], base: Path | None = None) -> int | None:
     """Size of the regular file root/parts..., walked without following any link (``open_dir``); None
     when it is missing, a link, or not a regular file."""
     parts = tuple(parts)
-    fd = open_dir(root, parts[:-1])
+    fd = open_dir(root, parts[:-1], base)
     if fd is None:
         return None
     try:
@@ -197,7 +214,7 @@ def _check_files(text: str, scope: Scope) -> str | None:
             parts = _inside(candidate, root)
             if not parts or (len(parts) == 1 and (parts[0] in GENERATED or parts[0].startswith(".bot-office"))):
                 continue
-            size = regular_file(root, parts)
+            size = regular_file(root, parts, scope.base)
             if size:
                 return f"file {'/'.join(parts)} exists ({size:,} bytes)"
     return None
@@ -227,17 +244,38 @@ def _repos(scope: Scope) -> list[tuple[Path, tuple[str, ...]]]:
 
 def git_env() -> dict[str, str]:
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C",
+            "GIT_NO_REPLACE_OBJECTS": "1"}
+
+
+def _no_links(fd: int, limit: int = OBJECT_ENTRIES) -> bool:
+    """True when nothing below the directory open at *fd* is a link (walked by descriptor, at most
+    *limit* entries: a bigger tree is not checked and does not count)."""
+    seen = 0
+    try:
+        for _path, dirs, files, dir_fd in os.fwalk(".", dir_fd=fd, follow_symlinks=False):
+            for name in (*dirs, *files):
+                seen += 1
+                if seen > limit or stat.S_ISLNK(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+                    return False
+    except OSError:
+        return False
+    return True
 
 
 def _own_objects(fd: int) -> bool:
-    """True when the repository open at *fd* keeps its objects itself: objects/ is a real directory, and
-    no alternates or commondir point Git at another repository's objects."""
+    """True when the repository open at *fd* keeps its objects itself: objects/ is a real directory with
+    no link anywhere below it (a linked pack/ or loose-object directory could lend another repository's
+    objects), and no alternates or commondir point Git elsewhere."""
     try:
-        if not stat.S_ISDIR(os.stat("objects", dir_fd=fd, follow_symlinks=False).st_mode):
-            return False
+        objects = os.open("objects", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
     except OSError:
         return False
+    try:
+        if not _no_links(objects):
+            return False
+    finally:
+        os.close(objects)
     for name in ("objects/info/alternates", "objects/info/http-alternates", "commondir"):
         try:
             os.stat(name, dir_fd=fd, follow_symlinks=False)
@@ -249,10 +287,10 @@ def _own_objects(fd: int) -> bool:
     return True
 
 
-def commit_exists(root: Path, parts: tuple[str, ...], sha: str) -> bool:
+def commit_exists(root: Path, parts: tuple[str, ...], sha: str, base: Path | None = None) -> bool:
     """Whether *sha* names a commit of the repository root/parts (the ``.git`` directory, walked without
     following links and pinned by its descriptor, so it cannot be swapped between the checks and the Git run)."""
-    fd = open_dir(root, parts)
+    fd = open_dir(root, parts, base)
     if fd is None:
         return False
     try:
@@ -276,7 +314,7 @@ def _check_commits(text: str, scope: Scope) -> str | None:
         return None
     for root, parts in _repos(scope):
         for sha in shas:
-            if commit_exists(root, parts, sha):
+            if commit_exists(root, parts, sha, scope.base):
                 return f"commit {sha} is in {(root.joinpath(*parts[:-1])).name}"
     return None
 
@@ -353,42 +391,76 @@ def _check_urls(text: str, scope: Scope) -> str | None:
         left = deadline - time.monotonic()
         if left <= 0:
             break
-        future = _pool.submit(_fetch, url, scope, deadline)
-        try:
-            if future.result(timeout=left + 0.5):
-                return f"link {url[:200]} answered"
-        except (FutureTimeout, Exception):  # noqa: BLE001 - a link that cannot be checked does not count
-            continue
+        if _fetch_bounded(url, scope, deadline, left + 0.5):
+            return f"link {url[:200]} answered"
     return None
+
+
+def _fetch_bounded(url: str, scope: Scope, deadline: float, wait: float) -> bool:
+    """``_fetch`` in its own daemon thread, waited for at most *wait* seconds. A lookup that stalls past
+    that keeps only its own thread (never one a later check needs, never shutdown); while
+    MAX_LINK_THREADS are still running, no link is checked (it does not count)."""
+    if not _link_threads.acquire(blocking=False):
+        return False
+    answer: list[bool] = []
+
+    def run() -> None:
+        try:
+            answer.append(bool(_fetch(url, scope, deadline)))
+        except Exception:  # noqa: BLE001 - a link that cannot be checked does not count
+            answer.append(False)
+        finally:
+            _link_threads.release()
+
+    worker = threading.Thread(target=run, name="evidence-url", daemon=True)
+    try:
+        worker.start()
+    except RuntimeError:  # no thread to be had: the link is not checked
+        _link_threads.release()
+        return False
+    worker.join(wait)
+    return bool(answer and answer[0])
 
 
 # --- test output ---------------------------------------------------------------------------------------
 
-def _collect(node: object, out: list[str], inside: bool = False) -> None:
+def _collect(node: object, out: list[str], inside: bool = False) -> bool:
+    """Append the tool-output strings in *node* to *out*; True when *node* reports a failed run
+    (is_error, a nonzero exit code, status failed/error). What the model wrote is skipped."""
+    failed = False
     if isinstance(node, str):
         if inside:
             out.append(node)
     elif isinstance(node, list):
         for item in node:
-            _collect(item, out, inside)
+            failed |= _collect(item, out, inside)
     elif isinstance(node, dict):
         if node.get("type") == "assistant" or node.get("role") == "assistant":
-            return
+            return False
+        failed = node.get("is_error") is True or str(node.get("status", "")).lower() in ("failed", "error")
+        for key in EXIT_KEYS:
+            code = node.get(key)
+            failed |= isinstance(code, int) and not isinstance(code, bool) and code != 0
         here = inside or node.get("type") == "tool_result"
         for key, value in node.items():
             if key not in INPUT_KEYS:
-                _collect(value, out, here or key in OUTPUT_KEYS)
+                failed |= _collect(value, out, here or key in OUTPUT_KEYS)
+    return failed
 
 
-def tool_output(log_text: str) -> str:
-    """The tool and command output in a job's CLI log (JSON lines); assistant text is left out."""
-    out: list[str] = []
+def tool_output(log_text: str) -> list[tuple[str, bool]]:
+    """The tool and command results in a job's CLI log (JSON lines; each engine writes one result per
+    line), as (output, the run failed); assistant text and tool inputs are left out."""
+    results: list[tuple[str, bool]] = []
     for line in log_text.splitlines():
         if "pass" not in line or not line.startswith("{"):
             continue
+        out: list[str] = []
         with contextlib.suppress(ValueError):
-            _collect(json.loads(line), out)
-    return "\n".join(out)
+            failed = _collect(json.loads(line), out)
+            if out:
+                results.append(("\n".join(out), failed))
+    return results
 
 
 def _check_tests(text: str, scope: Scope) -> str | None:
@@ -400,10 +472,11 @@ def _check_tests(text: str, scope: Scope) -> str | None:
             data = handle.read(LOG_LIMIT)
     except OSError:
         return None
-    output = tool_output(data.decode("utf-8", errors="replace"))
+    results = tool_output(data.decode("utf-8", errors="replace"))
     for claim in cited:
         pattern = re.compile(rf"\b{re.escape(claim)}\b", re.IGNORECASE)
-        for line in output.splitlines():
-            if pattern.search(line) and not FAILED_ON_LINE.search(line):
+        for output, failed in results:
+            # the whole result must pass: no failure count anywhere in it, and no failed exit
+            if not failed and pattern.search(output) and not FAILED_ON_LINE.search(output):
                 return f'test output "{claim}" is in this job\'s own command output'
     return None
