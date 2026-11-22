@@ -8,6 +8,7 @@ untrusted data (``untrusted: true``; the client fences the text), at most 20 hit
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import threading
 import time
@@ -117,12 +118,59 @@ def run(store, job, query: str, scope: str = "self", limit: int = 10) -> dict:
         SLOTS.release()
 
 
-def run_admitted(store, job, query: str, scope: str = "self", limit: int = 10) -> dict:
-    """Worker body of the route: the caller took an ``ADMIT`` ticket; it is returned here, in the worker."""
+class _Ticket:
+    """One admission ticket: returned exactly once, by the worker, or by the caller if the work never started."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = "queued"
+
+    def start(self) -> bool:
+        with self._lock:
+            if self._state != "queued":
+                return False
+            self._state = "running"
+            return True
+
+    def _give_back(self, only_if: str | None) -> None:
+        with self._lock:
+            if self._state == "released" or (only_if and self._state != only_if):
+                return
+            self._state = "released"
+        ADMIT.release()
+
+    def release(self) -> None:
+        self._give_back(None)
+
+    def abandon(self) -> None:
+        self._give_back("queued")
+
+
+def _worker(ticket: _Ticket, store, job, query: str, scope: str, limit: int) -> dict:
+    if not ticket.start():  # the caller gave up before this ran
+        raise RecallError(503, "recall was cancelled")
     try:
         return run(store, job, query, scope, limit)
     finally:
-        ADMIT.release()
+        ticket.release()
+
+
+async def run_async(store, job, query: str, scope: str = "self", limit: int = 10) -> dict:
+    """The route body: at most ``ADMIT`` searches in flight (refused before any thread is used), run off the event loop.
+
+    The ticket goes back when the worker ends, or at once when the work never started (cancelled while queued in
+    the executor, or the submission failed), so it cannot leak.
+    """
+    if not ADMIT.acquire(blocking=False):
+        raise RecallError(503, "recall is busy, try again")
+    ticket = _Ticket()
+    try:
+        future = asyncio.get_running_loop().run_in_executor(None, _worker, ticket, store, job, query, scope, limit)
+    except BaseException:
+        ticket.abandon()
+        raise
+    future.add_done_callback(lambda _f: ticket.abandon())
+    return await future
 
 
 def _run(store, job, query: str, scope: str, limit: int) -> dict:

@@ -207,6 +207,15 @@ def test_slots_are_held_by_the_worker_and_busy_is_503(settings, monkeypatch):
         assert get(d, h, "fig").status_code == 200
 
 
+def _tickets_free() -> int:
+    got = 0
+    while recall.ADMIT.acquire(blocking=False):
+        got += 1
+    for _ in range(got):
+        recall.ADMIT.release()
+    return got
+
+
 def test_admission_is_bounded_before_any_thread(settings):
     with Desk(settings) as d:
         bot = d.bot("Reader")
@@ -219,5 +228,40 @@ def test_admission_is_bounded_before_any_thread(settings):
             for _ in taken:
                 recall.ADMIT.release()
         assert get(d, h, "plum").status_code == 200
-        assert recall.ADMIT.acquire(blocking=False)  # the ticket of the finished search was returned
-        recall.ADMIT.release()
+        assert _tickets_free() == 4  # the finished search returned its ticket (all four are free again)
+
+
+def test_admission_ticket_returns_when_the_work_never_started(settings):
+    import asyncio
+    import concurrent.futures
+    import threading
+
+    with Desk(settings) as d:
+        bot = d.bot("Reader")
+        add_message(d.store, bot, "user", "kiwi note")
+        job, _ = run_job(d.store, bot)
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            loop.set_default_executor(pool)
+            gate = threading.Event()
+            blocker = loop.run_in_executor(None, gate.wait)  # the only worker is busy, so the recall queues
+            task = asyncio.ensure_future(recall.run_async(d.store, job, "kiwi", "self", 5))
+            await asyncio.sleep(0.1)
+            assert _tickets_free() == 3  # admitted and queued
+            task.cancel()
+            await asyncio.sleep(0.1)
+            assert _tickets_free() == 4  # cancelled before it started: the ticket came back at once
+            gate.set()
+            await blocker
+            assert (await recall.run_async(d.store, job, "kiwi", "self", 5))["count"] == 1
+            assert _tickets_free() == 4
+            pool.shutdown(wait=True)
+            try:  # a submission that fails (executor shut down) returns the ticket too
+                await recall.run_async(d.store, job, "kiwi", "self", 5)
+            except RuntimeError:
+                pass
+            assert _tickets_free() == 4
+
+        asyncio.run(scenario())
