@@ -139,7 +139,7 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
-## What changed in 0.12.23
+## What changed in 0.12.21
 
 **A bot now has a standing digest of its own recent chat, and a search over the rest, so a short ask ("What is AMA?", "Push it to 1PM") is not answered from a dictionary or a guess.**
 
@@ -148,7 +148,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 - **Rule 9 for all bots.** For a short or underspecified ask, check `CONTEXT.md`, then `context_recall`. Exactly one live match: act on it and name it in the first line. Zero or several: do not guess; ask one short question listing the candidates and end with `BOT-OFFICE-STATUS: waiting_on_user`. A dictionary definition is never an answer to a question about the owner's own work. The session prompt points at `CONTEXT.md` too.
 - **Hello-screen eyes follow the pointer.** The character on the empty-chat screen looks toward the mouse (a few pixels, clamped per shape), recentres when the pointer leaves the window, and stays still with "reduce motion". UI only.
 - **Not in this release.** Needs-you entries are not in the digest; no counterpart (S4 mirror) section yet (the extension point is `context.counterpart_lines`); `context_recall` is Claude-only like the other `botoffice` tools (CONTEXT.md is a workspace file, so other engines can read it).
-- **Rollback.** No schema change and no migration. Roll back by checking out the previous tag (the one before 0.12.23, or the pre-deploy `backup/pre-0.12.23-*` tag) and restarting; the `CONTEXT.md` file in old job directories is ignored.
+- **Rollback.** No schema change and no migration. Roll back by checking out the previous tag (the one before 0.12.21, or the pre-deploy `backup/pre-0.12.21-*` tag) and restarting; the `CONTEXT.md` file in old job directories is ignored.
 
 ## What changed in 0.12.20
 
