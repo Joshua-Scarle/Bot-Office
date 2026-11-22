@@ -427,7 +427,7 @@ def build_resume_prompt(job: Job) -> str:
     return f"""New turn ({_source_label(job)}). This turn runs in a new job directory \
 (the current directory). {_reply_rule(job)} Update WORKING.md there only if your tasks changed \
 (it is pre-filled with your saved copy), and memory.md only for durable facts. Rules from the start of this \
-session still apply (end with BOT-OFFICE-STATUS: done — <what you checked, and how> when finished; unfinished: not_done|blocked|waiting_on_user — <reason>; if you could not do it, say so there: never done).
+session still apply (end with BOT-OFFICE-STATUS: done — <what you checked, and how>, else not_done|blocked|waiting_on_user — <reason>; could not do it: never done).
 
 Current message:
 {job.prompt}

@@ -1042,9 +1042,9 @@ class Scheduler:
         audit = self._read_text(reply, 10**9).strip() if job.bot_id and not (result and result.reply_file_stale) else ""
         if not audit and sink is not None:
             audit = sink.assembled
-            draft = sink.draft.strip()
-            if len(audit) <= REPLY_LIMIT < len(draft) and failures.LIMIT_NOTE.search(audit):
-                audit = draft
+        draft = sink.draft.strip() if sink is not None else ""
+        if len(audit) <= REPLY_LIMIT < len(draft) and failures.LIMIT_NOTE.search(audit):
+            audit = draft  # from reply.txt or the stream alike
         return audit
 
     def _check_done(self, job: Job, workspace: Path, result: RunResult | None,

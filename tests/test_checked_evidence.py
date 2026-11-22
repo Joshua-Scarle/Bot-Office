@@ -432,3 +432,82 @@ def test_claude_parser_without_a_cut_reports_the_last_message():
     parser = ClaudeParser()
     parser.feed({"type": "assistant", "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "a"}]}})
     assert parser.feed({"type": "result", "result": "a", "is_error": False}) == [("final", {"text": "a"})]
+
+
+# --- review r1: what the checks must not be fooled by --------------------------------------------------------
+
+def test_a_workspace_root_swapped_for_a_link_is_not_followed(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "passwd").write_text("root:x:0:0\n")
+    (tmp_path / "ws").symlink_to(outside)
+    assert evidence.check("checked `passwd`", evidence.Scope(roots=[tmp_path / "ws"], network=False)) is None
+
+
+def test_a_tool_call_input_is_not_tool_output(tmp_path):
+    log = tmp_path / "job.log"
+    log.write_text("\n".join(json.dumps(line) for line in (
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "true", "output": "12 passed"}}]}},
+        {"type": "tool_use", "part": {"tool": "bash", "state": {"input": {"output": "12 passed"}, "output": "ok"}}},
+        {"type": "item.completed", "item": {"type": "function_call", "arguments": {"stdout": "12 passed"}}},
+    )) + "\n")
+    assert evidence.check("ran pytest: 12 passed", evidence.Scope(roots=[tmp_path], log_path=log, network=False)) is None
+
+
+def test_evidence_that_names_a_failed_check_never_counts_even_with_a_real_file(tmp_path):
+    (tmp_path / "report.txt").write_text("FAILED test_x\n")
+    scope = evidence.Scope(roots=[tmp_path], network=False)
+    assert evidence.check("see report.txt", scope)
+    assert evidence.check("tests failed; see report.txt", scope) is None  # task evidence and re-checks use this too
+
+
+def test_task_evidence_of_the_turn_does_not_cover_a_failed_status_line(settings):
+    store, bot, job = turn(settings, Turn("Done.\nBOT-OFFICE-STATUS: done — ran pytest, 3 failed"))
+    assert job.verified == 0
+    with __import__("contextlib").closing(store._connect()) as db, db:
+        db.execute("INSERT INTO assignment_events (assignment_id, kind, note, job_id, created_at) VALUES "
+                   "('a', 'evidence', 'wrote x.md (Bot-Office checked: file x.md exists)', ?, '2026-11-21T00:00:00Z')",
+                   (str(job.id),))
+    message = reply(store, bot)
+    assert message.unverified is True and message.evidence == "ran pytest, 3 failed"
+
+
+@pytest.mark.parametrize("reason", ["nothing new, fixed the build", "nothing new; ran pytest, 12 passed"])
+def test_nothing_new_is_quiet_only_as_the_whole_reason(reason):
+    from botoffice import failures
+
+    assert failures.judge_evidence("done", "nothing new") == (1, "nothing new")
+    assert failures.judge_evidence("done", reason)[0] == 0
+
+
+def test_a_repository_borrowing_objects_from_outside_does_not_count(settings):
+    settings.ensure_dirs()
+    outer = settings.data_dir.parent / "outer"
+    outer.mkdir()
+    make_repo(outer)
+    head = (outer / "sha").read_text()
+
+    def prepare(workspace):
+        repo = workspace / "proj"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        (repo / ".git" / "objects" / "info" / "alternates").write_text(str(outer / "proj" / ".git" / "objects") + "\n")
+
+    store, _, job = turn(settings, Turn(f"Done.\nBOT-OFFICE-STATUS: done — commit {head[:10]}", prepare=prepare))
+    assert job.outcome == "done" and job.verified == 0
+
+
+def test_an_all_letter_short_sha_is_a_candidate():
+    assert [m.group(0) for m in evidence.SHA_RE.finditer("committed abcdefa and 1a2b3c4")] == ["abcdefa", "1a2b3c4"]
+
+
+def test_a_limit_apology_in_reply_txt_does_not_replace_the_draft(settings):
+    draft = TICKS + "\n\n" + APOLOGY
+
+    def prepare(workspace):
+        (workspace / "reply.txt").write_text(APOLOGY)
+
+    store, bot, job = turn(settings, Turn(APOLOGY, draft=draft, prepare=prepare))
+    message = reply(store, bot)
+    assert message.cut_chars > 0 and message.text.startswith("tick tick") and job.reply_text == draft.strip()

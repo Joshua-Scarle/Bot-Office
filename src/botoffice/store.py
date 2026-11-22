@@ -2582,14 +2582,16 @@ class JobStore:
         """The newest *limit* (-1: all) rows matching *where*, oldest first, with the reply-verified and
         agent-sender columns."""
         # a succeeded reply without a BOT-OFFICE-STATUS line, or a done without evidence of how it was checked
-        # (0.12.16; a task's checked `bot-task done --evidence` counts), is "unverified"; a done with evidence shows
-        # it (0.12.20: an unchecked status-line reason is kept on the job and shown as what was cited)
-        given = "EXISTS(SELECT 1 FROM assignment_events e WHERE e.job_id=j.id AND e.kind='evidence')"
+        # (0.12.16; a task's checked `bot-task done --evidence` counts for a bare done), is "unverified"; a done
+        # with evidence shows it (0.12.20: a status-line reason that was not checked, or that names a failed
+        # check, stays unverified and is shown as what was cited: a task's evidence never covers it)
+        given = ("(COALESCE(j.evidence, '')='' AND EXISTS(SELECT 1 FROM assignment_events e WHERE e.job_id=j.id"
+                 " AND e.kind='evidence'))")
         return db.execute(
             "SELECT m.*, COALESCE(m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND (j.outcome='unverified'"
             f" OR (j.outcome='done' AND j.verified=0 AND NOT {given})), 0) AS unverified,"
             " CASE WHEN m.role='assistant' AND m.kind!='say' AND j.status='succeeded' AND j.outcome='done'"
-            f" THEN COALESCE(CASE WHEN j.verified=0 AND {given} THEN NULL ELSE j.evidence END,"
+            " THEN COALESCE(NULLIF(j.evidence, ''),"
             " (SELECT e.note FROM assignment_events e WHERE e.job_id=j.id AND e.kind='evidence'"
             " ORDER BY e.id DESC LIMIT 1)) END AS evidence,"
             " COALESCE((SELECT a.from_bot FROM agent_messages a WHERE a.job_id=m.job_id LIMIT 1),"

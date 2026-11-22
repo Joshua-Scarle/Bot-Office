@@ -40,6 +40,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
+from . import failures
+
 MAX_CANDIDATES = 8  # of each kind, per evidence text
 URL_TIMEOUT = 4.0  # seconds per connection
 URL_BUDGET = 8.0  # seconds for every link of one evidence text
@@ -50,7 +52,7 @@ MAX_REPOS = 10
 LOG_LIMIT = 64 * 1024 * 1024  # bytes of a job's log that are searched for test output
 
 URL_RE = re.compile(r"\bhttps?://[^\s<>\"'`]+", re.IGNORECASE)
-SHA_RE = re.compile(r"(?<![0-9A-Za-z/._-])(?=[0-9a-f]*\d)[0-9a-f]{7,40}(?![0-9A-Za-z_-])", re.IGNORECASE)
+SHA_RE = re.compile(r"(?<![0-9A-Za-z/._-])[0-9a-f]{7,40}(?![0-9A-Za-z_-])", re.IGNORECASE)
 PASSED_RE = re.compile(r"\b(\d+)\s+(passed|passing)\b", re.IGNORECASE)
 FAILED_ON_LINE = re.compile(r"\b[1-9]\d*\s+(?:failed|failing|failures?|errors?)\b", re.IGNORECASE)
 _EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,10}$")
@@ -64,6 +66,9 @@ _SKIP_DIRS = {"node_modules", ".venv", "venv", "__pycache__", ".cache", "reset-a
 # tool-output keys in the engines' JSON logs (Claude tool_result / tool_use_result, Codex command items,
 # OpenCode tool state, Cursor tool results); assistant text ("text", Claude's "result") is never searched
 OUTPUT_KEYS = {"tool_use_result", "aggregated_output", "output", "stdout", "stderr", "formatted_output"}
+# what the model wrote (a tool call's input or arguments, an assistant message) is never searched, even
+# where it has an "output" key
+INPUT_KEYS = {"input", "args", "arguments", "parameters"}
 
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="evidence-url")
 
@@ -105,7 +110,7 @@ def job_scope(data_dir: Path, store: object, job: object, *, network: bool = Tru
 def check(text: str, scope: Scope) -> str | None:
     """What Bot-Office could check in *text* (a short description), or None when nothing it cites exists."""
     text = (text or "").strip()
-    if not text:
+    if not text or failures.failed_check(text):  # "tests failed; see report.txt" names a failure, not a check
         return None
     return (_check_tests(text, scope) or _check_files(text, scope) or _check_commits(text, scope)
             or (_check_urls(text, scope) if scope.network else None))
@@ -142,22 +147,32 @@ def _inside(path: str, root: Path) -> tuple[str, ...] | None:
     return tuple(parts) or None
 
 
-def regular_file(root: Path, parts: Iterable[str]) -> int | None:
-    """Size of the regular file root/parts..., walked without following any link below *root*; None
-    when it is missing, a link, or not a regular file."""
-    parts = tuple(parts)
+def open_dir(root: Path, parts: Iterable[str]) -> int | None:
+    """A descriptor of the directory root/parts..., opened one component at a time without following any
+    link (the root included: a root swapped for a link is refused); None when that fails."""
     try:
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
         return None
-    try:
-        for part in parts[:-1]:
-            try:
-                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
-            except OSError:
-                return None
+    for part in parts:
+        try:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        except OSError:
             os.close(fd)
-            fd = nxt
+            return None
+        os.close(fd)
+        fd = nxt
+    return fd
+
+
+def regular_file(root: Path, parts: Iterable[str]) -> int | None:
+    """Size of the regular file root/parts..., walked without following any link (``open_dir``); None
+    when it is missing, a link, or not a regular file."""
+    parts = tuple(parts)
+    fd = open_dir(root, parts[:-1])
+    if fd is None:
+        return None
+    try:
         try:
             info = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
         except OSError:
@@ -190,9 +205,10 @@ def _check_files(text: str, scope: Scope) -> str | None:
 
 # --- commits -------------------------------------------------------------------------------------------
 
-def _repos(scope: Scope) -> list[Path]:
-    """``.git`` directories (not links, not git files) at most REPO_DEPTH levels below the roots."""
-    found: list[Path] = []
+def _repos(scope: Scope) -> list[tuple[Path, tuple[str, ...]]]:
+    """``.git`` directories (not links, not git files) at most REPO_DEPTH levels below the roots, as
+    (root, components below it)."""
+    found: list[tuple[Path, tuple[str, ...]]] = []
     for root in scope.roots:
         if not os.path.isdir(root) or os.path.islink(root):
             continue
@@ -200,8 +216,8 @@ def _repos(scope: Scope) -> list[Path]:
         for current, dirs, _files in os.walk(root):  # never follows links
             depth = len(Path(current).parts) - base
             if ".git" in dirs:
-                git = Path(current) / ".git"
-                if not git.is_symlink() and git not in found:
+                git = (Path(root), (*Path(current).parts[base:], ".git"))
+                if not (Path(current) / ".git").is_symlink() and git not in found:
                     found.append(git)
                     if len(found) >= MAX_REPOS:
                         return found
@@ -214,15 +230,43 @@ def git_env() -> dict[str, str]:
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
 
 
-def commit_exists(git_dir: Path, sha: str) -> bool:
+def _own_objects(fd: int) -> bool:
+    """True when the repository open at *fd* keeps its objects itself: objects/ is a real directory, and
+    no alternates or commondir point Git at another repository's objects."""
     try:
+        if not stat.S_ISDIR(os.stat("objects", dir_fd=fd, follow_symlinks=False).st_mode):
+            return False
+    except OSError:
+        return False
+    for name in ("objects/info/alternates", "objects/info/http-alternates", "commondir"):
+        try:
+            os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        return False
+    return True
+
+
+def commit_exists(root: Path, parts: tuple[str, ...], sha: str) -> bool:
+    """Whether *sha* names a commit of the repository root/parts (the ``.git`` directory, walked without
+    following links and pinned by its descriptor, so it cannot be swapped between the checks and the Git run)."""
+    fd = open_dir(root, parts)
+    if fd is None:
+        return False
+    try:
+        if not _own_objects(fd):
+            return False
         done = subprocess.run(
-            ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", f"--git-dir={git_dir}",
+            ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", f"--git-dir=/proc/self/fd/{fd}",
              "cat-file", "-e", f"{sha}^{{commit}}"],
             env=git_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            timeout=GIT_TIMEOUT, check=False)
+            pass_fds=(fd,), timeout=GIT_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError):
         return False
+    finally:
+        os.close(fd)
     return done.returncode == 0
 
 
@@ -230,10 +274,10 @@ def _check_commits(text: str, scope: Scope) -> str | None:
     shas = list(dict.fromkeys(m.group(0).lower() for m in SHA_RE.finditer(URL_RE.sub(" ", text))))[:MAX_CANDIDATES]
     if not shas:
         return None
-    for git in _repos(scope):
+    for root, parts in _repos(scope):
         for sha in shas:
-            if commit_exists(git, sha):
-                return f"commit {sha} is in {git.parent.name}"
+            if commit_exists(root, parts, sha):
+                return f"commit {sha} is in {(root.joinpath(*parts[:-1])).name}"
     return None
 
 
@@ -328,9 +372,12 @@ def _collect(node: object, out: list[str], inside: bool = False) -> None:
         for item in node:
             _collect(item, out, inside)
     elif isinstance(node, dict):
+        if node.get("type") == "assistant" or node.get("role") == "assistant":
+            return
         here = inside or node.get("type") == "tool_result"
         for key, value in node.items():
-            _collect(value, out, here or key in OUTPUT_KEYS)
+            if key not in INPUT_KEYS:
+                _collect(value, out, here or key in OUTPUT_KEYS)
 
 
 def tool_output(log_text: str) -> str:

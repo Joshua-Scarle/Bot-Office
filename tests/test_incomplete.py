@@ -114,7 +114,7 @@ def test_unverified_reply_carries_a_subtle_flag_only(settings):
     messages = [m for m in store.list_messages(bot.id) if m.role != "user"]
     assert [(m.role, m.text, m.unverified) for m in messages] == [("assistant", "Fine.", True)]
     store, bot, job = run_turn(settings.__class__(data_dir=settings.data_dir / "b", token="t", job_timeout=2),
-                               "Fine.\nBOT-OFFICE-STATUS: done — read it back, matches the spec")
+                               "Fine.\nBOT-OFFICE-STATUS: done — nothing new")
     assert not any(m.unverified for m in store.list_messages(bot.id))
 
 

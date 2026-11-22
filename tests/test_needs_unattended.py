@@ -14,6 +14,9 @@ from botoffice.scheduler import Scheduler
 from botoffice.store import JobStore
 
 H = {"Authorization": "Bearer test-token"}
+# a CLI log whose command output has the test run (Claude tool_result)
+PASSED_LOG = ('{"type": "user", "message": {"content": [{"type": "tool_result", "content": "== 3 passed, 12 passed in 1s =="}]}}'
+              "\n")
 BLOCKED = "Could not run the check.\n\nBOT-OFFICE-STATUS: blocked — check module unavailable"
 
 
@@ -22,13 +25,13 @@ class Replying:
     enabled = True
 
     def __init__(self):
-        self.reply, self.result = "", "succeeded"
+        self.reply, self.result, self.log = "", "succeeded", "log"
 
     async def login_status(self):
         return "ok"
 
     async def run(self, job, workspace_dir, log_path, timeout):
-        log_path.write_text("log")
+        log_path.write_text(self.log)
         if self.result == "failed":
             return RunResult("failed", exit_code=1, error="gh exploded", failure_kind="launch")
         return RunResult("succeeded", exit_code=0, final_text=self.reply)
@@ -43,8 +46,8 @@ class Desk:
         self.bot = self.store.create_bot("Ada", "", "codex", None)
         self.routine = self.store.create_routine(self.bot.id, "0 8 * * *", "Check the mailbox", True, name="mailbox")
 
-    def run(self, reply, source="routine", routine=True, result="succeeded"):
-        self.adapter.reply, self.adapter.result = reply, result
+    def run(self, reply, source="routine", routine=True, result="succeeded", log="log"):
+        self.adapter.reply, self.adapter.result, self.adapter.log = reply, result, log
         _, job = self.scheduler.turns.post_message(self.bot, "go", source=source,
                                                    routine_id=self.routine.id if routine else None)
         asyncio.run(self.scheduler._execute(Slot.DESKTOP_1, self.store.claim(Slot.DESKTOP_1, {"codex"})))
@@ -81,11 +84,11 @@ def test_a_later_success_of_the_same_routine_clears_it(settings):
     desk.run(BLOCKED)
     # another routine succeeding does not clear it
     other = desk.store.create_routine(desk.bot.id, "0 9 * * *", "Other", True, name="other")
-    desk.adapter.reply = "ok\nBOT-OFFICE-STATUS: done — ran the routine check, all passed"
+    desk.adapter.reply = "ok\nBOT-OFFICE-STATUS: done — nothing new"
     _, job = desk.scheduler.turns.post_message(desk.bot, "go", source="routine", routine_id=other.id)
     asyncio.run(desk.scheduler._execute(Slot.DESKTOP_1, desk.store.claim(Slot.DESKTOP_1, {"codex"})))
     assert [i["state"] for i in desk.items()] == ["blocked"]
-    desk.run("Fixed.\nBOT-OFFICE-STATUS: done — reran it, passes now")
+    desk.run("Fixed.\nBOT-OFFICE-STATUS: done — reran it: 3 passed", log=PASSED_LOG)
     assert desk.items() == []
 
 
@@ -192,5 +195,8 @@ def test_an_unattended_done_without_evidence_is_listed_until_a_checked_done_foll
     assert [i["state"] for i in items] == ["no_evidence"] and "nothing to show it was checked" in items[0]["title"]
     desk.run("Did it.\nBOT-OFFICE-STATUS: done")
     assert [(i["state"], i["count"]) for i in desk.items()] == [("no_evidence", 2)]
+    # 0.12.20: naming a check is not enough, it must be one Bot-Office can check
     desk.run("Did it.\nBOT-OFFICE-STATUS: done — ran pytest, 12 passed")
+    assert [(i["state"], i["count"]) for i in desk.items()] == [("no_evidence", 3)]
+    desk.run("Did it.\nBOT-OFFICE-STATUS: done — ran pytest, 12 passed", log=PASSED_LOG)
     assert desk.items() == []

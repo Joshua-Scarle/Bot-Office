@@ -21,7 +21,7 @@ ASYNC = "Asked the other bot.\nBOT-OFFICE-STATUS: waiting_on_user — reply arri
 class Desk:
     """Test Bot and Peer on one scheduler; the replies are functions of the job."""
 
-    def __init__(self, settings, asker, peer=lambda job: "Here is my answer.\nBOT-OFFICE-STATUS: done — checked the answer against the source, it matches"):
+    def __init__(self, settings, asker, peer=lambda job: "Here is my answer.\nBOT-OFFICE-STATUS: done — nothing new"):
         settings.ensure_dirs()
         self.store = JobStore(settings.data_dir / "agentdesk.sqlite3")
         self.asker_bot = self.store.create_bot("Test Bot", "", "codex", None)
@@ -85,9 +85,9 @@ def test_the_reply_wakes_the_bot_once_and_it_finishes(settings):
         if len(seen_prompts) == 1:
             desk.ask(job)
             return ASYNC
-        return "Got it: the number is 7.\nBOT-OFFICE-STATUS: done — checked the answer against the source, it matches"
+        return "Got it: the number is 7.\nBOT-OFFICE-STATUS: done — nothing new"
 
-    desk = Desk(settings, asker, peer="The number is 7.\nBOT-OFFICE-STATUS: done — checked the answer against the source, it matches")
+    desk = Desk(settings, asker, peer="The number is 7.\nBOT-OFFICE-STATUS: done — nothing new")
     desk.start_chat()
     jobs = desk.all()
     assert [j.bot_id == desk.asker_bot.id for j in jobs] == [True, False, True]  # ask, peer's inbox turn, wake
@@ -111,7 +111,7 @@ def test_the_reply_wake_goes_through_decide_and_the_caps(settings, monkeypatch):
 def test_the_hourly_cap_holds_the_reply_wake(settings):
     asked = []
     desk = Desk(settings, lambda job: (desk.ask(job), ASYNC)[1] if not asked.append(1) and len(asked) == 1
-                else "ok\nBOT-OFFICE-STATUS: done — checked the answer against the source, it matches")
+                else "ok\nBOT-OFFICE-STATUS: done — nothing new")
     save(desk.store, per_hour=1)
     with closing(desk.store._connect()) as db:  # one automatic turn already started this hour
         db.execute("INSERT INTO jobs (id,prompt,status,provider,created_at,started_at,bot_id,source,auto_kind) "
@@ -231,7 +231,7 @@ def test_a_task_turn_waiting_for_a_bot_is_waiting_on_bot_and_the_reply_resumes_i
             return ASYNC
         return "Used the answer; finished.\nBOT-OFFICE-STATUS: done — wrote the report, ran the check: it passes"
 
-    desk = Desk(settings, asker, peer="The number is 7.\nBOT-OFFICE-STATUS: done — checked the answer against the source, it matches")
+    desk = Desk(settings, asker, peer="The number is 7.\nBOT-OFFICE-STATUS: done — nothing new")
     save(desk.store, evidence=False)
     item = desk.book.create(desk.asker_bot.id, {"title": "Report", "goal": "write it", "start": True})
     first = desk.next()

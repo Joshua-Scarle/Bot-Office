@@ -74,7 +74,8 @@ def split_status(reply: str) -> tuple[str, str, str]:
 # 0.12.16: a "done" counts as verified only when its status line says what was checked and how.
 # 0.12.20: and Bot-Office itself must find what it cites (evidence.check: a file in the bot's workspace, a
 # commit, a link that answers, or test output in this job's own command output), and no cited check failed.
-NO_OP_DONE = re.compile(r"(?:nothing|no)\s+(?:new|to report|changed|to do|found)\b", re.IGNORECASE)
+# 0.12.20: the whole reason, so "nothing new" claims no work; "nothing new, fixed the build" is checked like any other
+NO_OP_DONE = re.compile(r"(?:nothing|no)\s+(?:new|to report|changed|to do|found)[.!]?", re.IGNORECASE)
 # 0.12.20: a short final note that the reply was cut by the engine's output limit (the draft is the real reply)
 LIMIT_NOTE = re.compile(
     r"\b(?:output|token|length|response|reply|message|character)s?[\s-]+(?:token[\s-]+)?(?:limit|maximum|cap)\b"
@@ -115,7 +116,7 @@ def judge_evidence(state: str, reason: str, checked: str | None = None) -> tuple
     reason = reason.strip()
     if failed_check(reason):
         return 0, reason
-    if NO_OP_DONE.match(reason):
+    if NO_OP_DONE.fullmatch(reason):
         return 1, reason
     if not checked:
         return 0, reason
