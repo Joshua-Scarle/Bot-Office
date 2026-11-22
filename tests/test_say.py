@@ -148,7 +148,7 @@ def test_prompt_instructions(setup):
     _, _, bot, job, _ = setup
     assert 'desk say' in workspace.build_self(bot, job)
     assert '10 per turn' in workspace.RULES
-    assert 'do not repeat it with desk say' in workspace._reply_rule(job)
+    assert 'do not narrate your steps' in workspace._reply_rule(job)
 
 
 def test_say_rows_are_never_a_jobs_reply(setup):

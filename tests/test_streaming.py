@@ -318,7 +318,7 @@ def test_stream_covers_inbox_routine_and_api_jobs(settings):
             )
             assert {"start", "text", "final", "done"} <= {e["kind"] for e in snap["events"]}
         api_final = client.get(f"/v1/jobs/{api_job['id']}", headers=H).json()["job"]
-        assert api_final["reply_text"] == "Hello"  # no bot, no reply.txt: assembled stream text
+        assert api_final["reply_text"] == "lo"  # no bot, no reply.txt: the last stream segment (0.12.24: "Hel" came before a tool call)
 
 
 # ---------- audit ----------

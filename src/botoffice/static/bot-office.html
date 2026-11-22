@@ -774,7 +774,7 @@ const state = {
   // 0.12.5: the loaded part of the selected chat (see newHist), a scroll anchor to restore, a flag to stick to the bottom
   hist: null, anchor: null, stickBottom: false,
   // details drawer (0.11.6) and the current queued/running placeholders of the selected bot
-  drawerOpen: false, drawerOpener: null, drawerSteps: false, drawerLogs: new Set(), pendingJobs: [],
+  drawerOpen: false, drawerOpener: null, drawerSteps: false, drawerLogs: new Set(), drawerPast: new Set(), pendingJobs: [],
 };
 // mirrors the server's catalog; /v1/model-choices is authoritative once loaded
 const FALLBACK_EFFORTS = {
@@ -1993,7 +1993,7 @@ function liveStatus(view, now) {
   }
   if (view.phase === "thinking") return "Thinking";
   if (view.phase === "tool") return view.tool ? describeTool(view.tool.name, view.tool.summary) : "Working";
-  if (view.phase === "writing") return "Writing the reply";
+  if (view.phase === "writing") return "Working";
   if (view.phase === "steered") return "Got your message, adjusting";
   return view.phase ? "Working" : "Starting up";
 }
@@ -2065,8 +2065,10 @@ async function stopJob(jobId, button) {
 }
 
 function refreshView(view) {
-  view.body.textContent = view.text || "";
-  view.body.hidden = !view.text;
+  // 0.12.24: the streamed text is the CLI's step-by-step narration, not a message: the bubble shows only
+  // the working indicator, the narration is a step in Activity, and the reply arrives as a chat message
+  view.body.textContent = "";
+  view.body.hidden = true;
   view.statusText.textContent = liveStatus(view) + (view.continuing ? " · continuing, " + view.continuing : "");
   view.wrap.classList.toggle("is-waiting", view.status === "queued");
   view.more.hidden = !view.queuedAfter;
@@ -2075,7 +2077,7 @@ function refreshView(view) {
 
 function addStep(view, kind, text, cls) {
   const last = view.steps[view.steps.length - 1];
-  if (kind === "thinking" && last && last.kind === "thinking") last.text += text;
+  if ((kind === "thinking" || kind === "text") && last && last.kind === kind) last.text += text;
   else view.steps.push({ kind, text, cls: cls || "" });
   if (view.steps.length > 400) view.steps.splice(0, view.steps.length - 400);
   scheduleDrawer();
@@ -2098,7 +2100,11 @@ function applyEvent(view, ev) {
     loadMessages().catch(() => {});
   }
   else if (ev.kind === "start") { view.status = "running"; view.phase = view.phase || "starting"; }
-  else if (ev.kind === "text") { view.text = ev.replace ? (ev.text || "") : view.text + (ev.text || ""); if (ev.text) view.phase = "writing"; }
+  else if (ev.kind === "text") {
+    view.text = ev.replace ? (ev.text || "") : view.text + (ev.text || "");
+    // a whole-message replace (Codex) is a new step; deltas extend the current one
+    if (ev.text) { view.phase = "writing"; addStep(view, ev.replace ? "said" : "text", ev.replace ? ev.text : ev.text.replace(/^\n+/, "")); }
+  }
   else if (ev.kind === "final") { if (ev.text) view.text = ev.text; }
   else if (ev.kind === "thinking") { view.thinks += 1; view.phase = "thinking"; addStep(view, "thinking", ev.text || ""); }
   else if (ev.kind === "tool") {
@@ -2237,16 +2243,64 @@ function logDetails(jobId) {
   return box;
 }
 
+/* 0.12.24: a finished turn's steps (tool calls, narration) and its full reply, loaded on demand from the job log.
+   Interim replies of continued work are not chat messages; this is where they are read */
+function pastStepsDetails(jobId) {
+  const box = document.createElement("details");
+  box.append(el("summary", "", "Steps and reply"));
+  const list = el("div", "step-list");
+  box.append(list);
+  const load = async () => {
+    list.replaceChildren(el("div", "muted", "Loading…"));
+    try {
+      // every page of the log (2,000 events each, up to 10), and the full reply from the job itself
+      const events = [];
+      for (let after = 0, page = 0; page < 10; page++) {
+        const snap = await api("/v1/jobs/" + jobId + "/events?after=" + after);
+        events.push(...(snap.events || []));
+        if (snap.done || !(snap.events || []).length) break;
+        after = snap.next;
+      }
+      const reply = ((await api("/v1/jobs/" + jobId)).job || {}).reply_text || "";
+      let steps = [], attempt = 0;
+      const push = (kind, text, cls) => {  // like addStep: coalesced deltas of one kind extend one step
+        const last = steps[steps.length - 1];
+        if ((kind === "text" || kind === "thinking") && last && last.kind === kind) last.text += text;
+        else steps.push({ kind, text, cls: cls || "" });
+      };
+      for (const ev of events) {
+        if (typeof ev.attempt === "number" && ev.attempt > attempt) { steps = []; attempt = ev.attempt; }  // the last run only
+        if (ev.kind === "text" && ev.text) push(ev.replace ? "said" : "text", ev.replace ? ev.text : ev.text.replace(/^\n+/, ""));
+        else if (ev.kind === "thinking" && ev.text) push("thinking", ev.text);
+        else if (ev.kind === "tool") push("tool", "🔧 " + (ev.name || "tool") + (ev.summary ? ": " + ev.summary : ""));
+        else if (ev.kind === "error") push("error", "⚠ " + (ev.message || "error"), "bad");
+      }
+      const view = { steps };
+      const nodes = view.steps.slice(-120).map((step) => el("div", "step" + (step.cls ? " " + step.cls : ""),
+        (step.kind === "thinking" ? "💭 " : step.kind === "text" || step.kind === "said" ? "💬 " : "") + clip(step.text, 600)));
+      if (!nodes.length) nodes.push(el("div", "muted", "No steps recorded."));
+      if (reply) nodes.push(el("div", "step", "Reply: " + reply));
+      list.replaceChildren(...nodes);
+    } catch (e) { list.replaceChildren(el("div", "bad", e.message)); }
+  };
+  box.ontoggle = () => {  // stays open across drawer redraws, like the log
+    if (box.open) { state.drawerPast.add(jobId); load(); } else state.drawerPast.delete(jobId);
+  };
+  if (state.drawerPast.has(jobId)) { box.open = true; load(); }
+  return box;
+}
+
 function stepsDetails(view) {
   const box = document.createElement("details");
   const parts = [];
+  if (view.steps.some((step) => step.kind === "text" || step.kind === "said")) parts.push("notes");
   if (view.thinks) parts.push("thinking");
   if (view.tools) parts.push(view.tools + (view.tools === 1 ? " tool call" : " tool calls"));
   if (view.errors) parts.push(view.errors + (view.errors === 1 ? " error" : " errors"));
   box.append(el("summary", "", "Steps" + (parts.length ? ": " + parts.join(" · ") : "")));
   const list = el("div", "step-list");
   for (const step of view.steps.slice(-120)) {
-    list.append(el("div", "step" + (step.cls ? " " + step.cls : ""), (step.kind === "thinking" ? "💭 " : "") + clip(step.text, 600)));
+    list.append(el("div", "step" + (step.cls ? " " + step.cls : ""), (step.kind === "thinking" ? "💭 " : step.kind === "text" || step.kind === "said" ? "💬 " : "") + clip(step.text, 600)));
   }
   if (!view.steps.length) list.append(el("div", "muted", "No steps yet."));
   box.append(list);
@@ -2280,6 +2334,7 @@ function jobRow(job, view, current) {
   else if (job.status === "succeeded" && job.outcome === "done" && job.evidence)
     box.append(el("div", "drawer-meta", "Verified by: " + clip(job.evidence, 300)));
   if (view) box.append(stepsDetails(view));
+  else if (!active) box.append(pastStepsDetails(job.id));
   box.append(logDetails(job.id));
   return box;
 }

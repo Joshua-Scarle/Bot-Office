@@ -80,7 +80,8 @@ AUTO_CONTINUE_PROMPT = (
     "Automatic continuation {n} of {max}: your previous turn ended not_done, so carry on with the same task "
     "from where you stopped (WORKING.md and your last reply have the state). Keep going until it is done, you "
     "are stuck and need the user, or a rule or instruction tells you to stop. Do not start work beyond that "
-    "task. If it is still unfinished when you stop, end with the BOT-OFFICE-STATUS line.")
+    "task. If it is still unfinished when you stop, end with the BOT-OFFICE-STATUS line. The owner did not see "
+    "your previous reply: your final reply reports the whole task.")
 
 
 class Scheduler:
@@ -1000,6 +1001,9 @@ class Scheduler:
                        (str(new_job.id),))
             db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='system' AND text LIKE 'Not done%'",
                        (str(job.id),))
+            # 0.12.24: the not_done turn's reply is a step of the work, not a message to the owner: it
+            # stays on the job (Activity), and the turn that finishes reports the whole task
+            autocontinue.interim_reply(db, str(job.id))
 
         try:
             self.turns.post_message(bot, text, source=job.source, sender="Bot-Office",
@@ -1080,6 +1084,10 @@ class Scheduler:
             state, reason = stated
             text = (f"Done — {reason}" if reason else "Done.") if state == "done" else (
                 f"({state}: {reason})" if reason else f"({state})")
+        sink = self._sinks.get(str(job.id))
+        if not text and sink is not None and sink.streamed:
+            # 0.12.24: a streaming engine's log is its step-by-step output, never a chat message
+            text = "(no reply; the steps are in Activity)"
         if not text:
             log_text = self._read_text(log_path, 10**7).split("\n--- stderr ---\n")[0]
             text = log_text.strip()[-LOG_FALLBACK_LIMIT:] or "(no reply)"

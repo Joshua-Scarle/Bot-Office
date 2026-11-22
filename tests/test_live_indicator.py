@@ -85,9 +85,14 @@ ev('steer', { status: 'delivered', message_id: 4 });
 assert.strictEqual(view.statusText.textContent, 'Got your message, adjusting');
 assert(reloads >= 1, 'the chat reloads so the steering message shows as delivered');
 ev('text', { text: 'Working on it' });
-assert.strictEqual(view.statusText.textContent, 'Writing the reply');
-assert.strictEqual(view.body.textContent, 'Working on it'); assert(!view.body.hidden);
-assert.strictEqual(view.tools, 3); assert.strictEqual(view.steps.length, 4);  // steps are data for the drawer, not chat nodes
+assert.strictEqual(view.statusText.textContent, 'Working');
+// 0.12.24: streamed narration is a step in Activity, never text in the chat bubble
+assert.strictEqual(view.body.textContent, ''); assert(view.body.hidden);
+assert.strictEqual(view.text, 'Working on it');
+assert.strictEqual(view.steps[view.steps.length - 1].kind, 'text'); assert.strictEqual(view.steps[view.steps.length - 1].text, 'Working on it');
+ev('text', { text: ' now' });
+assert.strictEqual(view.steps[view.steps.length - 1].text, 'Working on it now');  // deltas extend one step
+assert.strictEqual(view.tools, 3); assert.strictEqual(view.steps.length, 5);  // steps are data for the drawer, not chat nodes
 assert.strictEqual(view.wrap.children.length, 3);  // who, indicator, reply: no step list inline
 // queued / retry wait
 view.status = 'queued'; view.notBefore = null; refreshView(view);

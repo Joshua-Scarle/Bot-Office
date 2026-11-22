@@ -39,6 +39,13 @@ class EventSink:
         self.events_log = events_log
         self.seq = store.last_event_seq(self.job_id)
         self.draft = ""
+        # 0.12.24: the text since the last tool call or thinking block. Text before a tool call is the
+        # CLI's step-by-step narration ("Now running the tests..."): it stays in the job log, and only
+        # the last segment can be the reply when the stream reports no final one
+        self.segment = ""
+        self._boundary = False
+        self._tool_last = False  # a tool call came after the last text
+        self.streamed = False  # the engine streamed text or steps: its raw log is not a reply
         self.final_text: str | None = None
         self._pending: tuple[str, str] | None = None
         self._timer: asyncio.TimerHandle | None = None
@@ -54,17 +61,25 @@ class EventSink:
 
     @property
     def assembled(self) -> str:
-        """Final reply if the stream reported one, else the text streamed so far."""
-        return (self.final_text if self.final_text is not None else self.draft).strip()
+        """Final reply if the stream reported one, else the last text segment (never the narration). Text
+        followed by a tool call with no text after it was narration too: no reply then."""
+        if self.final_text is not None:
+            return self.final_text.strip()
+        return "" if self._tool_last else self.segment.strip()
 
     # --- emitting ---
     def emit(self, kind: str, **data: Any) -> None:
+        if kind in ("text", "thinking", "tool"):
+            self.streamed = True
         if kind in DELTA_KINDS and not data.get("replace"):
             text = str(data.get("text") or "")
             if not text:
                 return
             if kind == "text":
                 self.draft += text
+                self._add_segment(text)
+            else:
+                self._boundary = True
             if self._pending and self._pending[0] != kind:
                 self.flush()
             self._pending = (kind, (self._pending[1] if self._pending else "") + text)
@@ -73,11 +88,21 @@ class EventSink:
         self.flush()
         if kind == "text":
             self.draft = str(data.get("text") or "")
+            self.segment, self._boundary, self._tool_last = self.draft, False, False  # a whole-message replace is one segment
+        elif kind in ("tool", "thinking"):
+            self._boundary = True
+            self._tool_last = self._tool_last or kind == "tool"
         elif kind == "final":
             self.final_text = str(data.get("text") or "")
         self._write(kind, data)
         if kind == "text":
             self.store.set_draft(self.job_id, self.draft)
+
+    def _add_segment(self, text: str) -> None:
+        if self._boundary:
+            self.segment, self._boundary = "", False
+        self._tool_last = False
+        self.segment += text
 
     def _schedule(self) -> None:
         try:
