@@ -13,7 +13,7 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from . import continuation, failures
+from . import autocontinue, continuation, failures
 from .catalog import default_effort
 from .cron import to_cron_time
 from .domain import CLOSED_STATUSES, Assignment, Task, Wakeup
@@ -1263,11 +1263,9 @@ class Assignments:
             self._enqueue_turn(db, row, f'Continue assignment {_quoted(row)} (next step).',
                                f'Continue "{row["title"]}"', sender="Bot-Office", priority=LOOP_PRIORITY, hidden=True,
                                auto_kind="loop")
-            # 0.12.24: the step's reply is work in progress, not a message to the owner: it stays on the job
-            # (Activity). A reply with a question card, and any stop above, stay in the chat
-            db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='assistant' AND kind='message'"
-                       " AND source!='inbox' AND NOT EXISTS (SELECT 1 FROM questions q WHERE q.job_id=?)",
-                       (job_id, job_id))
+            # 0.12.24: the step's reply is work in progress, not a message to the owner (any stop above
+            # keeps it in the chat)
+            autocontinue.interim_reply(db, job_id)
             return "continue"
         self._set_status(db, row, state, reason, actor=actor, job_id=job_id)
         return state

@@ -774,7 +774,7 @@ const state = {
   // 0.12.5: the loaded part of the selected chat (see newHist), a scroll anchor to restore, a flag to stick to the bottom
   hist: null, anchor: null, stickBottom: false,
   // details drawer (0.11.6) and the current queued/running placeholders of the selected bot
-  drawerOpen: false, drawerOpener: null, drawerSteps: false, drawerLogs: new Set(), pendingJobs: [],
+  drawerOpen: false, drawerOpener: null, drawerSteps: false, drawerLogs: new Set(), drawerPast: new Set(), pendingJobs: [],
 };
 // mirrors the server's catalog; /v1/model-choices is authoritative once loaded
 const FALLBACK_EFFORTS = {
@@ -2243,6 +2243,45 @@ function logDetails(jobId) {
   return box;
 }
 
+/* 0.12.24: a finished turn's steps (tool calls, narration) and its full reply, loaded on demand from the job log.
+   Interim replies of continued work are not chat messages; this is where they are read */
+function pastStepsDetails(jobId) {
+  const box = document.createElement("details");
+  box.append(el("summary", "", "Steps and reply"));
+  const list = el("div", "step-list");
+  box.append(list);
+  const load = async () => {
+    list.replaceChildren(el("div", "muted", "Loading…"));
+    try {
+      const snap = await api("/v1/jobs/" + jobId + "/events");
+      let steps = [], attempt = 0;
+      const push = (kind, text, cls) => {  // like addStep: coalesced deltas of one kind extend one step
+        const last = steps[steps.length - 1];
+        if ((kind === "text" || kind === "thinking") && last && last.kind === kind) last.text += text;
+        else steps.push({ kind, text, cls: cls || "" });
+      };
+      for (const ev of snap.events || []) {
+        if (typeof ev.attempt === "number" && ev.attempt > attempt) { steps = []; attempt = ev.attempt; }  // the last run only
+        if (ev.kind === "text" && ev.text) push(ev.replace ? "said" : "text", ev.replace ? ev.text : ev.text.replace(/^\n+/, ""));
+        else if (ev.kind === "thinking" && ev.text) push("thinking", ev.text);
+        else if (ev.kind === "tool") push("tool", "🔧 " + (ev.name || "tool") + (ev.summary ? ": " + ev.summary : ""));
+        else if (ev.kind === "error") push("error", "⚠ " + (ev.message || "error"), "bad");
+      }
+      const view = { steps };
+      const nodes = view.steps.slice(-120).map((step) => el("div", "step" + (step.cls ? " " + step.cls : ""),
+        (step.kind === "thinking" ? "💭 " : step.kind === "text" || step.kind === "said" ? "💬 " : "") + clip(step.text, 600)));
+      if (!nodes.length) nodes.push(el("div", "muted", "No steps recorded."));
+      if (snap.reply_text) nodes.push(el("div", "step", "Reply: " + clip(snap.reply_text, 4000)));
+      list.replaceChildren(...nodes);
+    } catch (e) { list.replaceChildren(el("div", "bad", e.message)); }
+  };
+  box.ontoggle = () => {  // stays open across drawer redraws, like the log
+    if (box.open) { state.drawerPast.add(jobId); load(); } else state.drawerPast.delete(jobId);
+  };
+  if (state.drawerPast.has(jobId)) { box.open = true; load(); }
+  return box;
+}
+
 function stepsDetails(view) {
   const box = document.createElement("details");
   const parts = [];
@@ -2287,6 +2326,7 @@ function jobRow(job, view, current) {
   else if (job.status === "succeeded" && job.outcome === "done" && job.evidence)
     box.append(el("div", "drawer-meta", "Verified by: " + clip(job.evidence, 300)));
   if (view) box.append(stepsDetails(view));
+  else if (!active) box.append(pastStepsDetails(job.id));
   box.append(logDetails(job.id));
   return box;
 }

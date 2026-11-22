@@ -80,6 +80,22 @@ def _unresolved_in(text: str) -> bool:
     return False
 
 
+def interim_reply(db, job_id: str) -> list[int]:
+    """0.12.24: hide the chat reply of *job_id*, a turn whose work carries on in a queued next turn: it is
+    a step, not a message to the owner, and stays on the job (Activity). Kept in the chat: a reply that
+    asks anything (a "?" in its own prose, or a question card), one with images or files, a desk say note
+    and an inbox copy. *db* is the caller's open transaction. Returns the ids hidden."""
+    if db.execute("SELECT 1 FROM questions WHERE job_id=? LIMIT 1", (job_id,)).fetchone():
+        return []
+    ids = [row[0] for row in db.execute(
+        "SELECT id, text FROM messages WHERE job_id=? AND role='assistant' AND kind='message' AND hidden=0"
+        " AND (source IS NULL OR source!='inbox') AND (attachments IS NULL OR attachments IN ('', '[]'))",
+        (job_id,)).fetchall() if "?" not in prose(row[1] or "")]
+    for message_id in ids:
+        db.execute("UPDATE messages SET hidden=1 WHERE id=?", (message_id,))
+    return ids
+
+
 def needs_user_phrase(reply: str, reason: str = "") -> str | None:
     """The phrase that says the bot is blocked or needs the user, else None (reply body and status reason).
     Code, quotes and quoted strings in the reply do not count: they are not the bot asking."""

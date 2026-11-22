@@ -59,8 +59,11 @@ class EventSink:
 
     @property
     def assembled(self) -> str:
-        """Final reply if the stream reported one, else the last text segment (never the narration)."""
-        return (self.final_text if self.final_text is not None else self.segment).strip()
+        """Final reply if the stream reported one, else the last text segment (never the narration). Text
+        followed by a tool call or thinking with nothing after it was narration too: no reply then."""
+        if self.final_text is not None:
+            return self.final_text.strip()
+        return "" if self._boundary else self.segment.strip()
 
     # --- emitting ---
     def emit(self, kind: str, **data: Any) -> None:

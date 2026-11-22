@@ -1002,10 +1002,8 @@ class Scheduler:
             db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='system' AND text LIKE 'Not done%'",
                        (str(job.id),))
             # 0.12.24: the not_done turn's reply is a step of the work, not a message to the owner: it
-            # stays on the job (Activity), and the turn that finishes reports the whole task. Progress
-            # notes the bot sent on purpose (desk say) stay in the chat
-            db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='assistant' AND kind='message'"
-                       " AND (source IS NULL OR source!='inbox')", (str(job.id),))
+            # stays on the job (Activity), and the turn that finishes reports the whole task
+            autocontinue.interim_reply(db, str(job.id))
 
         try:
             self.turns.post_message(bot, text, source=job.source, sender="Bot-Office",
