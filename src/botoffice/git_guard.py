@@ -281,12 +281,12 @@ def scan_text(text: str, ctx: Ctx, depth: int = 0) -> None:
     """Raise _Hit if any command in shell *text* is guarded."""
     if depth > MAX_DEPTH:
         _hit("a command nested too deeply to check")
-    if _REDIRECTED_AGENT.search(text):
-        ctx.no_subscription = True
     if "<<" in text:
         text, documents = _heredocs(text)
         for header, body in documents:
             _heredoc(header, body, ctx, depth)
+    if _REDIRECTED_AGENT.search(text):  # on the text without here-document bodies (they are data)
+        ctx.no_subscription = True
     commands, nested = split_words(text)
     for snippet in nested:
         scan_text(snippet, ctx, depth + 1)

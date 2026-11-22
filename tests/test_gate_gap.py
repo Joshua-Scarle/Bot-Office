@@ -201,6 +201,7 @@ def test_grok_questions_ask_even_without_the_outbound_preset(tmp_path):
     gate, job, _ = setup(tmp_path, rules=[rule for rule in E8 if rule[0] != "preset"])
     assert judge(gate, job, "desk grok send --to Lead --kind question --text 'Can you review the draft?'")[0] == "ask"
     assert judge(gate, job, GROK_REPORT)[0] == "allow"
+    assert judge(gate, job, "desk grok send --to Lead --kind question --text 'use --kind result '")[0] == "ask"
 
 
 def test_a_brief_written_by_heredoc_then_the_review(tmp_path):
@@ -208,6 +209,8 @@ def test_a_brief_written_by_heredoc_then_the_review(tmp_path):
     command = ("cat > ~/bo-work/x/brief.md <<'EOF'\nRead-only code review.\nEOF\nenv -u ANTHROPIC_API_KEY claude -p --model m "
                "--permission-mode bypassPermissions < ~/bo-work/x/brief.md")
     assert judge(gate, job, command)[0] == "allow"
+    shelly = command.replace("Read-only code review.", "Review how shell handles input < 'input.txt'.")
+    assert judge(gate, job, shelly)[0] == "allow"
     for evil in ("env -u ANTHROPIC_API_KEY <<claude -i true\nx\nclaude\n", "env -u ANTHROPIC_API_KEY <<'cl'aude -i t\nclaude\n",
                  "env -u ANTHROPIC_API_KEY <<<c\\laude -i true"):
         assert git_guard.classify("Bash", evil, {"command": evil}, "/srv"), evil
@@ -315,6 +318,8 @@ def test_write_then_run_still_caught(command):
     ("./deployment", True),
     ("npm run deployment", True),
     ("npm run deployment --prod", True),
+    ("npm run deployment production", True),
+    ("make deployment all", True),
     ("deploy --prod", True),
     ("make deploy", True),
     ("railway up", True),
