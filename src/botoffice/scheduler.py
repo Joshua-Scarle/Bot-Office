@@ -100,7 +100,8 @@ class Scheduler:
         self.turns = Turns(store, settings, providers)
         self.assignments = Assignments(store)
         self.assignments.cancel_running = self._cancel_dropped
-        self.rules = Rules(store, settings.approval_ttl_min, self.protected_paths())
+        self.rules = Rules(store, settings.approval_ttl_min, self.protected_paths(),
+                           workspaces=settings.data_dir / "workspaces")
         self.watchers = Watchers(store, settings, self.turns, self.rules)
         self._snapshots: dict[str, tuple[str, str]] = {}
         self._prepared: dict[str, list[tuple[Path, str, str, tuple[str, Merge] | None]]] = {}
