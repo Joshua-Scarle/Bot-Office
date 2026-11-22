@@ -342,6 +342,16 @@ Nothing here replaces `bot-office.service` or its drop-ins, and the controller n
     loginctl enable-linger "$USER"
     ```
     The heartbeat unit runs `/usr/bin/python3 $BOT_OFFICE_DIR/scripts/healthz_push.py` (stdlib only; any system Python 3.9+); change `ExecStart` if your `python3` lives elsewhere.
+12. Sync to GitHub (every deploy ends here; see [Keeping GitHub in step](#keeping-github-in-step)): `"$D/scripts/sync_github.sh" <deployed-branch>`. It is idempotent and never touches the service.
+
+### Keeping GitHub in step
+
+`origin` is the public repo, so nothing is pushed unscanned. Two mechanisms, both using `scripts/sync_github.sh`:
+
+- **After every deploy** (runbook step 12): `scripts/sync_github.sh <deployed-branch>` pushes `master` and the deployed branch. For each branch it runs `gitleaks` over the commits not yet on origin (config `.gitleaks.toml`; the six reviewed test-fixture commits are allowlisted by hash) and does a plain `git push` only if clean. A finding blocks that branch (exit 2, logged, nothing pushed). A diverged remote fails the push (exit 1); it is never forced. Nothing to push is a no-op.
+- **Safety net:** cron every 30 minutes runs `scripts/sync_github.sh --quiet` (master only), so a missed deploy step is caught within half an hour. Entry: `*/30 * * * * /home/ubuntu/printpilot-agentdesk/scripts/sync_github.sh --quiet`.
+
+Log: `~/.local/state/bot-office/github-sync.log`. Needs `gitleaks` (`~/.local/bin/gitleaks`, official release) and the `gh` or git credentials already used for `origin`. History is never rewritten by the script; a blocked branch needs a human decision.
 
 ### Verify (about 20 minutes)
 

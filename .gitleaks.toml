@@ -1,0 +1,15 @@
+[extend]
+useDefault = true
+
+# Reviewed 2026-11-22: these six commits add fake tokens in tests (sequential digits, "abcdef",
+# "secret", an API method name). Pinned by commit so a real secret added later is still caught.
+[[allowlists]]
+description = "test fixtures reviewed as non-secrets"
+commits = [
+    '''2572b53b24ee9af64cc6ba4663414a2b767be62a''',
+    '''4d4e1063e7dcdf5f36fd7be88fe88f49007a1802''',
+    '''f80d188181ec1aef2ec8fe47f1ecd346a2d753dd''',
+    '''7ffa00237be4a89bf3383fcfe5d1abd8c75398fe''',
+    '''8fa3891769587ebe7aa326dd5a603d19872614f5''',
+    '''f34703651556ee5880786132142f33f3959af126''',
+]
