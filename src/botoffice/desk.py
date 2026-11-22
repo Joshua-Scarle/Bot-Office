@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from .config import DESKTOP_NAME, first_env
 from .outgoing_images import job_cwd
+from .team_client import usage as team_usage
 
 SLOTS = ("desktop-1", "desktop-2")
 DISPLAY = "DISPLAY=:1"
@@ -19,7 +20,7 @@ USAGE = (
     " | open URL | message BOT TEXT | attach FILE\n"
     "       desk grok send --to NAME --kind question|result|blocker|fyi --text TEXT"
     " [--thread ID] [--from NAME]\n"
-    "       desk team list | status BOT | read BOT [--limit N] [--since X] | message [--queue] BOT TEXT | ask BOT TEXT [--timeout S]\n"
+    f"       {team_usage().removeprefix('usage: ')}\n"
     "       desk grok install-config\n"
     "       desk inbox post --to BOT --from NAME --text TEXT [--thread ID] [--hop N]"
 )

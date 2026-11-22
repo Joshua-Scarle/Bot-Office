@@ -487,6 +487,7 @@ class Scheduler:
 
     def _handle_inbox_file(self, path: Path) -> None:
         try:
+            info = safefs.lstat(path)  # who wrote it (the sticky dir keeps a bot from swapping in another's file)
             try:
                 raw = safefs.read_bytes(path, MAX_INBOX_BYTES + 1)  # a link or a FIFO is refused
             finally:
@@ -503,6 +504,11 @@ class Scheduler:
                 safefs.unlink(path)
             return
         if "from_bot_id" not in data:
+            if info is not None and info.st_uid == isolation.bots_uid():
+                # B12: a bot's file must name its bot and job (desk message does), so it passes the send gate
+                # (team_messaging, rate limit, audit) and the receiver sees who sent it; an unsigned one is dropped
+                log.warning("inbox file %s from the bots user without a sender dropped", path.name)
+                return
             self._post_turn(to, text, "inbox")
             return
         sender = self.store.find_bot(sender_ref) if isinstance(sender_ref, str) else None
