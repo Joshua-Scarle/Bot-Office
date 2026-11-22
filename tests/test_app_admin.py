@@ -149,6 +149,11 @@ def test_admin_reads_every_non_private_bot(settings):
     data = client.get("/v1/agent/team", headers=token).json()
     readable = {b["name"]: b["readable"] for b in data["bots"]}
     assert data["app_admin"] is True and readable == {"Eng": True, "Ops": False}
+    # another admin or a sudo bot falls back to the ordinary team_read rule (here: none)
+    for flag in ({"app_admin": True}, {"allow_sudo": True}):
+        client.patch(f"/v1/bots/{eng.id}", headers=H, json=flag)
+        assert {b["name"]: b["readable"] for b in client.get("/v1/agent/team", headers=token).json()["bots"]}["Eng"] is False
+        client.patch(f"/v1/bots/{eng.id}", headers=H, json={key: False for key in flag})
     client.__exit__(None, None, None)
 
 

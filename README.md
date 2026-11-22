@@ -143,7 +143,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 
 **App admin: the owner can let one bot manage the office inside Bot-Office.** A new per-bot flag `app_admin` (off by default) is set only with the master token: `PATCH /v1/bots/{id}` `{"app_admin": true}`. No bot can set it, on itself or on a bot it creates. An admin bot, with its job token:
 
-- reads every bot that is not private (`desk team list`, teammate tools, recall), whatever its `team_read`;
+- reads every bot that is not private, another admin or a sudo bot (`desk team list`, teammate tools, recall), whatever its `team_read`;
 - edits other bots' profile and work settings: `bot-task admin edit-bot BOT` (`PATCH /v1/agent/bots/{bot}`), only name, description, icon, model, effort, timeout, notify, digest, steer and chat-only;
 - gives a bot a task and starts it (`bot-task add TITLE --for BOT --start`), edits bot-made tasks on any list, and drops them with a note;
 - lists, adds, edits and removes other bots' bot-made routines (`bot-task routine list --bot BOT`, `routine add --for BOT`, `edit`, `rm`); `bot-task admin check` says whether a bot is an admin.

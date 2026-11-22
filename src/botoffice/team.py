@@ -108,8 +108,8 @@ def can_read(reader: dict, target: dict, sections: dict[str, str]) -> bool:
     section and any bot when either side has no section."""
     if str(reader["id"]) == str(target["id"]) or target["team_private"]:
         return False
-    if reader.get("app_admin"):  # 0.12.26: an app admin reads every bot that is not private
-        return True
+    if reader.get("app_admin") and not target.get("app_admin") and not target.get("allow_sudo"):
+        return True  # 0.12.26: an app admin reads every bot that is not private, another admin or a sudo bot
     mode = reader["team_read"] or "section"
     if mode == "all":
         return True

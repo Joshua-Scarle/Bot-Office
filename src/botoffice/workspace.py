@@ -191,7 +191,7 @@ def admin_line(bot: Bot) -> str:
     if not getattr(bot, "app_admin", False):
         return ""
     return ("\n- App admin (set by the owner): you manage the office inside Bot-Office. You read every bot that is "
-            "not private; edit other bots' profile and work settings (`bot-task admin edit-bot`: name, description, "
+            "not private, another admin or a sudo bot; edit other bots' profile and work settings (`bot-task admin edit-bot`: name, description, "
             "icon, model, effort, timeout, notify, digest, steer, chat-only); give a bot a task and start it "
             "(`bot-task add --for BOT --start`); edit and drop (with a note) bot-made tasks on other lists; list, add, "
             "edit and remove other bots' bot-made routines (`bot-task routine ... --bot/--for`). Not included: the "
