@@ -16,7 +16,7 @@ def reply(store, bot):
 def test_judge_evidence():
     assert failures.judge_evidence("done", "") == (0, "")
     assert failures.judge_evidence("done", "ok") == (0, "")
-    assert failures.judge_evidence("done", "all done now") == (0, "")  # 0.12.18: words that name no check
+    assert failures.judge_evidence("done", "all done now") == (0, "")  # 0.12.20: words that name no check
     assert failures.judge_evidence("done", "nothing new") == (1, "nothing new")
     assert failures.judge_evidence("done", "ran pytest tests/test_x.py: 12 passed") == (1, "ran pytest tests/test_x.py: 12 passed")
     assert failures.judge_evidence("blocked", "need key") == (None, "")

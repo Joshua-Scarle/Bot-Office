@@ -1,4 +1,4 @@
-"""0.12.18: evidence must name a check that did not fail, "could not do it" is not a done, and the
+"""0.12.20: evidence must name a check that did not fail, "could not do it" is not a done, and the
 status-line rule reaches every engine (Claude included) on fresh and resumed sessions."""
 import asyncio
 

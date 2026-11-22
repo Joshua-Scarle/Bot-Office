@@ -72,7 +72,7 @@ def split_status(reply: str) -> tuple[str, str, str]:
 
 
 # 0.12.16: a "done" counts as verified only when its status line says what was checked and how.
-# 0.12.18: and the words must name a check, and the check must not be a failed one.
+# 0.12.20: and the words must name a check, and the check must not be a failed one.
 NO_OP_DONE = re.compile(r"(?:nothing|no)\s+(?:new|to report|changed|to do|found)\b", re.IGNORECASE)
 MIN_EVIDENCE_WORDS = 3
 CHECK_WORDS = re.compile(
@@ -123,7 +123,7 @@ def judge_evidence(state: str, reason: str) -> tuple[int | None, str]:
     return 1, reason
 
 
-# 0.12.18: a reply that says the work could not be done is not a done. Checked on the status reason and the
+# 0.12.20: a reply that says the work could not be done is not a done. Checked on the status reason and the
 # opening and closing paragraphs only, so a long report that mentions a failed attempt in the middle stays done.
 _CANT = (r"(?:could\s?n['\u2019]?t|could\s+not|can['\u2019]?t|cannot|can\s+not|unable\s+to|(?:was|am|is)\s*(?:n['\u2019]?t|not)\s+able\s+to|"
          r"not\s+able\s+to|failed\s+to|did\s*(?:n['\u2019]?t|not)\s+manage\s+to|never\s+(?:got|managed))")

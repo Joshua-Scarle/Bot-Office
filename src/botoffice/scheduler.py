@@ -823,7 +823,7 @@ class Scheduler:
             audit, state, reason = failures.split_status(audit)
             state, reason = self._waiting_for_bot(job, audit, state, reason)
             if state == "done" and job.bot_id and not self.store.outstanding_bot_replies(job.id):
-                state, reason = failures.judge_done(audit, state, reason)  # 0.12.18: "could not do it" is not a done
+                state, reason = failures.judge_done(audit, state, reason)  # 0.12.20: "could not do it" is not a done
             if state != "unverified":
                 stated = (state, reason)
             outcome = f"{state}: {reason}" if reason and state != "done" else state
