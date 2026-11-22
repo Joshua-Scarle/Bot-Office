@@ -219,7 +219,8 @@ def _writes_and_runs(text: str) -> str | None:
             base = posixpath.basename(word).lower()
             # 0.12.23: a path runs only as the program (first word, or after a wrapper or runner
             # anywhere before it); `cat > outbox/notes.md` names a path it writes, it runs none
-            runs_path = "/" in word and (all(_ASSIGN.match(before) for before in words[:position]) or any(
+            runs_path = "/" in word and (all(_ASSIGN.match(before) or before in _SYNTAX
+                                                 for before in words[:position]) or any(
                 posixpath.basename(before).lower() in WRAPPERS or posixpath.basename(before).lower() in
                 git_guard.RUNNERS or posixpath.basename(before).lower() in git_guard.SHELLS
                 for before in words[:position]))

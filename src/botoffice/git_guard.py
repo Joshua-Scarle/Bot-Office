@@ -120,6 +120,8 @@ class Ctx:
     moved_out: bool = False  # without a root: a `cd` left for somewhere not known to be inside
     commands: int = 0
     sends: list = None  # fix3 #4: why a part of the command sends something out (the "send" class)
+    # 0.12.23: a redirect next to an agent name (`<<<claude`): the word list may not be what runs
+    no_subscription: bool = False
 
     def __post_init__(self):
         if self.sends is None:
@@ -279,6 +281,8 @@ def scan_text(text: str, ctx: Ctx, depth: int = 0) -> None:
     """Raise _Hit if any command in shell *text* is guarded."""
     if depth > MAX_DEPTH:
         _hit("a command nested too deeply to check")
+    if _REDIRECTED_AGENT.search(text):
+        ctx.no_subscription = True
     if "<<" in text:
         text, documents = _heredocs(text)
         for header, body in documents:
@@ -348,7 +352,8 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
             for item in rest:
                 _hook_env(item.split("=", 1)[0].lstrip("-"))
             if program == "env" and any(a in ("-i", "--ignore-environment", "-") or a.startswith("-u") or
-                                        a.startswith("--unset") for a in rest) and not subscription_env(rest):
+                                        a.startswith("--unset") for a in rest) and not (
+                    subscription_env(rest) and not ctx.no_subscription):
                 _hit("env that clears the run's environment (the push check and the GitHub credential path)")
         if program in ("bot-office-credential", "bot-office-git-hook") or program.startswith("git-credential"):
             _hit("calling Bot-Office's GitHub credential helper or push check directly")
@@ -389,6 +394,9 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
 # run's environment (the push check, the credential path), so it is not "clearing" it.
 SUBSCRIPTION_UNSET = "ANTHROPIC_API_KEY"
 SUBSCRIPTION_AGENTS = ("claude", "codex")
+# the split drops redirect operators and keeps their operand as a word: `env -u K <<<claude -i x`
+# would read as `env -u K claude -i x` while bash runs `env -u K -i x`; such text gets no exemption
+_REDIRECTED_AGENT = re.compile(r"[<>][<>|&]*\s*['\"]?(?:[^\s'\"<>;&|]*/)?(?:claude|codex)\b")
 
 
 def subscription_env(rest: list[str]) -> bool:
