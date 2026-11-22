@@ -28,7 +28,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
-from . import grouping, isolation, needs_you, notify, recall, safefs, team, vnc
+from . import failures, grouping, isolation, needs_you, notify, recall, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -1780,6 +1780,33 @@ def create_app(
             return str(UUID(ref))
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="assignment not found") from exc
+
+    @app.get("/v1/agent/approvals")
+    async def agent_approvals(ids: str = "", job: Job = Depends(agent_scope)) -> list[dict]:  # noqa: B008
+        """0.12.24 live source: the bot's own approval cards (no ids: the latest 20), or the current
+        status of the cards named in *ids* (another bot's card: status, bot and times only)."""
+        rules.expire()
+        def shape(item: dict) -> dict:
+            out = {key: item.get(key) for key in ("id", "status", "created_at", "decided_at", "expires_at")}
+            bot = store.get_bot(item["bot_id"]) if item.get("bot_id") else None
+            out["bot"] = bot.name if bot else None
+            if str(item.get("bot_id")) == str(job.bot_id):
+                out["mine"] = True
+                out["summary"] = failures.clip(item.get("summary") or "", 200)
+            return out
+        if ids.strip():
+            wanted = []
+            for part in ids.replace(",", " ").split()[:20]:
+                try:
+                    wanted.append(int(part.lstrip("#")))
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=f"not an approval number: {part}") from exc
+            found = [rules.get(n) for n in wanted]
+            return [shape(item) if item else {"id": n, "status": "not_found"} for n, item in zip(wanted, found, strict=True)]
+        with closing(store._connect()) as db:
+            rows = db.execute("SELECT * FROM approvals WHERE bot_id=? ORDER BY id DESC LIMIT 20",
+                              (str(job.bot_id),)).fetchall()
+        return [shape(dict(row)) for row in rows]
 
     @app.get("/v1/agent/assignments")
     async def agent_list_assignments(job: Job = Depends(agent_scope)) -> list[Assignment]:  # noqa: B008

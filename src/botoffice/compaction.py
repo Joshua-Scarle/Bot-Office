@@ -26,6 +26,7 @@ people, conditions, safety rules).
 - Key decisions with a one-line reason, standing rules and constraints from the user.
 - Open questions still waiting on someone.
 - The last user request and whether it has been answered.
+- Date every state you keep ("as of <date time ET>"): the summary is a snapshot that will age.
 Drop finished tasks and their details, directory listings, file contents, long command or test \
 output, superseded plans, greetings and small talk. Do not write a lifetime history or a diary; \
 a finished item only stays if a later task depends on it. Keep exact commands, ids, paths and \

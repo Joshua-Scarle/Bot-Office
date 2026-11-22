@@ -29,6 +29,9 @@ HELP = """bot-task: your assignments, wake-ups and routines (works only inside a
   bot-task note <id> TEXT                         add a note to your own assignment or to a child you created
   bot-task create --title T [--goal G] [--done-when D] [--for BOT --parent <id>|current] [--no-start]
 
+  bot-task approvals [N ...]                      live status of approval cards: yours (no N), or cards #N
+        check this before saying a card is pending, approved or gone; never trust a remembered status
+
   bot-task wake <id>|current|- (--at ISO | --in 2h | --on-change <id>) [--note TEXT]
         wake yourself later (5 min .. 30 days ahead; at most 5 pending, 24 a day); "-" = no assignment
   bot-task wakes                                  your pending wake-ups
@@ -199,6 +202,24 @@ def main(argv):
         print(f"Last event: {result['last_event']}")
         if result.get("more"):
             print(f"More changes: bot-task changes --since {result['last_event']}")
+    elif command == "approvals":
+        parser.add_argument("ids", nargs="*")
+        args = parser.parse_args(rest)
+        query = "?" + urllib.parse.urlencode({"ids": " ".join(args.ids)}) if args.ids else ""
+        items = call("GET", "/v1/agent/approvals" + query)
+        if not items:
+            print("no approval cards")
+        for item in items:
+            line = f"#{item['id']}  {item['status']}"
+            if item.get("bot"):
+                line += f"  ({'you' if item.get('mine') else item['bot']})"
+            if item.get("created_at"):
+                line += f"  raised {item['created_at'][:16].replace('T', ' ')} UTC"
+            if item.get("decided_at"):
+                line += f"  decided {item['decided_at'][:16].replace('T', ' ')} UTC"
+            if item.get("summary"):
+                line += f"  — {item['summary']}"
+            print(line)
     elif command == "list":
         for item in call("GET", "/v1/agent/assignments"):
             show(item)
