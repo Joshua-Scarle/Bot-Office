@@ -1084,6 +1084,10 @@ class Scheduler:
             state, reason = stated
             text = (f"Done — {reason}" if reason else "Done.") if state == "done" else (
                 f"({state}: {reason})" if reason else f"({state})")
+        sink = self._sinks.get(str(job.id))
+        if not text and sink is not None and sink.streamed:
+            # 0.12.24: a streaming engine's log is its step-by-step output, never a chat message
+            text = "(no reply; the steps are in Activity)"
         if not text:
             log_text = self._read_text(log_path, 10**7).split("\n--- stderr ---\n")[0]
             text = log_text.strip()[-LOG_FALLBACK_LIMIT:] or "(no reply)"

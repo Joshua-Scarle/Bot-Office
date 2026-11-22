@@ -2253,14 +2253,22 @@ function pastStepsDetails(jobId) {
   const load = async () => {
     list.replaceChildren(el("div", "muted", "Loading…"));
     try {
-      const snap = await api("/v1/jobs/" + jobId + "/events");
+      // every page of the log (2,000 events each, up to 10), and the full reply from the job itself
+      const events = [];
+      for (let after = 0, page = 0; page < 10; page++) {
+        const snap = await api("/v1/jobs/" + jobId + "/events?after=" + after);
+        events.push(...(snap.events || []));
+        if (snap.done || !(snap.events || []).length) break;
+        after = snap.next;
+      }
+      const reply = ((await api("/v1/jobs/" + jobId)).job || {}).reply_text || "";
       let steps = [], attempt = 0;
       const push = (kind, text, cls) => {  // like addStep: coalesced deltas of one kind extend one step
         const last = steps[steps.length - 1];
         if ((kind === "text" || kind === "thinking") && last && last.kind === kind) last.text += text;
         else steps.push({ kind, text, cls: cls || "" });
       };
-      for (const ev of snap.events || []) {
+      for (const ev of events) {
         if (typeof ev.attempt === "number" && ev.attempt > attempt) { steps = []; attempt = ev.attempt; }  // the last run only
         if (ev.kind === "text" && ev.text) push(ev.replace ? "said" : "text", ev.replace ? ev.text : ev.text.replace(/^\n+/, ""));
         else if (ev.kind === "thinking" && ev.text) push("thinking", ev.text);
@@ -2271,7 +2279,7 @@ function pastStepsDetails(jobId) {
       const nodes = view.steps.slice(-120).map((step) => el("div", "step" + (step.cls ? " " + step.cls : ""),
         (step.kind === "thinking" ? "💭 " : step.kind === "text" || step.kind === "said" ? "💬 " : "") + clip(step.text, 600)));
       if (!nodes.length) nodes.push(el("div", "muted", "No steps recorded."));
-      if (snap.reply_text) nodes.push(el("div", "step", "Reply: " + clip(snap.reply_text, 4000)));
+      if (reply) nodes.push(el("div", "step", "Reply: " + reply));
       list.replaceChildren(...nodes);
     } catch (e) { list.replaceChildren(el("div", "bad", e.message)); }
   };

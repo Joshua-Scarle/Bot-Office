@@ -87,6 +87,9 @@ def interim_reply(db, job_id: str) -> list[int]:
     and an inbox copy. *db* is the caller's open transaction. Returns the ids hidden."""
     if db.execute("SELECT 1 FROM questions WHERE job_id=? LIMIT 1", (job_id,)).fetchone():
         return []
+    full = db.execute("SELECT reply_text FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if full and "?" in prose(full[0] or ""):  # the whole reply, also past the chat copy's cut
+        return []
     ids = [row[0] for row in db.execute(
         "SELECT id, text FROM messages WHERE job_id=? AND role='assistant' AND kind='message' AND hidden=0"
         " AND (source IS NULL OR source!='inbox') AND (attachments IS NULL OR attachments IN ('', '[]'))",

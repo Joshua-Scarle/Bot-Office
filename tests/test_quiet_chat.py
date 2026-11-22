@@ -114,8 +114,9 @@ def test_activity_shows_a_finished_turns_steps_and_reply():
     code = _slice("function pastStepsDetails(jobId) {", "function stepsDetails(view) {")
     script = PRELUDE.replace("async function api() { return {}; }", r'''
 async function api(path) {
-  assert.strictEqual(path, '/v1/jobs/j9/events');
-  return { reply_text: 'All 12 tests pass.', events: [
+  if (path === '/v1/jobs/j9') return { job: { reply_text: 'All 12 tests pass.' } };
+  assert.strictEqual(path, '/v1/jobs/j9/events?after=0');
+  return { done: true, next: 4, events: [
     { seq: 1, kind: 'text', attempt: 0, text: 'Let me check. ' }, { seq: 2, kind: 'text', attempt: 0, text: 'Reading.' },
     { seq: 3, kind: 'tool', attempt: 0, name: 'Read', summary: 'a.py' },
     { seq: 4, kind: 'text', attempt: 0, text: '\n\nAll 12 tests pass.' }] };
@@ -153,7 +154,53 @@ def test_a_continued_reply_that_asks_or_carries_files_stays_in_the_chat(settings
         db.execute("UPDATE messages SET attachments='[\"2026-11-22-" + "0" * 32 + "-report.pdf\"]' "
                    "WHERE job_id=? AND role='assistant'", (str(first.id),))
         db.execute("UPDATE messages SET text='Report attached.' WHERE job_id=? AND role='assistant'", (str(first.id),))
+        db.execute("UPDATE jobs SET reply_text='Report attached.' WHERE id=?", (str(first.id),))
         assert autocontinue.interim_reply(db, str(first.id)) == []  # a file delivery is never hidden
         db.execute("UPDATE messages SET attachments='[]' WHERE job_id=? AND role='assistant'", (str(first.id),))
         assert len(autocontinue.interim_reply(db, str(first.id))) == 1
+        db.rollback()
+
+
+def test_a_streamed_turn_with_no_reply_never_posts_its_raw_log(settings):
+    from botoffice.providers.base import RunResult
+    from botoffice.streaming import emit_event
+    from test_auto_continue import ReplyAdapter
+
+    class ToolOnly(ReplyAdapter):
+        async def run(self, job, workspace, log_path, timeout):
+            emit_event("text", text="Let me check the disk.")
+            emit_event("tool", name="Bash", summary="df -h")
+            log_path.write_text('{"type":"assistant","raw":"jsonl"}\n')
+            return RunResult("succeeded", exit_code=0)
+
+    from botoffice.scheduler import Scheduler
+    settings.ensure_dirs()
+    store = JobStore(settings.data_dir / "agentdesk.sqlite3")
+    scheduler = Scheduler(store, settings, {"codex": ToolOnly(["unused"])})
+    bot = store.create_bot("Ada", "", "codex", None)
+    scheduler.turns.post_message(bot, "check the disk", source="chat")
+    job = _run_one(store, scheduler)
+    [reply] = [m.text for m in store.list_messages(bot.id) if m.role == "assistant" and m.job_id == job.id]
+    assert reply == "(no reply; the steps are in Activity)"
+
+
+def test_codex_message_before_a_tool_call_is_not_the_final_reply():
+    from botoffice.providers.streams import CodexParser
+    parser = CodexParser()
+    parser.feed({"type": "item.completed", "item": {"type": "agent_message", "text": "Running the tests now."}})
+    parser.feed({"type": "item.started", "item": {"type": "command_execution", "command": "pytest"}})
+    assert parser.finish() == []
+    parser.feed({"type": "item.completed", "item": {"type": "agent_message", "text": "12 passed."}})
+    assert parser.finish() == [("final", {"text": "12 passed."})]
+
+
+def test_a_question_past_the_chat_cut_keeps_the_reply_visible(settings):
+    from contextlib import closing
+    from botoffice import autocontinue
+    store, scheduler, _, bot = chat_setup(settings, [NOT_DONE, "Done.\nBOT-OFFICE-STATUS: done"])
+    first = _run_one(store, scheduler)
+    with closing(store._connect()) as db:
+        db.execute("UPDATE messages SET hidden=0 WHERE job_id=?", (str(first.id),))
+        db.execute("UPDATE jobs SET reply_text=? WHERE id=?", ("x " * 20000 + "Which region is approved?", str(first.id)))
+        assert autocontinue.interim_reply(db, str(first.id)) == []
         db.rollback()

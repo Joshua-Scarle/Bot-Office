@@ -293,6 +293,10 @@ class CodexParser(StreamParser):
             return [("text", {"text": item["text"], "replace": True})]
         if etype == "item.completed" and itype == "reasoning" and item.get("text"):
             return [("thinking", {"text": str(item["text"])})]
+        if etype == "item.started" and itype in ("command_execution", "mcp_tool_call", "web_search"):
+            self.final_text = None  # 0.12.24: a message before a tool call is narration, not the reply
+        if etype == "item.completed" and itype == "file_change":
+            self.final_text = None
         if etype == "item.started":
             if itype == "command_execution":
                 return [("tool", {"name": "command", "summary": _clip(item.get("command") or "")})]

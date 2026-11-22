@@ -44,6 +44,7 @@ class EventSink:
         # the last segment can be the reply when the stream reports no final one
         self.segment = ""
         self._boundary = False
+        self.streamed = False  # the engine streamed text or steps: its raw log is not a reply
         self.final_text: str | None = None
         self._pending: tuple[str, str] | None = None
         self._timer: asyncio.TimerHandle | None = None
@@ -67,6 +68,8 @@ class EventSink:
 
     # --- emitting ---
     def emit(self, kind: str, **data: Any) -> None:
+        if kind in ("text", "thinking", "tool"):
+            self.streamed = True
         if kind in DELTA_KINDS and not data.get("replace"):
             text = str(data.get("text") or "")
             if not text:
