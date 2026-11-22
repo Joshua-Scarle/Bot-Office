@@ -86,6 +86,9 @@ class TeamClient:
         return self.call("GET", f"/v1/agent/team/{urllib.parse.quote(bot, safe='')}/transcript?"
                          + urllib.parse.urlencode(query))
 
+    def recall(self, query: str, scope: str = "self", limit: int = 10) -> dict:
+        return self.call("GET", "/v1/agent/recall?" + urllib.parse.urlencode({"q": query[:200], "scope": scope, "limit": int(limit)}))
+
     def message(self, bot: str, text: str, mode: str = "steer") -> dict:
         return self.call("POST", "/v1/agent/team/message", {"to": bot, "body": text, "mode": mode})
 
@@ -131,6 +134,9 @@ def render(tool: str, data: dict, bot: str = "") -> str:
     if tool == "team_read":
         lines = [f'#{m["id"]} {m["at"]} {m["from"]} ({m["role"]}): {m["text"]}' for m in data.get("messages", [])]
         return wrap_untrusted(f"team_read:{bot}", "\n".join(lines) or "(no retained messages)")
+    if tool == "context_recall":
+        from . import recall
+        return recall.render(data)
     if tool not in team.SEND_TOOLS:  # a registered read without its own view: the result as fenced JSON
         return wrap_untrusted(f"{tool}:{bot}" if bot else tool, json.dumps(
             {key: value for key, value in data.items() if key != "untrusted"}, indent=1, ensure_ascii=False))
