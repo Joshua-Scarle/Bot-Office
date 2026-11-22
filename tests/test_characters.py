@@ -236,7 +236,7 @@ console.log(peaks);
     assert out.strip() == "6"
 
 
-# ---------------------------------------------------------------- eyes follow the pointer (0.12.20)
+# ---------------------------------------------------------------- eyes follow the pointer (0.12.23)
 _EYE_HARNESS = '''
 const assert = require("assert");
 const state = {};
