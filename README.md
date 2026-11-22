@@ -140,7 +140,7 @@ Restricted-mode command lines:
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
 ## What changed in 0.12.20
-One release with three parts: a clean session after Reset (B9), done-evidence that Bot-Office checks itself (B7), and the 20,000-character cut notice that now actually fires.
+One release with three parts: a clean session after Reset (B9), done-evidence that Bot-Office checks itself (B7), and the 20,000-character cut notice that now actually fires. It also carries the bot-group auto-assignment that was already on master as 0.12.20 (last section).
 
 ### Reset session gives a clean session (B9)
 **Reset session now gives a clean session.** After `POST /v1/bots/{id}/session/reset` (the Reset button), the bot's next prompt carries nothing of the earlier work: no recent chat messages, no `history.md`, no `worklog.md`, no `WORKING.md`, no "Last job directories" in `SELF.md`, no `attachments/INDEX.md`, no stable Cursor/Antigravity work directory, and no edit/rewind seed from before the reset. Before this, only the CLI's own session id was forgotten, so earlier jobs still leaked back through those files.
