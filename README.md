@@ -139,6 +139,18 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.24
+
+**Routine review runs and team reports no longer raise a card each time; real risks still ask.**
+
+- **Subscription unset.** `env -u ANTHROPIC_API_KEY claude ...` / `codex ...` (only that key, then the agent CLI directly) no longer trips the git guard's "env that clears the run's environment". Any other unset, `-i`, `-`, a `VAR=value`, another program, or a redirect next to the agent name still asks.
+- **A specific allow outranks a generic preset ask.** A shell/path allow rule now beats an `ask` rule of kind `preset` (outbound, destructive, nested-agent) when it covers every command part that hits a preset on its own (anchored, part by part; here-document bodies set aside, `$( )` parts included). Ask rules with their own pattern (push, merge, deploy, HTTP writes, mail), the other scope's asks for unattended runs, `never` rules, the git guard and the send class still win; trigger runs keep the strict profile. A tool rule does the same for a tool call without a command.
+- **`desk grok send --kind result|fyi`** with literal words is not outbound (a report to the team's Grok bots). Questions, blockers, `--from`, expansions, redirects or wrapped forms stay outbound, and trigger runs treat every Grok send as outbound.
+- **Here-document notes.** `cat > outbox/note.md <<EOF ... EOF` that mentions an agent command is no longer "a command that writes a file and runs one"; a path still counts as run in program position (also after `if`/`then`/`do`, assignments, wrappers).
+- **Rules (`scripts/gate_gap_rules.py`, idempotent).** Three global allow rules (nested `codex exec` review in `~/bo-work` or `~/bot-office-work` with the prompt on stdin; nested `claude -p` review with `brief.md` on stdin from a report/work dir; read-only Railway MCP calls), the deploy ask rule matches deploy commands instead of the word "deployment", and the send ask rule leaves `desk grok send` to the outbound preset. Every pattern is under 500 characters.
+- **Accepted risk.** A nested review run with bypass flags can do what its brief says: read-only is the brief's instruction, not enforced. The child keeps the run's environment (Bot-Office's `bin/` shims first on PATH and the pre-push check), so its pushes and sends still meet the guard.
+- **Rollback.** No schema change. Restore `action_rules` from the backup (or delete the three allow rules and restore the two old patterns), check out the `backup/pre-gate-gap-*` tag and restart.
+
 ## What changed in 0.12.22
 
 **An approved action is no longer asked again in the resume turn just because that turn runs in a new job workspace.**

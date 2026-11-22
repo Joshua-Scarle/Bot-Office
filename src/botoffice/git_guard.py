@@ -120,7 +120,7 @@ class Ctx:
     moved_out: bool = False  # without a root: a `cd` left for somewhere not known to be inside
     commands: int = 0
     sends: list = None  # fix3 #4: why a part of the command sends something out (the "send" class)
-    # 0.12.23: a redirect next to an agent name (`<<<claude`): the word list may not be what runs
+    # 0.12.24: a redirect next to an agent name (`<<<claude`): the word list may not be what runs
     no_subscription: bool = False
 
     def __post_init__(self):
@@ -389,14 +389,15 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
     return
 
 
-# 0.12.23: the owner's subscription rule. A nested claude/codex review run drops the API key so the
+# 0.12.24: the owner's subscription rule. A nested claude/codex review run drops the API key so the
 # child bills the subscription login: `env -u ANTHROPIC_API_KEY claude ...` keeps the rest of the
 # run's environment (the push check, the credential path), so it is not "clearing" it.
 SUBSCRIPTION_UNSET = "ANTHROPIC_API_KEY"
 SUBSCRIPTION_AGENTS = ("claude", "codex")
 # the split drops redirect operators and keeps their operand as a word: `env -u K <<<claude -i x`
-# would read as `env -u K claude -i x` while bash runs `env -u K -i x`; such text gets no exemption
-_REDIRECTED_AGENT = re.compile(r"[<>][<>|&]*\s*['\"]?(?:[^\s'\"<>;&|]*/)?(?:claude|codex)\b")
+# would read as `env -u K claude -i x` while bash runs `env -u K -i x`. So there is no exemption
+# when a redirect operand names an agent CLI or is quoted, escaped or built from pieces
+_REDIRECTED_AGENT = re.compile(r"(?<![<>|&])[<>][<>|&]*[ \t]*(?=['\"\\`(]|\$['\"]|[\w./~-]*(?:claude|codex)|[\w./~-]+['\"\\$`])")
 
 
 def subscription_env(rest: list[str]) -> bool:

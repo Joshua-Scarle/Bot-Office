@@ -99,20 +99,21 @@ OUTBOUND = (
     re.compile(r"\b(?:ssh|scp|sftp)\s"),
     re.compile(r"\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\b(?:docker|podman)\s+push\b"),
 )
-# 0.12.23: `desk grok send --kind result|fyi` reports to the team's own Grok bots (a result or an FYI),
+# 0.12.24: `desk grok send --kind result|fyi` reports to the team's own Grok bots (a result or an FYI),
 # not to people: not outbound. A question or blocker, any other form, or a mention it cannot read
 # plainly as such a command (quoted, wrapped, inside another command's text) stays outbound.
 _GROK_SEND = re.compile(r"\bdesk\s+grok\s+send\b")
 GROK_REPORT_KINDS = ("result", "fyi")
 _SEPARATORS = frozenset({";", "&&", "||", "&", "|", "\n"})
+_LITERAL_WORD = re.compile(r"[\w@%+=:,./-]+")
 
 
 def _grok_report(words: list[str]) -> bool:
     """*words* is one plain `desk grok send` command with one --kind result or fyi, --to and --text,
     no --from, and only literal words (no `$` expansion, no backticks, no redirect)."""
-    if len(words) < 3 or posixpath.basename(words[0]) != "desk" or words[1:3] != ["grok", "send"]:
-        return False
-    if any("$" in word or "`" in word or word in _SEPARATORS or set(word) <= set("<>&|()") for word in words):
+    if len(words) < 3 or words[0] != "desk" or words[1:3] != ["grok", "send"]:
+        return False  # the desk on PATH only (not ./desk or another file named desk)
+    if any(word == "\0" for word in words):
         return False
     seen, index = {}, 3
     while index < len(words):
@@ -135,12 +136,24 @@ def grok_send_outbound(command: str) -> bool:
     if not found:
         return False
     try:
-        lexer = shlex.shlex(command.replace("\n", " \n "), posix=True, punctuation_chars=";&|<>()")
+        lexer = shlex.shlex(command.replace("\n", " \n "), posix=False, punctuation_chars=";&|<>()")
         lexer.whitespace = " \t\r"
         lexer.commenters = ""
-        tokens = list(lexer)
+        raw = list(lexer)
     except ValueError:
         return True
+    tokens = []
+    for token in raw:
+        if token in _SEPARATORS:
+            tokens.append(token)
+        elif token[:1] == "'" and token[-1:] == "'" and len(token) >= 2:
+            tokens.append(token[1:-1])  # single quotes: literal
+        elif token[:1] == '"' and token[-1:] == '"' and len(token) >= 2 and not re.search(r'[$`\\!]', token):
+            tokens.append(token[1:-1])  # double quotes without expansions
+        elif _LITERAL_WORD.fullmatch(token):
+            tokens.append(token)
+        else:
+            tokens.append("\0")  # expansion, glob, brace, redirect, mixed quoting: not a plain word
     segments, current = [], []
     for token in tokens:
         if token in _SEPARATORS:
@@ -469,19 +482,46 @@ def _rule_matches(rule: sqlite3.Row, action: Action, hits: list[str]) -> bool:
 COVER_SEGMENTS = 64  # an action with more command parts than this is not judged part by part
 
 
+_ASSIGN_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _full_match(pattern: str, text: str) -> bool:
+    try:
+        return re.fullmatch(pattern, text) is not None
+    except re.error:
+        return False
+
+
+def _runs_code(word: str) -> bool:
+    base = posixpath.basename(word).lower()
+    return (base in git_guard.SHELLS or bool(git_guard.INTERPRETERS.match(base)) or base in git_guard.RUNNERS
+            or base in ("eval", "source", "."))
+
+
 def _covered(action: Action, hits: list[str], allows: list[sqlite3.Row]) -> bool:
-    """0.12.23: the specific allow rules *allows* cover the whole of *action*. A tool call without a
-    command: a tool, path or domain rule matched it. A shell command: every part (each command the
-    shell runs, nested `$( )` ones too; here-document bodies set aside) that hits a preset on its own
-    is matched by a shell or path rule on its own, and those parts explain every preset the whole
-    command hits (a here-document fed to a shell, an odd form the parts miss: not covered)."""
+    """0.12.24: the specific allow rules *allows* cover the whole of *action*. A tool call without a
+    command: a tool rule matched it. A shell command: only shell rules anchored ``^...$`` take part
+    (opt-in); every part (each command the shell runs, nested `$( )` ones too; here-document bodies
+    set aside) that hits a preset, or runs a path, a shell or an interpreter, must fully match one,
+    and the matched parts must explain every preset the whole command hits. A here-document fed to
+    a shell or interpreter, code in one quoted word, or too many parts: not covered."""
     if not action.command:
-        return bool(allows)
-    rules = [rule for rule in allows if rule["kind"] in ("shell", "path")]
+        return any(rule["kind"] == "tool" for rule in allows)
+    # opt-in: only a shell rule anchored at both ends (^...$) judges parts, as a full match
+    rules = [rule for rule in allows if rule["kind"] == "shell" and rule["pattern"].startswith(("^", "(?i)^"))
+             and rule["pattern"].endswith("$")]
     if not rules or len(action.command) > COMMAND_LIMIT:
         return False
     try:
-        text = git_guard._heredocs(action.command)[0] if "<<" in action.command else action.command
+        text = action.command
+        if "<<" in text:
+            text, documents = git_guard._heredocs(text)
+            for header, _body in documents:
+                # a here-document fed to a shell or an interpreter is code no part shows: not covered
+                words = [posixpath.basename(word).lower() for part in git_guard.split_words(header)[0] for word in part]
+                if any(word in git_guard.SHELLS or git_guard.INTERPRETERS.match(word) or word in ("eval", "source", ".")
+                       or word in git_guard.RUNNERS for word in words):
+                    return False
         commands, nested = git_guard.split_words(text)
         for snippet in nested:
             commands += git_guard.split_words(snippet)[0]
@@ -493,15 +533,18 @@ def _covered(action: Action, hits: list[str], allows: list[sqlite3.Row]) -> bool
     for words in commands:
         if not words:
             continue
+        spaced = any(any(ch in word for ch in " \t\n") for word in words)
+        if spaced and any(_runs_code(word) for word in words):
+            return False  # `bash <<< 'claude ...'`, `sh -c '...'`, `ssh h '...'`: code in one word
         part = " ".join(words)
         part_action = Action(tool=action.tool, command=part, cwd=action.cwd, workspace=action.workspace)
         part_hits = presets_hit(part_action)
-        if not part_hits:
+        matched = not spaced and any(_full_match(rule["pattern"], part) for rule in rules)
+        if not matched:
+            program = next((word for word in words if not _ASSIGN_WORD.match(word)), "")
+            if part_hits or "/" in program or _runs_code(program):
+                return False  # an uncovered part that hits a preset or runs a file, shell or interpreter
             continue
-        if any(any(ch in word for ch in " \t\n") for word in words):
-            return False  # a quoted word with spaces: the joined text is not what runs
-        if not any(_rule_matches(rule, part_action, part_hits) for rule in rules):
-            return False
         explained.update(part_hits)
     return set(hits) <= explained
 
@@ -632,7 +675,7 @@ class Rules:
         first_party = team.is_first_party_tool(action.tool, job)  # the controller's own bot-to-bot tools: not outbound
         hits = presets_hit(action, first_party)
         if job.source in STRICT_SOURCES and "outbound" not in hits and _GROK_SEND.search(action.command or ""):
-            hits.append("outbound")  # a watcher run keeps every Grok send outbound (0.12.23 exemption off)
+            hits.append("outbound")  # a watcher run keeps every Grok send outbound (0.12.24 exemption off)
         scope = "unattended" if unattended else "attended"
         with closing(self.store._connect()) as db:
             own = self._rules(db, bot_id, scope)
@@ -661,7 +704,7 @@ class Rules:
         sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
-        # 0.12.23: a specific allow rule (a shell, path, tool or domain pattern for this exact kind of
+        # 0.12.24: a specific allow rule (a shell, path, tool or domain pattern for this exact kind of
         # action) outranks a generic ask *preset* rule (outbound, destructive, nested-agent). An ask
         # rule with its own pattern (git push, merge, deploy, HTTP writes, mail) still wins, and so do
         # never rules, the git guard and the send class above. Trigger runs keep the strict profile.
@@ -670,13 +713,18 @@ class Rules:
         # A shell command is judged part by part, so its shell/path allow rules need not match the
         # whole text (`cd /tmp; R=...; ( timeout 540 claude ... ) &`), only each part that hits a preset.
         if action.command:
-            specific = [rule for rule in own if rule["effect"] == "allow" and rule["kind"] in ("shell", "path")]
+            specific = [rule for rule in own if rule["effect"] == "allow" and rule["kind"] == "shell"]
         else:
-            specific = [rule for rule in rules if rule["effect"] == "allow" and rule["kind"] != "preset"]
+            specific = [rule for rule in rules if rule["effect"] == "allow" and rule["kind"] == "tool"]
         foreign_ids = {rule["id"] for rule in foreign}
         preset_asks = any(rule["effect"] == "ask" and rule["kind"] == "preset" and rule["id"] not in foreign_ids
                           for rule in rules)
         overridable = bool(specific) and preset_asks and _covered(action, hits, specific)
+        if overridable:
+            from . import approval_classes
+            chosen = approval_classes.match(self.store, action.tool, action.command)
+            if chosen is not None:  # an enabled approval class (purchases ...) is never overridden
+                return "ask", chosen.key, f"{chosen.label.lower()} waits for your approval"
         asks = [rule for rule in rules if rule["effect"] == "ask" and not (
             overridable and rule["kind"] == "preset" and rule["id"] not in foreign_ids)]
         if asks:

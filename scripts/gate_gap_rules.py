@@ -1,12 +1,12 @@
-"""0.12.23: the gate-gap rule changes for a Bot-Office DB (new allow rules, the E8 deploy and send ask
+"""0.12.24: the gate-gap rule changes for a Bot-Office DB (new allow rules, the E8 deploy and send ask
 patterns). usage: gate_gap_rules.py DB [--dry-run]. Idempotent; back the DB up first."""
 import datetime
 import re
 import sqlite3
 import sys
 
-NOTE = "0.12.23 gate-gap (owner-approved draft allow rules, 2026-11-22): "
-# 0.12.23: shell allow rules are matched against each command part the shell runs (words joined by
+NOTE = "0.12.24 gate-gap (owner-approved draft allow rules, 2026-11-22): "
+# 0.12.24: shell allow rules are matched against each command part the shell runs (words joined by
 # one space; redirect operators dropped, their targets kept), anchored, so nothing can ride along.
 PATHW = r"(?:~/(?:bot-office-reports|bo-work|bot-office-work)|/tmp|\$R)/[\w${}-]+(?:[./][\w${}-]+)*"
 NEW = [
@@ -26,11 +26,12 @@ OLD_SEND = r"(?i)\b(mail|mailx|sendmail|msmtp|mutt|swaks)\b|desk\s+grok\s+send|\
 NEW_SEND = r"(?i)\b(mail|mailx|sendmail|msmtp|mutt|swaks)\b|\b(slack|telegram|twilio)\b.*\b(send|post|message)\b"
 OLD_DEPLOY = (r"(?i)\bdeploy|\brailway\s+up\b|\bkubectl\s+(apply|rollout|delete)\b|\bterraform\s+apply\b|\bvercel\b.*--prod|"
               r"\bnetlify\s+deploy|\bfly(ctl)?\s+deploy|\bsystemctl\s+(restart|reload|start)\b|\bansible-playbook\b")
-NEW_DEPLOY = (r"(?i)(?:^|[\n;&|(]|\b(?:sudo|bash|sh|exec|timeout \d+\w?|npm run|pnpm(?: run)?|yarn(?: run)?|make|just|task))"
-              r"[ \t]*(?:\w+=\S{0,99}[ \t]+){0,5}(?:[\w.~$-]{0,99}/){0,8}deploy[\w.-]{0,40}(?=[\s;&|)]|$)|"
-              r"\b(?:railway|vercel|netlify|fly(?:ctl)?|heroku|firebase|serverless|wrangler|eb|pulumi|gcloud(?: [\w-]+){0,3})"
-              r"(?: --?[\w-]+(?:=\S{0,99})?){0,6} (?:deploy|up)\b|\bkubectl\s+(apply|rollout|delete)\b|\bterraform\s+apply\b|"
-              r"\bvercel\b.{0,300}--prod|\bsystemctl\s+(restart|reload|start)\b|\bansible-playbook\b")
+# the old rule with one change: the words "deployment(s)", "deployed", "deploying" (prose, a
+# bot-task goal) no longer match; `deploy`, `./deploy.sh`, `deployment.sh`, `npm run deploy` still do
+NEW_DEPLOY = OLD_DEPLOY.replace(r"(?i)\bdeploy|", r"(?i)\bdeploy(?!(?:ments?|ed|ing)(?![\w.-]))|", 1)
+assert NEW_DEPLOY != OLD_DEPLOY
+
+
 def apply(db_path: str, dry: bool = False) -> list:
     """Apply (or with *dry* only count) the changes; returns the effect counts."""
     for _, p, _n in NEW: assert len(p) <= 500, (len(p), p); re.compile(p)
@@ -41,9 +42,9 @@ def apply(db_path: str, dry: bool = False) -> list:
         deploys = db.execute("SELECT id, pattern FROM action_rules WHERE effect='ask' AND kind='shell' AND pattern=?", (OLD_DEPLOY,)).fetchall()
         print(f"send rows {n_send}, deploy rows {len(deploys)}, new deploy pattern {len(NEW_DEPLOY)} chars")
         if not dry:
-            db.execute("UPDATE action_rules SET pattern=?, note=note || ' [0.12.23: desk grok send judged by the outbound preset]' WHERE effect='ask' AND kind='shell' AND pattern=?", (NEW_SEND, OLD_SEND))
+            db.execute("UPDATE action_rules SET pattern=?, note=note || ' [0.12.24: desk grok send judged by the outbound preset]' WHERE effect='ask' AND kind='shell' AND pattern=?", (NEW_SEND, OLD_SEND))
             for rid, _p in deploys:
-                db.execute("UPDATE action_rules SET pattern=?, note=note || ' [0.12.23: deploy commands, not the word]' WHERE id=?", (NEW_DEPLOY, rid))
+                db.execute("UPDATE action_rules SET pattern=?, note=note || ' [0.12.24: not the words deployment/deployed/deploying]' WHERE id=?", (NEW_DEPLOY, rid))
             for pattern in OLD_ALLOWS:
                 db.execute("DELETE FROM action_rules WHERE bot_id IS NULL AND effect='allow' AND pattern=?", (pattern,))
             stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
