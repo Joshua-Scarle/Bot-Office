@@ -190,6 +190,16 @@ def active() -> Launcher | None:
     return _active
 
 
+def bots_uid() -> int | None:
+    """The bots user's uid in the isolated layout (None in the single-user layout): who wrote a shared file."""
+    if _active is None:
+        return None
+    try:
+        return pwd.getpwnam(_active.user).pw_uid
+    except KeyError:
+        return None
+
+
 def wrap(argv: list[str], **options) -> list[str]:
     """*argv* through the launcher in the isolated layout, unchanged otherwise."""
     return _active.wrap(argv, **options) if _active else list(argv)

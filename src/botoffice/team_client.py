@@ -13,6 +13,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import team
+
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 MAX_RESPONSE = 256 * 1024
 
@@ -129,6 +131,9 @@ def render(tool: str, data: dict, bot: str = "") -> str:
     if tool == "team_read":
         lines = [f'#{m["id"]} {m["at"]} {m["from"]} ({m["role"]}): {m["text"]}' for m in data.get("messages", [])]
         return wrap_untrusted(f"team_read:{bot}", "\n".join(lines) or "(no retained messages)")
+    if tool not in team.SEND_TOOLS:  # a registered read without its own view: the result as fenced JSON
+        return wrap_untrusted(f"{tool}:{bot}" if bot else tool, json.dumps(
+            {key: value for key, value in data.items() if key != "untrusted"}, indent=1, ensure_ascii=False))
     reply = data.get("reply")
     head = {key: data[key] for key in ("id", "status", "delivery") if data.get(key) is not None}
     text = json.dumps(head, ensure_ascii=False)
@@ -138,46 +143,73 @@ def render(tool: str, data: dict, bot: str = "") -> str:
     return text
 
 
+def call_tool(client: TeamClient, name: str, args: dict) -> str:
+    """Run the registered tool *name* (team.REGISTRY) with the MCP-style *args*: each argument is checked against
+    the tool's schema (required strings non-empty, types, enums), then the TeamClient method gets them in order."""
+    tool = team.REGISTRY.get(name)
+    if tool is None or not tool.client:
+        raise TeamClientError(f"unknown tool {name}")
+    values = []
+    for key, spec in tool.properties.items():
+        value = args.get(key, tool.defaults.get(key))
+        kind = spec.get("type")
+        if key in tool.required and (not isinstance(value, str) or not value.strip()):
+            raise TeamClientError(f"{key} is required")
+        if value is not None and (kind == "string" and not isinstance(value, str) or kind == "integer" and (
+                isinstance(value, bool) or not isinstance(value, int))):
+            raise TeamClientError(f"{key} must be {'an integer' if kind == 'integer' else 'a string'}")
+        if value is not None and "enum" in spec and value not in spec["enum"]:
+            raise TeamClientError(f"{key} must be {' or '.join(spec['enum'])}")
+        values.append(value)
+    return render(name, getattr(client, tool.client)(*values), args.get("bot") or "")
+
+
 # ---- `desk team ...`: the same calls from a shell (full access) -------------------------------------------
 
-USAGE = ("usage: desk team list | status BOT | read BOT [--limit N] [--since ID|TIME] | "
-         "message [--queue] BOT TEXT | ask BOT TEXT [--timeout SECONDS]")
+def usage() -> str:
+    def one(tool: team.TeamTool) -> str:
+        enum = tool.properties.get("mode", {}).get("enum", [])
+        words = [tool.command, *(f"[--{value}]" for value in enum[1:]),
+                 *(key.upper() for key in tool.required),
+                 *(f"[{flag} {tool.flags[flag].upper()}]" for flag in tool.flags)]
+        return " ".join(words)
+    return "usage: desk team " + " | ".join(one(tool) for tool in team.REGISTRY.values())
+
+
+def parse_args(argv: list[str]) -> tuple[str, dict]:
+    """``desk team COMMAND ...`` as (tool name, MCP-style arguments): the required arguments in order (the last one
+    takes the rest of the words), ``--flag VALUE`` per the tool's flags, ``--<mode>`` for a tool with a mode."""
+    commands = {tool.command: tool for tool in team.REGISTRY.values()}
+    if not argv or argv[0] not in commands:
+        raise TeamClientError(usage())
+    tool, rest, args = commands[argv[0]], list(argv[1:]), {}
+    for flag, key in tool.flags.items():
+        if flag in rest:
+            at = rest.index(flag)
+            if at + 1 >= len(rest):
+                raise TeamClientError(usage())
+            value = rest[at + 1]
+            try:
+                args[key] = int(value) if tool.properties[key].get("type") == "integer" else value
+            except ValueError:
+                raise TeamClientError(usage()) from None
+            del rest[at:at + 2]
+    enum = tool.properties.get("mode", {}).get("enum", [])
+    if rest and rest[0] in {f"--{value}" for value in enum}:
+        args["mode"], rest = rest[0][2:], rest[1:]
+    need = list(tool.required)
+    if len(rest) < len(need) or (len(rest) > len(need) and (not need or need[-1] != "text")):
+        raise TeamClientError(usage())
+    for at, key in enumerate(need):
+        args[key] = " ".join(rest[at:]) if at == len(need) - 1 and key == "text" else rest[at]
+    return tool.name, args
 
 
 def main(argv: list[str]) -> int:
     import sys
-    args = list(argv)
     try:
-        if not args or args[0] not in ("list", "status", "read", "message", "ask"):
-            raise TeamClientError(USAGE)
-        command, rest = args[0], args[1:]
-        client = TeamClient()
-        flags = {}
-        for flag, key in (("--limit", "limit"), ("--since", "since"), ("--timeout", "timeout")):
-            if flag in rest:
-                at = rest.index(flag)
-                if at + 1 >= len(rest):
-                    raise TeamClientError(USAGE)
-                flags[key] = rest[at + 1]
-                del rest[at:at + 2]
-        mode = "steer"
-        if command == "message" and rest and rest[0] in ("--queue", "--steer"):
-            mode, rest = rest[0][2:], rest[1:]
-        try:
-            if command == "list" and not rest:
-                print(render("team_list", client.list()))
-            elif command == "status" and len(rest) == 1:
-                print(render("team_status", client.status(rest[0]), rest[0]))
-            elif command == "read" and len(rest) == 1:
-                print(render("team_read", client.read(rest[0], int(flags.get("limit", 20)), flags.get("since")), rest[0]))
-            elif command == "message" and len(rest) >= 2:
-                print(render("team_message", client.message(rest[0], " ".join(rest[1:]), mode), rest[0]))
-            elif command == "ask" and len(rest) >= 2:
-                print(render("team_ask", client.ask(rest[0], " ".join(rest[1:]), int(flags.get("timeout", 90))), rest[0]))
-            else:
-                raise TeamClientError(USAGE)
-        except ValueError:
-            raise TeamClientError(USAGE) from None
+        name, args = parse_args(list(argv))
+        print(call_tool(TeamClient(), name, args))
     except TeamClientError as exc:
         print(f"desk team: {exc}", file=sys.stderr)
         return 1
