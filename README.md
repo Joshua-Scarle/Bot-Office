@@ -150,6 +150,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 - **Rules (`scripts/gate_gap_rules.py`, idempotent).** Three global allow rules, anchored `^...$` (only anchored shell rules take part in the override): a nested `codex exec` review in `~/bo-work` or `~/bot-office-work` with the prompt on stdin; a nested `claude -p` review with `brief.md` on stdin from a report or work dir; read-only Railway MCP calls. The deploy ask rule no longer matches "deployment", "deployed" or "deploying" as prose (a word, a space, the word, a space, another word); `deploy`, `./deployment`, `npm run deployment` still ask. The send ask rule still asks for `desk grok send` unless `--kind result|fyi` follows. Every pattern is under 500 characters.
 - **Accepted risk.** A nested review run with bypass flags can do what its brief says: read-only is the brief's instruction, not enforced. The child keeps the run's environment (Bot-Office's `bin/` shims first on PATH and the pre-push check), so its pushes and sends still meet the guard.
 - **Rollback.** No schema change. Restore `action_rules` from the backup (or delete the three allow rules and restore the two old patterns), check out the `backup/pre-gate-gap-*` tag and restart.
+
 ## What changed in 0.12.23
 
 **Replies are shorter for routine work and open with what the owner needs; research keeps full detail.**
