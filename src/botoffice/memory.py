@@ -238,8 +238,8 @@ class Memory:
 
     def write_working(self, bot_id: UUID | str, text: str, who: str = "Bot-Office") -> None:
         _private_dir(self.data_dir / "bots")
-        with self._lock(self.bot_dir(bot_id)):
-            self._write_dated(self.working_path(bot_id), text, who)
+        # no lock (as before 0.12.24): its callers hold the chat lock, and a lock failure must not drop a reply
+        self._write_dated(self.working_path(bot_id), text, who)
 
     def ensure_shared(self) -> None:
         if not self.shared_path.exists():

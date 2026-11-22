@@ -211,8 +211,7 @@ def main(argv):
             print("no approval cards")
         for item in items:
             line = f"#{item['id']}  {item['status']}"
-            if item.get("bot"):
-                line += f"  ({'you' if item.get('mine') else item['bot']})"
+            line += "  (yours)" if item.get("mine") else "  (another bot's)" if item["status"] != "not_found" else ""
             if item.get("created_at"):
                 line += f"  raised {item['created_at'][:16].replace('T', ' ')} UTC"
             if item.get("decided_at"):

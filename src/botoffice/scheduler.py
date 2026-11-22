@@ -561,7 +561,7 @@ class Scheduler:
             return
         restore = self.store.pending_working_restore(bot_id)
         if restore is not None and self.store.get_bot(bot_id):
-            self.memory.write_working(bot_id, restore)
+            self.memory.write_working(bot_id, restore, who="")  # restored: a known note keeps its date
         self.store.complete_session_reset(bot_id, generation)
 
     def _reap_tasks(self) -> None:
@@ -1059,9 +1059,10 @@ class Scheduler:
             # bounded working state survives compaction and session loss, even after a failed
             # turn; dropped if an edit archived the turn, and snapshotted so an edit can roll it back
             # the ⟦date · age · by⟧ tags shown in the workspace are never stored (freshness)
-            text = cap_working(freshness.strip(self._read_text(working, MAX_MEMORY_BYTES)))
             with self.store.chat_lock:
                 before = self.memory.read_working(job.bot_id)
+                # read with room for the tags; the limit applies to the stripped text
+                text = cap_working(freshness.strip(self._read_text(working, 2 * MAX_MEMORY_BYTES), before))
                 if text != before and self.store.snapshot_working(job.bot_id, job.id, before):
                     bot = self.store.get_bot(job.bot_id)
                     self.memory.write_working(job.bot_id, text, who=bot.name if bot else "a bot")
@@ -1152,8 +1153,8 @@ class Scheduler:
         edits = []
         for name, target, base in (("memory.md", self.memory.bot_path(job.bot_id), old_memory),
                                    ("shared-memory.md", self.memory.shared_path, old_shared)):
-            ours = self._read_own_file(workspace / name, MAX_MEMORY_BYTES)
-            ours = freshness.strip(ours) if ours is not None else None
+            ours = self._read_own_file(workspace / name, 2 * MAX_MEMORY_BYTES)  # room for the tags
+            ours = freshness.strip(ours, base)[:MAX_MEMORY_BYTES] if ours is not None else None
             if ours is not None and ours != base:
                 edits.append((target, base, ours))
         return edits

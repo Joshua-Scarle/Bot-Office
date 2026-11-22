@@ -775,13 +775,15 @@ def self_extra(store: JobStore, bot: Bot, job: Job, working: str, moment: dateti
     from . import approval_classes
     approvals = approval_classes.self_note(store, job.provider or bot.default_provider, bot.cli_access)
     extra += approvals
-    extra += pending_cards_line(store, bot)
-    stable = json.dumps([stable_peers, peer_count, stable_routines, len(tasks), not_started, paths, approvals],
+    cards = pending_cards_line(store, bot)
+    extra += cards
+    stable = json.dumps([stable_peers, peer_count, stable_routines, len(tasks), not_started, paths, approvals, cards],
                         ensure_ascii=False)
     return extra, tasks, stable
 
 
 STALE_GAP = timedelta(hours=6)
+WORKING_TAG_BUDGET = 1500  # characters of ⟦⟧ tags allowed in the inline WORKING.md
 
 
 def pending_cards_line(store: JobStore, bot: Bot) -> str:
@@ -789,11 +791,13 @@ def pending_cards_line(store: JobStore, bot: Bot) -> str:
     try:
         with contextlib.closing(store._connect()) as db:
             rows = db.execute("SELECT id, created_at FROM approvals WHERE bot_id=? AND status='pending' "
-                              "AND (expires_at IS NULL OR expires_at>?) ORDER BY id LIMIT 10",
+                              "AND (expires_at IS NULL OR expires_at>?) ORDER BY id",
                               (str(bot.id), datetime.now(UTC).isoformat())).fetchall()
     except Exception:  # noqa: BLE001
         return ""
-    cards = ", ".join(f"#{row['id']} (since {context.et_label(row['created_at'])})" for row in rows) or "none"
+    cards = ", ".join(f"#{row['id']} (since {context.et_label(row['created_at'])})" for row in rows[:10]) or "none"
+    if len(rows) > 10:
+        cards += f", and {len(rows) - 10} more"
     return (f"- Your approval cards pending now (live, as this turn started): {cards}. "
             "`bot-task approvals [N ...]` checks any card's current status.\n")
 
@@ -803,8 +807,10 @@ def time_note(store: JobStore, bot: Bot, job: Job, moment: datetime) -> str:
     know that time passed, so what it remembers may be out of date)."""
     line = f"\nNow: {context.et_label(moment)}."
     with contextlib.suppress(Exception), contextlib.closing(store._connect()) as db:
-        row = db.execute("SELECT MAX(COALESCE(finished_at, started_at)) AS last FROM jobs WHERE bot_id=? AND id!=? "
-                         "AND started_at IS NOT NULL", (str(bot.id), str(job.id))).fetchone()
+        # the latest finished turn: other jobs, or an earlier attempt of this one (a retry)
+        row = db.execute("SELECT MAX(last) AS last FROM (SELECT MAX(finished_at) AS last FROM jobs WHERE bot_id=? "
+                         "AND id!=? UNION ALL SELECT MAX(finished_at) FROM job_attempts WHERE job_id=?)",
+                         (str(bot.id), str(job.id), str(job.id))).fetchone()
         last = context._when(row["last"]) if row and row["last"] else None
         if last is not None and moment - last >= STALE_GAP:
             gap = moment - last
@@ -859,7 +865,11 @@ def prepare_bot_workspace(
     working_raw = cap_working(memory.read_working(bot.id))
     # 0.12.24 freshness: every note shown to the bot carries its date, age and author; stripped on save
     now = moment or datetime.now(UTC)
-    working = freshness.annotate(working_raw, memory.working_path(bot.id), now, bot.name)
+    working_file = freshness.annotate(working_raw, memory.working_path(bot.id), now, bot.name)
+    # inline: no header (it names the time) and a bounded overhead, so the prompt stays small and stable
+    working = freshness.annotate(working_raw, memory.working_path(bot.id), now, bot.name, with_header=False)
+    if len(working) > len(working_raw) + WORKING_TAG_BUDGET:
+        working = working_raw
     saved = freshness.saved_at(memory.working_path(bot.id)) if working_raw.strip() else ""
     ids = current.attachments if current else []
     all_paths = _stable_paths(store, bot, ids)
@@ -918,7 +928,7 @@ def prepare_bot_workspace(
         "CONTEXT.md": context.build_file(store, bot.id, job.id),
         "prompt.txt": prompt,
         "prompt-resume.txt": resume_prompt,
-        WORKING_FILE: working,
+        WORKING_FILE: working_file,
     }
     for name, text in files.items():
         # a retried job reuses its workspace: replace any link the bot left, never write through it

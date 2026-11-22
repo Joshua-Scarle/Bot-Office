@@ -1,6 +1,7 @@
 """0.12.24 one-time: date the notes of memory files written before note ages existed.
 
-Usage: python -I scripts/backfill_note_ages.py <data dir> [--dry-run]
+Usage: python -I scripts/backfill_note_ages.py [--dry-run]   (the server's environment: BOT_OFFICE_DATA_DIR etc.;
+run it while the server is paused or stopped, before or right after the 0.12.24 restart)
 
 Reads each bot's memory.md and WORKING.md and the shared memory.md; for every file that has no
 ``.ages.json`` ledger yet, dates each note from the recorded memory-edit job events (time and the bot
@@ -18,11 +19,16 @@ from pathlib import Path
 
 
 def main(argv: list[str]) -> int:
-    data_dir = Path(argv[0]).resolve()
     dry = "--dry-run" in argv
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from botoffice import freshness, safefs
+    from botoffice import freshness, isolation, safefs
+    from botoffice.config import Settings
+    from botoffice.memory import Memory
 
+    settings = Settings.from_env()
+    isolation.configure(settings)  # ledgers live where the server keeps controller-only state
+    data_dir = settings.data_dir.resolve()
+    memory = Memory(data_dir)
     safefs.add_root(data_dir)
     db = sqlite3.connect(f"file:{data_dir / 'agentdesk.sqlite3'}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
@@ -44,12 +50,13 @@ def main(argv: list[str]) -> int:
         files.append((folder / "WORKING.md", []))
     total = 0
     for path, found in files:
-        if not path.is_file() or freshness.ledger_path(path).exists():
+        if not path.is_file() or safefs.lstat(freshness.ledger_path(path)) is not None:
             continue
         if dry:
             print(f"would date {path} ({len(found)} edit events)")
             continue
-        count = freshness.backfill(path, found)
+        with memory._lock(path.parent):  # the same lock as every memory write
+            count = freshness.backfill(path, found)
         total += count
         if count:
             print(f"dated {count} notes in {path.relative_to(data_dir)}")

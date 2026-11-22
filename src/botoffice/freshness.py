@@ -31,7 +31,9 @@ from . import isolation, safefs
 
 OLD_DAYS = 14
 LEDGER_SUFFIX = ".ages.json"
-_TAG = re.compile(r" ⟦[^⟧\n]{0,120}⟧")
+_MON = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_TAG = re.compile(r" ⟦[~≤]?" + _MON + r" \d{1,2} · [~≥]?\d+d(?: OLD)? · [^⟦⟧\n]{1,60}?(?: · EXPIRED)?(?: · SUPERSEDED)?⟧$",
+                  re.MULTILINE)
 HEADER_START = "<!-- Bot-Office note ages:"
 _HEADER = re.compile(r"\A" + re.escape(HEADER_START) + r"[^\n]*-->\n")
 _BULLET = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
@@ -41,7 +43,11 @@ OWNER = "owner"
 
 
 def ledger_path(path: Path) -> Path:
-    return path.with_name(path.name.removesuffix(".md") + LEDGER_SUFFIX)
+    """Controller-private when isolated (isolation.state_dir), so a bot cannot forge a note's date or author."""
+    return isolation.state_dir(path.parent) / (path.name.removesuffix(".md") + LEDGER_SUFFIX)
+
+
+KEEP_GONE = 400  # entries of removed notes kept, so a restored or reverted note keeps its original date
 
 
 def _key(lines: list[str]) -> str:
@@ -93,13 +99,26 @@ def keys(text: str) -> list[str]:
     return [_key([lines[i] for i in members]) for _, members, _ in notes(text)]
 
 
-def load(path: Path) -> dict[str, dict]:
+def _valid(entry: object) -> bool:
+    return (isinstance(entry, dict) and isinstance(entry.get("at"), str) and len(entry["at"]) < 40
+            and isinstance(entry.get("by", ""), str) and len(entry.get("by", "")) <= 200)
+
+
+def _load_all(path: Path) -> tuple[dict[str, dict], dict[str, dict]]:
     try:
-        data = json.loads(safefs.read_text(ledger_path(path)) or "{}")
+        raw = safefs.read_text(ledger_path(path))
+        data = json.loads(raw) if raw and len(raw) < 2_000_000 else {}
     except (OSError, ValueError):
-        return {}
-    blocks = data.get("notes") if isinstance(data, dict) else None
-    return blocks if isinstance(blocks, dict) else {}
+        return {}, {}
+    if not isinstance(data, dict):
+        return {}, {}
+    def clean(value: object) -> dict[str, dict]:
+        return {k: v for k, v in value.items() if isinstance(k, str) and _valid(v)} if isinstance(value, dict) else {}
+    return clean(data.get("notes")), clean(data.get("gone"))
+
+
+def load(path: Path) -> dict[str, dict]:
+    return _load_all(path)[0]
 
 
 def _mtime(path: Path) -> datetime | None:
@@ -114,20 +133,27 @@ def record(path: Path, before: str, after: str, who: str, before_mtime: datetime
     "on or before" *before_mtime*; new notes get *moment* and *who*. Never raises."""
     with contextlib.suppress(Exception):
         moment = moment or datetime.now(UTC)
-        ledger = load(path)
+        ledger, gone = _load_all(path)
         old = set(keys(before))
         fresh: dict[str, dict] = {}
         for key in keys(after):
             if key in fresh:
                 continue
-            if key in ledger:
-                fresh[key] = ledger[key]
+            if key in ledger or key in gone:
+                fresh[key] = ledger.get(key) or gone[key]
             elif key in old:
                 fresh[key] = {"at": (before_mtime or moment).isoformat(), "by": "", "upper": True}
             else:
                 fresh[key] = {"at": moment.isoformat(), "by": who}
-        safefs.write_text(ledger_path(path), json.dumps({"v": 1, "notes": fresh}, ensure_ascii=False),
-                          isolation.file_mode())
+        removed = {**gone, **{k: v for k, v in ledger.items() if k not in fresh}}
+        removed = {k: v for k, v in removed.items() if k not in fresh}
+        removed = dict(list(removed.items())[-KEEP_GONE:])
+        _save(path, fresh, removed)
+
+
+def _save(path: Path, notes_: dict, gone: dict | None = None) -> None:
+    safefs.write_text(ledger_path(path), json.dumps({"v": 1, "notes": notes_, "gone": gone or {}}, ensure_ascii=False),
+                      isolation.file_mode(), dir_mode=isolation.dir_mode())
 
 
 def _when(stamp: str) -> datetime | None:
@@ -144,7 +170,7 @@ def _who(by: str, self_name: str | None) -> str:
     if self_name and by == self_name:
         return "you"
     by = " ".join(by.replace("⟦", "").replace("⟧", "").split())
-    return by if len(by) <= 40 else by[:39] + "…"
+    return (by if len(by) <= 40 else by[:39] + "…") or "source unknown"
 
 
 def _tag(entry: dict | None, fallback: datetime | None, now: datetime, note_text: str,
@@ -180,28 +206,38 @@ def header(now: datetime) -> str:
             f"OLD = {OLD_DAYS}+ days (age only: a standing rule still applies). Tags and this line are removed when the file is saved. -->\n")
 
 
-def annotate(text: str, path: Path, now: datetime | None = None, self_name: str | None = None) -> str:
+def taggable(text: str) -> bool:
+    """False when *text* already has ⟦ ⟧ of its own: it is then shown untagged and never stripped, so
+    stripping cannot remove anything the file really contains."""
+    return "⟦" not in text and "⟧" not in text and HEADER_START not in text
+
+
+def annotate(text: str, path: Path, now: datetime | None = None, self_name: str | None = None,
+             with_header: bool = True) -> str:
     """*text* (the content of *path*) with a ⟦date · age · by⟧ tag per note and a header line.
     Never raises: on any error the text is returned untagged."""
-    if not text.strip():
+    if not text.strip() or not taggable(text):
         return text
     try:
         now = now or datetime.now(UTC)
         ledger = load(path)
         fallback = _mtime(path)
         lines = text.split("\n")
-        for first, members, taggable in notes(text):
-            if not taggable:
+        for first, members, tagged in notes(text):
+            if not tagged:
                 continue
             body = [lines[i] for i in members]
             lines[first] = lines[first] + _tag(ledger.get(_key(body)), fallback, now, "\n".join(body), self_name)
-        return header(now) + "\n".join(lines)
+        return (header(now) if with_header else "") + "\n".join(lines)
     except Exception:  # noqa: BLE001 - a tagging bug must never fail the turn
         return text
 
 
-def strip(text: str) -> str:
-    """Remove what ``annotate`` added (the header line and every ⟦…⟧ tag)."""
+def strip(text: str, base: str = "") -> str:
+    """Remove what ``annotate`` added (the header line and the ⟦…⟧ tags at line ends). *base*: the stored
+    text the workspace copy was made from; if it was not taggable nothing was added, so nothing is removed."""
+    if base and not taggable(base):
+        return text
     return _TAG.sub("", _HEADER.sub("", text, count=1))
 
 
@@ -243,10 +279,10 @@ def backfill(path: Path, events: list[tuple[datetime, str, str]], now: datetime 
     """One-time ledger for a file written before 0.12.24 (no ledger yet). Per note: the latest memory-edit
     event (time, writer, diff) that added one of its lines; else the newest date written in the note; else
     "on or before" the file's time. Returns the number of notes dated."""
-    if ledger_path(path).exists():
+    if safefs.lstat(ledger_path(path)) is not None:
         return 0
     text = safefs.read_text(path)
-    if not text.strip():
+    if not text.strip() or not taggable(text):
         return 0
     now = now or datetime.now(UTC)
     mtime = _mtime(path) or now
@@ -260,9 +296,9 @@ def backfill(path: Path, events: list[tuple[datetime, str, str]], now: datetime 
     lines = text.split("\n")
     out: dict[str, dict] = {}
     heading = ""
-    for first, members, taggable in notes(text):
+    for first, members, tagged in notes(text):
         body = [lines[i] for i in members]
-        if not taggable and lines[first].lstrip().startswith("#"):
+        if not tagged and lines[first].lstrip().startswith("#"):
             heading = lines[first]  # "### Product status (as of 25 October 2026)" dates the notes below it
         key = _key(body)
         hits = [added[b] for b in (" ".join(line.split()) for line in body) if b in added]
@@ -274,5 +310,5 @@ def backfill(path: Path, events: list[tuple[datetime, str, str]], now: datetime 
             out[key] = {"at": stated.isoformat(), "by": "", "stated": True}
         else:
             out[key] = {"at": mtime.isoformat(), "by": "", "upper": True}
-    safefs.write_text(ledger_path(path), json.dumps({"v": 1, "notes": out}, ensure_ascii=False), isolation.file_mode())
+    _save(path, out)
     return len(out)

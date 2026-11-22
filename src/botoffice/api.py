@@ -1784,26 +1784,28 @@ def create_app(
     @app.get("/v1/agent/approvals")
     async def agent_approvals(ids: str = "", job: Job = Depends(agent_scope)) -> list[dict]:  # noqa: B008
         """0.12.24 live source: the bot's own approval cards (no ids: the latest 20), or the current
-        status of the cards named in *ids* (another bot's card: status, bot and times only)."""
-        rules.expire()
+        status of the cards named in *ids* (another bot's card: its status only). Read-only: a pending
+        card past its expiry reads as expired (the watchdog persists that)."""
+        moment = datetime.now(UTC).isoformat()
         def shape(item: dict) -> dict:
-            out = {key: item.get(key) for key in ("id", "status", "created_at", "decided_at", "expires_at")}
-            bot = store.get_bot(item["bot_id"]) if item.get("bot_id") else None
-            out["bot"] = bot.name if bot else None
-            if str(item.get("bot_id")) == str(job.bot_id):
-                out["mine"] = True
-                out["summary"] = failures.clip(item.get("summary") or "", 200)
-            return out
-        if ids.strip():
-            wanted = []
-            for part in ids.replace(",", " ").split()[:20]:
-                try:
-                    wanted.append(int(part.lstrip("#")))
-                except ValueError as exc:
-                    raise HTTPException(status_code=400, detail=f"not an approval number: {part}") from exc
-            found = [rules.get(n) for n in wanted]
-            return [shape(item) if item else {"id": n, "status": "not_found"} for n, item in zip(wanted, found, strict=True)]
+            status = item.get("status")
+            if status == "pending" and item.get("expires_at") and str(item["expires_at"]) <= moment:
+                status = "expired"
+            if str(item.get("bot_id")) != str(job.bot_id):
+                return {"id": item["id"], "status": status}
+            out = {key: item.get(key) for key in ("id", "created_at", "decided_at", "expires_at")}
+            return {**out, "status": status, "mine": True, "summary": failures.clip(item.get("summary") or "", 200)}
         with closing(store._connect()) as db:
+            if ids.strip():
+                wanted = []
+                for part in ids.replace(",", " ").split()[:20]:
+                    number = part.lstrip("#")
+                    if not number.isdigit() or not 0 < int(number) < 2**63:
+                        raise HTTPException(status_code=400, detail=f"not an approval number: {part[:20]}")
+                    wanted.append(int(number))
+                found = {row["id"]: dict(row) for n in wanted
+                         for row in db.execute("SELECT * FROM approvals WHERE id=?", (n,))}
+                return [shape(found[n]) if n in found else {"id": n, "status": "not_found"} for n in wanted]
             rows = db.execute("SELECT * FROM approvals WHERE bot_id=? ORDER BY id DESC LIMIT 20",
                               (str(job.bot_id),)).fetchall()
         return [shape(dict(row)) for row in rows]

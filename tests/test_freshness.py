@@ -171,8 +171,9 @@ def test_agent_can_check_approval_cards_live(settings):
         assert [(item["id"], item["status"], item.get("mine")) for item in mine] == [(ids[0], "pending", True)]
         assert "Ada" in mine[0]["summary"]
         both = client.get("/v1/agent/approvals", params={"ids": f"#{ids[1]} 999"}, headers=headers).json()
-        assert both[0]["status"] == "approved" and both[0]["bot"] == "Bob" and "summary" not in both[0]
+        assert both[0] == {"id": ids[1], "status": "approved"}  # another bot's card: status only
         assert both[1] == {"id": 999, "status": "not_found"}
+        assert client.get("/v1/agent/approvals", params={"ids": str(2**64)}, headers=headers).status_code == 400
 
 
 def test_backfill_dates_notes_from_edit_events_then_stated_dates(tmp_path):
@@ -188,3 +189,36 @@ def test_backfill_dates_notes_from_edit_events_then_stated_dates(tmp_path):
     assert "⟦Nov 21 · 0d · Lead Bot⟧" in shown[4]
     assert "~Oct 25" in shown[5]  # inherits its heading's date
     assert freshness.backfill(path, [], now=NOW) == 0  # a ledger exists: left alone
+
+
+def test_strip_never_removes_text_the_file_really_has(tmp_path):
+    # the file's own ⟦…⟧ (code, quotes): shown untagged and returned exactly as written
+    own = "- a note\n```\nx ⟦Nov 21 · 1d · you⟧\n```\n"
+    assert freshness.annotate(own, tmp_path / "memory.md", NOW) == own
+    assert freshness.strip(own, own) == own
+    # a tag-like text in the middle of a line is not one of ours
+    text = "- see ⟦Nov 21 · 1d · you⟧ mid-line\n"
+    assert freshness.strip(text) == text
+
+
+def test_removed_note_keeps_its_date_when_restored(tmp_path):
+    memory = Memory(tmp_path)
+    path = memory.working_path("b1")
+    memory.write_working("b1", "- plan A\n", who="Ada")
+    ledger = freshness.load(path)
+    for entry in ledger.values():
+        entry["at"] = (NOW - timedelta(days=20)).isoformat()
+    freshness._save(path, ledger)
+    memory.write_working("b1", "- plan B\n", who="Ada")
+    memory.write_working("b1", "- plan A\n", who="")  # a rewind restores the old text
+    assert "20d OLD · you" in freshness.annotate("- plan A\n", path, NOW, "Ada")
+
+
+def test_large_memory_read_back_is_not_truncated_by_the_tags(settings):
+    store, scheduler, bot = _setup(settings)
+    from botoffice.memory import MAX_MEMORY_BYTES
+    big = "".join(f"- note {n} " + "x" * 60 + "\n" for n in range(MAX_MEMORY_BYTES // 80))
+    scheduler.memory.write_bot(bot.id, big, who="Ada")
+    _, job = scheduler.turns.post_message(bot, "hi")
+    asyncio.run(scheduler._execute(0, store.claim(("desktop-1",), {"codex"})))
+    assert scheduler.memory.read_bot(bot.id) == big
