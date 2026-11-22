@@ -243,7 +243,7 @@ def test_fingerprint_names_only_the_jobs_own_workspace_by_role():
     assert at(a, f"{root}/{a}/sub") == at(b, f"{root}/{b}/sub") != at(a, f"{root}/{a}")
     assert at(a, f"{root}/{a}") != at(b, f"{root}/{other}")  # another job's workspace stays exact
     assert at(a, f"{root}/{a}") != at("", f"{root}/{b}")
-    assert at(a, "/home/u/repo-one") != at(b, "/home/u/repo-two")
+    assert at(a, "/srv/repo-one") != at(b, "/srv/repo-two")
     assert at(a, f"/tmp/workspaces/{a}") != at(b, f"/tmp/workspaces/{b}")  # not under data_dir
     assert at(a, f"/tmp{root}/{a}/f") != at(b, f"/tmp{root}/{b}/f")  # a path that merely contains it
     assert at(a, "/x", f"cat /tmp{root}/{a}/f") != at(b, "/x", f"cat /tmp{root}/{b}/f")

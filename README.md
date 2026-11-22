@@ -139,6 +139,15 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.22
+
+**An approved action is no longer asked again in the resume turn just because that turn runs in a new job workspace.**
+
+- **Grant fingerprint names the job's own workspace by role.** Every resume turn runs in a new `<data_dir>/workspaces/<job id>`, and the fingerprint used to include that uuid, so an approved command (cwd or path in the job's own workspace) came back as a new card on each turn (#31-#35). `Rules` now gets `<data_dir>/workspaces`, and `decide()` binds each action to its own job's workspace: only that exact directory (or its resolved-root form) is replaced by a role marker, at a path start with a `/` or end boundary, no case folding, and in a shell command only where it is a whole shell-word prefix. `%` is escaped so no input can spell the marker. Other directories, another job's workspace, content fields and the origin job's workspace typed literally inside the resume turn all stay exact (fail closed: a new card).
+- **Unchanged.** A grant is still one-shot, bound to the bot, the originating job and its resume job, within 24 h. The git guard, the send class and every `never`/`ask` rule still come before any allow.
+- **Known gaps (liveness only, never broader matching).** A list-form Codex command (`bash -lc '...'`) and approvals still pending across this deploy (old hash format) fail closed to a new card.
+- **Rollback.** No schema change and no migration. Check out the `backup/pre-0.12.22-*` tag and restart.
+
 ## What changed in 0.12.21
 
 **A bot now has a standing digest of its own recent chat, and a search over the rest, so a short ask ("What is AMA?", "Push it to 1PM") is not answered from a dictionary or a guess.**
