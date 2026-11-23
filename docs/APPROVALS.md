@@ -68,7 +68,7 @@ Defence in depth, not a sandbox. **Not caught:** a compiled program; a script th
 | Sending email or messages | always on (locked) | `sendmail`, `mutt`, `mail`, `msmtp`, `swaks`...; SMTP from inline code; a request to a known sending endpoint (chat and webhook hosts, mail, SMS and social APIs; below); connector tools whose name sends (send / post / reply / message / email / publish / tweet / comment / create_issue...). Messages to other bots (bot-msg, desk grok send) never ask |
 | Purchases and payments | on | connector tools named pay / purchase / checkout / buy / charge / refund / create_payment / create_order...; `stripe ... create` |
 | Merging, releasing, force-pushing | on | `gh pr merge`, `gh release create`, `npm publish`, `docker push`, `git push` to main or master or with `--force` |
-| Admin and system changes | on | `sudo`, `systemctl`, `crontab`, `shutdown`, `reboot`, user accounts, `podman system prune` |
+| Admin and system changes | on | `sudo`, `systemctl`, `crontab`, `shutdown`, `reboot`, user accounts, `podman system prune`. Since 0.12.28 a `sudo` command goes to the auto-review instead (below) unless it is on the hard-stop list |
 | Deleting outside the bot's workspace | on | `rm -r` of paths outside the workspace, writes to `~/.ssh` and other protected places, `dd of=`; connector tools named delete / trash / destroy / purge |
 | Pushing code and posting on GitHub | off | any `git push`, `gh pr create/comment`, `gh issue ...`; GitHub connector writes |
 | Logging in to other computers | off | `ssh`, `scp`, `sftp`, `rsync host:` |
@@ -87,6 +87,10 @@ What counts as sending:
 Every other request does not ask, whatever its method: a read-only GraphQL POST, an embeddings or LLM API call, a POST to your own service. `BOT_OFFICE_SEND_HOSTS` (comma or space separated, in the controller's environment) adds endpoints: `host` (any path) or `host/path-prefix`; `*.example.com` also matches subdomains. A non-GET request to one of them sends.
 
 Your own classes match a command pattern or a tool-name pattern (regular expressions). A pattern sees at most the first 4096 characters; a longer command counts as in your class, so it asks. A pattern that is too slow on long, repetitive input (nested repeats such as `(a+)+`) is refused when you save it. Matching is a tripwire on the tool's name and its command line, not a sandbox: a bot that hides a command inside a script it wrote first is not caught. The bot's own instructions tell it not to work around a refused step.
+
+## Sudo auto-review (0.12.28)
+
+Every bot may use `sudo`; each sudo command is reviewed, not carded. Order: never rules and the secrets tripwire, the git guard, the send class, ask rules, then the sudo step: the hard-stop list (users and sudo rights, SSH, firewall, secrets, deleting data, deploys, push/merge/mail, reboot, networking, Bot-Office itself, over 2000 characters) asks for the owner's card; anything else goes to the reviewer (`claude -p`, no tools), which allows or blocks it against the bot's task. No answer in time: the card. Trigger runs, outbound or nested-agent hits, other enabled classes and bots with `sudo_review` off keep the card. Every sudo command and its outcome is logged in `sudo-review.jsonl` next to the DB. Code: `src/botoffice/sudo_review.py`, `Rules._sudo_route`.
 
 ## The git guard (always asks)
 

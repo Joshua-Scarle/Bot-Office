@@ -1024,7 +1024,7 @@ def create_app(
             fields["description"] = (fields["description"] or "").strip()
         for key in ("name", "instructions", "default_provider", "model", "icon", "cli_access", "notify", "allow_sudo",
                     "scheduled_runs", "daily_budget", "digest", "bot_steer", "chat_only", "team_read", "team_private",
-                    "app_admin"):
+                    "app_admin", "sudo_review"):
             if key in fields and fields[key] is None:
                 del fields[key]
         if "daily_budget" in fields:
@@ -1042,6 +1042,8 @@ def create_app(
             fields["team_private"] = int(fields["team_private"])
         if "app_admin" in fields:
             fields["app_admin"] = int(fields["app_admin"])
+        if "sudo_review" in fields:
+            fields["sudo_review"] = int(fields["sudo_review"])
         if fields.get("job_timeout") is not None and fields["job_timeout"] > settings.max_turn_timeout:
             raise HTTPException(status_code=422, detail=f"job_timeout must be at most {settings.max_turn_timeout} seconds")
         if "notify" in fields:
