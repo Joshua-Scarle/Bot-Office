@@ -139,6 +139,10 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## Unreleased: Claude Duet bridge
+
+A two-way channel with Claude Duet over a private pull request (inbound: comments polled with ETags; outbound: PR reviews). New: `src/botoffice/duet_bridge.py`, `desk duet`, `POST /v1/bridge/duet/send`, `GET /v1/bridge/duet/status`, table `duet_messages` (additive). See [Claude Duet bridge](#claude-duet-bridge).
+
 ## What changed in 0.12.22
 
 **An approved action is no longer asked again in the resume turn just because that turn runs in a new job workspace.**
@@ -1130,6 +1134,38 @@ desk inbox post --to "Ops Bot" --from "Grok Lead" --thread THREAD --text "Please
 ```
 
 `kind=ack` is dropped, sends are limited to one per minute per sending bot, 30 per day total and `BOT_OFFICE_GROK_PER_BOT_DAILY` (default 10) per day per bot, and each thread is capped at 6 hops so the two sides cannot loop. An inbound message's hop is the larger of the stored hop + 1 and the one supplied, so a sender cannot reset the count; the hop is stored in the same transaction as the queued turn, so a refused turn uses no hop. Rate and hop state live in SQLite (`bridge_sends`, `bridge_threads`); a send is reserved before the webhook call and released only if it certainly did not arrive (refused, DNS failure, HTTP error). A timeout or reset after sending may have delivered the message, so it stays counted. The pre-0.9.0 JSON files are imported once and renamed `*.imported`.
+
+## Claude Duet bridge
+
+A two-way message channel between Bot-Office and Claude Duet, with no public endpoint on the host and no model tokens spent while idle. Design and trade-offs: [docs/DUET-BRIDGE.md](docs/DUET-BRIDGE.md). The mailbox is one long-lived pull request in a **private** repository (never this public one):
+
+- **Duet to Bot-Office:** Duet posts a PR conversation comment whose first line is `[Duet -> Bot Office] id=... to=<bot> thread=<id> kind=task|question|result|fyi` (the arrow may also be written as a Unicode arrow). A controller thread polls the PR's comments with a conditional request (`If-None-Match`; an unchanged list answers `304`, which GitHub does not count against the rate limit). A comment from an allowed GitHub login is delivered once to the named bot (else `default_bot`) as untrusted data with its sender, id, thread and a reply hint: steered into the bot's running or queued turn if it has one, else a new turn. The controller adds an `eyes` reaction as a read receipt. Other comments, and the controller's own, are ignored.
+- **Bot-Office to Duet:** a bot runs `desk duet send`; the controller posts a pull request review (`event: COMMENT`) headed `[Bot Office -> Duet] id=BO-xxxxxxxx from=<bot> to=<to> thread=<id> reply_to=<id> kind=<kind>`. It is a review, not a conversation comment, because only review events wake the subscribed Duet session.
+
+Setup: the controller's own GitHub token (`github-token` in the control directory, the one already used for GitHub access, never handed to a bot) needs read access and comment/review access on the mailbox repository. Put the config in the control directory as `duet_mailbox.json` (mode `0600`; a file readable by group or others is refused). Never commit it. Fields:
+
+| Field | Meaning |
+|---|---|
+| `repo` | `owner/mailbox-repo` (private) |
+| `pr` | pull request number |
+| `default_bot` | bot that gets messages with no or an unknown `to` |
+| `interval` | poll seconds, default 4, clamped to 2..60 |
+| `allowed_authors` | GitHub logins whose comments are accepted; empty means the token's own login |
+| `enabled` | default `true` |
+
+```sh
+desk duet install-config < duet_mailbox.json     # validates, writes mode 0600; operator only, refused inside a bot turn
+desk duet send --text "..." [--to main] [--kind task|question|result|fyi|blocker] [--thread ID] [--reply-to ID] [--from NAME]
+desk duet status                                  # the same as GET /v1/bridge/duet/status (master token)
+```
+
+`desk duet send` is a thin client of `POST /v1/bridge/duet/send`; a job's token always sends as its own bot (`--from` needs the master token). The text is refused (HTTP 400, never echoing the match) if it looks like a token or key (GitHub tokens, `sk-`, `AKIA`, `-----BEGIN`, and similar) or contains a line of the out-of-repo push denylist (`BO_PUSH_DENYLIST`, see [Keeping GitHub in step](#keeping-github-in-step)).
+
+Limits (kept in SQLite, table `duet_messages`): at most 60,000 characters, one send per 3 s per bot, 40 a minute, 1000 a day, and 30 messages per thread (both directions) so two agents cannot loop. On a rate limit (`403`/`429`) the poller honours `Retry-After` or `X-RateLimit-Reset`; on network errors it backs off up to 60 s. On first start the cursor is "now": history is never replayed. Each comment id is delivered at most once, also across restarts.
+
+Status shows whether the bridge is enabled, the repo and PR, last poll time and HTTP status, poll and `304` counts, the last error, inbound and outbound counts, and the last 20 inbound latencies (comment created to delivered, in seconds).
+
+Rollback: delete `duet_mailbox.json` (or set `"enabled": false`) and restart; the poller then idles and sends are refused. The `duet_messages` table is additive and can stay.
 
 ## Security rules
 

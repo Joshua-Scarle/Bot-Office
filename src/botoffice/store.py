@@ -974,6 +974,14 @@ class JobStore:
                 "CREATE TABLE IF NOT EXISTS bridge_threads (thread_id TEXT PRIMARY KEY, hop INTEGER NOT NULL, "
                 "updated_at TEXT NOT NULL)"
             )
+            # Claude Duet bridge (duet_bridge.py): one row per inbound or outbound mailbox message,
+            # keyed by the GitHub comment id, or -review_id for a sent review (dedupe, rate limits, thread cap, latency).
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS duet_messages (comment_id INTEGER PRIMARY KEY, direction TEXT NOT NULL, "
+                "msg_id TEXT, thread TEXT, kind TEXT, bot_id TEXT, job_id TEXT, gh_created_at TEXT, "
+                "seen_at TEXT, delivered_at TEXT, mode TEXT, error TEXT, review_id INTEGER)"
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS duet_messages_dir_seen ON duet_messages(direction, seen_at)")
             self._import_bridge_json(db)
             _init_assignment_tables(db)
             db.execute("CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, "

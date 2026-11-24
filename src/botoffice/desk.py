@@ -21,6 +21,7 @@ USAGE = (
     " [--thread ID] [--from NAME]\n"
     "       desk team list | status BOT | read BOT [--limit N] [--since X] | message [--queue] BOT TEXT | ask BOT TEXT [--timeout S]\n"
     "       desk grok install-config\n"
+    "       desk duet send --text TEXT [--to main] [--kind K] [--thread ID] [--reply-to ID] | status | install-config\n"
     "       desk inbox post --to BOT --from NAME --text TEXT [--thread ID] [--hop N]"
 )
 
@@ -198,6 +199,9 @@ def main(argv: list[str] | None = None) -> int:
             directory, payload = message_target(rest, dict(os.environ), Path(inbox))
             write_inbox(directory, payload)
             return 0
+        if command == "duet":
+            from . import duet_bridge
+            return duet_bridge.desk_duet(rest)
         if command in {"grok", "inbox"}:
             if command == "inbox" and os.environ.get("BOT_OFFICE_JOB_ID"):
                 raise DeskError("use bot-msg or desk message for agent messages")
