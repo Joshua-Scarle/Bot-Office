@@ -139,6 +139,11 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.34
+
+- **Clear in Needs you.** Items that are only notices (a failed job, a stalled task, an expired card, a paused watcher, a usage limit, ...) get a **Clear** button, and the open panel has **Clear all**. Clearing hides the item until it changes: a new failure, stall or card shows again. Pending approval cards and open questions are never cleared, because a bot is waiting on them; settle them with Approve/Deny or Answer/Skip. Items that already had **Dismiss** keep it.
+- **Rollback.** One additive table (`needs_cleared`, ignored by older code). Check out the previous release and restart; cleared items show again.
+
 ## What changed in 0.12.28
 
 **Every bot can use sudo, through an automatic review.** (Owner decision, Nov 22: "give full sudo to everyone with only certain external actions being blocked. Use auto-review tho, not just willy nilly use.")

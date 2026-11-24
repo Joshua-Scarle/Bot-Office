@@ -189,7 +189,44 @@ def needs_you(store: JobStore) -> list[dict]:
                 "ask": f"{bot['name']}'s watcher \"{row['name']}\" was paused: {row['paused_reason']}",
                 "at": row["last_fired_at"], "actions": ["resume"],
             })
-    return items
+    return _without_cleared(store, items)
+
+
+# 0.12.34: "Clear" hides an item until it changes (its id carries its state and time, so a new
+# failure, a new stall or a new card shows again). A pending approval card and an open question
+# keep a bot waiting, so they are never hidden: Approve/Deny or Answer/Skip settles them.
+CLEARED_KEEP_DAYS = 30
+
+
+def clearable(item: dict) -> bool:
+    return not (item["kind"] == "question" or (item["kind"] == "approval" and item["state"] == "pending"))
+
+
+def _cleared_table(db: sqlite3.Connection) -> None:
+    db.execute("CREATE TABLE IF NOT EXISTS needs_cleared (item_id TEXT PRIMARY KEY, cleared_at TEXT NOT NULL)")
+
+
+def _without_cleared(store: JobStore, items: list[dict]) -> list[dict]:
+    with closing(store._connect()) as db:
+        _cleared_table(db)
+        hidden = {row[0] for row in db.execute("SELECT item_id FROM needs_cleared")}
+    kept = [item for item in items if not (clearable(item) and item["id"] in hidden)]
+    for item in kept:
+        item["clearable"] = clearable(item)
+    return kept
+
+
+def clear(store: JobStore, item_ids: list[str]) -> int:
+    """Hide these Needs-you items (only ones on the list now and clearable); returns how many."""
+    current = {item["id"] for item in needs_you(store) if item["clearable"]}
+    chosen = [item_id for item_id in dict.fromkeys(item_ids) if item_id in current]
+    stamp = now()
+    with closing(store._connect()) as db:
+        _cleared_table(db)
+        db.execute("DELETE FROM needs_cleared WHERE cleared_at<?", ((stamp - timedelta(days=CLEARED_KEEP_DAYS)).isoformat(),))
+        db.executemany("INSERT OR REPLACE INTO needs_cleared (item_id, cleared_at) VALUES (?, ?)",
+                       [(item_id, stamp.isoformat()) for item_id in chosen])
+    return len(chosen)
 
 
 def _usage_text(bot: str, provider: str, not_before: str, stamp: datetime) -> str:
