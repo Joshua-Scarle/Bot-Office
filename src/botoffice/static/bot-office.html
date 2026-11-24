@@ -4984,8 +4984,11 @@ $("needs-clear-all").onclick = async () => {
   const left = $("needs-count").textContent - needsClearable.length;
   if (!confirm("Clear " + needsClearable.length + " item(s)? Each shows again if it changes." +
     (left > 0 ? " " + left + " approval card(s) or question(s) stay until you answer them." : ""))) return;
-  try { await api("/v1/needs-you/clear", {method: "POST", body: JSON.stringify({ids: needsClearable})}); }
-  catch (err) { $("needs-list").prepend(el("p", "muted", err.message)); return; }
+  const ids = needsClearable.slice();  // the API takes at most 500 ids per call
+  try {
+    for (let i = 0; i < ids.length; i += 500)
+      await api("/v1/needs-you/clear", {method: "POST", body: JSON.stringify({ids: ids.slice(i, i + 500)})});
+  } catch (err) { await loadNeedsYou(); $("needs-list").prepend(el("p", "muted", err.message)); return; }
   await loadNeedsYou();
 };
 $("needs-toggle").onclick = () => setNeedsOpen(!$("needs-you").classList.contains("open"), true);
