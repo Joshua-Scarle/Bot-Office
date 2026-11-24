@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
+from . import approval_classes, attachments, avatars, baseline, continuation, duet_bridge, git_guard, github_access, grok_bridge, health
 from . import grouping, isolation, needs_you, notify, recall, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
@@ -391,6 +391,17 @@ class BridgeSend(BaseModel):
     from_bot: str | None = Field(default=None, alias="from", max_length=200)
 
 
+class DuetSend(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    text: str = Field(min_length=1, max_length=60000)
+    to: str = Field(default="main", max_length=200)
+    kind: str = Field(default="fyi", max_length=20)
+    thread: str | None = Field(default=None, max_length=200)
+    reply_to: str | None = Field(default=None, max_length=200)
+    from_bot: str | None = Field(default=None, alias="from", max_length=200)
+
+
 class BridgeInbox(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -513,6 +524,14 @@ def create_app(
 
     notifier = notify.Notifier(store)
 
+    def _duet_steer(bot: Bot, text: str) -> bool:
+        # the chat endpoint's rule for a message that reaches a busy bot (see _post_owner_message_ex)
+        _, steer_reason = scheduler.turns._validate(bot.default_provider, None, bot)
+        result, _note = store.post_steer_explained(bot.id, text, [], steer_reason, unsteerable=_steer_blocked(bot))
+        return bool(result)  # attached to the turn, or (engine cannot take input mid-run) queued as its own turn
+
+    duet = duet_bridge.DuetBridge(store, settings, turns=scheduler.turns, steer=_duet_steer)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store.initialize()
@@ -521,8 +540,10 @@ def create_app(
         pusher = asyncio.create_task(notifier.run(), name="botoffice-notify")
         warm = asyncio.create_task(provider_status.warm(), name="botoffice-provider-warm")
         on_terminate(scheduler.begin_shutdown)
+        duet.start()
         reaper = asyncio.create_task(reap_voice(), name="botoffice-voice-reaper")
         yield
+        await asyncio.to_thread(duet.stop)
         pusher.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await pusher
@@ -1957,6 +1978,31 @@ def create_app(
             status = 400 if str(exc).startswith(("kind must", "to and text")) else 502
             raise HTTPException(status_code=status, detail=str(exc)) from exc
         return {"result": result}
+
+    @app.post("/v1/bridge/duet/send")
+    async def bridge_duet_send(body: DuetSend, binding: Job | None = Depends(agent_auth)) -> dict:  # noqa: B008
+        """Post a message to Claude Duet (a comment on the mailbox pull request). A job's token always sends as
+        its own bot (``from`` is for the master token only)."""
+        if binding:
+            bot = store.get_bot(binding.bot_id) if binding.bot_id else None
+            if not bot:
+                raise HTTPException(status_code=403, detail="token is not bound to a bot")
+            if body.from_bot and body.from_bot.strip() not in (bot.name, str(bot.id)):
+                raise HTTPException(status_code=403, detail="--from is only allowed with the master token")
+            sender = bot.name
+        else:
+            sender = (body.from_bot or "").strip() or "agentdesk"
+        try:
+            return await asyncio.to_thread(duet.send, text=body.text, sender=sender, to=body.to, kind=body.kind,
+                                           thread=body.thread, reply_to=body.reply_to)
+        except duet_bridge.DuetError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=502, detail="GitHub is unreachable") from exc
+
+    @app.get("/v1/bridge/duet/status", dependencies=[Depends(auth)])
+    async def bridge_duet_status() -> dict:
+        return await asyncio.to_thread(duet.report)
 
     @app.post("/v1/bridge/inbox", dependencies=[Depends(auth)])
     async def bridge_inbox(body: BridgeInbox) -> dict:
