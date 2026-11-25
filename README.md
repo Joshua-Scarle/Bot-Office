@@ -149,6 +149,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 
 - **New `botoffice.remote_access` middleware (outermost).** A request is remote when its Host is a configured public hostname or it carries a Cloudflare header. Remote requests need a valid Access JWT (RS256 only, keys from the team's JWKS, issuer, audience and expiry checked) and fail closed: a missing or disabled configuration gives 403, an invalid one 503. Loopback requests without Cloudflare headers pass through unchanged.
 - **Two roles.** `owner` (an email in `owners`) gets the whole API without a bearer token; state-changing requests must send a matching `Origin`. `remote-client` (a service token in `clients`) is limited to a fixed route allowlist and gets no websockets.
+- **Stopgap shared key.** Without Access, a caller may send `X-Bot-Office-Key`; only its SHA-256 and an expiry are stored, it always gets the `remote-client` role, and `deploy/remote-access/shared_key.py` makes, lists and revokes keys without printing them.
 - **Configuration** is `<control dir>/remote_access.json` (or `BOT_OFFICE_REMOTE_ACCESS_FILE`), re-read when it changes, so a client can be revoked without a restart. The signing keys are cached for an hour.
 - **GUI.** The page asks `GET /v1/remote/whoami` first and, for a remote owner, skips the token prompt.
 - **Unchanged.** The API still binds to loopback only, the bearer token still works locally, and job-scoped agent routes still need a job token.
