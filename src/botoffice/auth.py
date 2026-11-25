@@ -6,6 +6,7 @@ from collections.abc import Callable
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from . import remote_access
 from .config import Settings
 
 bearer = HTTPBearer(auto_error=False)
@@ -15,6 +16,10 @@ def auth_dependency(settings: Settings) -> Callable[..., None]:
     async def require_token(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     ) -> None:
+        # 0.12.23: RemoteAccessMiddleware (outermost) has already verified the Cloudflare Access JWT,
+        # the host, the role and, for a service token, the route allowlist. Only it sets this.
+        if remote_access.current_remote_identity.get() is not None:
+            return
         try:
             expected = settings.read_token()
         except (OSError, RuntimeError) as exc:

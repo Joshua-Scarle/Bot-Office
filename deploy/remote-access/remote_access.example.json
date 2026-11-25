@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "team_domain": "yourteam.cloudflareaccess.com",
+  "audience": ["<Access application AUD tag>"],
+  "hostnames": ["office.example.test"],
+  "owners": ["you@example.test"],
+  "clients": {
+    "<service token client id>.access": {"name": "claude-cloud", "role": "remote-client"}
+  }
+}
