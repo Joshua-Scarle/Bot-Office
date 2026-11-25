@@ -1,0 +1,13 @@
+# cloudflared config for Bot-Office remote access (placeholders only).
+# Copy to the host as ~/.cloudflared/config.yml (or /etc/cloudflared/config.yml) and edit.
+#
+# The tunnel credentials file named below stays on the host, mode 0600, and never goes into git.
+tunnel: <tunnel id>
+credentials-file: /home/<user>/.cloudflared/<tunnel id>.json
+
+ingress:
+  # Bot-Office keeps listening on loopback only; cloudflared connects OUTBOUND and forwards here.
+  - hostname: office.example.test
+    service: http://127.0.0.1:8787
+  # Anything else gets a 404.
+  - service: http_status:404
