@@ -139,6 +139,15 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.29
+
+**Reruns no longer overwrite earlier results.** (Owner decision, Nov 23: reruns overwrote reports, which broke approved links and lost the only proof of 3 mismatches.)
+
+- **New rule 10 in Rules for all bots:** "Keep every run. One results folder per task. Each run or rerun writes a new dated subfolder, `results/run-YYYY-MM-DD[-N]/`. Never edit, move or delete an earlier run's outputs. Links in reports and approvals point to the dated subfolder."
+- **Prompt budget.** Wording in both pages was tightened (no rule dropped), so rules + system prompt stay at 1481 words (552 + 929), the same as 0.12.28 and below the test limit of 1500. (The "1396/1400" in the 0.12.25 notes predates 0.12.27.)
+- **Owner overrides.** A customized Rules page keeps its text; use "Reset to default" in Settings to pick up rule 10.
+- **Rollback.** Prompt text only; no schema change. Revert the merge commit and restart.
+
 ## What changed in 0.12.28
 
 **Every bot can use sudo, through an automatic review.** (Owner decision, Nov 22: "give full sudo to everyone with only certain external actions being blocked. Use auto-review tho, not just willy nilly use.")
