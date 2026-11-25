@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PORT="${1:-8787}"
-CONFIG="${2:-${BOT_OFFICE_REMOTE_ACCESS_FILE:-${HOME}/printpilot-agentdesk/data/remote_access.json}}"
+CONFIG="${2:-${BOT_OFFICE_REMOTE_ACCESS_FILE:-${HOME}/bot-office/data/remote_access.json}}"
 fail=0
 
 echo "== listener on :${PORT} =="
