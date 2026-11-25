@@ -139,6 +139,32 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.32
+
+- **Each chat keeps its own unsent draft.** Switching to another bot no longer carries half-typed text into the wrong chat; coming back restores it. Drafts live in this browser's local storage, are cleared once the message is sent, and come back if sending fails.
+
+## What changed in 0.12.31
+
+- **Routine merges go ahead without a card.** A bot's plain GitHub pull-request merge command (one command, the repository named, optional squash/rebase and delete-branch, and a required `--match-head-commit` with the full 40-character head SHA) skips the owner's card only when Bot-Office reads the PR from GitHub and every check holds: open, not a draft, base is not a release branch, GitHub says mergeable and clean, labeled `status:ready-to-deploy` with no blocker label (new model, launch, new tool version, redesign/UI, tutorial, BT accuracy lever, spending), every check on the head commit finished with "success" (neutral, skipped or pending do not count), and `Written-by:`, `Reviewed-by:` (a different CLI) and `Tested:` lines in the PR. Anything else, any malformed data or any error reading GitHub keeps the card. Any ask rule the owner set up also keeps the card.
+- **Bot-Office's own repo always keeps the card.** A merge there changes the gate and needs a restart.
+- **Self-attested markers.** Written-by, Reviewed-by and Tested are written by the bots; Bot-Office checks they are present, not that they are true. A marker line that says failed, not, none or the like counts as missing. The required head-commit pin means nothing pushed after the review slips in; without it the card stays.
+- **Owner switch and log.** Meta key `auto_merge` ("off" turns it off; on by default). Every decision is appended to `auto-merge.jsonl` next to the DB.
+- **Rollback.** No schema change. Check out the previous release and restart; every merge asks again.
+
+## What changed in 0.12.30
+
+- Simpler chat header: only Unread, Search, Activity, Desktop, Routines and Assignments stay on the header. Read aloud, Voice, Show archived, Agent messages, Memory, Watchers and Settings moved into a new ⋯ menu button (press again to close).
+- The model, effort and tier labels now sit under the bot's name, so the header fits on one row.
+
+## What changed in 0.12.29
+
+**Reruns no longer overwrite earlier results.** (Owner decision, Nov 23: reruns overwrote reports, which broke approved links and lost the only proof of 3 mismatches.)
+
+- **New rule 10 in Rules for all bots:** "Keep every run. One results folder per task. Each run or rerun writes a new dated subfolder, `results/run-YYYY-MM-DD[-N]/`. Never edit, move or delete an earlier run's outputs. Links in reports and approvals point to the dated subfolder."
+- **Prompt budget.** Wording in both pages was tightened (no rule dropped), so rules + system prompt stay at 1481 words (552 + 929), the same as 0.12.28 and below the test limit of 1500. (The "1396/1400" in the 0.12.25 notes predates 0.12.27.)
+- **Owner overrides.** A customized Rules page keeps its text; use "Reset to default" in Settings to pick up rule 10.
+- **Rollback.** Prompt text only; no schema change. Revert the merge commit and restart.
+
 ## What changed in 0.12.28
 
 **Every bot can use sudo, through an automatic review.** (Owner decision, Nov 22: "give full sudo to everyone with only certain external actions being blocked. Use auto-review tho, not just willy nilly use.")
