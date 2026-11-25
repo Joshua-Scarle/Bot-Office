@@ -44,6 +44,38 @@ A job-scoped agent token is a separate thing and is never satisfied by a remote 
 
 In the cloud environment's settings, add network secrets for your hostname so the sandbox's proxy adds the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers to requests for that host. The session then calls `https://office.example.test/v1/bots` and never sees the secret. Cloudflare turns those headers into the JWT, and Bot-Office checks it and applies the `remote-client` allowlist.
 
+## Stopgap: a shared key without Cloudflare Access
+
+Cloudflare Access needs the Zero Trust plan, which asks for a card on file even at $0. Until that is set
+up, a Claude cloud session can come in through the tunnel with a long random key instead.
+
+- **What it is.** The caller sends `X-Bot-Office-Key: <key>`. `remote_access.json` stores only the key's
+  SHA-256, a name and an `expires_at`. A shared key always gets the `remote-client` role and its route
+  allowlist; it can never be `owner`, so no GUI, settings or slot exec. The header is removed before the
+  request reaches the app.
+- **What it exposes.** The hostname is public. Anything without a valid, unexpired key gets 403 from
+  Bot-Office. Anyone holding the key can do what `remote-client` can, including chatting with bots that
+  have full CLI access, so keep the lifetime short (`--days`, at most 30) and treat the key as a password.
+- **Make one (on the host).** `python3 deploy/remote-access/shared_key.py new --host <hostname> --days 5`.
+  The key goes to `<data dir>/remote_key.txt` (0600) and is never printed. Copy it into the cloud
+  environment's network secret for the hostname, header name `X-Bot-Office-Key`, then `shred -u` the file.
+- **Revoke.** `python3 deploy/remote-access/shared_key.py revoke` (effective within 5 seconds), or stop
+  `cloudflared`. A key also stops working by itself at `expires_at`.
+- **Moving to Access.** Add `team_domain`, `audience`, `owners` and `clients` as below, then revoke the
+  shared key. Both can run side by side while you switch over.
+
+The tunnel itself can be made from the host without the dashboard:
+
+```
+cloudflared tunnel login                      # open the printed URL, pick the zone, Authorize
+cloudflared tunnel create bot-office
+cloudflared tunnel route dns bot-office <hostname>
+```
+
+Then use `deploy/remote-access/cloudflared-config.example.yml` as `/etc/cloudflared/config.yml` and run
+`sudo cloudflared service install`. Deploy Bot-Office 0.12.23 with the key in place before the tunnel
+starts, so no request ever reaches an older build through it.
+
 ## Revoking access
 
 - **One client:** delete or rotate the service token in Cloudflare, and remove its entry from `remote_access.json` (effective within seconds, no restart).

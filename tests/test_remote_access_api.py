@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 from test_remote_access import (
     CONFIG,
     HOST,
+    KEY,
+    KEY_CONFIG,
     Fetcher,
     jwk,
     service_claims,
@@ -25,7 +27,8 @@ from botoffice.api import create_app
 def client(settings, tmp_path, monkeypatch):
     monkeypatch.setenv(ra.CONFIG_ENV, str(tmp_path / "remote_access.json"))
     import json
-    (tmp_path / "remote_access.json").write_text(json.dumps(CONFIG))
+    cfg = dict(CONFIG, shared_keys=KEY_CONFIG["shared_keys"])
+    (tmp_path / "remote_access.json").write_text(json.dumps(cfg))
     monkeypatch.setattr(ra, "default_fetcher", Fetcher(keys=[jwk("k1")]))
     app = create_app(settings=settings)
     with TestClient(app) as c:
@@ -79,3 +82,13 @@ def test_local_bearer_still_works(client):
     assert client.get("/v1/bots").status_code == 401
     assert client.get("/v1/bots", headers={"Authorization": "Bearer test-token"}).status_code == 200
     assert client.get("/v1/bots", headers={"Authorization": "Bearer wrong"}).status_code == 401
+
+
+def test_shared_key_reaches_bots_but_not_settings(client):
+    headers = {"host": HOST, "cf-ray": "1", "x-bot-office-key": KEY}
+    assert client.get("/v1/bots", headers=headers).status_code == 200
+    assert client.get("/v1/remote/whoami", headers=headers).json() == {
+        "remote": True, "kind": "service", "role": "remote-client", "name": "claude-cloud"}
+    assert client.get("/v1/settings", headers=headers).status_code == 403
+    wrong = dict(headers, **{"x-bot-office-key": KEY + "z"})
+    assert client.get("/v1/bots", headers=wrong).status_code == 403

@@ -8,6 +8,10 @@ and maps the identity to a role:
 * ``owner``         a person whose email is in ``owners`` (a browser, full GUI and API).
 * ``remote-client`` a service token listed in ``clients`` (least privilege: a fixed route allowlist).
 
+Stopgap without Cloudflare Access (0.12.23): ``shared_keys`` lets a caller that sends a long random key
+in the ``X-Bot-Office-Key`` header in through the tunnel. Only the key's SHA-256 is stored, every key
+has an ``expires_at``, and a shared key can only ever have the ``remote-client`` role (never owner).
+
 Local requests (loopback, no Cloudflare headers) pass through completely unchanged.
 
 Pure standard library. ``httpx`` is imported lazily, only inside the default JWKS fetcher, so this
@@ -28,7 +32,8 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +58,9 @@ CLOUDFLARE_HEADERS = (
     b"cf-access-client-id", b"cf-access-client-secret", b"cf-visitor",
 )
 JWT_HEADER = b"cf-access-jwt-assertion"
+KEY_HEADER = b"x-bot-office-key"
+KEY_MIN_CHARS = 43          # 256 bits of base64url, the shortest key we accept
+KEY_MAX_CHARS = 256
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 # The identity of the request being served, set by the middleware only after the JWT, the host, the
@@ -101,6 +109,7 @@ _B64URL = re.compile(r"^[A-Za-z0-9_-]+$")
 _TEAM_DOMAIN = re.compile(r"^[a-z0-9-]+\.cloudflareaccess\.com$")
 _DNS_NAME = re.compile(r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 # DER DigestInfo prefix for SHA-256 (RFC 8017 section 9.2)
 _SHA256_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
 
@@ -123,11 +132,12 @@ class RemoteIdentity:
 
 @dataclass(frozen=True)
 class RemoteConfig:
-    team_domain: str
+    team_domain: str | None               # None when only shared keys are set up (no Cloudflare Access yet)
     audience: tuple[str, ...]
     hostnames: tuple[str, ...]
     owners: tuple[str, ...]
     clients: dict[str, tuple[str, str]]   # common_name -> (name, role)
+    shared_keys: dict[str, tuple[str, float]] = field(default_factory=dict)  # sha256 hex -> (name, expires_at epoch seconds)
 
 
 @dataclass(frozen=True)
@@ -148,13 +158,19 @@ def parse_config(raw: Any) -> RemoteConfig | None:
         raise ConfigError("enabled must be true or false")
     if not enabled:
         return None
+    shared_keys = _parse_shared_keys(raw.get("shared_keys", {}))
     team = raw.get("team_domain")
-    if not isinstance(team, str) or not _TEAM_DOMAIN.match(team):
-        raise ConfigError("team_domain must look like <team>.cloudflareaccess.com")
     audience = raw.get("audience")
-    if (not isinstance(audience, list) or not audience
-            or not all(isinstance(a, str) and a.strip() for a in audience)):
-        raise ConfigError("audience must be a non-empty list of non-empty strings")
+    if team is None and audience is None:
+        if not shared_keys:
+            raise ConfigError("set team_domain and audience (Cloudflare Access), or at least one shared key")
+        audience = []
+    else:
+        if not isinstance(team, str) or not _TEAM_DOMAIN.match(team):
+            raise ConfigError("team_domain must look like <team>.cloudflareaccess.com")
+        if (not isinstance(audience, list) or not audience
+                or not all(isinstance(a, str) and a.strip() for a in audience)):
+            raise ConfigError("audience must be a non-empty list of non-empty strings")
     hostnames = raw.get("hostnames")
     if (not isinstance(hostnames, list) or not hostnames
             or not all(isinstance(h, str) and _DNS_NAME.match(h) for h in hostnames)):
@@ -183,7 +199,65 @@ def parse_config(raw: Any) -> RemoteConfig | None:
         hostnames=tuple(hostnames),
         owners=tuple(sorted({o.strip().lower() for o in owners})),
         clients=clients,
+        shared_keys=shared_keys,
     )
+
+
+def _parse_expiry(value: Any) -> float:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError("each shared key needs expires_at, an ISO 8601 time with a time zone")
+    text = value.strip()
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ConfigError("expires_at must be an ISO 8601 time, e.g. 2026-12-01T00:00:00Z") from exc
+    if moment.tzinfo is None:
+        raise ConfigError("expires_at must include a time zone (end it with Z for UTC)")
+    return moment.timestamp()
+
+
+def _parse_shared_keys(raw: Any) -> dict[str, tuple[str, float]]:
+    if not isinstance(raw, dict):
+        raise ConfigError("shared_keys must be an object")
+    keys: dict[str, tuple[str, float]] = {}
+    for digest, entry in raw.items():
+        if not isinstance(digest, str) or not _SHA256_HEX.match(digest):
+            raise ConfigError("shared_keys keys must be the key's SHA-256, 64 lowercase hex characters")
+        if not isinstance(entry, dict):
+            raise ConfigError("each shared key must be an object with name and expires_at")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError("each shared key needs a name")
+        if entry.get("role", ROLE_CLIENT) != ROLE_CLIENT:
+            raise ConfigError("a shared key can only have the 'remote-client' role")
+        keys[digest] = (name.strip(), _parse_expiry(entry.get("expires_at")))
+    return keys
+
+
+def check_shared_key(value: bytes, config: RemoteConfig, now: float) -> RemoteIdentity:
+    """Constant-time match of a presented key against the stored SHA-256 digests."""
+    keys = config.shared_keys or {}
+    if not keys:
+        raise AccessDenied("no shared keys set up")
+    try:
+        text = value.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise AccessDenied("key is not ascii") from exc
+    if not KEY_MIN_CHARS <= len(text) <= KEY_MAX_CHARS:
+        raise AccessDenied("key has the wrong length")
+    presented = hashlib.sha256(text.encode("ascii")).hexdigest()
+    match: tuple[str, float] | None = None
+    for digest, entry in keys.items():          # compare against every entry, no early exit
+        if hmac.compare_digest(presented, digest):
+            match = entry
+    if match is None:
+        raise AccessDenied("unknown key")
+    name, expires_at = match
+    if now >= expires_at:
+        raise AccessDenied(f"key {name} has expired")
+    return RemoteIdentity("service", name, name, ROLE_CLIENT)
 
 
 class ConfigLoader:
@@ -421,6 +495,7 @@ class RemoteAccessMiddleware:
             settings = settings_or_loader
             self.loader = ConfigLoader(lambda: config_path(settings), clock)
         self.verifier = AccessVerifier(fetcher, clock)
+        self.clock = clock
 
     async def __call__(self, scope, receive, send):
         kind = scope["type"]
@@ -452,13 +527,19 @@ class RemoteAccessMiddleware:
             await self._deny(kind, send, 403, "remote access denied")
             return
         tokens = headers.get(JWT_HEADER, [])
-        if len(tokens) != 1:
-            log.warning("remote request refused: missing or repeated Access JWT (%s %s)", method, path)
+        keys = headers.get(KEY_HEADER, [])
+        if len(tokens) > 1 or len(keys) > 1 or (tokens and keys) or not (tokens or keys):
+            log.warning("remote request refused: missing or repeated credentials (%s %s)", method, path)
             await self._deny(kind, send, 403, "remote access denied")
             return
         try:
-            identity = await asyncio.to_thread(
-                self.verifier.verify, tokens[0].decode("latin-1"), config)
+            if tokens:
+                if config.team_domain is None:
+                    raise AccessDenied("Cloudflare Access is not set up")
+                identity = await asyncio.to_thread(
+                    self.verifier.verify, tokens[0].decode("latin-1"), config)
+            else:
+                identity = check_shared_key(keys[0], config, self.clock())
         except AccessDenied as exc:
             log.warning("remote request refused: %s (%s %s)", exc, method, path)
             await self._deny(kind, send, 403, "remote access denied")
@@ -486,6 +567,9 @@ class RemoteAccessMiddleware:
                 return
 
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
+        if keys:   # the app never sees the key
+            scope = dict(scope)
+            scope["headers"] = [(n, v) for n, v in scope.get("headers", []) if n.lower() != KEY_HEADER]
         token = current_remote_identity.set(identity)
         try:
             await self.app(scope, receive, send)

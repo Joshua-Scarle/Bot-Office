@@ -525,3 +525,149 @@ def test_info_log_has_no_query_or_token(tmp_path, caplog):
         run(mw, headers=remote(token))
     text = " ".join(r.getMessage() for r in caplog.records)
     assert "you@example.test" in text and "owner" in text and "GET /v1/bots" in text and token not in text
+
+
+# ---------------------------------------------------------------- shared keys (stopgap without Access)
+# A made-up test key, not a secret: 43+ base64url characters, like `secrets.token_urlsafe(32)`.
+KEY = "test-key-not-a-secret-" + "x" * 30
+KEY_DIGEST = hashlib.sha256(KEY.encode()).hexdigest()
+KEY_CONFIG = {
+    "enabled": True, "hostnames": [HOST],
+    "shared_keys": {KEY_DIGEST: {"name": "claude-cloud", "expires_at": "2099-01-01T00:00:00Z"}},
+}
+
+
+def keyed(key=KEY, **extra):
+    headers = {"host": HOST, "cf-ray": "abc-IAD", "x-bot-office-key": key}
+    headers.update(extra)
+    return headers
+
+
+def test_shared_key_allows_remote_client_routes(tmp_path):
+    mw, probe, *_ = build(tmp_path, KEY_CONFIG)
+    sent = run(mw, headers=keyed())
+    assert status(sent) == 200
+    assert probe.seen[0][1] == ra.RemoteIdentity("service", "claude-cloud", "claude-cloud", "remote-client")
+    assert status(run(mw, "POST", "/v1/bots/abc/messages", headers=keyed())) == 200
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/"), ("GET", "/v1/settings"), ("POST", "/v1/bots"), ("DELETE", "/v1/bots/abc"),
+    ("POST", "/v1/slots/1/exec"), ("GET", "/v1/agent/whoami"),
+])
+def test_shared_key_is_least_privilege(tmp_path, method, path):
+    mw, probe, *_ = build(tmp_path, KEY_CONFIG)
+    sent = run(mw, method, path, headers=keyed())
+    assert status(sent) == 403 and detail(sent) == "not allowed for this client"
+    assert probe.seen == []
+
+
+def test_shared_key_websocket_closed(tmp_path):
+    mw, probe, *_ = build(tmp_path, KEY_CONFIG)
+    sent = run(mw, path="/v1/ws", headers=keyed(), kind="websocket")
+    assert sent == [{"type": "websocket.close", "code": 1008}] and probe.seen == []
+
+
+@pytest.mark.parametrize("key", [
+    "", "short", KEY + "y", KEY[:-1] + "y", "z" * 300, KEY.upper(),
+])
+def test_wrong_shared_key_403(tmp_path, key):
+    mw, probe, *_ = build(tmp_path, KEY_CONFIG)
+    sent = run(mw, headers=keyed(key))
+    assert status(sent) == 403 and detail(sent) == "remote access denied"
+    assert probe.seen == []
+
+
+def test_no_credentials_through_tunnel_403(tmp_path):
+    mw, probe, *_ = build(tmp_path, KEY_CONFIG)
+    sent = run(mw, headers={"host": HOST, "cf-ray": "abc-IAD"})
+    assert status(sent) == 403 and probe.seen == []
+
+
+def test_repeated_or_mixed_credentials_403(tmp_path):
+    mw, probe, *_ = build(tmp_path, KEY_CONFIG)
+    scope_headers = [(b"host", HOST.encode()), (b"x-bot-office-key", KEY.encode()),
+                     (b"x-bot-office-key", KEY.encode())]
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(m):
+        sent.append(m)
+    asyncio.run(mw({"type": "http", "method": "GET", "path": "/v1/bots", "headers": scope_headers},
+                   receive, send))
+    assert status(sent) == 403
+    both = keyed(**{"cf-access-jwt-assertion": sign(service_claims())})
+    assert status(run(mw, headers=both)) == 403
+    assert probe.seen == []
+
+
+def test_jwt_refused_when_access_not_set_up(tmp_path):
+    mw, probe, *_ = build(tmp_path, KEY_CONFIG)
+    sent = run(mw, headers=remote(sign(user_claims())))
+    assert status(sent) == 403 and probe.seen == []
+
+
+def test_shared_key_expires(tmp_path):
+    cfg = json.loads(json.dumps(KEY_CONFIG))
+    cfg["shared_keys"][KEY_DIGEST]["expires_at"] = "2026-11-30T00:00:00Z"
+    clock = Clock(1795996799.0)   # 2026-11-29T23:59:59Z
+    mw, probe, *_ = build(tmp_path, cfg, clock=clock)
+    assert status(run(mw, headers=keyed())) == 200
+    clock.t = 1795996800.0        # 2026-11-30T00:00:00Z
+    assert status(run(mw, headers=keyed())) == 403
+
+
+def test_shared_key_header_is_stripped_before_the_app(tmp_path):
+    seen_headers = []
+
+    async def app(scope, receive, send):
+        seen_headers.extend(name for name, _ in scope["headers"])
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+    path = write_config(tmp_path, KEY_CONFIG)
+    clock = Clock()
+    mw = ra.RemoteAccessMiddleware(app, ra.ConfigLoader(lambda: path, clock), fetcher=Fetcher(), clock=clock)
+    assert status(run(mw, headers=keyed())) == 200
+    assert b"x-bot-office-key" not in seen_headers and b"host" in seen_headers
+
+
+def test_shared_key_revoked_by_removing_it(tmp_path):
+    mw, probe, path, clock = build(tmp_path, KEY_CONFIG)
+    assert status(run(mw, headers=keyed())) == 200
+    path.write_text(json.dumps({"enabled": False}))
+    clock.t += 10
+    assert status(run(mw, headers=keyed())) == 403
+
+
+def test_shared_keys_and_access_together(tmp_path):
+    cfg = dict(CONFIG)
+    cfg["shared_keys"] = KEY_CONFIG["shared_keys"]
+    mw, probe, *_ = build(tmp_path, cfg)
+    assert status(run(mw, headers=keyed())) == 200
+    assert status(run(mw, headers=remote(sign(user_claims())))) == 200
+
+
+def test_local_request_ignores_key_header(tmp_path):
+    mw, probe, *_ = build(tmp_path, KEY_CONFIG)
+    sent = run(mw, headers={"host": "127.0.0.1:8787", "x-bot-office-key": "anything"})
+    assert status(sent) == 200 and probe.seen[0][1] is None
+
+
+@pytest.mark.parametrize("bad", [
+    {"enabled": True, "hostnames": [HOST]},                                         # nothing to check
+    {"enabled": True, "hostnames": [HOST], "shared_keys": {}},
+    {"enabled": True, "hostnames": [HOST], "shared_keys": {"ABC": {"name": "x", "expires_at": "2099-01-01T00:00:00Z"}}},
+    {"enabled": True, "hostnames": [HOST], "shared_keys": {KEY_DIGEST: {"name": "x"}}},
+    {"enabled": True, "hostnames": [HOST], "shared_keys": {KEY_DIGEST: {"name": "x", "expires_at": "2099-01-01T00:00:00"}}},
+    {"enabled": True, "hostnames": [HOST], "shared_keys": {KEY_DIGEST: {"name": "x", "expires_at": "soon"}}},
+    {"enabled": True, "hostnames": [HOST], "shared_keys": {KEY_DIGEST: {"expires_at": "2099-01-01T00:00:00Z"}}},
+    {"enabled": True, "hostnames": [HOST], "shared_keys": {KEY_DIGEST: {"name": "x", "role": "owner",
+                                                                        "expires_at": "2099-01-01T00:00:00Z"}}},
+    {"enabled": True, "hostnames": [HOST], "team_domain": TEAM,
+     "shared_keys": {KEY_DIGEST: {"name": "x", "expires_at": "2099-01-01T00:00:00Z"}}},  # half of Access
+])
+def test_bad_shared_key_config_is_broken(tmp_path, bad):
+    mw, probe, *_ = build(tmp_path, bad)
+    assert status(run(mw, headers=keyed())) == 503
