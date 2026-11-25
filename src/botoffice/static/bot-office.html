@@ -1795,7 +1795,7 @@ async function selectBot(id, jump) {
   const clicked = state.bots.find((b) => b.id === id);
   const click = { revision: clicked ? clicked.read_revision || 0 : 0,
                   synced: api("/v1/bots/" + id).catch(() => null) };
-  if (state.selected !== id) { closeSlash(); draftRevision++; clearImages(); clearImageCache(); state.editingMsg = null; $("queue-next").checked = false; stopDictation(); stopPlayback(); }
+  if (state.selected !== id) { saveDraft(state.selected, $("text").value); $("text").value = loadDraft(id); autoGrow(); closeSlash(); draftRevision++; clearImages(); clearImageCache(); state.editingMsg = null; $("queue-next").checked = false; stopDictation(); stopPlayback(); }
   state.selected = id;
   state.hist = newHist(jump);
   rememberBot(id);
@@ -2394,6 +2394,15 @@ const pendingImages = [];
 const imageCache = new Map();
 let sendingImages = false;
 let draftRevision = 0;
+// 0.12.32: each bot keeps its own unsent draft (switching chats no longer carries the text over); kept in localStorage
+const DRAFTS_KEY = "bo-chat-drafts";
+const chatDrafts = (() => { try { const d = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "{}"); return d && typeof d === "object" && !Array.isArray(d) ? d : {}; } catch (err) { return {}; } })();
+function saveDraft(botId, text) {
+  if (!botId) return;
+  if (text && text.trim()) chatDrafts[botId] = String(text).slice(0, 100000); else delete chatDrafts[botId];
+  try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(chatDrafts)); } catch (err) { /* storage blocked or full: kept for this tab only */ }
+}
+function loadDraft(botId) { return (botId && typeof chatDrafts[botId] === "string") ? chatDrafts[botId] : ""; }
 function formatBytes(n) {
   if (!Number.isFinite(n) || n < 0) return "";
   if (n < 1024) return n + " B";
@@ -3259,6 +3268,8 @@ $("composer").onsubmit = async (event) => {
   try {
     const posted = await api("/v1/bots/" + bot.id + "/messages", { method: "POST", body: JSON.stringify(body) });
     if (state.selected === bot.id && draftRevision === revision && $("text").value === draft) $("text").value = "";
+    if (state.selected === bot.id) saveDraft(bot.id, $("text").value);
+    else if (loadDraft(bot.id) === draft) saveDraft(bot.id, "");
     $("queue-next").checked = false;  // one-shot: the next message steers again
     renderHeader();
     for (const item of sentImages) { item.idSent = true; if (!item.removed) removeImage(item, true); }
@@ -3276,7 +3287,8 @@ $("composer").onsubmit = async (event) => {
   } catch (err) {
     clearEcho(echo);
     if (state.selected === bot.id) state.msgSig = "";  // the chat is redrawn below (e.g. the empty-chat greeting is back)
-    if (!sentImages.length && !$("text").value && state.selected === bot.id) { $("text").value = draft; autoGrow(); }  // nothing is lost
+    if (!sentImages.length && !$("text").value && state.selected === bot.id) { $("text").value = draft; autoGrow(); saveDraft(bot.id, draft); }  // nothing is lost
+    else if (!sentImages.length && state.selected !== bot.id && !loadDraft(bot.id)) saveDraft(bot.id, draft);  // another chat is open: back into this bot's draft
     if (err && err.timeout) {
       // the server may have accepted it even though no answer came back: refresh the chat and warn before a retry duplicates it
       err.message = "No answer from the server. The message may have been sent: check the chat before sending it again.";
@@ -3288,7 +3300,7 @@ $("composer").onsubmit = async (event) => {
 };
 
 function autoGrow() { const t = $("text"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 220) + "px"; }
-$("text").addEventListener("input", () => { draftRevision++; autoGrow(); });
+$("text").addEventListener("input", () => { draftRevision++; autoGrow(); saveDraft(state.selected, $("text").value); });
 $("text").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
@@ -3459,7 +3471,8 @@ async function trySlash(bot, text) {
   if (slashBusy) { setStatus("A slash command is still being sent."); return true; }  // one at a time; the draft stays in the box
   const revision = draftRevision;
   const clearDraft = () => {  // like a normal send: only when the same bot is open and the draft was not edited meanwhile
-    if (state.selected === bot.id && draftRevision === revision && $("text").value.trim() === text.trim()) { $("text").value = ""; autoGrow(); draftRevision++; }
+    if (state.selected === bot.id && draftRevision === revision && $("text").value.trim() === text.trim()) { $("text").value = ""; autoGrow(); draftRevision++; saveDraft(bot.id, ""); }
+    else if (state.selected !== bot.id && (loadDraft(bot.id) || "").trim() === text.trim()) saveDraft(bot.id, "");
   };
   let data;
   try { data = await slashCommands(bot); } catch (err) { if (err instanceof AuthError) throw err; return false; }
