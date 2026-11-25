@@ -139,6 +139,11 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.34
+
+- **Clear in Needs you.** Items that are only notices (a failed job, a stalled task, an expired card, a paused watcher, a usage limit, ...) get a **Clear** button, and the open panel has **Clear all**. Clearing hides the item until it changes: a new failure, stall or card shows again. Pending approval cards and open questions are never cleared, because a bot is waiting on them; settle them with Approve/Deny or Answer/Skip. Items that already had **Dismiss** keep it.
+- **Rollback.** One additive table (`needs_cleared`, ignored by older code). Check out the previous release and restart; cleared items show again.
+
 ## What changed in 0.12.32
 
 - **Each chat keeps its own unsent draft.** Switching to another bot no longer carries half-typed text into the wrong chat; coming back restores it. Drafts live in this browser's local storage, are cleared once the message is sent, and come back if sending fails.

@@ -67,7 +67,7 @@ def _assignment_ask(row: sqlite3.Row, state: str, bot: str) -> str:
     }[state]
 
 
-def needs_you(store: JobStore) -> list[dict]:
+def needs_you(store: JobStore, *, with_cleared: bool = False) -> list[dict]:
     stamp = now()
     items: list[dict] = []
     with closing(store._connect()) as db:
@@ -154,7 +154,7 @@ def needs_you(store: JobStore) -> list[dict]:
             if bot is None:
                 continue
             items.append({
-                "id": f"b:{row['bot_id']}:{row['held']}", "kind": "budget", "state": "held",
+                "id": f"b:{row['bot_id']}:{row['held']}:{row['at']}", "kind": "budget", "state": "held",
                 "bot_id": row["bot_id"], "bot_name": bot["name"], "notify": bool(bot["notify"]),
                 "title": "Daily budget used",
                 "ask": f"{bot['name']} used today's unattended budget; {row['held']} turn(s) wait until tomorrow "
@@ -189,7 +189,48 @@ def needs_you(store: JobStore) -> list[dict]:
                 "ask": f"{bot['name']}'s watcher \"{row['name']}\" was paused: {row['paused_reason']}",
                 "at": row["last_fired_at"], "actions": ["resume"],
             })
-    return items
+    return _without_cleared(store, items, with_cleared)
+
+
+# 0.12.34: "Clear" hides an item until it changes (its id carries its state and time, so a new
+# failure, a new stall or a new card shows again). A pending approval card and an open question
+# keep a bot waiting, so they are never hidden: Approve/Deny or Answer/Skip settles them.
+# A cleared id is kept while its item is still on the list (however long), and dropped once the
+# item has changed or gone, since that id can never show again.
+
+
+def clearable(item: dict) -> bool:
+    return not (item["kind"] == "question" or (item["kind"] == "approval" and item["state"] == "pending"))
+
+
+def _cleared_table(db: sqlite3.Connection) -> None:
+    db.execute("CREATE TABLE IF NOT EXISTS needs_cleared (item_id TEXT PRIMARY KEY, cleared_at TEXT NOT NULL)")
+
+
+def _without_cleared(store: JobStore, items: list[dict], with_cleared: bool = False) -> list[dict]:
+    with closing(store._connect()) as db:
+        _cleared_table(db)
+        hidden = {row[0] for row in db.execute("SELECT item_id FROM needs_cleared")}
+    kept = items if with_cleared else [item for item in items if not (clearable(item) and item["id"] in hidden)]
+    for item in kept:
+        item["clearable"] = clearable(item)
+    return kept
+
+
+def clear(store: JobStore, item_ids: list[str]) -> int:
+    """Hide these Needs-you items (only ones on the list now and clearable); returns how many."""
+    listed = needs_you(store, with_cleared=True)
+    current = {item["id"] for item in listed if item["clearable"]}
+    chosen = [item_id for item_id in dict.fromkeys(item_ids) if item_id in current]
+    stamp = now()
+    with closing(store._connect()) as db:
+        _cleared_table(db)
+        alive = {item["id"] for item in listed}
+        gone = [(row[0],) for row in db.execute("SELECT item_id FROM needs_cleared") if row[0] not in alive]
+        db.executemany("DELETE FROM needs_cleared WHERE item_id=?", gone)
+        db.executemany("INSERT OR REPLACE INTO needs_cleared (item_id, cleared_at) VALUES (?, ?)",
+                       [(item_id, stamp.isoformat()) for item_id in chosen])
+    return len(chosen)
 
 
 def _usage_text(bot: str, provider: str, not_before: str, stamp: datetime) -> str:

@@ -355,6 +355,10 @@ class NeedsYouDismiss(BaseModel):
     assignment_id: UUID
 
 
+class NeedsYouClear(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+
 class SwitchProvider(BaseModel):
     """#10 "Retry on <provider>" for a job parked on a usage limit (owner only)."""
     provider: str = Field(min_length=1, max_length=40)
@@ -2993,6 +2997,11 @@ def create_app(
     async def isolation_status() -> dict:
         """C1: whether the controller/bots split is installed (paths and modes only, no secrets)."""
         return isolation.status(settings)
+
+    @app.post("/v1/needs-you/clear", dependencies=[Depends(auth)])
+    async def clear_needs_you(body: NeedsYouClear) -> dict:
+        """0.12.34: hide these items until they change (pending cards and open questions stay)."""
+        return {"cleared": needs_you.clear(store, body.ids)}
 
     @app.post("/v1/needs-you/dismiss", response_model=Assignment, dependencies=[Depends(auth)])
     async def dismiss_needs_you(body: NeedsYouDismiss) -> Assignment:
