@@ -85,7 +85,7 @@ let resolveRequest;
 function currentBot() { return bot; } function showEcho() { return {}; } function clearEcho() {}
 function api() { return new Promise(resolve => { resolveRequest = resolve; }); }
 function removeImage(item) { pendingImages.splice(pendingImages.indexOf(item), 1); item.removed = true; }
-function updateImages() {} function autoGrow() {} function setStatus() {} function renderBots() {}
+function updateImages() {} function autoGrow() {} const drafts = {}; function saveDraft(b, t) { if (t) drafts[b] = t; else delete drafts[b]; } function loadDraft(b) { return drafts[b] || ""; } function setStatus() {} function renderBots() {}
 async function loadMessages() {} function renderHeader() {} function handleError(e) { throw e; } function deleteUpload() {}
 ''' + handler + r'''
 (async () => {
@@ -100,6 +100,7 @@ async function loadMessages() {} function renderHeader() {} function handleError
   elements.text.value = 'another bot draft';
   resolveRequest(); await sending2;
   assert.strictEqual(elements.text.value, 'another bot draft');
+  assert.strictEqual(drafts.one, undefined);  // the sent text is not kept as bot one's draft
 })().catch(err => { console.error(err); process.exit(1); });
 '''
     subprocess.run([node, '-e', script], check=True, capture_output=True, text=True)
@@ -352,7 +353,7 @@ let posts = 0, statuses = [], resolvePost;
 const API_TIMEOUT_MS = 30000;
 function currentBot() { return bot; } function showEcho() { return {}; } function clearEcho() {}
 function api() { posts++; return new Promise((resolve) => { resolvePost = resolve; }); }
-function removeImage() {} function updateImages() {} function autoGrow() {} function renderBots() {} function renderHeader() {}
+function removeImage() {} function updateImages() {} function autoGrow() {} function saveDraft() {} function loadDraft() { return ""; } function renderBots() {} function renderHeader() {}
 function setStatus(t) { statuses.push(t); } function handleError(e) { throw e; } function deleteUpload() {}
 function loadMessages() { return new Promise(() => {}); }   // the chat refresh never answers
 """ + handler + r"""
@@ -397,7 +398,7 @@ let shown = null, refreshed = 0;
 const API_TIMEOUT_MS = 30000;
 function currentBot() { return bot; } function showEcho() { return {}; } function clearEcho() {}
 function api() { const e = new Error('No answer from the server after 30 s.'); e.timeout = true; e.status = 0; return Promise.reject(e); }
-function removeImage() {} function updateImages() {} function autoGrow() {} function renderBots() {} function renderHeader() {}
+function removeImage() {} function updateImages() {} function autoGrow() {} function saveDraft() {} function loadDraft() { return ""; } function renderBots() {} function renderHeader() {}
 function setStatus() {} function handleError(e) { shown = e.message; } function deleteUpload() {}
 function loadMessages() { refreshed++; return Promise.resolve(); }
 """ + handler + r"""

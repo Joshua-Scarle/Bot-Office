@@ -139,6 +139,10 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.32
+
+- **Each chat keeps its own unsent draft.** Switching to another bot no longer carries half-typed text into the wrong chat; coming back restores it. Drafts live in this browser's local storage, are cleared once the message is sent, and come back if sending fails.
+
 ## What changed in 0.12.31
 
 - **Routine merges go ahead without a card.** A bot's plain GitHub pull-request merge command (one command, the repository named, optional squash/rebase and delete-branch, and a required `--match-head-commit` with the full 40-character head SHA) skips the owner's card only when Bot-Office reads the PR from GitHub and every check holds: open, not a draft, base is not a release branch, GitHub says mergeable and clean, labeled `status:ready-to-deploy` with no blocker label (new model, launch, new tool version, redesign/UI, tutorial, BT accuracy lever, spending), every check on the head commit finished with "success" (neutral, skipped or pending do not count), and `Written-by:`, `Reviewed-by:` (a different CLI) and `Tested:` lines in the PR. Anything else, any malformed data or any error reading GitHub keeps the card. Any ask rule the owner set up also keeps the card.
