@@ -23,7 +23,7 @@ A job-scoped agent token is a separate thing and is never satisfied by a remote 
 ## Threat notes
 
 - **The owner role through Access equals full Bot-Office control**, including settings and bot configuration. Anyone who can log in as the owner email controls the host's bots. Use a strong login for that email: a hardware key or passkey on the identity provider, and a short Access session duration.
-- The `remote-client` role is least privilege, but it can still send chat messages to bots, and bots can act. Treat the service token like a password for "talk to my bots".
+- The `remote-client` role is least privilege for the API, but it can still send chat messages to bots, and bots with full CLI access can run commands on the host. So it limits accidents and direct admin changes; it is not a wall against someone who steals the token. Treat the service token like a password for the whole Bot-Office.
 - The service token secret is shown once by Cloudflare. Keep it out of git, chat and logs.
 - If you run `cloudflared` as a service, anyone with the host account can read its credentials file. Keep it mode `0600`.
 - Bot-Office refuses a remote request when the file is missing or disabled, so a typo in the configuration never opens access.
