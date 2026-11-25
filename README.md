@@ -139,6 +139,11 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.30
+
+- Simpler chat header: only Unread, Search, Activity, Desktop, Routines and Assignments stay on the header. Read aloud, Voice, Show archived, Agent messages, Memory, Watchers and Settings moved into a new ⋯ menu button (press again to close).
+- The model, effort and tier labels now sit under the bot's name, so the header fits on one row.
+
 ## What changed in 0.12.29
 
 **Reruns no longer overwrite earlier results.** (Owner decision, Nov 23: reruns overwrote reports, which broke approved links and lost the only proof of 3 mismatches.)

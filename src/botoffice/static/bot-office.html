@@ -156,6 +156,9 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .chat-head h2 { margin: 0; font-size: 16px; }
 .chat-head .grow { flex: 1 1 180px; min-width: 0; }
 .chat-head > button, .chat-head > .model-pill { flex: none; }
+.chat-head .head-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.chat-head .head-meta .model-pill { font-size: 11px; padding: 0 8px; }
+#head-more { font-size: 18px; line-height: 1; padding-left: 12px; padding-right: 12px; }
 .chat-head .desc { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-pill { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .priority-urgent { color: #b42318; border-color: #b42318; }
@@ -475,23 +478,29 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <div class="grow">
         <h2 id="head-name"></h2>
         <div id="head-desc" class="desc"></div>
+        <div class="head-meta">
+          <span id="head-model" class="model-pill"></span>
+          <span id="head-effort" class="model-pill" title="Thinking effort" hidden></span>
+          <span id="head-tier" class="model-pill tier" title="Capability tier, derived from the model"></span>
+        </div>
       </div>
-      <span id="head-model" class="model-pill"></span>
-      <span id="head-effort" class="model-pill" title="Thinking effort" hidden></span>
-      <span id="head-tier" class="model-pill tier" title="Capability tier, derived from the model"></span>
       <button id="mark-unread" type="button" title="Mark as unread (Alt+U)">Unread</button>
-      <button id="read-aloud" type="button" aria-pressed="false" title="Read new replies aloud" aria-label="Read new replies aloud" hidden>🔈</button>
-      <button id="voice-open" type="button" title="Voice settings">Voice</button>
       <button id="search-open" type="button" title="Search messages (Ctrl+Shift+F)">Search</button>
-      <button id="show-archived" type="button" aria-pressed="false" title="Show messages archived by edits">Show archived</button>
-      <button id="desktop-open" title="Live desktops">Desktop</button>
-      <button id="agent-open" title="Agent messages">Agents</button>
-      <button id="memory-open">Memory</button>
-      <button id="routines-open">Routines</button>
-      <button id="watchers-open" title="Wake this bot when something changes">Watchers</button>
-      <button id="assignments-open" title="Goals this bot works on until done">Assignments</button>
       <button id="activity-open" type="button" title="What this bot is doing, its steps, log and recent turns">Activity</button>
-      <button id="edit-bot" title="Bot settings">Settings</button>
+      <button id="desktop-open" title="Live desktops">Desktop</button>
+      <button id="routines-open">Routines</button>
+      <button id="assignments-open" title="Goals this bot works on until done">Assignments</button>
+      <button id="head-more" type="button" aria-haspopup="menu" aria-label="More" title="More: voice, archived messages, agents, memory, watchers, settings">⋯</button>
+      <!-- 0.12.30: the rest of the header buttons live behind the ⋯ menu; kept here hidden so their handlers stay as they were -->
+      <div id="head-more-items" hidden>
+        <button id="read-aloud" type="button" aria-pressed="false" title="Read new replies aloud" aria-label="Read new replies aloud" hidden>🔈</button>
+        <button id="voice-open" type="button" title="Voice settings">Voice</button>
+        <button id="show-archived" type="button" aria-pressed="false" title="Show messages archived by edits">Show archived</button>
+        <button id="agent-open" title="Agent messages">Agents</button>
+        <button id="memory-open">Memory</button>
+        <button id="watchers-open" title="Wake this bot when something changes">Watchers</button>
+        <button id="edit-bot" title="Bot settings">Settings</button>
+      </div>
     </header>
     <div id="messages" class="messages" role="log" aria-live="polite">
       <div id="thread" class="thread"></div>
@@ -1497,7 +1506,8 @@ function closeMenu(refocus) {
   document.removeEventListener("pointerdown", menuOutside, true);
   if (refocus && sidebarMenuReturn && sidebarMenuReturn.isConnected) sidebarMenuReturn.focus();
 }
-function menuOutside(event) { if (sidebarMenu && !sidebarMenu.contains(event.target)) closeMenu(false); }
+// a press on the menu's own button is left to that button, so the header ⋯ can toggle its menu shut
+function menuOutside(event) { if (sidebarMenu && !sidebarMenu.contains(event.target) && !(sidebarMenuReturn && sidebarMenuReturn.contains(event.target))) closeMenu(false); }
 function menuKeydown(event) {
   if (!sidebarMenu) return;
   const items = [...sidebarMenu.querySelectorAll('button[role="menuitem"]:not([disabled])')];
@@ -1531,6 +1541,28 @@ function openMenu(anchor, items) {
   const first = menu.querySelector('button[role="menuitem"]:not([disabled])');
   if (first) first.focus();
 }
+// 0.12.30 (the owner, 2026-11-23: "Keep unread, search, activity, desktop, routines and assignments, with
+// everything else in a menu button"): the ⋯ menu clicks the hidden buttons, so each keeps its own handler
+function headMoreItems() {
+  const pick = (id) => () => $(id).click();
+  const items = [];
+  if (!$("read-aloud").hidden) {
+    const on = $("read-aloud").getAttribute("aria-pressed") === "true";
+    items.push({ text: on ? "🔊 Read replies aloud: on" : "🔈 Read replies aloud: off", run: pick("read-aloud") });
+  }
+  const archived = $("show-archived").getAttribute("aria-pressed") === "true";
+  items.push({ text: "Voice", run: pick("voice-open") },
+    { text: archived ? "Hide archived messages" : "Show archived messages", run: pick("show-archived") },
+    { text: "Agent messages", run: pick("agent-open") },
+    { text: "Memory", run: pick("memory-open") },
+    { text: "Watchers", run: pick("watchers-open") },
+    { text: "Settings", run: pick("edit-bot") });
+  return items;
+}
+$("head-more").onclick = () => {
+  if (sidebarMenu && sidebarMenuReturn === $("head-more")) { closeMenu(true); return; }
+  openMenu($("head-more"), headMoreItems());
+};
 // The menu items look the layout up when they run, so a poll that re-rendered the list meanwhile cannot make them stale
 function botMenuItems(botId) {
   const lay = sidebarLayout(), sec = sectionOfBot(lay, botId), bot = state.bots.find((b) => b.id === botId);
