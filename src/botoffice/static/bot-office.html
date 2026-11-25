@@ -156,6 +156,9 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .chat-head h2 { margin: 0; font-size: 16px; }
 .chat-head .grow { flex: 1 1 180px; min-width: 0; }
 .chat-head > button, .chat-head > .model-pill { flex: none; }
+.chat-head .head-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.chat-head .head-meta .model-pill { font-size: 11px; padding: 0 8px; }
+#head-more { font-size: 18px; line-height: 1; padding-left: 12px; padding-right: 12px; }
 .chat-head .desc { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-pill { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .priority-urgent { color: #b42318; border-color: #b42318; }
@@ -475,23 +478,29 @@ dialog textarea { min-height: 90px; resize: vertical; }
       <div class="grow">
         <h2 id="head-name"></h2>
         <div id="head-desc" class="desc"></div>
+        <div class="head-meta">
+          <span id="head-model" class="model-pill"></span>
+          <span id="head-effort" class="model-pill" title="Thinking effort" hidden></span>
+          <span id="head-tier" class="model-pill tier" title="Capability tier, derived from the model"></span>
+        </div>
       </div>
-      <span id="head-model" class="model-pill"></span>
-      <span id="head-effort" class="model-pill" title="Thinking effort" hidden></span>
-      <span id="head-tier" class="model-pill tier" title="Capability tier, derived from the model"></span>
       <button id="mark-unread" type="button" title="Mark as unread (Alt+U)">Unread</button>
-      <button id="read-aloud" type="button" aria-pressed="false" title="Read new replies aloud" aria-label="Read new replies aloud" hidden>🔈</button>
-      <button id="voice-open" type="button" title="Voice settings">Voice</button>
       <button id="search-open" type="button" title="Search messages (Ctrl+Shift+F)">Search</button>
-      <button id="show-archived" type="button" aria-pressed="false" title="Show messages archived by edits">Show archived</button>
-      <button id="desktop-open" title="Live desktops">Desktop</button>
-      <button id="agent-open" title="Agent messages">Agents</button>
-      <button id="memory-open">Memory</button>
-      <button id="routines-open">Routines</button>
-      <button id="watchers-open" title="Wake this bot when something changes">Watchers</button>
-      <button id="assignments-open" title="Goals this bot works on until done">Assignments</button>
       <button id="activity-open" type="button" title="What this bot is doing, its steps, log and recent turns">Activity</button>
-      <button id="edit-bot" title="Bot settings">Settings</button>
+      <button id="desktop-open" title="Live desktops">Desktop</button>
+      <button id="routines-open">Routines</button>
+      <button id="assignments-open" title="Goals this bot works on until done">Assignments</button>
+      <button id="head-more" type="button" aria-haspopup="menu" aria-label="More" title="More: voice, archived messages, agents, memory, watchers, settings">⋯</button>
+      <!-- 0.12.30: the rest of the header buttons live behind the ⋯ menu; kept here hidden so their handlers stay as they were -->
+      <div id="head-more-items" hidden>
+        <button id="read-aloud" type="button" aria-pressed="false" title="Read new replies aloud" aria-label="Read new replies aloud" hidden>🔈</button>
+        <button id="voice-open" type="button" title="Voice settings">Voice</button>
+        <button id="show-archived" type="button" aria-pressed="false" title="Show messages archived by edits">Show archived</button>
+        <button id="agent-open" title="Agent messages">Agents</button>
+        <button id="memory-open">Memory</button>
+        <button id="watchers-open" title="Wake this bot when something changes">Watchers</button>
+        <button id="edit-bot" title="Bot settings">Settings</button>
+      </div>
     </header>
     <div id="messages" class="messages" role="log" aria-live="polite">
       <div id="thread" class="thread"></div>
@@ -1497,7 +1506,8 @@ function closeMenu(refocus) {
   document.removeEventListener("pointerdown", menuOutside, true);
   if (refocus && sidebarMenuReturn && sidebarMenuReturn.isConnected) sidebarMenuReturn.focus();
 }
-function menuOutside(event) { if (sidebarMenu && !sidebarMenu.contains(event.target)) closeMenu(false); }
+// a press on the menu's own button is left to that button, so the header ⋯ can toggle its menu shut
+function menuOutside(event) { if (sidebarMenu && !sidebarMenu.contains(event.target) && !(sidebarMenuReturn && sidebarMenuReturn.contains(event.target))) closeMenu(false); }
 function menuKeydown(event) {
   if (!sidebarMenu) return;
   const items = [...sidebarMenu.querySelectorAll('button[role="menuitem"]:not([disabled])')];
@@ -1531,6 +1541,28 @@ function openMenu(anchor, items) {
   const first = menu.querySelector('button[role="menuitem"]:not([disabled])');
   if (first) first.focus();
 }
+// 0.12.30 (the owner, 2026-11-23: "Keep unread, search, activity, desktop, routines and assignments, with
+// everything else in a menu button"): the ⋯ menu clicks the hidden buttons, so each keeps its own handler
+function headMoreItems() {
+  const pick = (id) => () => $(id).click();
+  const items = [];
+  if (!$("read-aloud").hidden) {
+    const on = $("read-aloud").getAttribute("aria-pressed") === "true";
+    items.push({ text: on ? "🔊 Read replies aloud: on" : "🔈 Read replies aloud: off", run: pick("read-aloud") });
+  }
+  const archived = $("show-archived").getAttribute("aria-pressed") === "true";
+  items.push({ text: "Voice", run: pick("voice-open") },
+    { text: archived ? "Hide archived messages" : "Show archived messages", run: pick("show-archived") },
+    { text: "Agent messages", run: pick("agent-open") },
+    { text: "Memory", run: pick("memory-open") },
+    { text: "Watchers", run: pick("watchers-open") },
+    { text: "Settings", run: pick("edit-bot") });
+  return items;
+}
+$("head-more").onclick = () => {
+  if (sidebarMenu && sidebarMenuReturn === $("head-more")) { closeMenu(true); return; }
+  openMenu($("head-more"), headMoreItems());
+};
 // The menu items look the layout up when they run, so a poll that re-rendered the list meanwhile cannot make them stale
 function botMenuItems(botId) {
   const lay = sidebarLayout(), sec = sectionOfBot(lay, botId), bot = state.bots.find((b) => b.id === botId);
@@ -1795,7 +1827,7 @@ async function selectBot(id, jump) {
   const clicked = state.bots.find((b) => b.id === id);
   const click = { revision: clicked ? clicked.read_revision || 0 : 0,
                   synced: api("/v1/bots/" + id).catch(() => null) };
-  if (state.selected !== id) { closeSlash(); draftRevision++; clearImages(); clearImageCache(); state.editingMsg = null; $("queue-next").checked = false; stopDictation(); stopPlayback(); }
+  if (state.selected !== id) { saveDraft(state.selected, $("text").value); $("text").value = loadDraft(id); autoGrow(); closeSlash(); draftRevision++; clearImages(); clearImageCache(); state.editingMsg = null; $("queue-next").checked = false; stopDictation(); stopPlayback(); }
   state.selected = id;
   state.hist = newHist(jump);
   rememberBot(id);
@@ -2394,6 +2426,15 @@ const pendingImages = [];
 const imageCache = new Map();
 let sendingImages = false;
 let draftRevision = 0;
+// 0.12.32: each bot keeps its own unsent draft (switching chats no longer carries the text over); kept in localStorage
+const DRAFTS_KEY = "bo-chat-drafts";
+const chatDrafts = (() => { try { const d = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "{}"); return d && typeof d === "object" && !Array.isArray(d) ? d : {}; } catch (err) { return {}; } })();
+function saveDraft(botId, text) {
+  if (!botId) return;
+  if (text && text.trim()) chatDrafts[botId] = String(text).slice(0, 100000); else delete chatDrafts[botId];
+  try { localStorage.setItem(DRAFTS_KEY, JSON.stringify(chatDrafts)); } catch (err) { /* storage blocked or full: kept for this tab only */ }
+}
+function loadDraft(botId) { return (botId && typeof chatDrafts[botId] === "string") ? chatDrafts[botId] : ""; }
 function formatBytes(n) {
   if (!Number.isFinite(n) || n < 0) return "";
   if (n < 1024) return n + " B";
@@ -3259,6 +3300,8 @@ $("composer").onsubmit = async (event) => {
   try {
     const posted = await api("/v1/bots/" + bot.id + "/messages", { method: "POST", body: JSON.stringify(body) });
     if (state.selected === bot.id && draftRevision === revision && $("text").value === draft) $("text").value = "";
+    if (state.selected === bot.id) saveDraft(bot.id, $("text").value);
+    else if (loadDraft(bot.id) === draft) saveDraft(bot.id, "");
     $("queue-next").checked = false;  // one-shot: the next message steers again
     renderHeader();
     for (const item of sentImages) { item.idSent = true; if (!item.removed) removeImage(item, true); }
@@ -3276,7 +3319,8 @@ $("composer").onsubmit = async (event) => {
   } catch (err) {
     clearEcho(echo);
     if (state.selected === bot.id) state.msgSig = "";  // the chat is redrawn below (e.g. the empty-chat greeting is back)
-    if (!sentImages.length && !$("text").value && state.selected === bot.id) { $("text").value = draft; autoGrow(); }  // nothing is lost
+    if (!sentImages.length && !$("text").value && state.selected === bot.id) { $("text").value = draft; autoGrow(); saveDraft(bot.id, draft); }  // nothing is lost
+    else if (!sentImages.length && state.selected !== bot.id && !loadDraft(bot.id)) saveDraft(bot.id, draft);  // another chat is open: back into this bot's draft
     if (err && err.timeout) {
       // the server may have accepted it even though no answer came back: refresh the chat and warn before a retry duplicates it
       err.message = "No answer from the server. The message may have been sent: check the chat before sending it again.";
@@ -3288,7 +3332,7 @@ $("composer").onsubmit = async (event) => {
 };
 
 function autoGrow() { const t = $("text"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 220) + "px"; }
-$("text").addEventListener("input", () => { draftRevision++; autoGrow(); });
+$("text").addEventListener("input", () => { draftRevision++; autoGrow(); saveDraft(state.selected, $("text").value); });
 $("text").addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
@@ -3459,7 +3503,8 @@ async function trySlash(bot, text) {
   if (slashBusy) { setStatus("A slash command is still being sent."); return true; }  // one at a time; the draft stays in the box
   const revision = draftRevision;
   const clearDraft = () => {  // like a normal send: only when the same bot is open and the draft was not edited meanwhile
-    if (state.selected === bot.id && draftRevision === revision && $("text").value.trim() === text.trim()) { $("text").value = ""; autoGrow(); draftRevision++; }
+    if (state.selected === bot.id && draftRevision === revision && $("text").value.trim() === text.trim()) { $("text").value = ""; autoGrow(); draftRevision++; saveDraft(bot.id, ""); }
+    else if (state.selected !== bot.id && (loadDraft(bot.id) || "").trim() === text.trim()) saveDraft(bot.id, "");
   };
   let data;
   try { data = await slashCommands(bot); } catch (err) { if (err instanceof AuthError) throw err; return false; }

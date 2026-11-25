@@ -46,7 +46,7 @@ def _prepare(store, scheduler, bot, job):
 
 def test_default_layers_are_short_and_split_cleanly():
     rules, system = RULES.default_text(), SYSTEM.default_text()
-    assert len(rules.split()) < 540 and len(rules.split()) + len(system.split()) < 1500  # 0.12.27: +90 words for memory-is-a-snapshot; 0.12.17: +30 words for the done-needs-evidence rule; S5: +75 for the ask-when-ambiguous rule
+    assert len(rules.split()) < 560 and len(rules.split()) + len(system.split()) < 1500  # 0.12.29: +40 words for the results-folder rule, total kept at 1481 by trimming wording; 0.12.27: +90 words for memory-is-a-snapshot; 0.12.17: +30 words for the done-needs-evidence rule; S5: +75 for the ask-when-ambiguous rule
     # the owner's own words, in substance
     for needed in ("Keep working on your task until", "the goal is met", "stuck and need the user's help",
                    "another rule or instruction tells you to stop", "not an endless goal",
@@ -58,6 +58,14 @@ def test_default_layers_are_short_and_split_cleanly():
     # agency rules live in one place only
     assert "Finish what you start" not in system and "bot-msg" not in rules
     assert "state the reason" not in rules + system
+
+
+def test_rules_keep_every_run_in_a_dated_results_folder():
+    rules = RULES.default_text()
+    for needed in ("One results folder per task", "Each run or rerun writes a new dated subfolder",
+                   "`results/run-YYYY-MM-DD[-N]/`", "Never edit, move or delete an earlier run's outputs",
+                   "Links in reports and approvals point to the dated subfolder"):
+        assert needed in rules
 
 
 @pytest.mark.parametrize("engine", ENGINES)

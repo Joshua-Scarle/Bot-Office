@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from . import approval_classes, attachments, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
+from . import approval_classes, attachments, auto_merge, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
 from . import failures, grouping, isolation, needs_you, notify, recall, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
@@ -2776,6 +2776,7 @@ def create_app(
 
     # 0.12.4 fix3 #5: the git guard asks GitHub (cached) for a repo's real default branch
     git_guard.default_lookup = github_access.DefaultBranches(lambda: action_rules.github_token(settings))
+    auto_merge.token_source = lambda: action_rules.github_token(settings)  # 0.12.31
 
     @app.post("/v1/agent/github-ticket")
     async def agent_github_ticket(request: Request, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008

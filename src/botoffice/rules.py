@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from . import git_guard, github_access, nested_agents, sudo_review, team
+from . import auto_merge, git_guard, github_access, nested_agents, sudo_review, team
 from .domain import Job
 from .store import JobStore, now
 
@@ -620,6 +620,8 @@ class Rules:
         self.tickets = github_access.Tickets()
         # 0.12.28: the sudo auto-review (sudo_review.py); its log sits next to the DB
         self.sudo = sudo_review.Reviewer(Path(store.path).parent / "sudo-review.jsonl")
+        # 0.12.31: a qualifying PR merge is checked against GitHub instead of the card (auto_merge.py)
+        self.auto_merge = auto_merge.Checker(Path(store.path).parent / "auto-merge.jsonl")
 
     # --- rules CRUD (master token only) ---
 
@@ -701,6 +703,14 @@ class Rules:
         # level: no "allow" (a rule, a class switched off) reaches past it
         guarded = git_guard.classify(action.tool, action.command, action.data, action.cwd)
         if guarded:
+            # 0.12.31: one plain PR merge naming its repository may skip the card when GitHub shows the
+            # PR ready (auto_merge.judge); trigger runs and a switched-off office keep the card, and so
+            # does any ask rule of the owner's own (not a generic preset) or from the other scope
+            own_asks = any(rule["effect"] == "ask" and (rule["kind"] != "preset" or rule in foreign)
+                           for rule in rules)
+            if (not own_asks and _is_shell(action) and job.source not in STRICT_SOURCES and job.bot_id
+                    and auto_merge.parse(action.command) and auto_merge.enabled(self.store)):
+                return "auto-merge", git_guard.PRESET, f"{guarded} goes to the auto-merge check"
             return "ask", git_guard.PRESET, f"{guarded} always waits for your approval"
         # A16: so does sending email or messages to people (the "send" class is locked on)
         sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
@@ -781,6 +791,29 @@ class Rules:
                        "command": action.command[:APPROVAL_LIMIT], "cwd": action.cwd,
                        "outcome": outcome, "why": why, "verdict": verdict or None, "reason": reason or None})
 
+    def _auto_merge(self, job: Job, provider: str, action: Action, preset: str | None) -> tuple[str, str]:
+        """("allow", why) when GitHub shows the PR ready and the decision was logged, else the card."""
+        parsed = auto_merge.parse(action.command)
+        if parsed is None:
+            return "ask", "a merge always waits for your approval"
+        owner, repo, number, sha = parsed
+        blocker = self.auto_merge.check(owner, repo, number, sha)
+        bot = self.store.get_bot(job.bot_id) if job.bot_id else None
+        logged = self.auto_merge.log({
+            "at": now().isoformat(), "bot_id": str(job.bot_id) if job.bot_id else None,
+            "bot": getattr(bot, "name", None), "job_id": str(job.id), "source": job.source,
+            "repo": f"{owner}/{repo}", "pr": number, "command": action.command[:APPROVAL_LIMIT],
+            "outcome": "allowed" if blocker is None else "card", "why": blocker})
+        if blocker is None and logged:
+            self._log(job, provider, "allow", "auto-merge", preset, action, None,
+                      note=f"auto-merge: {owner}/{repo}#{number} ready")
+            with self._lock:  # a gh call in it may get a GitHub ticket, as after a granted card
+                self._approved.setdefault(str(job.id), []).append(
+                    (time.monotonic() + PASS_SECONDS, action.command, action.cwd))
+            return "allow", f"auto-merge: {owner}/{repo}#{number} is labeled ready, reviewed and green"
+        reason = blocker or "the auto-merge log could not be written"
+        return "ask", f"merging {owner}/{repo}#{number} waits for your approval ({reason})"
+
     def decide(self, job: Job, event: dict, provider: str = "") -> Decision:
         decision = self._decide(job, event, provider)
         if event and readable(event):
@@ -826,6 +859,8 @@ class Rules:
             # no readable verdict in time: the owner's card, as before 0.12.28
             self._sudo_log(job, action, "review-failed", "auto-review", verdict, reason)
             effect, preset, why = "ask", "system", "sudo (the auto-review could not answer) waits for your approval"
+        if effect == "auto-merge":
+            effect, why = self._auto_merge(job, provider, action, preset)
         if effect == "allow":
             return Decision("allow", "allow", why, preset)
         if effect == "never":

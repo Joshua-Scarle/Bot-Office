@@ -271,3 +271,50 @@ def test_header_controls_stay_on_screen_between_720_and_1100px():
             }""")
             assert offscreen == [], (width, offscreen)
         browser.close()
+
+
+def test_header_keeps_six_buttons_and_the_rest_sit_in_the_more_menu():
+    # 0.12.30, the owner: "Keep unread, search, activity, desktop, routines and assignments, with everything
+    # else in a menu button"
+    sync_api = pytest.importorskip("playwright.sync_api")
+    page_html = CHAT_PAGE.read_text()
+    from pathlib import Path
+
+    with sync_api.sync_playwright() as pw:
+        browser = None
+        for executable in [None, *sorted(Path.home().glob(".cache/ms-playwright/chromium*/*/chrome*"), reverse=True)]:
+            if executable is not None and (not executable.is_file() or executable.suffix):
+                continue
+            try:
+                browser = pw.chromium.launch(executable_path=str(executable) if executable else None)
+                break
+            except Exception:  # noqa: BLE001, S112 - try the next one
+                continue
+        if browser is None:
+            pytest.skip("chromium is unavailable")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=page_html)
+                   if route.request.url.endswith("/") else route.fulfill(status=401, body="{}"))
+        page.goto("http://office.test/")
+        page.evaluate("""() => {
+            document.getElementById('lock').hidden = true;
+            document.getElementById('app').hidden = false;
+            document.getElementById('chat-head').hidden = false;
+            document.getElementById('read-aloud').hidden = false;
+        }""")
+        shown = page.evaluate("""() => [...document.querySelectorAll('#chat-head button')]
+            .filter((b) => b.getClientRects().length).map((b) => b.textContent.trim())""")
+        assert shown == ["Unread", "Search", "Activity", "Desktop", "Routines", "Assignments", "⋯"]
+        page.click("#head-more")
+        items = page.evaluate("""() => [...document.querySelectorAll('.sidebar-menu [role=menuitem]')]
+            .map((b) => b.textContent)""")
+        assert items == ["🔈 Read replies aloud: off", "Voice", "Show archived messages", "Agent messages",
+                         "Memory", "Watchers", "Settings"]
+        page.click("#head-more")  # a second press closes it
+        assert page.evaluate("() => document.querySelectorAll('.sidebar-menu').length") == 0
+        page.click("#head-more")
+        page.click(".sidebar-menu >> text=Show archived messages")  # runs the hidden button's own handler
+        assert page.get_attribute("#show-archived", "aria-pressed") == "true"
+        page.click("#head-more")
+        assert "Hide archived messages" in page.inner_text(".sidebar-menu")
+        browser.close()

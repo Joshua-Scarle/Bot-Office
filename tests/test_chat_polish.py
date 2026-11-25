@@ -135,7 +135,7 @@ function currentBot() { return bot; }
 function api() { return new Promise((res, rej) => { resolve = res; reject = rej; }); }
 function showEcho(b, text, n) { echoes.push([b.id, text, n, elements.text.value]); state.echo = {bot: b.id, nodes: []}; return state.echo; }
 function clearEcho(echo) { cleared += 1; if (state.echo === echo) state.echo = null; }
-function removeImage() {} function updateImages() {} function autoGrow() {} function setStatus() {} function renderBots() {}
+function removeImage() {} function updateImages() {} function autoGrow() {} function saveDraft() {} function loadDraft() { return ""; } function setStatus() {} function renderBots() {}
 async function loadMessages() {} function renderHeader() {} function handleError() {} function deleteUpload() {}
 """ + page[start:end] + r"""
 (async () => {
