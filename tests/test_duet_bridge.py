@@ -660,7 +660,7 @@ def test_public_or_replaced_repository_fails_closed(env):
     assert rec.turns_posted == [] and fake.gets() == []
     fake.repo["private"] = True
     b.send(text="now fine", bot=env.lead)
-    assert json.loads(env.store.get_meta("duet_repo_ids")) == {REPO: 555}
+    assert env.store.get_meta(f"duet_repo_id:{REPO}") == "555"
     # the repository was deleted and recreated (or transferred): another id
     fake.repo["id"] = 556
     b2, _ = bridge(env, fake)
@@ -1524,3 +1524,73 @@ def test_a_bare_reply_to_matching_several_threads_is_not_guessed(env):
     b.poll_once()
     row = next(r for r in rows(b, "in") if r["msg_id"] == "IN-10")
     assert row["thread"] == "t-lead"
+
+
+# --- review round 6 ---
+
+def test_a_review_post_never_starts_long_after_its_private_check(env, monkeypatch):
+    write_config(env)
+    fake = Fake()
+    b, _ = _real_transport_bridge(env, fake, monkeypatch)
+    monkeypatch.setattr(duet_bridge, "REPO_FRESH_SECONDS", 0.2)
+    real_verify = b.verify_repo
+
+    def verify(config, token, fresh=False):
+        real_verify(config, token, fresh)
+        if fresh:
+            assert duet_bridge.wait_for_requests(2)
+            duet_bridge._INFLIGHT.acquire()  # the POST now waits for the slot
+            threading.Timer(0.6, duet_bridge._INFLIGHT.release).start()
+
+    b.verify_repo = verify
+    with pytest.raises(DuetError) as exc:
+        b.send(text="work content", bot=env.lead, msg_id="FRESH-1")
+    assert exc.value.code == "repo_check_stale" and fake.posted == []
+    assert [(r["state"], r["error"]) for r in rows(b, "out")] == [("failed", "not_started")]
+    b.verify_repo = real_verify
+    b.clock.advance(120)
+    assert b.send(text="work content", bot=env.lead, msg_id="FRESH-1")["review_id"]  # same id, sent once
+
+
+def test_concurrent_first_repository_checks_agree_on_one_pin(env):
+    write_config(env)
+    b, _ = bridge(env, Fake())
+    assert b._pin_repo(REPO, 555) == 555
+    assert b._pin_repo(REPO, 556) == 555  # the second first-check sees the winner, not its own id
+    env.store.set_meta("duet_repo_ids", json.dumps({"other/repo": 77}))
+    assert b._pin_repo("other/repo", 78) == 77  # an older combined pin is kept
+    env.store.set_meta("duet_repo_id:bad/repo", "garbage")
+    assert b._pin_repo("bad/repo", 5) == -1  # unreadable: fails closed
+
+
+def test_a_request_whose_deadline_passed_during_admission_never_starts(monkeypatch):
+    import time
+    calls = []
+    monkeypatch.setattr(duet_bridge, "_request", lambda *args: calls.append(1) or (200, {}, b""))
+    with pytest.raises(duet_bridge._NotStarted):
+        duet_bridge.default_transport("POST", "https://api.github.com/x", {}, None,
+                                      deadline=time.monotonic() + 0.1, ready=lambda: time.sleep(0.2))
+    assert calls == [] and duet_bridge.wait_for_requests(1)
+    assert duet_bridge._INFLIGHT.acquire(timeout=0.1)
+    duet_bridge._INFLIGHT.release()
+
+
+def test_a_send_that_never_got_a_slot_is_failed_not_unknown(env, monkeypatch):
+    write_config(env)
+    fake = Fake()
+    b, _ = _real_transport_bridge(env, fake, monkeypatch)
+    monkeypatch.setattr(duet_bridge, "HTTP_TIMEOUT", 0.3)
+    real_verify = b.verify_repo
+
+    def verify(config, token, fresh=False):
+        real_verify(config, token, fresh)
+        if fresh:
+            assert duet_bridge.wait_for_requests(2)
+            duet_bridge._INFLIGHT.acquire()  # held past the POST's deadline
+
+    b.verify_repo = verify
+    with pytest.raises(DuetError) as exc:
+        b.send(text="x", bot=env.lead, msg_id="BUSY-1")
+    duet_bridge._INFLIGHT.release()
+    assert exc.value.code == "github_busy" and fake.posted == []
+    assert [(r["state"], r["error"]) for r in rows(b, "out")] == [("failed", "not_started")]

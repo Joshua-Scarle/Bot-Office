@@ -67,6 +67,7 @@ REPO_CHECK_SECONDS = 600
 MAX_ATTEMPTS = 5
 HTTP_TIMEOUT = 20
 MAX_INFLIGHT = 2  # GitHub request threads at once (each has the total deadline)
+REPO_FRESH_SECONDS = 5.0  # a review POST starts at most this long after its fresh private-repository check
 # attempt budget: every outbound HTTP sequence is charged up front and the charge is kept, also on a 4xx
 ATTEMPTS_PER_BOT_MINUTE = 20
 ATTEMPTS_PER_MINUTE = 60
@@ -295,7 +296,7 @@ def default_transport(method: str, url: str, headers: dict[str, str], body: byte
     deadline = time.monotonic() + HTTP_TIMEOUT if deadline is None else deadline
     result: list[Any] = []
     if not _INFLIGHT.acquire(timeout=max(0.0, deadline - time.monotonic())):
-        raise TimeoutError("too many GitHub requests in flight")
+        raise _NotStarted("too many GitHub requests in flight")
 
     def run() -> None:
         try:
@@ -315,6 +316,8 @@ def default_transport(method: str, url: str, headers: dict[str, str], body: byte
         try:
             if ready is not None:
                 ready()
+            if time.monotonic() >= deadline:  # the budget ran out during admission: do not start late
+                raise _NotStarted("GitHub request deadline passed before it started")
             _ACTIVE.add(worker)
             worker.start()
         except BaseException:
@@ -328,6 +331,10 @@ def default_transport(method: str, url: str, headers: dict[str, str], body: byte
     if kind == "error":
         raise value
     return value
+
+
+class _NotStarted(TimeoutError):
+    """The deadline passed before the request started (slot wait or admission): nothing reached GitHub."""
 
 
 _INFLIGHT = threading.BoundedSemaphore(MAX_INFLIGHT)
@@ -556,20 +563,40 @@ class DuetBridge:
             raise DuetError("mailbox repository check failed", 503, "repo_check_failed")
         if str(data.get("full_name") or "").lower() != key:
             raise DuetError("the mailbox repository answered with another name", 503, "repo_name_mismatch")
-        try:
-            pinned = json.loads(self._meta("duet_repo_ids") or "{}")
-        except ValueError:
-            pinned = {}
-        if not isinstance(pinned, dict):
-            pinned = {}
-        known = pinned.get(key)
-        if known is None:
-            pinned[key] = repo_id
-            self.store.set_meta("duet_repo_ids", json.dumps(pinned, sort_keys=True))
-        elif known != repo_id:
+        if self._pin_repo(key, repo_id) != repo_id:
             raise DuetError("the mailbox repository id changed; nothing is sent or delivered", 503,
                             "repo_id_changed")
         self._repo_ok = (key, now)
+
+    def _pin_repo(self, key: str, repo_id: int) -> int:
+        """The repository id pinned for *key*: set on first use, in one write transaction, so concurrent
+        first checks (poller and a send) agree on one winner. An id in the older combined pin map is kept."""
+        meta = f"duet_repo_id:{key}"
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT value FROM meta WHERE key=?", (meta,)).fetchone()
+                if row is None:
+                    first = repo_id
+                    legacy = db.execute("SELECT value FROM meta WHERE key='duet_repo_ids'").fetchone()
+                    try:
+                        older = json.loads(legacy["value"]).get(key) if legacy else None
+                    except (ValueError, AttributeError):
+                        older = None
+                    if isinstance(older, int) and not isinstance(older, bool):
+                        first = older
+                    db.execute("INSERT INTO meta (key, value) VALUES (?,?)", (meta, str(first)))
+                    pinned = first
+                else:
+                    try:
+                        pinned = int(row["value"])
+                    except (TypeError, ValueError):
+                        pinned = -1  # unreadable pin: fail closed (never re-pinned silently)
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return pinned
 
     # -- who may write to Bot Office --
 
@@ -1106,10 +1133,15 @@ class DuetBridge:
             header = "[Bot Office → Duet] " + " ".join(f"{k}={v}" for k, v in parts if v)
             body = f"{header}\n\n{text}"
             mailbox = config.mailbox
+            repo_checked = [0.0]
 
             def still_allowed() -> None:
                 """Asked again once the request slot is held, right before the review is posted: the mailbox
-                config, the sender's authorization and the sending job (a slot wait may be long)."""
+                config, the sender's authorization and the sending job (a slot wait may be long), and the
+                private-repository check is still recent (REPO_FRESH_SECONDS), so a wait cannot widen it."""
+                if time.monotonic() - repo_checked[0] > REPO_FRESH_SECONDS:
+                    raise DuetError("the repository check is too old by the time a request slot was free; "
+                                    "send it again", 503, "repo_check_stale")
                 now = self.config()
                 if now is None or not now.enabled:
                     raise DuetError("the Duet bridge is not configured or is disabled", 503, "not_configured")
@@ -1124,6 +1156,7 @@ class DuetBridge:
             try:
                 self.check_text(body, token)  # the final serialized review, header fields included
                 self.verify_repo(config, token, fresh=True)  # asked again right before the write
+                repo_checked[0] = time.monotonic()
                 still_allowed()
             except BaseException:
                 self._settle(key, state="failed", error="refused_before_send")
@@ -1231,6 +1264,10 @@ class DuetBridge:
         except (_Stopped, _RateLimited, DuetError):
             self._settle(key, state="failed", error="not_started")  # the request never started
             raise
+        except _NotStarted as exc:
+            self._settle(key, state="failed", error="not_started")
+            raise DuetError(f"GitHub is busy; message {msg_id} was not sent, send it again", 503,
+                            "github_busy") from exc
         except OSError as exc:
             self._settle(key, state="unknown", error="send_no_answer")
             raise DuetError(f"GitHub did not answer; message {msg_id} may or may not be posted (it counts against "
