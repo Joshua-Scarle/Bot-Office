@@ -28,8 +28,10 @@ keeps the owner's card (fail safe):
   passed>`` lines count only in a PR *comment* (never the description, which any collaborator can
   edit unseen) that is unedited, written by an authorized identity (``authorized_identities``) and
   whose marker line names the head commit (at least 12 hex characters of it, so any later push makes
-  every marker stale); a line that says no, not, failed, skipped, pending or the like counts as no
-  line at all. A Reviewed-by only counts from a login that is not the PR author, not an author or
+  every marker stale). Lines must be affirmative and fixed in shape: Written-by / Reviewed-by hold only
+  CLI names (plus "approved" or "lgtm"), Tested must end saying it passed ("<what ran> passed", green,
+  ok ...) with no conditional (if, after, when, until, will ...); a line that
+  says no, not, failed, skipped, pending, awaiting, requested or the like counts as no line at all. A Reviewed-by only counts from a login that is not the PR author, not an author or
   committer of the PR's commits and not the login that posted the Written-by (no self-approval);
 - READY_LABEL counts only when the issue timeline shows it was last applied by an authorized identity
   after the head commit, after every check run and status on it finished and after the last
@@ -106,7 +108,15 @@ COMMENTS_QUERY = ("query($owner: String!, $name: String!, $number: Int!, $after:
                   "hasNextPage endCursor } nodes { author { login } createdAt lastEditedAt includesCreatedEdit body } } } } }")
 _NEGATIVE = re.compile(r"\b(no|not|none|n/?a|never|todo|tbd|fail\w*|skip\w*|pending|didn'?t|won'?t|unknown|"
                        r"partial\w*|broken|errors?|un(?:tested|reviewed|verified|checked|run|approved)|without|"
-                       r"missing|incomplete|wip|draft|later|soon|disabled|flaky|nope|\w+n't|blocked|red)\b|\?")
+                       r"missing|incomplete|wip|draft|later|soon|disabled|flaky|nope|\w+n't|blocked|red|awaiting|await|"
+                       r"waiting|requested|request|queued|scheduled|running|planned|expected|should|will|once|"
+                       r"eventually|progress|ongoing|soon|next|if|when|after|before|until|unless|would|could|might|"
+                       r"assum\w*|hopefully|implement\w*|fix(?:ed)?\s+is)\b|\?")
+# round 5: a marker is an affirmative statement in a fixed shape, not "anything without a negative word"
+# fixed shape: "<what ran> passed" - the line ends with the affirmative word (a trailing on/at/for before the
+# SHA is dropped), so "tests pass after the fix is implemented" is no claim
+_AFFIRMATIVE = re.compile(r"\b(?:passed|passes|pass|green|ok|succeeded|success|successful)[.!]?$")
+_MARKER_WORDS = frozenset(CLIS) | {"code", "cli", "and", "approved", "lgtm"}
 
 # set by the API at start-up (like git_guard.default_lookup): () -> the controller's GitHub token
 token_source: Callable[[], str | None] | None = None
@@ -362,8 +372,11 @@ def _markers(comments: list, head: str, identities: frozenset[str], after: float
             if _NEGATIVE.search(value):
                 continue  # 'Tested: failed', 'Reviewed-by: codex did not review': no claim at all
             if key == "tested":
-                tested = tested or bool(re.sub(r"[\W_]+", "", value))
+                claim = re.sub(r"[\s(@:,-]*(?:\b(?:on|at|for|of)\b)?[\s()@:,-]*$", "", value)
+                tested = tested or bool(_AFFIRMATIVE.search(claim))  # it must end saying it passed
                 continue
+            if any(word not in _MARKER_WORDS for word in re.findall(r"[a-z][a-z0-9-]*", value)):
+                continue  # Written-by / Reviewed-by hold only CLI names (and approved / lgtm), nothing else
             clis = {cli for cli in CLIS if re.search(rf"\b{cli}\b", value)}
             if "antigravity" in clis:
                 clis = (clis - {"antigravity"}) | {"agy"}

@@ -186,26 +186,40 @@ _SEGMENT_END = re.compile(r"[;&|\n()]")
 _SECURE_PATH: list[bool] = []  # cached answer of secure_path_ok (one sudo -n -l per process)
 
 
-def _root_only(directory: str) -> bool:
-    """True when *directory* (as written and as resolved) and every ancestor of it are owned by root and
-    not group or world writable, so no other user can replace any part of the path; a missing part
-    only needs its existing ancestors to be root-only."""
-    for path in {os.path.abspath(directory), os.path.realpath(directory)}:
-        current = path
-        while True:
-            try:
-                info = os.lstat(current)
-            except FileNotFoundError:
-                info = None
-            except OSError:
-                return False
-            if info is not None and (info.st_uid != 0 or info.st_mode & 0o022 and not os.path.islink(current)):
-                return False
-            parent = os.path.dirname(current)
-            if parent == current:
-                break
-            current = parent
-    return True
+def _root_only(directory: str, depth: int = 0) -> bool:
+    """True when every component of *directory*, and of every symlink target met on the way (followed one
+    component at a time, so an intermediate link is checked too), is owned by root and not group or world
+    writable: no other user can replace any part of the path. A missing tail only needs root-only parents."""
+    if depth > 40 or not directory.startswith("/") or any(part in (".", "..") for part in directory.split("/")):
+        return False  # the kernel resolves a symlink before "..": no lexical shortcut, refuse such paths
+    path = os.path.abspath(directory)
+    current = "/"
+    for part in [part for part in path.split("/") if part]:
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return False
+        if info.st_uid != 0 or (info.st_mode & 0o022 and not os.path.islink(current)):
+            return False
+        current = os.path.join(current, part)
+        try:
+            link = os.readlink(current)
+        except FileNotFoundError:
+            return True  # does not exist: creating it needs the root-only parent just checked
+        except OSError:
+            continue  # not a symlink
+        target = link if link.startswith("/") else os.path.dirname(current) + "/" + link
+        if any(part in (".", "..") for part in link.split("/")):
+            return False
+        if not _root_only(target, depth + 1):
+            return False
+    try:
+        info = os.lstat(current)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return info.st_uid == 0 and not (info.st_mode & 0o022 and not os.path.islink(current))
 
 
 def secure_path_ok() -> bool:

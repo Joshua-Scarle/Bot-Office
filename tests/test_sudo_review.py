@@ -475,3 +475,17 @@ def test_secure_path_needs_every_ancestor_root_only(tmp_path):
     link = tmp_path / "link"
     link.symlink_to("/usr/bin")
     assert not sudo_review._root_only(str(link))  # the symlink itself sits in a bot-owned directory
+
+
+
+def test_secure_path_checks_intermediate_symlinks(tmp_path):
+    hop = tmp_path / "hop"
+    hop.symlink_to("/usr/bin")
+    assert not sudo_review._root_only(str(hop))  # the bot can retarget hop: not root-only
+    assert sudo_review._root_only("/usr/bin") and sudo_review._root_only("/bin")  # /bin -> usr/bin here
+
+
+
+@pytest.mark.parametrize("path", ["/usr/../usr/bin", "/usr/./bin", "usr/bin"])
+def test_secure_path_entries_with_dot_parts_or_relative_fail_closed(path):
+    assert not sudo_review._root_only(path)

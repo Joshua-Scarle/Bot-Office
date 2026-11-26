@@ -590,3 +590,32 @@ def test_negative_test_claims_do_not_count(tmp_path, line):
 @pytest.mark.parametrize("base", ["release_2026", "production_hotfix", "release-1.2", "prod"])
 def test_release_like_bases_keep_the_card(tmp_path, base):
     _card(tmp_path, fake_github(ready_pr(base={"ref": base})), "it merges into")
+
+
+
+@pytest.mark.parametrize("comments,why", [
+    ([note("writer-bot", f"Written-by: claude {SHA12}\nTested: integration tests awaiting execution {SHA12}"),
+      note("review-bot", f"Reviewed-by: codex {SHA12}")], "Tested"),
+    ([note("writer-bot", f"Written-by: claude {SHA12}\nTested: pytest {SHA12}"),
+      note("review-bot", f"Reviewed-by: codex {SHA12}")], "Tested"),  # says nothing passed
+    ([note("writer-bot", f"Written-by: claude {SHA12}\nTested: tests pass after the fix is implemented {SHA12}"),
+      note("review-bot", f"Reviewed-by: codex {SHA12}")], "Tested"),
+    ([note("writer-bot", f"Written-by: claude {SHA12}\nTested: ok if CI agrees {SHA12}"),
+      note("review-bot", f"Reviewed-by: codex {SHA12}")], "Tested"),
+    ([note("writer-bot", f"Written-by: claude {SHA12}\nTested: should pass {SHA12}"),
+      note("review-bot", f"Reviewed-by: codex {SHA12}")], "Tested"),
+    ([note("writer-bot", f"Written-by: claude {SHA12}\nTested: ok {SHA12}"),
+      note("review-bot", f"Reviewed-by: codex review requested {SHA12}")], "Reviewed-by"),
+    ([note("writer-bot", f"Written-by: claude {SHA12}\nTested: ok {SHA12}"),
+      note("review-bot", f"Reviewed-by: codex partly, mostly fine {SHA12}")], "Reviewed-by"),
+])
+def test_markers_must_be_affirmative_and_fixed_in_shape(tmp_path, comments, why):
+    _card(tmp_path, fake_github(ready_pr(), comments=comments), why)
+
+
+def test_affirmative_marker_shapes_pass(tmp_path):
+    store, job = make(tmp_path)
+    comments = [note("writer-bot", f"Written-by: Claude Code and grok @ {SHA12}\nTested: 120 passed, e2e green {SHA12}"),
+                note("review-bot", f"Reviewed-by: codex, approved ({SHA12})")]
+    rules = checker(Rules(store), fake_github(ready_pr(), comments=comments))
+    assert rules.decide(job, bash(f"{MERGE} 7 --repo acme/widgets {PIN}")).decision == "allow"
