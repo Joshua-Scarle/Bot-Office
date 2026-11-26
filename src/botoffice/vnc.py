@@ -87,6 +87,10 @@ class Tickets:
         self._tickets[ticket] = (name, now + TICKET_TTL, mode, tuple(binding), bot)
         return ticket
 
+    def bot_bound(self, ticket: str) -> bool:
+        entry = self._tickets.get(ticket)
+        return bool(entry and entry[4] is not None)
+
     def consume(self, ticket: str, name: str, binding: tuple = LOCAL, owner_of=None) -> str | None:
         """The ticket's mode, or None. *owner_of(name)* gives the desktop's bot now (for bot-bound tickets)."""
         entry = self._tickets.pop(ticket, None)

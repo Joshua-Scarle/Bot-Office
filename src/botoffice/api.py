@@ -1682,7 +1682,9 @@ def create_app(
             raise HTTPException(status_code=409, detail="this desktop is no longer that bot's; reload the list")
         if not any(item["name"] == name and item["status"] == "running" for item in await vnc.desktops()):
             raise HTTPException(status_code=404, detail="desktop is not running")
-        if bot is not None and bot_desks.bot_of(name) != str(bot):   # again, after the await
+        if bot is not None:
+            await bot_desks.refresh()   # a live listing: a replaced container's mapping is dropped (labels win)
+        if bot is not None and bot_desks.bot_of(name) != str(bot):   # again, after the awaits
             raise HTTPException(status_code=409, detail="this desktop is no longer that bot's; reload the list")
         # bound to who asked: a remote owner's ticket only opens a socket from that same verified person
         binding = vnc.binding_for(remote_access.current_remote_identity.get())
@@ -1698,6 +1700,8 @@ def create_app(
         protocols = ws.scope.get("subprotocols", [])
         ticket = next((p[10:] for p in protocols if p.startswith("bo-ticket.")), "")
         binding = vnc.binding_for(remote_access.current_remote_identity.get())
+        if tickets.bot_bound(ticket):
+            await bot_desks.refresh()   # bot-bound: the mapping is checked against the containers as they are now
         mode = (tickets.consume(ticket, name, binding, bot_desks.bot_of)
                 if vnc.same_origin(ws.headers.get("origin"), ws.headers.get("host", "")) else None)
         if not mode or "binary" not in protocols or proxy_counts.get(name, 0) >= 4 or sum(proxy_counts.values()) >= 8:
@@ -3249,13 +3253,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="no finished job with that id")
 
     @app.post("/v1/desktops/{name}/hand-back", dependencies=[Depends(auth)])
-    async def desktop_hand_back(name: str) -> dict:
+    async def desktop_hand_back(name: str, bot: UUID | None = None) -> dict:
         """Joshua finished a step on a desktop: the bot that last used it continues."""
         # checked and posted with no await in between: the bot is never told to continue while the owner
         # still holds a control connection to this desktop
         if bot_desks.owner_controlling(name):
             raise HTTPException(status_code=409, detail="release control of this desktop first")
         own = bot_desks.bot_of(name)
+        if bot is not None and own != str(bot):
+            raise HTTPException(status_code=409, detail="this desktop is no longer that bot's; reload the list")
         if own is not None:
             bot = store.get_bot(own)
             if bot is None:

@@ -5283,6 +5283,9 @@ $("notify-enable").onclick = async () => {
 $("desktop-hand-back").onclick = async () => {
   const name = $("desktop-select").value;
   if (!name || name.startsWith("bot:")) return;
+  // the bot this hand-back is for, fixed now: the server refuses if the desktop has become another bot's
+  const handEntry = desktopList.find((d) => d.name === name);
+  const handBot = handEntry && handEntry.kind === "per-bot" ? handEntry.bot_id : "";
   try {
     const wasControlling = desktopMode === "control" && desktopConnected === name;
     if (wasControlling) {
@@ -5302,7 +5305,7 @@ $("desktop-hand-back").onclick = async () => {
     }
     if (cancelled()) return;
     if (!released) { $("desktop-status").textContent = "Could not confirm that control of " + name + " is released (another window, or the desktop list failed). Try again."; return; }
-    await api("/v1/desktops/" + encodeURIComponent(name) + "/hand-back", {method: "POST"});
+    await api("/v1/desktops/" + encodeURIComponent(name) + "/hand-back" + (handBot ? "?bot=" + encodeURIComponent(handBot) : ""), {method: "POST"});
     if (cancelled()) return;
     if (wasControlling) connectDesktop();
     $("desktop-status").textContent = "Handed back; the bot continues.";
