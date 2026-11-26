@@ -44,7 +44,8 @@ def test_claim_leases_free_desktops_then_runs_without_one(settings):
 
 
 def test_job_without_desktop_gets_no_desktop_note_and_no_slot_env(settings):
-    settings = Settings(data_dir=settings.data_dir, token="test-token", job_timeout=2, desktops=("desktop-1",))
+    settings = Settings(data_dir=settings.data_dir, token="test-token", job_timeout=2, desktops=("desktop-1",),
+                        desktop_mode="pool")
     store, scheduler = make(settings)
     bots = [store.create_bot(name, "", "codex", None) for name in ("A", "B")]
     for bot in bots:
@@ -55,6 +56,22 @@ def test_job_without_desktop_gets_no_desktop_note_and_no_slot_env(settings):
     note = (settings.data_dir / "workspaces" / str(second.id) / "DESKTOP.md").read_text()
     assert "No desktop is free this turn" in note
     assert store.get(second.id).status == JobStatus.SUCCEEDED
+
+
+def test_per_bot_mode_tells_every_turn_about_its_own_desktop(settings):
+    settings = Settings(data_dir=settings.data_dir, token="test-token", job_timeout=2, desktops=("desktop-1",))
+    store, scheduler = make(settings)
+    bots = [store.create_bot(name, "", "codex", None) for name in ("A", "B")]
+    for bot in bots:
+        scheduler.turns.post_message(bot, "hi")
+    first, second = store.claim(settings.desktops, {"codex"}), store.claim(settings.desktops, {"codex"})
+    asyncio.run(scheduler._execute(0, second))
+    asyncio.run(scheduler._execute(1, first))
+    no_lease = (settings.data_dir / "workspaces" / str(second.id) / "DESKTOP.md").read_text()
+    leased = (settings.data_dir / "workspaces" / str(first.id) / "DESKTOP.md").read_text()
+    assert "You have your own desktop" in no_lease and "--slot" not in no_lease
+    assert "You have your own desktop" in leased and "desk --slot desktop-1" in leased
+    assert "your own (see DESKTOP.md)" in (settings.data_dir / "workspaces" / str(second.id) / "SELF.md").read_text()
 
 
 def test_settings_validate_lanes_and_desktops(monkeypatch):

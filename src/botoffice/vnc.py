@@ -63,20 +63,42 @@ async def desktops() -> list[dict]:
     return found
 
 
-class Tickets:
-    def __init__(self) -> None:
-        self._tickets: dict[str, tuple[str, float, str]] = {}
+LOCAL = ("local",)
 
-    def issue(self, name: str, mode: str = "view") -> str:
-        now = time.monotonic()
+
+def binding_for(identity) -> tuple:
+    """Who a ticket belongs to: a verified remote person (email + public host), or the local side
+    (bearer token on loopback). A ticket is only accepted from the same side it was issued to."""
+    if identity is None:
+        return LOCAL
+    return ("remote", identity.kind, identity.identity, identity.host)
+
+
+class Tickets:
+    def __init__(self, clock=None) -> None:
+        self._clock = clock or (lambda: time.monotonic())
+        self._tickets: dict[str, tuple[str, float, str, tuple, str | None]] = {}
+
+    def issue(self, name: str, mode: str = "view", binding: tuple = LOCAL, bot: str | None = None) -> str:
+        """*bot*: the ticket only opens the desktop while it is still that bot's own (checked on use)."""
+        now = self._clock()
         self._tickets = {key: value for key, value in self._tickets.items() if value[1] > now}
         ticket = secrets.token_urlsafe(32)
-        self._tickets[ticket] = (name, now + TICKET_TTL, mode)
+        self._tickets[ticket] = (name, now + TICKET_TTL, mode, tuple(binding), bot)
         return ticket
 
-    def consume(self, ticket: str, name: str) -> str | None:
+    def bot_bound(self, ticket: str) -> bool:
+        entry = self._tickets.get(ticket)
+        return bool(entry and entry[4] is not None)
+
+    def consume(self, ticket: str, name: str, binding: tuple = LOCAL, owner_of=None) -> str | None:
+        """The ticket's mode, or None. *owner_of(name)* gives the desktop's bot now (for bot-bound tickets)."""
         entry = self._tickets.pop(ticket, None)
-        return entry[2] if entry and entry[0] == name and entry[1] > time.monotonic() else None
+        if not entry or entry[0] != name or entry[1] <= self._clock() or entry[3] != tuple(binding):
+            return None
+        if entry[4] is not None and (owner_of is None or owner_of(name) != entry[4]):
+            return None
+        return entry[2]
 
 
 class ViewFilter:

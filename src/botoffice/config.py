@@ -21,6 +21,10 @@ VOICE_MODES = ("auto", "off")
 STT_MODELS = ("tiny.en", "base.en", "small.en")
 TTS_MODELS = ("fp32", "int8")
 DESKTOP_NAME = re.compile(r"desktop-[1-9][0-9]?")
+DESKTOP_MODES = ("per-bot", "pool")
+DESKTOP_MEMORY = re.compile(r"[1-9][0-9]{0,5}[mg]")
+DESKTOP_GEOMETRY = re.compile(r"([1-9][0-9]{2,3})x([1-9][0-9]{2,3})")
+DESKTOP_IMAGE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,200}(?::[A-Za-z0-9._-]{1,128})?")
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,14 @@ class Settings:
     # jobs that may run at once (one per bot); desktops are leased to them while free
     run_lanes: int = 3
     desktops: tuple[str, ...] = ("desktop-1", "desktop-2")
+    # remote-desktop: each bot's own desktop (docs/REMOTE-DESKTOPS.md); "pool" = the old lease only
+    desktop_mode: str = "per-bot"
+    desktop_image: str = "localhost/light-desktop:v1"
+    desktop_max_running: int = 4
+    desktop_idle_minutes: int = 20
+    desktop_memory: str = "1536m"
+    desktop_cpus: float = 1.5
+    desktop_geometry: str = "1280x800"
     # 0.10.0: an active assignment without progress this long is flagged stalled (no model call)
     stall_hours: float = 6
     # 0.12.39 stall sweeper (stall_sweep.py): N hours without progress wakes the owner, N more its lead
@@ -93,6 +105,21 @@ class Settings:
             DESKTOP_NAME.fullmatch(name) for name in self.desktops
         ):
             raise ValueError("BOT_OFFICE_DESKTOPS must be distinct names like desktop-1,desktop-2")
+        if self.desktop_mode not in DESKTOP_MODES:
+            raise ValueError("BOT_OFFICE_DESKTOP_MODE must be per-bot or pool")
+        if not DESKTOP_IMAGE.fullmatch(self.desktop_image):
+            raise ValueError("BOT_OFFICE_DESKTOP_IMAGE must be an image reference like localhost/light-desktop:v1")
+        if not 1 <= self.desktop_max_running <= 32:
+            raise ValueError("BOT_OFFICE_DESKTOP_MAX_RUNNING must be between 1 and 32")
+        if not 0 <= self.desktop_idle_minutes <= 7 * 24 * 60:
+            raise ValueError("BOT_OFFICE_DESKTOP_IDLE_MINUTES must be between 0 and 10080")
+        if not DESKTOP_MEMORY.fullmatch(self.desktop_memory):
+            raise ValueError("BOT_OFFICE_DESKTOP_MEMORY must look like 1536m or 2g")
+        if not 0.1 <= self.desktop_cpus <= 64:
+            raise ValueError("BOT_OFFICE_DESKTOP_CPUS must be between 0.1 and 64")
+        geometry = DESKTOP_GEOMETRY.fullmatch(self.desktop_geometry)
+        if not geometry or not (320 <= int(geometry[1]) <= 3840 and 240 <= int(geometry[2]) <= 2160):
+            raise ValueError("BOT_OFFICE_DESKTOP_GEOMETRY must look like 1280x800")
         if self.max_retries_per_hour < 0:
             raise ValueError("BOT_OFFICE_MAX_RETRIES_PER_HOUR must not be negative")
         if self.inbox_per_sender_hourly < 1 or self.inbox_global_hourly < 1:
@@ -174,6 +201,13 @@ class Settings:
                 name.strip() for name in (os.environ.get("BOT_OFFICE_DESKTOPS") or "desktop-1,desktop-2").split(",")
                 if name.strip()
             ),
+            desktop_mode=(os.environ.get("BOT_OFFICE_DESKTOP_MODE") or "per-bot").strip().lower(),
+            desktop_image=(os.environ.get("BOT_OFFICE_DESKTOP_IMAGE") or "localhost/light-desktop:v1").strip(),
+            desktop_max_running=int(os.environ.get("BOT_OFFICE_DESKTOP_MAX_RUNNING") or "4"),
+            desktop_idle_minutes=int(os.environ.get("BOT_OFFICE_DESKTOP_IDLE_MINUTES") or "20"),
+            desktop_memory=(os.environ.get("BOT_OFFICE_DESKTOP_MEMORY") or "1536m").strip().lower(),
+            desktop_cpus=float(os.environ.get("BOT_OFFICE_DESKTOP_CPUS") or "1.5"),
+            desktop_geometry=(os.environ.get("BOT_OFFICE_DESKTOP_GEOMETRY") or "1280x800").strip().lower(),
         )
 
     @property

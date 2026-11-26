@@ -1335,6 +1335,12 @@ class JobStore:
             rows = db.execute("SELECT * FROM jobs ORDER BY created_at, id").fetchall()
         return [self._job(row) for row in rows if row is not None]
 
+    def running_bot_ids(self) -> set[str]:
+        """Bots with a running turn (per-bot desktops of these bots are never stopped as idle)."""
+        with closing(self._connect()) as db:
+            return {str(row["bot_id"]) for row in db.execute(
+                "SELECT DISTINCT bot_id FROM jobs WHERE status=? AND bot_id IS NOT NULL", (JobStatus.RUNNING.value,))}
+
     def running_job_ids(self) -> list[str]:
         with closing(self._connect()) as db:
             return [row["id"] for row in db.execute("SELECT id FROM jobs WHERE status=?", (JobStatus.RUNNING.value,))]

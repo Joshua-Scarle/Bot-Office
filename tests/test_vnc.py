@@ -177,3 +177,35 @@ def test_view_filter_rejects_desync_and_unsupported_security():
         fresh = vnc.ViewFilter()
         handshake(fresh)
         fresh.feed(b"\xf8" + bytes(7) + b"\x41")
+
+
+def test_ticket_bound_to_identity():
+    from botoffice.remote_access import RemoteIdentity
+    owner = RemoteIdentity("user", "you@example.test", "you@example.test", "owner", host="office.example.test")
+    other = RemoteIdentity("user", "else@example.test", "else@example.test", "owner", host="office.example.test")
+    tickets = vnc.Tickets()
+    remote = vnc.binding_for(owner)
+    assert vnc.binding_for(None) == vnc.LOCAL and remote != vnc.LOCAL
+    t = tickets.issue("desktop-12", "control", remote)
+    assert tickets.consume(t, "desktop-12", vnc.LOCAL) is None          # wrong side: refused and burnt
+    assert tickets.consume(t, "desktop-12", remote) is None
+    t = tickets.issue("desktop-12", "control", remote)
+    assert tickets.consume(t, "desktop-12", vnc.binding_for(other)) is None
+    t = tickets.issue("desktop-12", "control", remote)
+    assert tickets.consume(t, "desktop-13", remote) is None               # wrong desktop
+    t = tickets.issue("desktop-12", "control", remote)
+    assert tickets.consume(t, "desktop-12", remote) == "control"
+    t = tickets.issue("desktop-12")
+    assert tickets.consume(t, "desktop-12") == "view"                     # local default
+
+
+def test_bot_bound_ticket_checked_on_use():
+    tickets = vnc.Tickets()
+    owner = {"desktop-12": "bot-a"}
+    t = tickets.issue("desktop-12", "view", vnc.LOCAL, "bot-a")
+    owner["desktop-12"] = "bot-b"                      # remapped between ticket and socket
+    assert tickets.consume(t, "desktop-12", vnc.LOCAL, owner.get) is None
+    t = tickets.issue("desktop-12", "view", vnc.LOCAL, "bot-b")
+    assert tickets.consume(t, "desktop-12", vnc.LOCAL) is None          # no owner lookup: refused
+    t = tickets.issue("desktop-12", "view", vnc.LOCAL, "bot-b")
+    assert tickets.consume(t, "desktop-12", vnc.LOCAL, owner.get) == "view"

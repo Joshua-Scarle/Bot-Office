@@ -15,7 +15,7 @@ All names below (`office.example.test`, `you@example.test`, `yourteam.cloudflare
 
 | Role | Who | What it can do |
 | --- | --- | --- |
-| `owner` | A person whose email is listed in `owners` and who passed the Access login | The whole GUI and API, with no bearer token. State-changing requests must carry an `Origin` header equal to `https://<host>` (blocks cross-site requests that ride on the browser's cookie). No websockets over remote access (0.12.35), so no remote VNC desktop: the JWT is only checked at the handshake. |
+| `owner` | A person whose email is listed in `owners` and who passed the Access login | The whole GUI and API, with no bearer token. State-changing requests must carry an `Origin` header equal to `https://<host>` (blocks cross-site requests that ride on the browser's cookie). One websocket only: the desktop viewer (`/v1/desktops/desktop-N/vnc`), with the exact `Origin`, a single-use ticket bound to this person, and a socket that is closed at the JWT's expiry, on revocation (re-checked every 15 s) or after 1 hour at most (see `docs/REMOTE-DESKTOPS.md`). |
 | `remote-client` | A service token listed in `clients` | Only the routes in the allowlist in `src/botoffice/remote_access.py`: read bots, chat history, jobs, needs-you and assignments; post a chat message; answer a question card; cancel a job; start, stop or reply to an assignment. No settings, no command execution, no bot create or delete, no memory, rules, watchers, uploads, voice, desktops or `/v1/agent/*`. No websockets. |
 
 A job-scoped agent token is a separate thing and is never satisfied by a remote identity.
