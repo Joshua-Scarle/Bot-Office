@@ -1382,12 +1382,16 @@ class Rules:
                 # unassigned runs: only of the same kind (chat/API turns and the bot's own wake-ups together, a
                 # routine's runs together...), so a card never moves from a routine to a chat turn or back
                 # (0.12.45 de-duplication kept)
+                # the same routine or watcher too: two routines of one bot are two tasks (r6)
                 same_task = ("(job_id=? OR (assignment_id IS NOT NULL AND assignment_id=?) OR (assignment_id IS NULL "
                              "AND ? IS NULL AND (CASE WHEN source IN ('chat','api','wakeup') THEN 'chat' ELSE source END)"
-                             "=?))")
+                             "=? AND (? = 'chat' OR EXISTS (SELECT 1 FROM jobs o WHERE o.id=approvals.job_id AND "
+                             "o.routine_id IS ? AND o.watcher_id IS ?))))")
                 kind = "chat" if (job.source or "api") in CHAT_KINDS else job.source
                 task_args = (str(job.id), str(job.assignment_id or ""),
-                             str(job.assignment_id) if job.assignment_id else None, kind)
+                             str(job.assignment_id) if job.assignment_id else None, kind, kind,
+                             str(job.routine_id) if job.routine_id else None,
+                             str(job.watcher_id) if job.watcher_id else None)
                 row = db.execute("SELECT id, job_id FROM approvals WHERE bot_id=? AND input_hash=? AND status='pending' "
                                  f"AND {same_task} ORDER BY job_id=? DESC, id DESC LIMIT 1",
                                  (str(job.bot_id), action.fingerprint, *task_args, str(job.id))).fetchone()

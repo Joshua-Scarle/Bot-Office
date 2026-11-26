@@ -592,3 +592,18 @@ def test_a_routine_card_does_not_move_to_a_chat_turn(tmp_path):
     assert first != second and rules.get(first)["job_id"] == str(routine.id)
     later = running(store, bot, source="routine")       # the routine's next run reuses its own card
     assert rules.decide(later, bash(ASKS)).approval_id == first
+
+
+def test_two_routines_do_not_share_a_card(tmp_path):
+    store, bot, rules = setup(tmp_path)
+
+    def routine_run(rid):
+        job = running(store, bot, source="routine")
+        with closing(store._connect()) as db:
+            db.execute("UPDATE jobs SET routine_id=? WHERE id=?", (rid, str(job.id)))
+        return store.get(job.id)
+    r1, r2 = "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"
+    first = rules.decide(routine_run(r1), bash(ASKS)).approval_id
+    other = rules.decide(routine_run(r2), bash(ASKS)).approval_id
+    same = rules.decide(routine_run(r1), bash(ASKS)).approval_id
+    assert other != first and same == first
