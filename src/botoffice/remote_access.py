@@ -62,6 +62,7 @@ JWT_HEADER = b"cf-access-jwt-assertion"
 KEY_HEADER = b"x-bot-office-key"
 # Remote credentials: never passed on to the app (0.12.35 review).
 CREDENTIAL_HEADERS = (JWT_HEADER, KEY_HEADER, b"cf-access-client-id", b"cf-access-client-secret")
+ACCESS_COOKIES = (b"CF_Authorization",)   # the Access session cookie: a replayable owner credential
 KEY_MIN_CHARS = 43          # 256 bits of base64url, the shortest key we accept
 KEY_MAX_CHARS = 256
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -131,6 +132,7 @@ class RemoteIdentity:
     identity: str      # lowercased email, or the service token's common name
     display_name: str
     role: str          # "owner" or "remote-client"
+    expires_at: float | None = field(default=None, compare=False)   # the JWT's exp (owner websockets close then)
 
 
 @dataclass(frozen=True)
@@ -371,18 +373,25 @@ class KeyCache:
         self._lock = threading.Lock()
 
     def get(self, kid: str) -> tuple[int, int] | None:
+        # 0.12.35 review: the fetch runs OUTSIDE the lock, by one caller at a time; everyone else gets the
+        # cached keys at once instead of queueing behind a slow network call.
         with self._lock:
             now = self._clock()
             fresh = self._fetched_at is not None and now - self._fetched_at < KEY_CACHE_SECONDS
             if kid in self._keys and fresh:
                 return self._keys[kid]
-            if self._attempt_at is None or now - self._attempt_at >= KEY_REFETCH_MIN_SECONDS:
-                self._attempt_at = now
-                try:
-                    self._keys = _parse_jwks(self._fetcher(self.url))
-                    self._fetched_at = now
-                except Exception as exc:   # noqa: BLE001  network, JSON or shape errors: keep what we have
-                    log.warning("could not fetch the Access signing keys (%s)", type(exc).__name__)
+            if self._attempt_at is not None and now - self._attempt_at < KEY_REFETCH_MIN_SECONDS:
+                return self._keys.get(kid)
+            self._attempt_at = now
+        try:
+            keys = _parse_jwks(self._fetcher(self.url))
+        except Exception as exc:   # noqa: BLE001  network, JSON or shape errors: keep what we have
+            log.warning("could not fetch the Access signing keys (%s)", type(exc).__name__)
+            with self._lock:
+                return self._keys.get(kid)
+        with self._lock:
+            self._keys = keys
+            self._fetched_at = now
             return self._keys.get(kid)
 
 
@@ -463,7 +472,7 @@ class AccessVerifier:
                 raise AccessDenied("bad email claim")
             who = email.strip().lower()
             if who in config.owners:
-                return RemoteIdentity("user", who, who, ROLE_OWNER)
+                return RemoteIdentity("user", who, who, ROLE_OWNER, float(claims["exp"]))
             raise AccessDenied("email is not an owner")
         common = claims.get("common_name")
         if isinstance(common, str) and common:
@@ -489,9 +498,24 @@ def _host_of(raw: bytes | None) -> str:
     return host.partition(":")[0].rstrip(".")
 
 
+def _strip_access_cookie(value: bytes) -> bytes:
+    parts = [p for p in value.split(b";") if p.strip() and p.strip().split(b"=", 1)[0].strip() not in ACCESS_COOKIES]
+    return b";".join(parts).strip()
+
+
 def _without_credentials(scope: dict) -> dict:
     scope = dict(scope)
-    scope["headers"] = [(n, v) for n, v in scope.get("headers", []) if n.lower() not in CREDENTIAL_HEADERS]
+    out = []
+    for n, v in scope.get("headers", []):
+        name = n.lower()
+        if name in CREDENTIAL_HEADERS:
+            continue
+        if name == b"cookie":
+            v = _strip_access_cookie(v)
+            if not v:
+                continue
+        out.append((n, v))
+    scope["headers"] = out
     return scope
 
 
@@ -588,11 +612,54 @@ class RemoteAccessMiddleware:
 
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
         scope = _without_credentials(scope)   # the app never sees the key, the Access JWT or a token secret
+        if kind == "websocket":
+            receive, send = self._guard_socket(identity, receive, send)
         token = current_remote_identity.set(identity)
         try:
             await self.app(scope, receive, send)
         finally:
             current_remote_identity.reset(token)
+
+    def _still_allowed(self, identity: RemoteIdentity) -> bool:
+        if identity.expires_at is not None and self.clock() > identity.expires_at + CLOCK_SKEW_SECONDS:
+            return False
+        result = self.loader.get()
+        if result.state != "ok" or result.config is None:
+            return False
+        if identity.kind == "user":
+            return identity.identity in result.config.owners
+        return identity.identity in result.config.clients
+
+    def _guard_socket(self, identity: RemoteIdentity, receive, send):
+        """0.12.35 review: an owner websocket is re-checked on every message; it is closed (1008) once the
+        JWT expired, the owner was removed or remote access was turned off or broken."""
+        closed = False
+
+        async def close() -> None:
+            nonlocal closed
+            if not closed:
+                closed = True
+                log.warning("remote websocket closed: access no longer valid (%s)", identity.display_name)
+                await send({"type": "websocket.close", "code": 1008})
+
+        async def guarded_receive():
+            if closed:
+                return {"type": "websocket.disconnect", "code": 1008}
+            message = await receive()
+            if message.get("type") == "websocket.receive" and not self._still_allowed(identity):
+                await close()
+                return {"type": "websocket.disconnect", "code": 1008}
+            return message
+
+        async def guarded_send(message):
+            if closed:
+                return
+            if message.get("type") == "websocket.send" and not self._still_allowed(identity):
+                await close()
+                return
+            await send(message)
+
+        return guarded_receive, guarded_send
 
     @staticmethod
     async def _deny(kind: str, send, status: int, detail: str) -> None:

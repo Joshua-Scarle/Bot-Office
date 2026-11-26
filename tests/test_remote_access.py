@@ -710,3 +710,82 @@ def test_local_request_ignores_key_header(tmp_path):
 def test_bad_shared_key_config_is_broken(tmp_path, bad):
     mw, probe, *_ = build(tmp_path, bad)
     assert status(run(mw, headers=keyed())) == 503
+
+
+# ---------------------------------------------------------------- 0.12.35 review round 2
+def test_access_cookie_is_stripped_others_kept():
+    scope = {"headers": [(b"cookie", b"a=1; CF_Authorization=secret; b=2"), (b"host", b"h")]}
+    out = dict(ra._without_credentials(scope)["headers"])
+    assert out[b"cookie"] == b"a=1; b=2" and out[b"host"] == b"h"
+    only = {"headers": [(b"cookie", b"CF_Authorization=secret")]}
+    assert ra._without_credentials(only)["headers"] == []
+
+
+def _ws(mw, headers, messages):
+    """Run a websocket through the middleware; the app echoes each client message back."""
+    sent = []
+    inbox = list(messages)
+
+    async def app(scope, receive, send):
+        await send({"type": "websocket.accept"})
+        while True:
+            msg = await receive()
+            if msg["type"] != "websocket.receive":
+                return
+            await send({"type": "websocket.send", "text": msg.get("text", "")})
+
+    mw.app = app
+    scope = {"type": "websocket", "path": "/v1/desktops/x/vnc",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+
+    async def receive():
+        if inbox:
+            item = inbox.pop(0)
+            if callable(item):
+                item()
+                return {"type": "websocket.receive", "text": "late"}
+            return item
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    return sent
+
+
+def _owner_ws_headers(exp):
+    return remote(sign(user_claims(exp=exp)), origin=f"https://{HOST}")
+
+
+def test_owner_websocket_closes_when_jwt_expires(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    def expire():
+        clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1
+    sent = _ws(mw, _owner_ws_headers(NOW + 600), [{"type": "websocket.receive", "text": "hi"}, expire])
+    texts = [m.get("text") for m in sent if m["type"] == "websocket.send"]
+    assert texts == ["hi"] and sent[-1] == {"type": "websocket.close", "code": 1008}
+
+
+def test_owner_websocket_closes_when_owner_removed(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    def remove_owner():
+        path.write_text(json.dumps({**CONFIG, "owners": []}))
+        os.utime(path, ns=(1, 1_700_000_000_000_000_000))
+        clock.t += 6
+    sent = _ws(mw, _owner_ws_headers(NOW + 6000), [{"type": "websocket.receive", "text": "hi"}, remove_owner])
+    assert [m.get("text") for m in sent if m["type"] == "websocket.send"] == ["hi"]
+    assert sent[-1] == {"type": "websocket.close", "code": 1008}
+
+
+def test_jwks_fetch_runs_outside_the_lock(tmp_path):
+    import threading as _t
+    seen = []
+    cache = None
+    def fetcher(url):
+        seen.append(cache._lock.acquire(blocking=False))   # the lock must be free during the fetch
+        if seen[-1]:
+            cache._lock.release()
+        return {"keys": [jwk("k1")]}
+    cache = ra.KeyCache(TEAM, fetcher, Clock())
+    assert cache.get("k1") is not None and seen == [True]
