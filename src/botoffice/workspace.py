@@ -143,7 +143,7 @@ stops by itself when idle. Use the `desk` command (already on PATH):
 - `desk extend --reason "<why, and what is left>"` adds time to your desktop session (below)
 
 `desk click`, `type` and `key` on this desktop of yours run without asking. Typing a password, a token or other
-secret asks the owner first (so does desk input on a shared `--slot` desktop). Leaving the box through the
+secret asks the owner first (so does desk input on a shared desktop). Leaving the box through the
 browser is a web action: before a click or key that sends, posts, publishes or buys something (a Send, Post,
 Submit-to-a-person or Buy button), add `--sends "<what it sends, to whom>"` (`desk click X Y --sends "..."`):
 Bot-Office asks the owner and runs it once approved, as for any send or post.
