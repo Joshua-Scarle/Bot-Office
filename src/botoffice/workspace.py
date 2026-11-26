@@ -192,9 +192,10 @@ def build_self(bot: Bot, job: Job, timeout: int | None = None, *, extra: str = "
                "if they are using it, do not fight the mouse or keyboard: wait, or ask in your reply."
                if job.slot else "none this turn (all desktops are in use); the screen commands of `desk` are unavailable.")
     if own_desktop:
-        desktop = ("your own (see DESKTOP.md), started by your first `desk` command. The user can watch or take over "
-                   "this desktop from Bot-Office; if they are using it, do not fight the mouse or keyboard: wait, or ask "
-                   "in your reply.")
+        desktop = ("your own (see DESKTOP.md), started by your first `desk` command"
+                   + (f"; this turn also leased the shared `{job.slot}` (`desk --slot {job.slot}`)" if job.slot else "")
+                   + ". The user can watch or take over this desktop from Bot-Office; if they are using it, do not "
+                   "fight the mouse or keyboard: wait, or ask in your reply.")
     minutes = f"{max(1, timeout // 60)} minutes" if timeout else "the configured job timeout"
     # 0.11.10 one continuation system: chat-only bots are never continued automatically
     continuing = ("off: you are a chat-only bot. Bot-Office never continues you automatically and gives you no task, "
