@@ -300,9 +300,14 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
         text, documents = git_guard._heredocs(command) if "<<" in command else (command, [])
         if "<<" in text:
             for line in text.split("\n"):
-                # every here-document opener must be one the reader recognises (else its body may be
-                # attributed to another delimiter): not judged part by part, it asks
-                if len(re.findall(r"(?<!<)<<(?!<)", line)) != len(git_guard._HEREDOC.findall(line)):
+                # every here-document opener must be one the reader recognises, whole (`<<EOF"X"` is the
+                # delimiter EOFX in bash): else its body may be attributed to another delimiter, and the
+                # command is not judged part by part (it asks). A trailing # comment is not looked at.
+                line = _without_comment(line)
+                openers = re.findall(r"(?<!<)<<(?!<)", line)
+                whole = [m for m in git_guard._HEREDOC.finditer(line)
+                         if m.end() == len(line) or line[m.end()] in " \t;&|<>()"]
+                if len(openers) != len(whole):
                     out.unreadable = True
                     return out
         for header, body in documents:
@@ -358,6 +363,20 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
         for place in dict.fromkeys(out.cwds or [scope.cwd]):
             _merge(out, parse(snippet, Scope(**{**scope.__dict__, "cwd": place}), depth + 1))
     return out
+
+
+def _without_comment(line: str) -> str:
+    """*line* up to an unquoted `#` that starts a word."""
+    quote = ""
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1] in " \t;&|("):
+            return line[:index]
+    return line
 
 
 SUBSTITUTION_LIMIT = 64  # more $( ) in one here-document than this: not judged part by part (it asks)
