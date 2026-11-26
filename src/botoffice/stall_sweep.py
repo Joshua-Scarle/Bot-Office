@@ -58,7 +58,7 @@ def _table(db: sqlite3.Connection) -> None:
     # one row per stall (its strike, and whether strike 1 really queued a turn); one row per queued wake
     db.execute("CREATE TABLE IF NOT EXISTS stall_sweeps (subject TEXT PRIMARY KEY, bot_id TEXT NOT NULL, "
                "marker TEXT NOT NULL, strike INTEGER NOT NULL, last_at TEXT NOT NULL, lead_id TEXT, "
-               "woke INTEGER NOT NULL DEFAULT 0, wake_job TEXT)")
+               "woke INTEGER NOT NULL DEFAULT 0, wake_job TEXT, lead_job TEXT, lead_retried INTEGER NOT NULL DEFAULT 0)")
     db.execute("CREATE TABLE IF NOT EXISTS stall_wakes (at TEXT NOT NULL, subject TEXT NOT NULL, bot_id TEXT NOT NULL, "
                "job_id TEXT)")
 
@@ -220,6 +220,14 @@ def _recheck(db: sqlite3.Connection, item: dict, cutoff: datetime, stamp: dateti
     return fresh if fresh is not None and fresh["subject"] == item["subject"] else None
 
 
+def _lead_turn_dropped(db: sqlite3.Connection, record: sqlite3.Row) -> bool:
+    """The lead's escalation turn was queued but cancelled before it ever started (once retried, never again)."""
+    if not record["lead_job"] or record["lead_retried"]:
+        return False
+    job = db.execute("SELECT status, started_at FROM jobs WHERE id=?", (record["lead_job"],)).fetchone()
+    return job is not None and job["status"] == "cancelled" and not job["started_at"]
+
+
 def _owner_prompt(item: dict, hours: float, age: float) -> tuple[str, str]:
     prompt = (
         f"Stall check from Bot-Office (an automatic, model-free sweep; not a message from the owner). "
@@ -322,7 +330,8 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
         return "skipped"
     record = db.execute("SELECT * FROM stall_sweeps WHERE subject=?", (item["subject"],)).fetchone()
     fresh = record is None or record["marker"] != item["marker"]
-    if not fresh and (record["strike"] >= 2 or record["last_at"] >= cutoff.isoformat()):
+    retry = not fresh and record["strike"] >= 2 and _lead_turn_dropped(db, record)
+    if not fresh and not retry and (record["strike"] >= 2 or record["last_at"] >= cutoff.isoformat()):
         return "skipped"  # this stall had both strikes (or was resolved), or its first is less than N h old
     if db.execute("SELECT COUNT(*) FROM stall_wakes WHERE at>=?",
                   ((stamp - timedelta(hours=1)).isoformat(),)).fetchone()[0] >= per_hour:
@@ -342,7 +351,7 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
                              "(the line above says why). The section lead hears about it next.")
         db.execute("INSERT INTO stall_sweeps (subject,bot_id,marker,strike,last_at,woke,wake_job) VALUES (?,?,?,1,?,?,?) "
                    "ON CONFLICT(subject) DO UPDATE SET marker=excluded.marker, strike=1, last_at=excluded.last_at, "
-                   "lead_id=NULL, woke=excluded.woke, wake_job=excluded.wake_job",
+                   "lead_id=NULL, woke=excluded.woke, wake_job=excluded.wake_job, lead_job=NULL, lead_retried=0",
                    (item["subject"], bot["id"], item["marker"], stamp.isoformat(), int(job_id is not None), job_id))
         return "woken" if job_id else "skipped"
     if item["kind"] == "job" and record["wake_job"]:
@@ -376,6 +385,8 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
             db.execute("UPDATE stall_sweeps SET strike=2, last_at=? WHERE subject=?", (stamp.isoformat(), item["subject"]))
             return "skipped"
         _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h, so Bot-Office told {lead['name']}.")
+        db.execute("UPDATE stall_sweeps SET lead_job=?, lead_retried=lead_retried+? WHERE subject=?",
+                   (told, int(retry), item["subject"]))
     db.execute("UPDATE stall_sweeps SET strike=2, last_at=?, lead_id=? WHERE subject=?",
                (stamp.isoformat(), lead["id"] if lead else None, item["subject"]))
     return "escalated" if told else "skipped"

@@ -112,6 +112,8 @@ def _live_lines(lines: list[str]) -> list[int]:
     out, fence = [], None
     for index, line in enumerate(lines):
         found = _FENCE.match(line)
+        if found and found.group(1)[0] == "`" and "`" in line.strip()[len(found.group(1)):]:
+            found = None  # a backtick fence's info string has no backticks: this line is text (CommonMark)
         if fence is None:
             if found:
                 fence = found.group(1)
@@ -148,8 +150,8 @@ def merge(memory: str, rule: dict) -> tuple[str, str]:
         if wanted and wanted == _text_of(existing):
             if not rule["id"]:
                 return memory, "present"
-            if _SYNCED_ID.match(existing):
-                continue  # another id's note with the same words: this id still gets its own note
+            if _SYNCED_TEXT.match(existing):
+                continue  # another rule's synced note (with or without an id): this id gets its own note
             if not existing.startswith(("- ", "* ", "+ ")):
                 continue  # a nested bullet belongs to its parent: never moved out, a note of its own is added
             # the same text written by hand: adopted as this rule's note (same words, now tracked by id),

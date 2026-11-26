@@ -694,3 +694,27 @@ def test_round8_chat_only_lead_nested_bullets_and_recreated_bot(tmp_path):
     second = store2.create_bot("Ada", "", "claude", None)
     assert rules_sync.run(store2, memory, folder)["files"][0]["added"] == 1
     assert "Rule A." in memory.read_bot(second.id)
+
+
+def test_round9_dropped_lead_turn_retried_once_and_backtick_text(tmp_path):
+    store, asg = _store(tmp_path)
+    owner = store.create_bot("BT Site Tester (BO)", "", "claude", None)
+    lead = store.create_bot("BT Lead (BO)", "", "claude", None)
+    _started_task(store, asg, owner, 9)
+    stall_sweep.sweep(store, asg, 3)
+    _finish_all(store, owner)
+    _age_sweeps(store, 4)
+    assert stall_sweep.sweep(store, asg, 3)["escalated"] == 1
+    with closing(store._connect()) as db:  # the lead's turn is cancelled before it starts
+        db.execute("UPDATE jobs SET status='cancelled' WHERE bot_id=? AND status='queued'", (str(lead.id),))
+    assert stall_sweep.sweep(store, asg, 3)["escalated"] == 1
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET status='cancelled' WHERE bot_id=? AND status='queued'", (str(lead.id),))
+    assert stall_sweep.sweep(store, asg, 3)["escalated"] == 0  # once only
+    assert len(_wake_jobs(store, lead)) == 2
+    rule = {"id": "g", "when": "2026-11-21", "source": "s", "text": "New", "moment": None}
+    assert rules_sync.merge("text ``` use `git` here\n", rule)[1] == "added"
+    keep = {"id": None, "when": "2026-11-21", "source": "s", "text": "Keep logs", "moment": None}
+    after, _ = rules_sync.merge("", keep)
+    after, what = rules_sync.merge(after, dict(keep, id="retention"))
+    assert what == "added" and after.count("Keep logs") == 2
