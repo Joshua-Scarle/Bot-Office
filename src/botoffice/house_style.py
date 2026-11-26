@@ -1,4 +1,4 @@
-"""How a bot's chat replies read (0.12.36): one house style for every engine, plus a light tidy-up.
+"""How a bot's chat replies read (0.12.37): one house style for every engine, plus a light tidy-up.
 
 ``HOUSE_STYLE`` is the shared block every provider gets: inline in each fresh-session prompt, a short
 reminder in each resumed turn, and as an appended system prompt where the CLI takes one (Claude's
@@ -30,7 +30,7 @@ recite everything you checked: the status line carries the evidence.
 - Put the answer first. No meta openers ("Here's a summary", "Great question", "Sure!") and no filler closings \
 ("Let me know if...", "Hope this helps").
 - No headers. No bold labels and no "Label: value" lines (not "**Status:** done", not "- **Tests:** pass"); \
-say it in a sentence: "It's live on 0.12.36 and the tests pass."
+say it in a sentence: "It's live on 0.12.37 and the tests pass."
 - Use a list only for genuinely parallel items (three or more of the same kind), with short plain bullets. \
 Use bold rarely, at most once, for the one thing they must not miss.
 - Links as markdown with short labels, like [the PR](https://example.com/pr/12); `code` spans only for \

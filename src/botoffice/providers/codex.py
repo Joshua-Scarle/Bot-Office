@@ -89,7 +89,7 @@ class CodexAdapter(CliAdapter):
             "-c", f"model_auto_compact_token_limit={compact_token_limit()}",
             "-c", f"compact_prompt={json.dumps(COMPACT_POLICY)}",
         ]
-        # 0.12.36: the chat house style as developer instructions, so it outranks Codex's own formatting habits
+        # 0.12.37: the chat house style as developer instructions, so it outranks Codex's own formatting habits
         style = (["-c", f"developer_instructions={json.dumps(house_style.HOUSE_STYLE, ensure_ascii=False)}"]
                  if job is not None and job.bot_id is not None else [])
         if session:

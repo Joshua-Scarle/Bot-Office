@@ -1935,7 +1935,7 @@ function agentGroupRow(group, bot) {
   wrap.append(open);
   return wrap;
 }
-/* 0.12.36: a bot's own words (its replies and progress notes) render as Markdown, like Grok Bot's chat;
+/* 0.12.37: a bot's own words (its replies and progress notes) render as Markdown, like Grok Bot's chat;
    the owner's messages and Bot-Office's notes stay exactly as typed */
 function usesMarkdown(m) { return m.role === "assistant" && !isAgentRow(m); }
 function fillBody(body, m, text) {
@@ -1943,7 +1943,7 @@ function fillBody(body, m, text) {
   body.classList.add("md-body");
   body.replaceChildren(renderMarkdown(text));
 }
-/* 0.12.36: the chat's Markdown (bot replies, progress notes, the bot-to-bot overlay), built from DOM nodes
+/* 0.12.37: the chat's Markdown (bot replies, progress notes, the bot-to-bot overlay), built from DOM nodes
    only (never parsed as HTML), so no HTML in a reply is ever interpreted. Bold, italics, strikethrough, inline
    code, fenced code, links (http, https and mailto only), bare URLs, headings (as a bold line), lists
    (nested, ordered), quotes, rules and short tables. Asterisk runs that open nothing are dropped, so a

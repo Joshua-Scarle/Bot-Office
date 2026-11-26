@@ -1111,7 +1111,7 @@ class Scheduler:
         from . import questions
         text, cards = questions.extract(text)
         if from_reply:
-            # 0.12.36: the chat copy loses a leading header, bold labels and a filler closing (house_style);
+            # 0.12.37: the chat copy loses a leading header, bold labels and a filler closing (house_style);
             # the job keeps the reply as written
             text = house_style.tidy_reply(text)
         # The chat message and the memory write are published together under the chat

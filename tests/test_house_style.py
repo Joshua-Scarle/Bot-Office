@@ -1,4 +1,4 @@
-"""0.12.36: one chat house style for every engine, and the light tidy-up of chat replies."""
+"""0.12.37: one chat house style for every engine, and the light tidy-up of chat replies."""
 from __future__ import annotations
 
 import json
@@ -21,7 +21,7 @@ H = {"Authorization": "Bearer test-token"}
 
 
 def test_leading_short_header_is_dropped():
-    assert tidy_reply("## Summary\n\nIt's live on 0.12.36.") == "It's live on 0.12.36."
+    assert tidy_reply("## Summary\n\nIt's live on 0.12.37.") == "It's live on 0.12.37."
     assert tidy_reply("# **Status**\nAll good.") == "All good."
 
 
@@ -127,7 +127,7 @@ def test_huge_header_is_fast():
 
 
 def test_plain_replies_are_unchanged():
-    for text in ("PONG", "It's live on 0.12.36 and the tests pass.", "- one\n- two\n- three", ""):
+    for text in ("PONG", "It's live on 0.12.37 and the tests pass.", "- one\n- two\n- three", ""):
         assert tidy_reply(text) == text
 
 

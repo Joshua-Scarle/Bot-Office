@@ -1,4 +1,4 @@
-"""0.12.36: bot replies render as safe Markdown in the chat (bot-office.html renderMarkdown)."""
+"""0.12.37: bot replies render as safe Markdown in the chat (bot-office.html renderMarkdown)."""
 from __future__ import annotations
 
 import json
@@ -65,8 +65,8 @@ def inner(html: str) -> str:
 
 
 def test_inline_bold_italic_code_strike():
-    [out] = render("It's **live** on *0.12.36*, see `bot-office.html` and ~~old~~ ***both***.")
-    assert inner(out) == ("<p>It's <strong>live</strong> on <em>0.12.36</em>, see <code>bot-office.html</code> and "
+    [out] = render("It's **live** on *0.12.37*, see `bot-office.html` and ~~old~~ ***both***.")
+    assert inner(out) == ("<p>It's <strong>live</strong> on <em>0.12.37</em>, see <code>bot-office.html</code> and "
                           "<del>old</del> <strong><em>both</em></strong>.</p>")
 
 

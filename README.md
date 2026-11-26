@@ -143,6 +143,15 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.37
+
+**Bot replies read like a chat, and their Markdown renders.**
+
+- **One house style for every engine** (`botoffice.house_style.HOUSE_STYLE`). Replies should be warm, plain prose with contractions, usually 1-2 sentences, with the answer first. They use no headers, bold labels or "Label: value" lines, lists only for parallel items, markdown links with short labels and code spans for identifiers. Every fresh-session prompt gets the full block, and each resumed turn gets a one-line reminder. Claude also gets it through `--append-system-prompt` and Codex through `-c developer_instructions=...` (bot turns only), so it outranks the CLIs' own formatting habits. Files, code and reports a bot writes keep their normal format.
+- **A light tidy-up of the chat copy** (`house_style.tidy_reply`, applied when the reply is published). It drops a generic leading header ("## Summary") on a short reply and unbolds `**Label:**` at the start of a line. It also drops a generic closing ("Let me know if you need anything else."). It never touches fenced, indented or inline code, and the job keeps the reply exactly as written (`GET /v1/jobs/{id}`).
+- **Markdown in the chat.** A bot's replies and progress notes now render bold, italics, strikethrough, inline and fenced code, links, nested lists, quotes, rules and short tables, like Grok Bot's chat. The renderer builds DOM nodes only, so HTML in a reply is shown as text and never interpreted. Links are clickable only for http, https and mailto. A stray `**` from a half-written bold is hidden. Lines over 4000 characters and tables over 20 columns stay plain text. Owner and Bot-Office messages are shown exactly as typed.
+- **Rollback.** No schema change. Check out the previous tag and restart.
+
 ## What changed in 0.12.35
 
 **Remote access through Cloudflare Tunnel and Cloudflare Access, with the token checked again inside Bot-Office.**

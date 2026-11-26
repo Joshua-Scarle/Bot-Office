@@ -104,7 +104,7 @@ class ClaudeAdapter(CliAdapter):
         if mcp:
             args += ["--mcp-config", json.dumps(mcp), "--allowedTools", *team.allowed_tools(job)]
         if job is not None and job.bot_id is not None:
-            # 0.12.36: the chat house style outranks Claude Code's own formatting habits (headers, bold labels)
+            # 0.12.37: the chat house style outranks Claude Code's own formatting habits (headers, bold labels)
             args += ["--append-system-prompt", house_style.HOUSE_STYLE]
         if session:
             args += ["--resume", session]
