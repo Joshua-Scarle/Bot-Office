@@ -49,6 +49,8 @@ CONFIG_ENV = "BOT_OFFICE_REMOTE_ACCESS_FILE"
 CONFIG_NAME = "remote_access.json"
 CONFIG_RECHECK_SECONDS = 5.0
 KEY_CACHE_SECONDS = 3600.0
+KEY_MAX_STALE_SECONDS = 24 * 3600.0   # cached signing keys are never used longer than this without a refresh
+MAX_PENDING_VERIFY = 16               # JWT checks waiting at once; more get 503 at once
 KEY_REFETCH_MIN_SECONDS = 60.0
 CLOCK_SKEW_SECONDS = 60
 MIN_RSA_BITS = 2048
@@ -137,6 +139,8 @@ class RemoteIdentity:
     identity: str      # lowercased email, or the service token's common name
     display_name: str
     role: str          # "owner" or "remote-client"
+    expires_at: float | None = field(default=None, compare=False)   # credential expiry: a stream ends then
+    via: str = field(default="jwt", compare=False)                   # "jwt" or "shared-key"
 
 
 @dataclass(frozen=True)
@@ -268,7 +272,7 @@ def check_shared_key(value: bytes, config: RemoteConfig, now: float) -> RemoteId
     name, expires_at = match
     if now >= expires_at:
         raise AccessDenied(f"key {name} has expired")
-    return RemoteIdentity("service", name, name, ROLE_CLIENT)
+    return RemoteIdentity("service", name, name, ROLE_CLIENT, expires_at, via="shared-key")
 
 
 class ConfigLoader:
@@ -392,11 +396,11 @@ class KeyCache:
                 inflight = self._inflight = threading.Event()
                 leader = True
             elif kid in self._keys or inflight is None:
-                return self._keys.get(kid)
+                return self._usable(kid)
         if not leader:
             inflight.wait(FETCH_TIMEOUT_SECONDS + 1)
             with self._lock:
-                return self._keys.get(kid)
+                return self._usable(kid)
         keys: dict[str, tuple[int, int]] | None = None
         try:
             keys = _parse_jwks(self._fetcher(self.url))
@@ -410,7 +414,14 @@ class KeyCache:
                 self._inflight = None
             inflight.set()
         with self._lock:
-            return self._keys.get(kid)
+            return self._usable(kid)
+
+    def _usable(self, kid: str) -> tuple[int, int] | None:
+        """A cached key, but never one older than KEY_MAX_STALE_SECONDS (a retired key stops working even
+        while the key endpoint is unreachable). Call with the lock held."""
+        if self._fetched_at is None or self._clock() - self._fetched_at > KEY_MAX_STALE_SECONDS:
+            return None
+        return self._keys.get(kid)
 
 def rsa_pkcs1_sha256_verify(n: int, e: int, signing_input: bytes, signature: bytes) -> bool:
     k = (n.bit_length() + 7) // 8
@@ -489,13 +500,13 @@ class AccessVerifier:
                 raise AccessDenied("bad email claim")
             who = email.strip().lower()
             if who in config.owners:
-                return RemoteIdentity("user", who, who, ROLE_OWNER)
+                return RemoteIdentity("user", who, who, ROLE_OWNER, float(claims["exp"]))
             raise AccessDenied("email is not an owner")
         common = claims.get("common_name")
         if isinstance(common, str) and common:
             entry = config.clients.get(common)
             if entry:
-                return RemoteIdentity("service", common, entry[0], entry[1])
+                return RemoteIdentity("service", common, entry[0], entry[1], float(claims["exp"]))
             raise AccessDenied("unknown service token")
         raise AccessDenied("no identity claim")
 
@@ -556,6 +567,7 @@ class RemoteAccessMiddleware:
             self.loader = ConfigLoader(lambda: config_path(settings), clock)
         self.verifier = AccessVerifier(fetcher, clock)
         self.clock = clock
+        self._pending_verify = 0   # touched only on the event loop thread
 
     async def __call__(self, scope, receive, send):
         kind = scope["type"]
@@ -597,8 +609,16 @@ class RemoteAccessMiddleware:
             if tokens:
                 if config.team_domain is None:
                     raise AccessDenied("Cloudflare Access is not set up")
-                identity = await asyncio.get_running_loop().run_in_executor(
-                    _VERIFY_POOL, self.verifier.verify, tokens[0].decode("latin-1"), config)
+                if self._pending_verify >= MAX_PENDING_VERIFY:
+                    log.warning("remote request refused: too many JWT checks waiting (%s %s)", method, path)
+                    await self._deny(kind, send, 503, "remote access busy")
+                    return
+                self._pending_verify += 1
+                try:
+                    identity = await asyncio.get_running_loop().run_in_executor(
+                        _VERIFY_POOL, self.verifier.verify, tokens[0].decode("latin-1"), config)
+                finally:
+                    self._pending_verify -= 1
             else:
                 identity = check_shared_key(keys[0], config, self.clock())
         except AccessDenied as exc:
@@ -631,11 +651,50 @@ class RemoteAccessMiddleware:
 
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
         scope = _without_credentials(scope)   # the app never sees the key, the Access JWT or a token secret
+        receive, send = self._bound_response(identity, receive, send)
         token = current_remote_identity.set(identity)
         try:
             await self.app(scope, receive, send)
         finally:
             current_remote_identity.reset(token)
+
+    def _still_allowed(self, identity: RemoteIdentity) -> bool:
+        if identity.expires_at is not None and identity.expires_at <= self.clock() - (
+                CLOCK_SKEW_SECONDS if identity.via == "jwt" else 0):
+            return False
+        result = self.loader.get()
+        if result.state != "ok" or result.config is None:
+            return False
+        config = result.config
+        if identity.kind == "user":
+            return identity.identity in config.owners
+        if identity.via == "shared-key":
+            return any(name == identity.identity and self.clock() < exp for name, exp in config.shared_keys.values())
+        entry = config.clients.get(identity.identity)
+        return bool(entry) and entry[1] == identity.role
+
+    def _bound_response(self, identity: RemoteIdentity, receive, send):
+        """0.12.35 review: a long response (a job's event stream) ends as soon as the credential expired or
+        was revoked; every body chunk re-checks (the config itself is re-read at most every 5 s)."""
+        state = {"ended": False}
+
+        async def bounded_send(message):
+            if state["ended"]:
+                return
+            if message.get("type") == "http.response.body" and message.get("more_body") \
+                    and not self._still_allowed(identity):
+                state["ended"] = True
+                log.warning("remote stream ended: access no longer valid (%s)", identity.display_name)
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                return
+            await send(message)
+
+        async def bounded_receive():
+            if state["ended"]:
+                return {"type": "http.disconnect"}
+            return await receive()
+
+        return bounded_receive, bounded_send
 
     @staticmethod
     async def _deny(kind: str, send, status: int, detail: str) -> None:

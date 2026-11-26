@@ -754,3 +754,74 @@ def test_jwks_cache_miss_waits_for_the_refresh_in_flight():
     follower.start()
     release.set(); leader.join(5); follower.join(5)
     assert out["a"] is not None and out["b"] is not None and len(calls) == 1
+
+
+# ---------------------------------------------------------------- 0.12.35 review round 5
+def test_cached_keys_expire_when_refresh_keeps_failing():
+    clock = Clock()
+    fetcher = Fetcher()
+    cache = ra.KeyCache(TEAM, fetcher, clock)
+    assert cache.get("k1") is not None
+    fetcher.fail = True
+    clock.t += ra.KEY_CACHE_SECONDS + 1
+    assert cache.get("k1") is not None            # stale but inside the maximum: still usable
+    clock.t += ra.KEY_MAX_STALE_SECONDS
+    assert cache.get("k1") is None                 # past the maximum stale life: fail closed
+
+
+def _stream(mw, headers, chunks_then):
+    """The app streams 3 chunks; between chunks ``chunks_then`` may change the world."""
+    sent = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        for i in range(3):
+            await send({"type": "http.response.body", "body": f"c{i}".encode(), "more_body": True})
+            chunks_then(i)
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    mw.app = app
+    scope = {"type": "http", "method": "GET", "path": "/v1/jobs/abc/events",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    return [m.get("body") for m in sent if m["type"] == "http.response.body"]
+
+
+def test_stream_ends_when_jwt_expires(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    def tick(i):
+        if i == 0:
+            clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1
+    bodies = _stream(mw, remote(sign(service_claims(exp=NOW + 600))), tick)
+    assert bodies == [b"c0", b""]
+
+
+def test_stream_ends_when_client_revoked(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    def tick(i):
+        if i == 1:
+            path.write_text(json.dumps({**CONFIG, "clients": {}}))
+            os.utime(path, ns=(1, 1_700_000_000_000_000_000))
+            clock.t += 6
+    bodies = _stream(mw, remote(sign(service_claims(exp=NOW + 6000))), tick)
+    assert bodies == [b"c0", b"c1", b""]
+
+
+def test_stream_unbounded_while_still_valid(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    bodies = _stream(mw, remote(sign(service_claims(exp=NOW + 6000))), lambda i: None)
+    assert bodies == [b"c0", b"c1", b"c2", b""]
+
+
+def test_too_many_pending_jwt_checks_get_503(tmp_path):
+    mw, probe, *_ = build(tmp_path)
+    mw._pending_verify = ra.MAX_PENDING_VERIFY
+    sent = run(mw, headers=remote(sign(user_claims())))
+    assert status(sent) == 503 and detail(sent) == "remote access busy"

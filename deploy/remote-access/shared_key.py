@@ -11,6 +11,7 @@ file into the Claude environment's network secret yourself, then delete the file
 Bot-Office re-reads remote_access.json within 5 seconds; no restart is needed.
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -68,7 +69,14 @@ def main() -> int:
     ap.add_argument("--name", default="claude-cloud")
     ap.add_argument("--days", type=float, default=7.0, help="key lifetime in days (default 7, max 30)")
     args = ap.parse_args()
+    # one shared_key.py at a time: a concurrent new and revoke can never bring a revoked key back
+    args.config.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.config.parent / ".remote_access.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return run(args)
 
+
+def run(args) -> int:
     cfg = load(args.config)
     keys = cfg.get("shared_keys", {})
 
