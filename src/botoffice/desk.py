@@ -16,6 +16,7 @@ DISPLAY = "DISPLAY=:1"
 TIMEOUT = 30
 USAGE = (
     "usage: desk [--slot SLOT] screenshot [outfile] | click X Y | type TEXT | key KEY"
+    "   (in a turn: your own desktop)"
     " | open URL | message BOT TEXT | attach FILE\n"
     "       desk grok send --to NAME --kind question|result|blocker|fyi --text TEXT"
     " [--thread ID] [--from NAME]\n"
@@ -56,6 +57,44 @@ def resolve_slot(explicit: str | None, environ: dict[str, str] | None = None) ->
     return slot
 
 
+OWNER_CONTROLLING = ("the owner is controlling this desktop right now; wait for the hand-back "
+                     "(desk screenshot and desk open still work)")
+OPEN_WAIT = 15.0
+
+
+def own_desktop(environ: dict[str, str], transport=None) -> tuple[str, bool] | None:
+    """Inside a turn: this bot's own desktop (started on demand by the controller) and whether the owner is
+    controlling it. None when per-bot desktops are off (then the leased pool desktop is used)."""
+    from . import grok_bridge
+
+    send = transport or grok_bridge._transport
+    status, data = send(grok_bridge._api_url(environ) + "/v1/agent/desktop", {}, environ["BOT_OFFICE_AGENT_TOKEN"])
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if status == 409 and detail == "per-bot desktops are off":
+        return None
+    if status != 200:
+        raise DeskError(detail if isinstance(detail, str) else f"no desktop (Bot-Office API HTTP {status})")
+    name = data.get("name")
+    if not isinstance(name, str) or not DESKTOP_NAME.fullmatch(name):
+        raise DeskError("the controller answered with an invalid desktop name")
+    return name, bool(data.get("owner_controlling"))
+
+
+def pick_desktop(explicit: str | None, environ: dict[str, str], transport=None) -> tuple[str, bool]:
+    """(desktop, owner_controlling). In a turn without --slot (or with --slot naming the bot's own desktop)
+    the bot's own desktop; --slot <leased pool desktop> and operator shells keep the old rules."""
+    in_turn = bool(environ.get("BOT_OFFICE_JOB_ID") and environ.get("BOT_OFFICE_AGENT_TOKEN"))
+    leased = environ.get("BOT_OFFICE_SLOT") or environ.get("AGENTDESK_SLOT") or ""
+    if in_turn and not (explicit and explicit == leased):
+        own = own_desktop(environ, transport)
+        if own is not None:
+            if explicit and explicit != own[0]:
+                raise DeskError(f"your own desktop is {own[0]}; --slot {explicit} is not yours"
+                                + (f" (this turn also leased {leased})" if leased else ""))
+            return own
+    return resolve_slot(explicit, environ), False
+
+
 def _exec(slot: str, *command: str, detach: bool = False) -> list[str]:
     return ["podman", "exec", *(["-d"] if detach else []), slot, "env", DISPLAY, *command]
 
@@ -80,6 +119,25 @@ def build_commands(slot: str, command: str, args: list[str]) -> list[list[str]]:
             raise DeskError("only http and https URLs are allowed")
         return [_exec(slot, "epiphany", args[0], detach=True)]
     raise DeskError(f"unknown command {command!r}")
+
+
+def wait_for_browser(slot: str, timeout: float = OPEN_WAIT, run=subprocess.run, sleep=None) -> bool:
+    """After ``desk open``: wait until a browser window is visible (a following screenshot shows it)."""
+    import time
+
+    sleep = sleep or time.sleep
+    deadline = time.monotonic() + timeout
+    probe = _exec(slot, "xdotool", "search", "--onlyvisible", "--class", "epiphany")
+    while True:
+        try:
+            if run(probe, capture_output=True, timeout=TIMEOUT, check=False).returncode == 0:
+                sleep(2.0)   # the window is up; give the first paint a moment
+                return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        sleep(0.5)
 
 
 def screenshot_commands(slot: str, dest: Path, tmp_name: str) -> list[list[str]]:
@@ -211,7 +269,11 @@ def main(argv: list[str] | None = None) -> int:
             if command == "grok":
                 return grok_bridge.desk_grok(rest, data_dir=data_dir)
             return grok_bridge.desk_inbox(rest, data_dir=data_dir)
-        slot = resolve_slot(slot_arg)
+        if command not in ("screenshot", "click", "type", "key", "open"):
+            raise DeskError(f"unknown command {command!r}")
+        slot, controlling = pick_desktop(slot_arg, dict(os.environ))
+        if controlling and command in ("click", "type", "key"):
+            raise DeskError(OWNER_CONTROLLING)
         if command == "screenshot":
             if len(rest) > 1:
                 raise DeskError("screenshot takes at most one outfile")
@@ -222,9 +284,13 @@ def main(argv: list[str] | None = None) -> int:
                 _run(commands[1])
             finally:
                 subprocess.run(commands[2], capture_output=True, timeout=TIMEOUT, check=False)
+            print(f"Screenshot of {slot} saved to {dest}")
         else:
             for argv_ in build_commands(slot, command, rest):
                 _run(argv_)
+            if command == "open":
+                print(f"Opened on {slot}." if wait_for_browser(slot) else
+                      f"Asked {slot} to open the page; the browser window is not up yet.")
     except (DeskError, subprocess.SubprocessError, OSError) as exc:
         print(f"desk: {exc}", file=sys.stderr)
         return 1

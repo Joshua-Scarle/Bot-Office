@@ -1,0 +1,233 @@
+import asyncio
+import json
+import uuid
+
+import pytest
+
+from botoffice import bot_desktops as bd
+from botoffice.config import Settings
+
+BOT_A = str(uuid.UUID(int=1))
+BOT_B = str(uuid.UUID(int=2))
+BOT_C = str(uuid.UUID(int=3))
+
+
+class FakePodman:
+    """Just enough podman: ps -a json, run, start, stop."""
+
+    def __init__(self):
+        self.containers = {}   # name -> {"running": bool, "labels": {}, "ports": [...]}
+        self.calls = []
+        self.fail = set()
+
+    def add(self, name, running=True, labels=None, host_ip="127.0.0.1"):
+        self.containers[name] = {"running": running, "labels": labels or {},
+                                 "ports": [{"host_ip": host_ip, "host_port": 5900, "container_port": 5900}]}
+
+    async def __call__(self, argv, timeout):
+        self.calls.append(argv)
+        verb = argv[0]
+        if verb in self.fail:
+            return 1, b"", b"boom"
+        if verb == "ps":
+            out = [{"Names": [name], "State": "running" if c["running"] else "exited", "Labels": c["labels"],
+                    "Ports": c["ports"]} for name, c in self.containers.items()]
+            return 0, json.dumps(out).encode(), b""
+        if verb == "run":
+            name = argv[argv.index("--name") + 1]
+            labels = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "--label")
+            publish = argv[argv.index("--publish") + 1]
+            self.add(name, True, labels, publish.split(":")[0])
+            return 0, b"id\n", b""
+        if verb == "start":
+            self.containers[argv[1]]["running"] = True
+            return 0, b"", b""
+        if verb == "stop":
+            self.containers[argv[-1]]["running"] = False
+            return 0, b"", b""
+        raise AssertionError(argv)
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+async def _ready(port):
+    return True
+
+
+def make(tmp_path, busy=(), **over):
+    settings = Settings(data_dir=tmp_path / "data", token="t", **over)
+    podman = FakePodman()
+    clock = Clock()
+    busy_set = set(busy)
+    manager = bd.DesktopManager(settings, busy_bots=lambda: set(busy_set), runner=podman, clock=clock,
+                                ready=_ready, registry_path=tmp_path / "desktops.json")
+    return manager, podman, clock, busy_set
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def test_first_use_creates_a_locked_down_desktop(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    name = run(manager.ensure(BOT_A))
+    assert name == "desktop-10"
+    argv = next(a for a in podman.calls if a[0] == "run")
+    joined = " ".join(argv)
+    for flag in ("--cap-drop ALL", "--security-opt no-new-privileges", "--memory 1536m", "--cpus 1.5",
+                 "--pids-limit 1024", "--publish 127.0.0.1:5910:5900", "--restart no", "--init",
+                 f"--volume bo-desktop-home-{BOT_A}:/root", f"--label bot-office.bot-id={BOT_A}",
+                 "--label bot-office.kind=per-bot", "localhost/light-desktop:v1"):
+        assert flag in joined, flag
+    assert "--privileged" not in argv and "--network" not in argv and "host" not in argv
+    assert "-nolisten tcp" in argv[-1]
+
+
+def test_mapping_is_stable_and_persisted(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    assert run(manager.ensure(BOT_A)) == "desktop-10"
+    assert run(manager.ensure(BOT_B)) == "desktop-11"
+    assert run(manager.ensure(BOT_A)) == "desktop-10"
+    assert sum(1 for a in podman.calls if a[0] == "run") == 2
+    again = bd.Registry(tmp_path / "desktops.json")
+    assert again.number(BOT_A) == 10 and again.number(BOT_B) == 11
+    assert again.bot("desktop-11") == BOT_B and again.bot("desktop-1") is None
+    assert oct((tmp_path / "desktops.json").stat().st_mode & 0o777) == "0o600"
+
+
+def test_stopped_desktop_is_started_not_recreated(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    run(manager.ensure(BOT_A))
+    podman.containers["desktop-10"]["running"] = False
+    assert run(manager.ensure(BOT_A)) == "desktop-10"
+    assert podman.calls[-1] == ["start", "desktop-10"]
+    assert sum(1 for a in podman.calls if a[0] == "run") == 1
+
+
+def test_foreign_containers_are_skipped_and_never_touched(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    podman.add("desktop-10")                                   # hand-made, no labels
+    podman.add("desktop-11", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_B})  # another bot's
+    assert run(manager.ensure(BOT_A)) == "desktop-12"
+    assert not any(a[0] in ("stop", "start") and a[-1] in ("desktop-10", "desktop-11") for a in podman.calls)
+
+
+def test_container_with_public_publish_is_refused(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    run(manager.ensure(BOT_A))
+    podman.containers["desktop-10"]["ports"][0]["host_ip"] = "0.0.0.0"
+    with pytest.raises(bd.DesktopError, match="127.0.0.1"):
+        run(manager.ensure(BOT_A))
+
+
+def test_range_exhausted(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    for n in range(bd.FIRST, bd.LAST + 1):
+        podman.add(f"desktop-{n}", running=False)
+    with pytest.raises(bd.DesktopError, match="no free desktop number"):
+        run(manager.ensure(BOT_A))
+
+
+def test_pool_mode_refuses(tmp_path):
+    manager, *_ = make(tmp_path, desktop_mode="pool")
+    with pytest.raises(bd.DesktopError, match="off"):
+        run(manager.ensure(BOT_A))
+
+
+def test_cap_stops_the_least_recently_used_idle_desktop(tmp_path):
+    manager, podman, clock, busy = make(tmp_path, desktop_max_running=2)
+    run(manager.ensure(BOT_A))
+    clock.t += 10
+    run(manager.ensure(BOT_B))
+    clock.t += 10
+    assert run(manager.ensure(BOT_C)) == "desktop-12"
+    assert ["stop", "--time", "10", "desktop-10"] in podman.calls     # A was used least recently
+    assert podman.containers["desktop-11"]["running"]
+
+
+def test_cap_never_stops_a_desktop_in_use(tmp_path):
+    manager, podman, clock, busy = make(tmp_path, desktop_max_running=2)
+    run(manager.ensure(BOT_A))
+    run(manager.ensure(BOT_B))
+    busy.add(BOT_A)                                   # A's bot has a running turn
+    with manager.viewing("desktop-11", "view"):       # the owner watches B
+        with pytest.raises(bd.DesktopError, match="all 2 desktops are in use"):
+            run(manager.ensure(BOT_C))
+    assert not any(a[0] == "stop" for a in podman.calls)
+
+
+def test_idle_reaper(tmp_path):
+    manager, podman, clock, busy = make(tmp_path, desktop_idle_minutes=20)
+    run(manager.ensure(BOT_A))
+    run(manager.ensure(BOT_B))
+    run(manager.ensure(BOT_C))
+    clock.t += 19 * 60
+    assert run(manager.reap_idle()) == []
+    clock.t += 2 * 60
+    busy.add(BOT_A)                       # a running turn keeps A
+    with manager.viewing("desktop-11", "view"):   # a viewer keeps B
+        assert run(manager.reap_idle()) == ["desktop-12"]
+    assert not podman.containers["desktop-12"]["running"]
+    clock.t += 21 * 60
+    busy.clear()
+    # B's viewer left at the old time + touch on exit; A is now idle long enough too
+    assert run(manager.reap_idle()) == ["desktop-10", "desktop-11"]
+    # stopped desktops start again with their state on the next use
+    assert run(manager.ensure(BOT_C)) == "desktop-12" and podman.calls[-1] == ["start", "desktop-12"]
+
+
+def test_reaper_grace_after_restart_and_disabled(tmp_path):
+    manager, podman, clock, _ = make(tmp_path)
+    podman.add("desktop-10", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_A})
+    manager.registry.allocate(BOT_A, {})
+    # a fresh controller does not know when desktop-10 was last used: it counts from now
+    assert run(manager.reap_idle()) == []
+    clock.t += 20 * 60
+    assert run(manager.reap_idle()) == ["desktop-10"]
+    manager, podman, clock, _ = make(tmp_path / "x", desktop_idle_minutes=0)
+    run(manager.ensure(BOT_A))
+    clock.t += 10 ** 6
+    assert run(manager.reap_idle()) == []
+
+
+def test_reaper_never_stops_pool_or_foreign_desktops(tmp_path):
+    manager, podman, clock, _ = make(tmp_path)
+    podman.add("desktop-1")
+    podman.add("desktop-13", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_B})  # labelled, not ours
+    clock.t += 10 ** 6
+    assert run(manager.reap_idle()) == []
+    assert not any(a[0] == "stop" for a in podman.calls)
+
+
+def test_controlling_flag(tmp_path):
+    manager, *_ = make(tmp_path)
+    assert not manager.owner_controlling("desktop-10")
+    with manager.viewing("desktop-10", "control"):
+        assert manager.owner_controlling("desktop-10")
+    with manager.viewing("desktop-10", "view"):
+        assert not manager.owner_controlling("desktop-10")
+    assert manager.viewers["desktop-10"] == 0
+
+
+def test_names_and_volume():
+    assert bd.number_of("desktop-10") == 10 and bd.number_of("desktop-99") == 99
+    for name in ("desktop-1", "desktop-9", "desktop-100", "desktop-010", "desk-10", "desktop-1x"):
+        assert bd.number_of(name) is None
+    with pytest.raises(ValueError):
+        bd.volume_name("../etc")
+    with pytest.raises(ValueError):
+        bd.run_argv("desktop-1", BOT_A, Settings(token="t"))
+
+
+def test_corrupt_registry_starts_empty(tmp_path):
+    path = tmp_path / "desktops.json"
+    path.write_text("{not json")
+    assert bd.Registry(path).items() == []
+    path.write_text(json.dumps({"bots": {BOT_A: 10, BOT_B: 10, "nope": 11, BOT_C: 5}}))
+    assert bd.Registry(path).items() == [(BOT_A, 10)]
