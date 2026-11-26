@@ -656,3 +656,11 @@ def test_round6_long_fences_and_retried_lead():
     memory = ("````\n```\n- RULE (2026-11-20; source: s) [rule:x] Old example\n" + rules_sync.SECTION + "\n````\n")
     after, what = rules_sync.merge(memory, rule)
     assert what == "added" and "Old example" in after and after.rstrip().endswith("[rule:x] New")
+
+
+def test_round7_unclosed_fence_and_indented_code(tmp_path):
+    rule = {"id": "k", "when": "2026-11-21", "source": "s", "text": "Keep staging read-only", "moment": None}
+    with pytest.raises(ValueError, match="unclosed code block"):
+        rules_sync.merge("notes\n```\n- x\n", rule)
+    after, what = rules_sync.merge("Example:\n\n    - Keep staging read-only\n", rule)
+    assert what == "added" and "    - Keep staging read-only" in after

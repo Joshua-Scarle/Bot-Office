@@ -65,7 +65,7 @@ _PREFIX = re.compile(r"^\s*(?:[-*+]\s+)?(?:RULE\s*\([^)]{0,200}\)\s*(?:\[rule:[\
 
 
 _SYNCED_TEXT = re.compile(r"^- RULE \(.*?\) \[rule:(?:-|[A-Za-z0-9][\w.-]{0,63})\] (?P<text>.*)$")
-_NOTE_LINE = re.compile(r"^\s*[-*+]\s+\S")  # a bullet note: the only kind of line a rule is compared with
+_NOTE_LINE = re.compile(r"^ {0,3}[-*+]\s+\S")  # a bullet note (4+ spaces would be code): the only lines compared
 
 
 def _text_of(line: str) -> str:
@@ -120,6 +120,8 @@ def _live_lines(lines: list[str]) -> list[int]:
         elif found and found.group(1)[0] == fence[0] and len(found.group(1)) >= len(fence) \
                 and not line.strip()[len(found.group(1)):].strip():
             fence = None
+    if fence is not None:
+        raise ValueError("memory.md ends inside an unclosed code block; close it, then the rules sync again")
     return out
 
 

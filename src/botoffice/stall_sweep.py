@@ -169,8 +169,10 @@ def _task_item(row: sqlite3.Row) -> dict:
 
 def _job_item(db: sqlite3.Connection, bot_id: str, cutoff: datetime, stamp: datetime) -> dict | None:
     """The bot's latest turn (not one of the sweep's own wake-ups), if it is a stall."""
-    job = db.execute(f"SELECT * FROM jobs WHERE bot_id=? AND {_OWN_TURN} ORDER BY created_at DESC, id DESC LIMIT 1",
-                     (bot_id,)).fetchone()
+    # latest by when it ended (a priority turn can run before an older queued one); queued or running turns
+    # make the bot busy anyway
+    job = db.execute(f"SELECT * FROM jobs WHERE bot_id=? AND {_OWN_TURN} "
+                     "ORDER BY COALESCE(finished_at, started_at, created_at) DESC, id DESC LIMIT 1", (bot_id,)).fetchone()
     if job is None or job["status"] not in SWEPT_JOB_STATUSES:
         return None
     ended = job["finished_at"] or job["created_at"]
