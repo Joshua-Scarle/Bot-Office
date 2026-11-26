@@ -62,14 +62,19 @@ OWNER_CONTROLLING = ("the owner is controlling this desktop right now; wait for 
 OPEN_WAIT = 30.0
 
 
-def own_desktop(environ: dict[str, str], transport=None) -> tuple[str, bool] | None:
-    """Inside a turn: this bot's own desktop (started on demand by the controller) and whether the owner is
-    controlling it. None when per-bot desktops are off (then the leased pool desktop is used)."""
+def _agent_desktop(environ: dict[str, str], body: dict, transport=None) -> tuple[int, dict]:
     from . import grok_bridge
 
     send = transport or grok_bridge._transport
-    status, data = send(grok_bridge._api_url(environ) + "/v1/agent/desktop", {}, environ["BOT_OFFICE_AGENT_TOKEN"])
-    detail = data.get("detail") if isinstance(data, dict) else None
+    status, data = send(grok_bridge._api_url(environ) + "/v1/agent/desktop", body, environ["BOT_OFFICE_AGENT_TOKEN"])
+    return status, data if isinstance(data, dict) else {}
+
+
+def own_desktop(environ: dict[str, str], transport=None) -> tuple[str, bool] | None:
+    """Inside a turn: this bot's own desktop (started on demand by the controller) and whether the owner is
+    controlling it. None when per-bot desktops are off (then the leased pool desktop is used)."""
+    status, data = _agent_desktop(environ, {}, transport)
+    detail = data.get("detail")
     if status == 409 and detail == "per-bot desktops are off":
         return None
     if status != 200:
@@ -80,19 +85,31 @@ def own_desktop(environ: dict[str, str], transport=None) -> tuple[str, bool] | N
     return name, bool(data.get("owner_controlling"))
 
 
+def leased_controlling(environ: dict[str, str], slot: str, transport=None) -> bool:
+    """Whether the owner is controlling the pool desktop this turn leased (asked, never assumed)."""
+    status, data = _agent_desktop(environ, {"slot": slot}, transport)
+    if status != 200:
+        detail = data.get("detail")
+        raise DeskError(detail if isinstance(detail, str) else f"desktop state unavailable (HTTP {status})")
+    return bool(data.get("owner_controlling"))
+
+
 def pick_desktop(explicit: str | None, environ: dict[str, str], transport=None) -> tuple[str, bool]:
     """(desktop, owner_controlling). In a turn without --slot (or with --slot naming the bot's own desktop)
     the bot's own desktop; --slot <leased pool desktop> and operator shells keep the old rules."""
     in_turn = bool(environ.get("BOT_OFFICE_JOB_ID") and environ.get("BOT_OFFICE_AGENT_TOKEN"))
     leased = environ.get("BOT_OFFICE_SLOT") or environ.get("AGENTDESK_SLOT") or ""
-    if in_turn and not (explicit and explicit == leased):
+    if not in_turn:
+        return resolve_slot(explicit, environ), False
+    if not (explicit and explicit == leased):
         own = own_desktop(environ, transport)
         if own is not None:
             if explicit and explicit != own[0]:
                 raise DeskError(f"your own desktop is {own[0]}; --slot {explicit} is not yours"
                                 + (f" (this turn also leased {leased})" if leased else ""))
             return own
-    return resolve_slot(explicit, environ), False
+    slot = resolve_slot(explicit, environ)   # inside a turn: only the leased pool desktop
+    return slot, leased_controlling(environ, slot, transport)
 
 
 def _exec(slot: str, *command: str, detach: bool = False) -> list[str]:

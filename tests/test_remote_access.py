@@ -1227,3 +1227,45 @@ def test_a_frame_stalled_at_the_cut_is_never_delivered(tmp_path):
     assert state.get("sending")
     assert not any(m.get("bytes") == b"late" for m in delivered)
     assert delivered[-1] == {"type": "websocket.close", "code": 1008}
+
+
+def test_cut_from_inside_the_app_still_sends_the_close_frame(tmp_path):
+    clock = Clock()
+    path = write_config(tmp_path)
+    sent = []
+
+    async def app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+
+        async def reader():
+            while (await receive())["type"] != "websocket.disconnect":
+                pass
+        child = asyncio.ensure_future(reader())   # the cut is detected in this child, like the VNC proxy
+        try:
+            await asyncio.sleep(30)
+        finally:
+            child.cancel()
+
+    mw = ra.RemoteAccessMiddleware(app, ra.ConfigLoader(lambda: path, clock), fetcher=Fetcher(), clock=clock)
+    mw.ws_recheck = 60.0                           # the watchdog is not what notices it
+    token = sign(user_claims(exp=NOW + 100))
+
+    async def drive():
+        scope = {"type": "websocket", "path": VNC_PATH,
+                 "headers": [(k.lower().encode(), v.encode()) for k, v in owner_ws(token).items()]}
+        steps = iter([{"type": "websocket.connect"}, {"type": "websocket.receive", "bytes": b"x"}])
+
+        async def receive():
+            message = next(steps, None)
+            if message is None:
+                await asyncio.sleep(30)
+            if message["type"] == "websocket.receive":
+                clock.t = NOW + 200
+            return message
+
+        async def send(message):
+            sent.append(message)
+        await asyncio.wait_for(mw(scope, receive, send), 6)
+    asyncio.run(drive())
+    assert sent[-1] == {"type": "websocket.close", "code": 1008}

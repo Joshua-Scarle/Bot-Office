@@ -349,3 +349,13 @@ def test_a_container_replaced_since_the_listing_is_never_stopped(tmp_path):
     assert not run(manager.stop("desktop-10", "test"))     # the old id is gone: nothing is stopped
     assert podman.containers["desktop-10"]["running"]
     assert not run(manager.stop("desktop-3", "test"))      # never anything outside the managed set
+
+
+# ---------------------------------------------------------------- review round 6
+def test_pool_mode_reaper_leaves_per_bot_desktops_alone(tmp_path):
+    manager, podman, clock, _ = make(tmp_path)
+    run(manager.ensure(BOT_A))
+    manager.settings = Settings(data_dir=tmp_path / "data", token="t", desktop_mode="pool")
+    clock.t += 10 ** 6
+    assert run(manager.reap_idle()) == []
+    assert podman.containers["desktop-10"]["running"]

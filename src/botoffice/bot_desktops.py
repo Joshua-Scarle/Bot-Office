@@ -425,7 +425,7 @@ class DesktopManager:
 
     async def reap_idle(self) -> list[str]:
         idle_seconds = self.settings.desktop_idle_minutes * 60
-        if idle_seconds <= 0:
+        if idle_seconds <= 0 or not self.enabled:   # pool mode (rollback) leaves per-bot desktops alone
             return []
         async with self._lock:
             try:

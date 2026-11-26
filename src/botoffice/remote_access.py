@@ -768,23 +768,29 @@ class RemoteAccessMiddleware:
             return message
 
         app_task: list[asyncio.Future] = []
+        closing: list[asyncio.Future] = []
+
+        async def send_close() -> None:
+            await asyncio.sleep(0)   # an abandoned in-flight frame observes the cut first
+            with contextlib.suppress(OSError, RuntimeError, TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(send({"type": "websocket.close", "code": 1008}), WEBSOCKET_CLOSE_SECONDS)
 
         async def cut(why: str) -> None:
-            """Stop forwarding at once, cancel the app, then send the close frame (bounded)."""
+            """Stop forwarding at once, send the close frame from a task of its own (cancelling the app, even
+            from inside one of its own tasks, can never swallow it), then cancel the app."""
             if state["cut"]:
                 return
             state["cut"] = True
             cut_event.set()
             log.warning("remote websocket closed: %s (%s)", why, identity.display_name)
-            current = asyncio.current_task()
-            for task in app_task:
-                if task is not current and not task.done():
-                    task.cancel()
-            await asyncio.sleep(0)   # let an abandoned in-flight frame observe the cut first
             if not state["closed"]:
                 state["closed"] = True
-                with contextlib.suppress(OSError, RuntimeError, TimeoutError, asyncio.CancelledError):
-                    await asyncio.wait_for(send({"type": "websocket.close", "code": 1008}), WEBSOCKET_CLOSE_SECONDS)
+                closer = asyncio.ensure_future(send_close())
+                closer.add_done_callback(_observe)
+                closing.append(closer)
+            for task in app_task:
+                if not task.done():
+                    task.cancel()
 
         token = current_remote_identity.set(identity)
         try:
@@ -803,12 +809,15 @@ class RemoteAccessMiddleware:
                     break
         except asyncio.CancelledError:
             state["cut"] = True
+            cut_event.set()
             task.cancel()
             task.add_done_callback(_observe)
             raise
         if not task.done():
             task.cancel()
             await asyncio.wait({task}, timeout=1.0)
+        if closing:
+            await asyncio.wait(closing, timeout=WEBSOCKET_CLOSE_SECONDS + 1.0)
         if not task.done():
             task.add_done_callback(_observe)   # still unwinding: its outcome is logged when it ends
             return

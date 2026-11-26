@@ -528,6 +528,11 @@ def _tail(path: str | None, limit: int = 8192) -> str:
         return ""
 
 
+
+class AgentDesktopRequest(BaseModel):
+    """POST /v1/agent/desktop: empty for the bot's own desktop, or the turn's leased pool slot."""
+    slot: str | None = Field(default=None, max_length=16)
+
 def create_app(
     settings: Settings | None = None,
     providers: dict[str, ProviderAdapter] | None = None,
@@ -1771,9 +1776,15 @@ def create_app(
         return job
 
     @app.post("/v1/agent/desktop")
-    async def agent_desktop(job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+    async def agent_desktop(body: AgentDesktopRequest | None = None,
+                            job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
         """remote-desktop: the calling bot's own desktop (from the token, never an argument), started
-        on demand. ``desk`` uses it when it runs inside a turn without --slot."""
+        on demand. ``desk`` uses it when it runs inside a turn without --slot. With ``slot`` (only the
+        pool desktop this turn leased) it just reports whether the owner is controlling that one."""
+        if body is not None and body.slot is not None:
+            if not job.slot or body.slot != job.slot:
+                raise HTTPException(status_code=403, detail="that desktop is not leased to this turn")
+            return {"name": job.slot, "owner_controlling": bot_desks.owner_controlling(job.slot)}
         if not bot_desks.enabled:
             raise HTTPException(status_code=409, detail="per-bot desktops are off")
         try:

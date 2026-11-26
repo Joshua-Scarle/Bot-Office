@@ -27,10 +27,14 @@ def test_turn_uses_its_own_desktop():
     assert desk.pick_desktop("desktop-12", TURN, transport) == ("desktop-12", False)
 
 
-def test_leased_pool_slot_still_works_without_asking():
-    transport, calls = answer(500, {})
-    assert desk.pick_desktop("desktop-1", TURN, transport) == ("desktop-1", False)
-    assert calls == []
+def test_leased_pool_slot_asks_only_for_its_control_state():
+    seen = []
+
+    def transport(url, payload, token):
+        seen.append(payload)
+        return 200, {"name": "desktop-1", "owner_controlling": True}
+    assert desk.pick_desktop("desktop-1", TURN, transport) == ("desktop-1", True)
+    assert seen == [{"slot": "desktop-1"}]          # never starts the bot's own desktop for this
 
 
 def test_another_desktop_is_refused():
@@ -42,8 +46,12 @@ def test_another_desktop_is_refused():
 
 
 def test_pool_mode_falls_back_to_the_leased_slot():
-    transport, _ = answer(409, {"detail": "per-bot desktops are off"})
+    def transport(url, payload, token):
+        if payload.get("slot"):
+            return 200, {"name": "desktop-1", "owner_controlling": False}
+        return 409, {"detail": "per-bot desktops are off"}
     assert desk.pick_desktop(None, TURN, transport) == ("desktop-1", False)
+    transport, _ = answer(409, {"detail": "per-bot desktops are off"})
     no_lease = {k: v for k, v in TURN.items() if k != "BOT_OFFICE_SLOT"}
     with pytest.raises(desk.DeskError, match="No desktop is free"):
         desk.pick_desktop(None, no_lease, transport)
@@ -167,6 +175,19 @@ def test_owner_start_listing_and_hand_back(settings, tmp_path, monkeypatch):
             assert refused.status_code == 409 and "release control" in refused.json()["detail"]
         handed = d.client.post("/v1/desktops/desktop-10/hand-back", headers=MASTER)
         assert handed.status_code == 200 and handed.json()["bot_id"] == str(a.id)
+
+
+def test_agent_reports_control_of_the_leased_slot_only(settings, tmp_path):
+    with Desk(settings) as d:
+        manager = fake_manager(d, tmp_path)
+        a = d.bot("A")
+        job, ha = run_job(d.store, a)          # leased desktop-1
+        assert d.client.post("/v1/agent/desktop", headers=ha, json={"slot": "desktop-2"}).status_code == 403
+        r = d.client.post("/v1/agent/desktop", headers=ha, json={"slot": job.slot})
+        assert r.json() == {"name": job.slot, "owner_controlling": False}
+        with manager.viewing(job.slot, "control"):
+            assert d.client.post("/v1/agent/desktop", headers=ha, json={"slot": job.slot}).json()["owner_controlling"]
+        assert not any(a[0] == "run" for a in manager.runner.calls)
 
 
 def test_pool_mode_agent_endpoint_says_off(tmp_path):
