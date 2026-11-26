@@ -206,7 +206,7 @@ def test_public_pr_review_line_still_asks(office):
     ("desk type 'hello abc123'", "ask"),
     ("desk type 'hello abc123!'", "ask"),
     ("desk type 'my login hunter/2'", "ask"),
-    ("desk type 'see /home/user/report.pdf and example.com'", "allow"),
+    ("desk type 'see /srv/files/report.pdf and example.com'", "allow"),
     ("desk type ghp_abcdefghijklmnopqrstu", "ask"),
     ("cat pw | xargs desk type", "ask"),
     ("cat pw | xargs -I{} desk type {}", "ask"),
