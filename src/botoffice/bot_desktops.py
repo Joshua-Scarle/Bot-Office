@@ -389,11 +389,15 @@ class DesktopManager:
             await asyncio.sleep(0.5)
         return name
 
-    async def refresh(self) -> None:
-        """Reconcile the registry with container labels (listing and Start right after a lost registry)."""
+    async def refresh(self) -> bool:
+        """Reconcile the registry with container labels (listing and Start right after a lost registry).
+        False when the live listing failed (callers that verify ownership must then refuse)."""
         async with self._lock:
-            with contextlib.suppress(DesktopError):
+            try:
                 await self.containers()   # reconciles the registry as a side effect
+            except DesktopError:
+                return False
+            return True
 
     async def start(self, name: str) -> str:
         """Owner "Connect" on a stopped per-bot desktop."""

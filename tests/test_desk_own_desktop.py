@@ -183,6 +183,9 @@ def test_owner_start_listing_and_hand_back(settings, tmp_path, monkeypatch):
         manager.runner.containers["desktop-10"]["labels"] = {bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: str(a.id)}
         run_refresh = d.client.get("/v1/desktops", headers=MASTER)   # relabelled: mapped again
         assert run_refresh.status_code == 200
+        manager.runner.fail.add("ps")       # no live listing: a bot-bound ticket is refused, not trusted
+        assert d.client.post(f"/v1/desktops/desktop-10/ticket?bot={a.id}", headers=MASTER).status_code == 503
+        manager.runner.fail.discard("ps")
         handed = d.client.post(f"/v1/desktops/desktop-10/hand-back?bot={a.id}", headers=MASTER)
         assert handed.status_code == 200 and handed.json()["bot_id"] == str(a.id)
 

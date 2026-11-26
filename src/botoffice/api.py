@@ -1682,8 +1682,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="this desktop is no longer that bot's; reload the list")
         if not any(item["name"] == name and item["status"] == "running" for item in await vnc.desktops()):
             raise HTTPException(status_code=404, detail="desktop is not running")
-        if bot is not None:
-            await bot_desks.refresh()   # a live listing: a replaced container's mapping is dropped (labels win)
+        if bot is not None and not await bot_desks.refresh():   # live listing: a replaced container is dropped
+            raise HTTPException(status_code=503, detail="cannot verify the desktop right now; try again")
         if bot is not None and bot_desks.bot_of(name) != str(bot):   # again, after the awaits
             raise HTTPException(status_code=409, detail="this desktop is no longer that bot's; reload the list")
         # bound to who asked: a remote owner's ticket only opens a socket from that same verified person
@@ -1700,8 +1700,10 @@ def create_app(
         protocols = ws.scope.get("subprotocols", [])
         ticket = next((p[10:] for p in protocols if p.startswith("bo-ticket.")), "")
         binding = vnc.binding_for(remote_access.current_remote_identity.get())
-        if tickets.bot_bound(ticket):
-            await bot_desks.refresh()   # bot-bound: the mapping is checked against the containers as they are now
+        if tickets.bot_bound(ticket) and not await bot_desks.refresh():   # fail closed without a live listing
+            tickets.consume(ticket, name, binding)
+            await ws.close(code=1013)
+            return
         mode = (tickets.consume(ticket, name, binding, bot_desks.bot_of)
                 if vnc.same_origin(ws.headers.get("origin"), ws.headers.get("host", "")) else None)
         if not mode or "binary" not in protocols or proxy_counts.get(name, 0) >= 4 or sum(proxy_counts.values()) >= 8:
