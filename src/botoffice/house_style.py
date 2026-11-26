@@ -42,18 +42,16 @@ fine. The only loose end is card #189, which you can decline since we don't need
 
 # for a resumed session (the full block was in its first prompt, and in the system prompt where the
 # CLI takes one): one line, so it stays in force without repeating the whole block every turn
-HOUSE_STYLE_REMINDER = ("Reply in the house style: warm, plain conversational prose, answer first, usually "
-                        "1-2 sentences, no headers, no bold labels or \"Label: value\" lines, lists only for "
-                        "parallel items, no filler closing.")
+HOUSE_STYLE_REMINDER = ("Reply in the house style: warm plain prose with contractions, answer first, usually 1-2 "
+                        "sentences; no headers, no bold labels, no \"Label: value\" bullets.")
 
-# engines that get HOUSE_STYLE as a system instruction on every turn, resumed ones included (Claude's
-# --append-system-prompt, Codex's developer_instructions); the others get the reminder in each resumed turn
-SYSTEM_STYLE_PROVIDERS = frozenset({"claude", "codex"})
-
-
+# Claude records its system prompt once per conversation (--system-prompt-snapshot, on by default) and reuses
+# it until compaction, so a session started before the style existed never sees --append-system-prompt; every
+# resumed turn therefore carries the one-line reminder, on every engine
 def resume_reminder(provider: str) -> str:
-    """The resumed-turn reminder (with its leading space), empty where the system prompt already has it."""
-    return "" if provider in SYSTEM_STYLE_PROVIDERS else " " + HOUSE_STYLE_REMINDER
+    """The resumed-turn reminder, with its leading space (*provider* kept for callers and future engines)."""
+    del provider
+    return " " + HOUSE_STYLE_REMINDER
 
 
 # a reply up to this size counts as "short" for the leading-header rule

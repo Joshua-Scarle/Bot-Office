@@ -143,6 +143,11 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.38
+
+- **The house-style reminder now reaches every resumed turn, on every engine.** Claude records a conversation's system prompt once (`--system-prompt-snapshot`, on by default) and reuses it until compaction. So a bot whose session started before 0.12.37 never saw the style passed with `--append-system-prompt`, and its first live reply after 0.12.37 still used bold-label bullets. Each resumed turn now ends its reminder with one line (warm plain prose with contractions, answer first, usually 1-2 sentences, no headers, bold labels or "Label: value" bullets). The resume prompt grows by about 150 characters.
+- **Rollback.** No schema change. Check out the previous tag and restart.
+
 ## What changed in 0.12.37
 
 **Bot replies read like a chat, and their Markdown renders.**

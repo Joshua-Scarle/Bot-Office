@@ -189,7 +189,7 @@ def test_prompts_reply_rule_and_resume_prompt_is_small():
     assert "Do not write reply.txt" in build_prompt(bot, codex, "W", "R")
     assert "Do not write reply.txt" in build_prompt(bot, agy)  # 0.10.5: Antigravity replies with its final message too
     short = build_resume_prompt(codex)
-    assert len(short) < 700 and "history.md" not in short and short.rstrip().endswith("hi")
+    assert len(short) < 850 and "history.md" not in short and short.rstrip().endswith("hi")  # 0.12.38: +150 chars for the house-style reminder (Claude keeps an old session on its recorded system prompt)
 
 
 def test_repeated_transient_resume_failure_keeps_the_session_and_fails_as_transient(monkeypatch, tmp_path):
