@@ -3233,6 +3233,10 @@ def create_app(
     @app.post("/v1/desktops/{name}/hand-back", dependencies=[Depends(auth)])
     async def desktop_hand_back(name: str) -> dict:
         """Joshua finished a step on a desktop: the bot that last used it continues."""
+        # checked and posted with no await in between: the bot is never told to continue while the owner
+        # still holds a control connection to this desktop
+        if bot_desks.owner_controlling(name):
+            raise HTTPException(status_code=409, detail="release control of this desktop first")
         own = bot_desks.bot_of(name)
         if own is not None:
             bot = store.get_bot(own)

@@ -49,6 +49,13 @@ def test_pool_mode_falls_back_to_the_leased_slot():
         desk.pick_desktop(None, no_lease, transport)
 
 
+def test_pool_mode_never_reaches_another_desktop():
+    transport, _ = answer(409, {"detail": "per-bot desktops are off"})
+    for other in ("desktop-10", "desktop-2", "desktop-3"):
+        with pytest.raises(desk.DeskError, match="leased desktop-1"):
+            desk.pick_desktop(other, TURN, transport)
+
+
 def test_errors_and_bad_names_surface():
     transport, _ = answer(409, {"detail": "all 4 desktops are in use; try again later"})
     with pytest.raises(desk.DeskError, match="all 4 desktops"):
@@ -155,6 +162,9 @@ def test_owner_start_listing_and_hand_back(settings, tmp_path, monkeypatch):
         assert listed["desktop-10"]["kind"] == "per-bot" and listed["desktop-10"]["bot"] == "Alpha"
         assert listed["desktop-1"]["kind"] == "pool" and listed["desktop-3"]["kind"] == "other"
         assert listed["desktop-10"]["owner_controlling"] is False
+        with manager.viewing("desktop-10", "control"):
+            refused = d.client.post("/v1/desktops/desktop-10/hand-back", headers=MASTER)
+            assert refused.status_code == 409 and "release control" in refused.json()["detail"]
         handed = d.client.post("/v1/desktops/desktop-10/hand-back", headers=MASTER)
         assert handed.status_code == 200 and handed.json()["bot_id"] == str(a.id)
 

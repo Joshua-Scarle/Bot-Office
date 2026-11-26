@@ -5286,6 +5286,7 @@ $("desktop-hand-back").onclick = async () => {
     if (cancelled()) return;
     if (!released) { $("desktop-status").textContent = "Could not confirm that control of " + name + " is released (another window, or the desktop list failed). Try again."; return; }
     await api("/v1/desktops/" + encodeURIComponent(name) + "/hand-back", {method: "POST"});
+    if (cancelled()) return;
     if (wasControlling) connectDesktop();
     $("desktop-status").textContent = "Handed back; the bot continues.";
   } catch (err) { $("desktop-status").textContent = err.message; }
