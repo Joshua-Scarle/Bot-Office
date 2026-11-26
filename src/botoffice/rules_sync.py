@@ -150,6 +150,8 @@ def merge(memory: str, rule: dict) -> tuple[str, str]:
                 return memory, "present"
             if _SYNCED_ID.match(existing):
                 continue  # another id's note with the same words: this id still gets its own note
+            if not existing.startswith(("- ", "* ", "+ ")):
+                continue  # a nested bullet belongs to its parent: never moved out, a note of its own is added
             # the same text written by hand: adopted as this rule's note (same words, now tracked by id),
             # so a later change of the rule replaces it instead of leaving the old text behind
             lines[index] = line
@@ -205,15 +207,16 @@ def _run(store: JobStore, memory, folder: Path | None, *, only_changed: bool, lo
             if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("not a regular file under 200 kB")
             raw = path.read_bytes()
-            digest = hashlib.sha256(raw).hexdigest()
-            if only_changed and seen.get(path.name) == digest:
-                continue
             name, rules = parse(raw.decode("utf-8", errors="replace"))
-            if len(rules) > MAX_RULES_PER_FILE:
-                raise ValueError(f"{len(rules)} rules; at most {MAX_RULES_PER_FILE} per file")
             bot = _find_bot(store, name, path.stem)
             if bot is None:
                 raise ValueError(f"no bot named {name!r}" if name else f"no bot matches the file name {path.stem!r}")
+            # the file's content AND the bot it went to: a bot recreated under the same name gets the rules again
+            digest = f"{hashlib.sha256(raw).hexdigest()}:{bot.id}"
+            if only_changed and seen.get(path.name) == digest:
+                continue
+            if len(rules) > MAX_RULES_PER_FILE:
+                raise ValueError(f"{len(rules)} rules; at most {MAX_RULES_PER_FILE} per file")
             entry["bot"] = bot.name
             counts = {"added": 0, "changed": 0, "present": 0}
             for rule in rules:

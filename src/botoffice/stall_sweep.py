@@ -351,8 +351,8 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
             db.execute("UPDATE stall_sweeps SET strike=2, last_at=? WHERE subject=?", (stamp.isoformat(), item["subject"]))
             return "skipped"  # the wake-up turn sorted it out: resolved, no escalation
     lead = lead_of(db, bot, cfg)
-    if lead is not None and lead["id"] in skipped:
-        lead = None
+    if lead is not None and (lead["id"] in skipped or lead["chat_only"]):
+        lead = None  # a chat-only lead is never woken: it counts as no lead
     if lead is not None and _busy(db, lead["id"]):
         return "skipped"  # asked on a later pass, once the lead is free
     told = None
@@ -362,13 +362,18 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
     else:
         told = _wake(assignments, db, lead["id"], f"stall escalation: {bot['name']}",
                      _lead_prompt(item, bot["name"], hours, age, bool(record["woke"])), item["subject"])
-        if not told:
-            # the lead's wake-up did not run (a cap, chat-only, auto-continue off): strike 2 is tried again
-            # after another N hours, not given up
+        if not told and not record["lead_id"]:
+            # the lead's wake-up did not run (a cap, auto-continue off): tried once more after another N hours
             _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h; Bot-Office tried to tell "
                                  f"{lead['name']}, but its wake-up did not run ({lead['name']}'s chat says why). "
-                                 f"It tries again in {hours:g} h.")
-            db.execute("UPDATE stall_sweeps SET last_at=? WHERE subject=?", (stamp.isoformat(), item["subject"]))
+                                 f"It tries once more in {hours:g} h.")
+            db.execute("UPDATE stall_sweeps SET last_at=?, lead_id=? WHERE subject=?",
+                       (stamp.isoformat(), lead["id"], item["subject"]))
+            return "skipped"
+        if not told:  # the second try did not run either: given up (strike 2), said once
+            _line(db, bot["id"], f"Stall check: Bot-Office could not reach {lead['name']} about this; it stops "
+                                 "trying until the task moves.")
+            db.execute("UPDATE stall_sweeps SET strike=2, last_at=? WHERE subject=?", (stamp.isoformat(), item["subject"]))
             return "skipped"
         _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h, so Bot-Office told {lead['name']}.")
     db.execute("UPDATE stall_sweeps SET strike=2, last_at=?, lead_id=? WHERE subject=?",

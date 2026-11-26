@@ -664,3 +664,33 @@ def test_round7_unclosed_fence_and_indented_code(tmp_path):
         rules_sync.merge("notes\n```\n- x\n", rule)
     after, what = rules_sync.merge("Example:\n\n    - Keep staging read-only\n", rule)
     assert what == "added" and "    - Keep staging read-only" in after
+
+
+def test_round8_chat_only_lead_nested_bullets_and_recreated_bot(tmp_path):
+    store, asg = _store(tmp_path)
+    owner = store.create_bot("MS ML Engineer (BO)", "", "claude", None)
+    lead = store.create_bot("MS Lead (BO)", "", "claude", None)
+    with closing(store._connect()) as db:
+        db.execute("UPDATE bots SET chat_only=1 WHERE id=?", (str(lead.id),))
+    _started_task(store, asg, owner, 9)
+    assert stall_sweep.sweep(store, asg, 3)["woken"] == 1
+    _finish_all(store, owner)
+    _age_sweeps(store, 4)
+    stall_sweep.sweep(store, asg, 3)
+    assert not _wake_jobs(store, lead) and any("no section lead" in l for l in _system_lines(store, owner))
+    # a nested bullet with the same words is not moved out of its list
+    rule = {"id": "r", "when": "2026-11-21", "source": "s", "text": "Restart only after approval", "moment": None}
+    after, what = rules_sync.merge("- Production\n  - Restart only after approval\n", rule)
+    assert what == "added" and after.startswith("- Production\n  - Restart only after approval\n")
+    # a bot recreated under the same name gets the unchanged file again
+    store2 = JobStore(tmp_path / "rs.sqlite3")
+    memory = Memory(tmp_path / "data")
+    folder = tmp_path / "drop"
+    folder.mkdir()
+    (folder / "x.md").write_text("bot: Ada\n- [2026-11-21 | s | id=a] Rule A.\n")
+    first = store2.create_bot("Ada", "", "claude", None)
+    assert rules_sync.run(store2, memory, folder)["files"][0]["added"] == 1
+    store2.delete_bot(first.id)
+    second = store2.create_bot("Ada", "", "claude", None)
+    assert rules_sync.run(store2, memory, folder)["files"][0]["added"] == 1
+    assert "Rule A." in memory.read_bot(second.id)
