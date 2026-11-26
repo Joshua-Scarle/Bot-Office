@@ -79,6 +79,9 @@ bounds it: a bot's own desktop starts with no logins (no browser-state copying),
 token asks, so a send as a person needs an account the owner logged in or approved on that desktop; after
 the owner approves such a login, clicks on that site run without a card. Anonymous web forms are reachable.
 The owner can still switch on the "Controlling printers and the screen" class to card every desk input.
+Typing a password made of plain words (`correct horse battery staple`) is not told apart from ordinary text
+and runs (accepted residual, Codex r3): bots cannot read the owner's credential files (secrets are `never`),
+and text from a variable, a file or a command substitution always asks.
 
 ## Allow (no card)
 

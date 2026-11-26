@@ -1361,9 +1361,11 @@ class Rules:
                     return ("denied", int(denied["id"]))
                 granted = db.execute(
                     "SELECT a.id FROM approvals a LEFT JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
-                    "a.input_hash=? AND a.status='approved' AND a.job_id=? AND (a.resume_job_id IS NULL OR "
-                    "(a.resume_job_id<>? AND j.status IN ('queued','running'))) ORDER BY a.id DESC LIMIT 1",
-                    (str(job.bot_id), action.fingerprint, str(job.id), str(job.id))).fetchone()
+                    "a.input_hash=? AND a.status='approved' AND (a.job_id=? OR a.assignment_id IS ?) AND "
+                    "(a.resume_job_id IS NULL OR (a.resume_job_id<>? AND j.status IN ('queued','running'))) "
+                    "ORDER BY a.id DESC LIMIT 1",
+                    (str(job.bot_id), action.fingerprint, str(job.id),
+                     str(job.assignment_id) if job.assignment_id else None, str(job.id))).fetchone()
                 if granted:
                     db.commit()
                     return ("granted", int(granted["id"]))
@@ -1484,7 +1486,9 @@ class Rules:
                               (stamp, row["id"])).rowcount:
                     count += 1
                     timed_out.append(row)
-            count += db.execute("UPDATE approvals SET status='expired' WHERE status='approved' "
+            # 0.12.47: an unused grant that lapsed is unbound from its resume turn (which can no longer use it),
+            # so the card can be approved again with a fresh grant and a new resume turn
+            count += db.execute("UPDATE approvals SET status='expired', resume_job_id=NULL WHERE status='approved' "
                                 "AND grant_expires_at<=?", (stamp,)).rowcount
         for row in timed_out:
             self.store.add_message(row["bot_id"], "system", (

@@ -401,11 +401,14 @@ def test_approved_but_not_yet_bound_is_not_recarded(tmp_path):
 
 def test_a_grant_for_one_task_does_not_swallow_another_tasks_card(tmp_path):
     store, bot, rules = setup(tmp_path)
-    origin = running(store, bot)
+    origin, other = running(store, bot), running(store, bot)
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET assignment_id=? WHERE id=?", ("33333333-3333-4333-8333-333333333333", str(origin.id)))
+        db.execute("UPDATE jobs SET assignment_id=? WHERE id=?", ("44444444-4444-4444-8444-444444444444", str(other.id)))
+    origin, other = store.get(origin.id), store.get(other.id)
     approval = rules.decide(origin, bash(ASKS)).approval_id
     store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
     rules.approve(approval)
-    other = running(store, bot)
     decision = rules.decide(other, bash(ASKS))
     assert decision.effect == "ask" and "already granted" not in decision.reason
 
@@ -510,3 +513,47 @@ def test_deny_audit_commits_with_the_decision(tmp_path, monkeypatch):
     with pytest.raises(sqlite3.OperationalError):
         rules.deny(approval, follow_up=False)
     assert rules.get(approval)["status"] == "pending"
+
+
+# --- Codex round 3 regressions ---
+
+def test_an_approval_in_flight_covers_later_turns_of_the_same_task(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    store.finish(a.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    b = running(store, bot)                      # another chat turn of the same bot (no assignment)
+    rules.approve(approval)
+    retry = rules.decide(b, bash(ASKS))
+    assert retry.approval_id == approval and "already granted" in retry.reason
+
+
+def test_lapsed_grant_is_unbound_and_can_be_approved_again(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    store.finish(a.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    rules.approve(approval)
+    with closing(store._connect()) as db:
+        db.execute("UPDATE approvals SET grant_expires_at='2000-01-01T00:00:00+00:00' WHERE id=?", (approval,))
+    rules.expire()
+    item = rules.get(approval)
+    assert item["status"] == "expired" and item["resume_job_id"] is None
+    assert rules.approve(approval)["status"] == "approved"
+
+
+def test_an_old_unchanged_screenshot_does_not_judge_later_clicks():
+    clock = Clock()
+    lim = limits(clock)
+    lim.screenshot("desktop-17", "a" * 32)
+    lim.check("desktop-17", "click", "next")
+    lim.screenshot("desktop-17", "a" * 32)       # taken before the page updated
+    for _ in range(3 * bd.LOOP_ACTIONS):
+        assert lim.check("desktop-17", "click", "next") is None
+
+
+def test_short_steps_cannot_be_stacked():
+    clock = Clock()
+    lim = limits(clock, base=1, step=1, cap=240)
+    lim.check("desktop-18", "click", "a")
+    assert lim.extend("desktop-18", "long task still going", True)[0] is False

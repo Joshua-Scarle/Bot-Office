@@ -417,6 +417,8 @@ class Session:
     shots: list = field(default_factory=list)        # recent (digest, at) of screenshots
     shot_run: tuple = ("", 0.0, 0)                   # the current identical-screenshot run: (digest, since, count)
     seen_same: int = 0          # screenshots, since the action streak began, that show the screen unchanged
+    n_actions: int = 0          # desk actions so far in this session
+    same_after: int = -1        # n_actions when the latest unchanged screenshot was taken
     stopped: str = ""           # "loop" / "no progress": refused until a gap with no desk use
 
 
@@ -472,10 +474,12 @@ class SessionLimits:
             session.actions = (session.actions + [f"{command}:{fingerprint or ''}"])[-LOOP_KEYS:]
             if len(session.actions) == 1 or session.actions[-1] != session.actions[-2]:
                 session.seen_same = 0   # a new streak: it needs its own proof that the screen did not change
+            recent_proof = session.same_after == session.n_actions   # unchanged right after the previous action
+            session.n_actions += 1
             recent = session.actions[-limit:]
             # a loop needs evidence: the same action again and again AND a screenshot during the streak showing
             # the screen unchanged (unobserved clicks on a Next button are not judged; the time limit bounds them)
-            if len(recent) == limit and len(set(recent)) == 1 and session.seen_same > 0:
+            if len(recent) == limit and len(set(recent)) == 1 and session.seen_same > 0 and recent_proof:
                 session.stopped = "loop: the same action repeated"
                 return "loop"
         return None
@@ -489,6 +493,7 @@ class SessionLimits:
             session.seen_same = 0
         elif session.shots and session.actions:
             session.seen_same += 1   # unchanged screen during an action streak
+            session.same_after = session.n_actions
         session.shots = (session.shots + [(digest, now)])[-LOOP_SHOTS:]
         run_digest, since, count = session.shot_run
         session.shot_run = (digest, since, count + 1) if run_digest == digest else (digest, now, 1)
@@ -510,9 +515,10 @@ class SessionLimits:
         if session.stopped:
             return False, f"the session was stopped ({session.stopped}); an extension cannot restart it"
         left = session.started + session.budget - now
-        if left > EXTEND_WINDOW:
+        window = min(EXTEND_WINDOW, self.step / 4)   # under one step: an extension can never be stacked on another
+        if left > window:
             return False, (f"{round(left / 60)} minutes are still left; extend in the last "
-                           f"{EXTEND_WINDOW // 60} minutes of the session")
+                           f"{max(1, round(window / 60))} minutes of the session")
         if session.budget + self.step > self.cap + 1e-6:
             return False, f"the hard limit is {round(self.cap / 60)} minutes in total; no more extensions"
         session.budget += self.step
