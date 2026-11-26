@@ -110,6 +110,7 @@ class Container:
     running: bool
     bot_id: str | None      # set only for containers labelled as our per-bot desktop
     publish_ok: bool        # every published port is on 127.0.0.1
+    id: str = ""            # podman's container id: stop/start act on it, never on a name that may be reused
 
 
 def parse_ps(raw: bytes) -> dict[str, Container]:
@@ -124,8 +125,10 @@ def parse_ps(raw: bytes) -> dict[str, Container]:
         publish_ok = all(str(p.get("host_ip", "")) == "127.0.0.1" for p in ports if isinstance(p, dict))
         for name in names:
             if isinstance(name, str) and name.startswith("desktop-"):
+                cid = item.get("Id")
                 found[name] = Container(name, str(item.get("State", "")).lower() == "running",
-                                        labels[LABEL_BOT] if ours else None, publish_ok)
+                                        labels[LABEL_BOT] if ours else None, publish_ok,
+                                        cid if isinstance(cid, str) and cid.isalnum() else "")
     return found
 
 
@@ -269,6 +272,7 @@ class DesktopManager:
         self.controllers: dict[str, int] = {}
         self.reserved: dict[str, float] = {}   # name -> until (clock): just started, not evictable yet
         self.stopping: set[str] = set()         # being stopped: no new viewer is admitted
+        self._ids: dict[str, str] = {}          # name -> id of OUR container, from the latest listing
         self._lock = asyncio.Lock()
 
     @property
@@ -314,9 +318,14 @@ class DesktopManager:
         if code:
             raise DesktopError("cannot list desktop containers")
         try:
-            return parse_ps(out)
+            found = parse_ps(out)
         except ValueError as exc:
             raise DesktopError("cannot read the desktop container list") from exc
+        self.registry.reconcile(found)
+        # only containers labelled per-bot for the bot the registry maps to that name are ever acted on
+        self._ids = {c.name: c.id for c in found.values()
+                     if c.id and c.bot_id and number_of(c.name) and self.registry.bot(c.name) == c.bot_id}
+        return found
 
     def _running_ours(self, containers: dict[str, Container]) -> list[str]:
         """Running per-bot desktops we manage (registry and label agree): the ones we may stop."""
@@ -335,7 +344,6 @@ class DesktopManager:
         bot = str(uuid.UUID(str(bot_id)))
         async with self._lock:
             containers = await self.containers()
-            self.registry.reconcile(containers)
             name = desktop_name(self.registry.allocate(bot, containers))
             current = containers.get(name)
             if current is not None and current.bot_id != bot:
@@ -345,10 +353,16 @@ class DesktopManager:
             if current is None or not current.running:
                 await self._make_room(name, containers)
                 if current is None:
-                    code, _, err = await self.runner(run_argv(name, bot, self.settings), 120)
+                    code, out, err = await self.runner(run_argv(name, bot, self.settings), 120)
                     action = "create"
+                    cid = out.decode(errors="replace").strip()
+                    if not code and cid.isalnum():
+                        self._ids[name] = cid
                 else:
-                    code, _, err = await self.runner(["start", name], 60)
+                    cid = self._ids.get(name)
+                    if not cid:
+                        raise DesktopError(f"{name} is not a desktop Bot-Office manages")
+                    code, _, err = await self.runner(["start", cid], 60)
                     action = "start"
                 if code:
                     log.warning("desktop %s %s failed: %s", name, action, err.decode(errors="replace")[-300:])
@@ -368,7 +382,7 @@ class DesktopManager:
         """Reconcile the registry with container labels (listing and Start right after a lost registry)."""
         async with self._lock:
             with contextlib.suppress(DesktopError):
-                self.registry.reconcile(await self.containers())
+                await self.containers()   # reconciles the registry as a side effect
 
     async def start(self, name: str) -> str:
         """Owner "Connect" on a stopped per-bot desktop."""
@@ -394,11 +408,13 @@ class DesktopManager:
 
     async def stop(self, name: str, why: str) -> bool:
         """Stop one desktop. No viewer is admitted from the moment it is chosen until the stop finished."""
-        if number_of(name) is None:
+        cid = self._ids.get(name)
+        if number_of(name) is None or not cid:
             return False
         self.stopping.add(name)
         try:
-            code, _, _ = await self.runner(["stop", "--time", "10", name], 60)
+            # by id: if the container was replaced since the listing, the old id no longer exists and nothing stops
+            code, _, _ = await self.runner(["stop", "--time", "10", cid], 60)
         finally:
             self.stopping.discard(name)
         if not code:
@@ -416,7 +432,6 @@ class DesktopManager:
                 containers = await self.containers()
             except DesktopError:
                 return []
-            self.registry.reconcile(containers)
             running = [n for n in self._running_ours(containers) if not self._protected(n)]
             now = self.clock()
             for name in running:

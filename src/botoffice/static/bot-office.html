@@ -5272,14 +5272,19 @@ $("desktop-hand-back").onclick = async () => {
       desktopMode = "view";
       disconnectDesktop();
     }
-    // the bot is told only once nobody controls the desktop, so its first click is not refused
+    // the hand-back belongs to this click: another selection, connect or closing the dialog cancels it
+    const generation = desktopGeneration;
+    const cancelled = () => generation !== desktopGeneration || $("desktop-select").value !== name || !$("tools-dialog").open;
+    // the bot is told only once the server affirmatively reports nobody controls the desktop
     let released = false;
     for (let i = 0; i < 40 && !released; i++) {
       const d = (await api("/v1/desktops")).find((x) => x.name === name);
-      released = !d || !d.owner_controlling;
+      if (cancelled()) return;
+      released = Boolean(d) && d.owner_controlling === false;
       if (!released) await new Promise((r) => setTimeout(r, 250));
     }
-    if (!released) { $("desktop-status").textContent = "Control of " + name + " is still open (another window?). Release it there, then hand back again."; return; }
+    if (cancelled()) return;
+    if (!released) { $("desktop-status").textContent = "Could not confirm that control of " + name + " is released (another window, or the desktop list failed). Try again."; return; }
     await api("/v1/desktops/" + encodeURIComponent(name) + "/hand-back", {method: "POST"});
     if (wasControlling) connectDesktop();
     $("desktop-status").textContent = "Handed back; the bot continues.";

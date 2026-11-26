@@ -21,7 +21,8 @@ class FakePodman:
         self.fail = set()
 
     def add(self, name, running=True, labels=None, host_ip="127.0.0.1"):
-        self.containers[name] = {"running": running, "labels": labels or {},
+        self.serial = getattr(self, "serial", 0) + 1
+        self.containers[name] = {"running": running, "labels": labels or {}, "id": f"c{self.serial:04d}{name[8:]}",
                                  "ports": [{"host_ip": host_ip, "host_port": 5900, "container_port": 5900}]}
 
     async def __call__(self, argv, timeout):
@@ -30,20 +31,20 @@ class FakePodman:
         if verb in self.fail:
             return 1, b"", b"boom"
         if verb == "ps":
-            out = [{"Names": [name], "State": "running" if c["running"] else "exited", "Labels": c["labels"],
-                    "Ports": c["ports"]} for name, c in self.containers.items()]
+            out = [{"Names": [name], "Id": c["id"], "State": "running" if c["running"] else "exited",
+                    "Labels": c["labels"], "Ports": c["ports"]} for name, c in self.containers.items()]
             return 0, json.dumps(out).encode(), b""
         if verb == "run":
             name = argv[argv.index("--name") + 1]
             labels = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "--label")
             publish = argv[argv.index("--publish") + 1]
             self.add(name, True, labels, publish.split(":")[0])
-            return 0, b"id\n", b""
-        if verb == "start":
-            self.containers[argv[1]]["running"] = True
-            return 0, b"", b""
-        if verb == "stop":
-            self.containers[argv[-1]]["running"] = False
+            return 0, self.containers[name]["id"].encode() + b"\n", b""
+        if verb in ("start", "stop"):
+            found = next((c for c in self.containers.values() if c["id"] == argv[-1]), None)
+            if found is None:
+                return 125, b"", b"no such container"
+            found["running"] = verb == "start"
             return 0, b"", b""
         raise AssertionError(argv)
 
@@ -106,7 +107,7 @@ def test_stopped_desktop_is_started_not_recreated(tmp_path):
     run(manager.ensure(BOT_A))
     podman.containers["desktop-10"]["running"] = False
     assert run(manager.ensure(BOT_A)) == "desktop-10"
-    assert podman.calls[-1] == ["start", "desktop-10"]
+    assert podman.calls[-1] == ["start", podman.containers["desktop-10"]["id"]]
     assert sum(1 for a in podman.calls if a[0] == "run") == 1
 
 
@@ -115,7 +116,8 @@ def test_foreign_containers_are_skipped_and_never_touched(tmp_path):
     podman.add("desktop-10")                                   # hand-made, no labels
     podman.add("desktop-11", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_B})  # another bot's
     assert run(manager.ensure(BOT_A)) == "desktop-12"
-    assert not any(a[0] in ("stop", "start") and a[-1] in ("desktop-10", "desktop-11") for a in podman.calls)
+    foreign = {podman.containers[n]["id"] for n in ("desktop-10", "desktop-11")}
+    assert not any(a[0] in ("stop", "start") and a[-1] in foreign for a in podman.calls)
 
 
 def test_container_with_public_publish_is_refused(tmp_path):
@@ -147,7 +149,7 @@ def test_cap_stops_the_least_recently_used_idle_desktop(tmp_path):
     run(manager.ensure(BOT_B))
     clock.t += bd.RESERVE_SECONDS + 1       # past the just-started reservation of both
     assert run(manager.ensure(BOT_C)) == "desktop-12"
-    assert ["stop", "--time", "10", "desktop-10"] in podman.calls     # A was used least recently
+    assert ["stop", "--time", "10", podman.containers["desktop-10"]["id"]] in podman.calls     # A was used least recently
     assert podman.containers["desktop-11"]["running"]
 
 
@@ -180,7 +182,7 @@ def test_idle_reaper(tmp_path):
     # B's viewer left at the old time + touch on exit; A is now idle long enough too
     assert run(manager.reap_idle()) == ["desktop-10", "desktop-11"]
     # stopped desktops start again with their state on the next use
-    assert run(manager.ensure(BOT_C)) == "desktop-12" and podman.calls[-1] == ["start", "desktop-12"]
+    assert run(manager.ensure(BOT_C)) == "desktop-12" and podman.calls[-1] == ["start", podman.containers["desktop-12"]["id"]]
 
 
 def test_reaper_grace_after_restart_and_disabled(tmp_path):
@@ -299,7 +301,7 @@ def test_labels_override_a_stale_registry_entry(tmp_path):
     podman.add("desktop-11", running=False, labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_A})
     manager.registry._map = {BOT_A: 15, BOT_B: 11}     # damaged: A points at nothing, B at A's container
     assert run(manager.ensure(BOT_A)) == "desktop-11"
-    assert podman.calls[-1] == ["start", "desktop-11"] and not any(a[0] == "run" for a in podman.calls)
+    assert podman.calls[-1] == ["start", podman.containers["desktop-11"]["id"]] and not any(a[0] == "run" for a in podman.calls)
     assert manager.registry.number(BOT_B) is None
     assert run(manager.ensure(BOT_B)) == "desktop-10"   # B gets a fresh number, never A's desktop
 
@@ -312,7 +314,7 @@ def test_reaper_rechecks_busy_bots_before_each_stop(tmp_path):
     original = podman.__call__
 
     async def runner(argv, timeout):
-        if argv[0] == "stop" and argv[-1] == "desktop-10":
+        if argv[0] == "stop" and argv[-1] == podman.containers["desktop-10"]["id"]:
             busy.add(BOT_B)                  # B starts a turn while A's desktop is being stopped
         return await original(argv, timeout)
     manager.runner = runner
@@ -326,7 +328,7 @@ def test_mapping_to_a_foreign_container_is_dropped(tmp_path):
     manager.registry._map = {BOT_A: 10}       # mapped earlier, then creation failed ...
     podman.add("desktop-10", running=False)   # ... and someone made a desktop-10 by hand
     assert run(manager.ensure(BOT_A)) == "desktop-11"
-    assert not any(a[0] in ("start", "stop") and a[-1] == "desktop-10" for a in podman.calls)
+    assert not any(a[0] in ("start", "stop") and a[-1] == podman.containers["desktop-10"]["id"] for a in podman.calls)
 
 
 def test_refresh_reconciles_for_listing(tmp_path):
@@ -336,3 +338,14 @@ def test_refresh_reconciles_for_listing(tmp_path):
     run(manager.refresh())
     assert manager.bot_of("desktop-14") == BOT_C
     assert run(manager.start("desktop-14")) == "desktop-14"
+
+
+# ---------------------------------------------------------------- review round 4
+def test_a_container_replaced_since_the_listing_is_never_stopped(tmp_path):
+    manager, podman, clock, _ = make(tmp_path)
+    run(manager.ensure(BOT_A))
+    run(manager.containers())                              # listing knows desktop-10 by its id
+    podman.add("desktop-10")                               # removed and replaced by a hand-made one meanwhile
+    assert not run(manager.stop("desktop-10", "test"))     # the old id is gone: nothing is stopped
+    assert podman.containers["desktop-10"]["running"]
+    assert not run(manager.stop("desktop-3", "test"))      # never anything outside the managed set

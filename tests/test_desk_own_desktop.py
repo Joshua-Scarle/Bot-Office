@@ -142,7 +142,7 @@ def test_owner_start_listing_and_hand_back(settings, tmp_path, monkeypatch):
         assert d.client.post(f"/v1/bots/{a.id}/desktop", headers=MASTER).status_code == 200
         manager.runner.containers["desktop-10"]["running"] = False
         assert d.client.post("/v1/desktops/desktop-10/start", headers=MASTER).json() == {"name": "desktop-10"}
-        assert manager.runner.calls[-1] == ["start", "desktop-10"]
+        assert manager.runner.calls[-1] == ["start", manager.runner.containers["desktop-10"]["id"]]
         assert d.client.post("/v1/desktops/desktop-1/start", headers=MASTER).status_code == 404
         assert d.client.post("/v1/desktops/desktop-10/start").status_code == 401
 
