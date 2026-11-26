@@ -4635,8 +4635,9 @@ $("delete-go").onclick = async () => {
 let desktopRfb = null;
 let desktopList = [];
 function disconnectDesktop() {
-  if (desktopRfb) desktopRfb.disconnect();
-  desktopRfb = null;
+  const old = desktopRfb;
+  desktopRfb = null;   // first, so the old connection's own disconnect event is ignored
+  if (old) old.disconnect();
   $("desktop-take").disabled = true;
   $("desktop-take").textContent = "Take control";
   $("desktop-control-banner").hidden = true;
@@ -4696,19 +4697,23 @@ async function connectDesktop() {
     const {default: RFB} = await import("/static/vendor/novnc/core/rfb.js");
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     const url = scheme + "//" + location.host + "/v1/desktops/" + encodeURIComponent(name) + "/vnc";
-    desktopRfb = new RFB($("desktop-screen"), url, {wsProtocols: ["binary", "bo-ticket." + grant.ticket]});
-    desktopRfb.viewOnly = desktopMode === "view";
-    desktopRfb.scaleViewport = true;
+    // events are tied to this connection: a previous one's late "disconnect" must not change the current state
+    const rfb = new RFB($("desktop-screen"), url, {wsProtocols: ["binary", "bo-ticket." + grant.ticket]});
+    const control = desktopMode === "control";
+    desktopRfb = rfb;
+    rfb.viewOnly = !control;
+    rfb.scaleViewport = true;
     const who = (desktopList.find((d) => d.name === name) || {}).bot;
-    desktopRfb.addEventListener("connect", () => {
-      const control = desktopMode === "control";
+    rfb.addEventListener("connect", () => {
+      if (desktopRfb !== rfb) return;
       $("desktop-status").textContent = control ? "Connected · you have control" : "Connected · view only";
       $("desktop-take").textContent = control ? "Release control" : "Take control";
       $("desktop-take").disabled = false;
       $("desktop-control-banner").textContent = "You are controlling " + (who ? who + "'s desktop" : name) + ". The bot's clicks and typing wait until you release or hand back.";
       $("desktop-control-banner").hidden = !control;
     });
-    desktopRfb.addEventListener("disconnect", () => {
+    rfb.addEventListener("disconnect", () => {
+      if (desktopRfb !== rfb) return;
       $("desktop-status").textContent = "Disconnected (remote sessions end after an hour or when your login expires). Press Connect to reconnect.";
       $("desktop-take").disabled = true;
       $("desktop-control-banner").hidden = true;

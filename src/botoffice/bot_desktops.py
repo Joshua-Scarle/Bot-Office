@@ -31,6 +31,7 @@ KIND = "per-bot"
 REGISTRY_NAME = "desktops.json"
 READY_TIMEOUT = 20.0
 REAP_INTERVAL = 60.0
+RESERVE_SECONDS = 120.0   # a desktop just started for someone is not evicted before they can use it
 
 # PID 1 is podman's --init; the shell starts the display stack and waits. Xvfb never listens on TCP;
 # x11vnc listens inside the container's own network namespace, published to the host on 127.0.0.1 only.
@@ -142,7 +143,10 @@ class Registry:
         except FileNotFoundError:
             raw = {}
         except (OSError, ValueError) as exc:
-            log.warning("desktop registry unreadable (%s); starting empty", type(exc).__name__)
+            # keep the damaged file for inspection; the mapping is rebuilt from container labels (reconcile)
+            log.warning("desktop registry unreadable (%s); rebuilding it from container labels", type(exc).__name__)
+            with contextlib.suppress(OSError):
+                os.replace(self.path, self.path.with_name(f"{self.path.name}.corrupt-{int(time.time())}"))
             raw = {}
         bots = raw.get("bots", {}) if isinstance(raw, dict) else {}
         self._map = {}
@@ -168,6 +172,25 @@ class Registry:
 
     def items(self) -> list[tuple[str, int]]:
         return sorted(self._map.items(), key=lambda item: item[1])
+
+    def reconcile(self, containers: dict[str, Container]) -> None:
+        """Adopt labelled per-bot containers missing from the map (registry lost or damaged): each bot keeps
+        its existing desktop. A number or bot already mapped is never re-assigned; for a bot with several
+        labelled containers the lowest number wins."""
+        changed = False
+        for container in sorted(containers.values(), key=lambda c: number_of(c.name) or 0):
+            number = number_of(container.name)
+            if not number or not container.bot_id:
+                continue
+            try:
+                bot = str(uuid.UUID(container.bot_id))
+            except ValueError:
+                continue
+            if bot not in self._map and number not in self._map.values():
+                self._map[bot] = number
+                changed = True
+        if changed:
+            self.save()
 
     def allocate(self, bot_id: str, containers: dict[str, Container]) -> int:
         """The bot's number, or the lowest free one. A number is free when no other bot has it and no
@@ -235,6 +258,8 @@ class DesktopManager:
         self.last_used: dict[str, float] = {}
         self.viewers: dict[str, int] = {}
         self.controllers: dict[str, int] = {}
+        self.reserved: dict[str, float] = {}   # name -> until (clock): just started, not evictable yet
+        self.stopping: set[str] = set()         # being stopped: no new viewer is admitted
         self._lock = asyncio.Lock()
 
     @property
@@ -254,9 +279,15 @@ class DesktopManager:
     def owner_controlling(self, name: str) -> bool:
         return self.controllers.get(name, 0) > 0
 
+    def _protected(self, name: str) -> bool:
+        return self.reserved.get(name, 0.0) > self.clock()
+
     @contextlib.contextmanager
     def viewing(self, name: str, mode: str):
-        """Count a viewer (and a controller) for the lifetime of a websocket."""
+        """Count a viewer (and a controller) for the lifetime of a websocket. Refused while the desktop is
+        being stopped (the stop decision and this check never interleave: both run without awaiting)."""
+        if name in self.stopping:
+            raise DesktopError(f"{name} is stopping; press Connect again")
         self.viewers[name] = self.viewers.get(name, 0) + 1
         if mode == "control":
             self.controllers[name] = self.controllers.get(name, 0) + 1
@@ -279,8 +310,14 @@ class DesktopManager:
             raise DesktopError("cannot read the desktop container list") from exc
 
     def _running_ours(self, containers: dict[str, Container]) -> list[str]:
+        """Running per-bot desktops we manage (registry and label agree): the ones we may stop."""
         return [c.name for c in containers.values()
                 if c.running and c.bot_id and number_of(c.name) and self.registry.bot(c.name) == c.bot_id]
+
+    @staticmethod
+    def _running_labelled(containers: dict[str, Container]) -> int:
+        """Every running per-bot-labelled desktop counts toward the cap, managed or not."""
+        return sum(1 for c in containers.values() if c.running and c.bot_id and number_of(c.name))
 
     async def ensure(self, bot_id: str) -> str:
         """Start (creating if needed) the bot's own desktop and wait until its VNC answers."""
@@ -289,6 +326,7 @@ class DesktopManager:
         bot = str(uuid.UUID(str(bot_id)))
         async with self._lock:
             containers = await self.containers()
+            self.registry.reconcile(containers)
             name = desktop_name(self.registry.allocate(bot, containers))
             current = containers.get(name)
             if current is not None and current.bot_id != bot:
@@ -308,6 +346,7 @@ class DesktopManager:
                     raise DesktopError(f"could not {action} {name}")
                 log.info("desktop %s %sed for bot %s", name, action.rstrip("e"), bot)
             self.touch(name)
+            self.reserved[name] = self.clock() + RESERVE_SECONDS
         port = 5900 + (number_of(name) or 0)
         deadline = self.clock() + READY_TIMEOUT
         while not await self.ready(port):
@@ -324,21 +363,31 @@ class DesktopManager:
         return await self.ensure(bot)
 
     async def _make_room(self, name: str, containers: dict[str, Container]) -> None:
-        running = self._running_ours(containers)
-        if len(running) < self.settings.desktop_max_running:
-            return
-        victim = evict_candidate(running, name, self.last_used, self.viewers, self.busy_bots(), self.bot_of)
-        if victim is None:
-            raise DesktopError(f"all {self.settings.desktop_max_running} desktops are in use; try again later")
-        await self.stop(victim, "making room")
+        """Called with the lock held. Stops LRU idle desktops until one more fits; fails closed."""
+        running = [n for n in self._running_ours(containers) if not self._protected(n)]
+        count = self._running_labelled(containers)
+        while count >= self.settings.desktop_max_running:
+            victim = evict_candidate(running, name, self.last_used, self.viewers, self.busy_bots(), self.bot_of)
+            if victim is None:
+                raise DesktopError(f"all {self.settings.desktop_max_running} desktops are in use; try again later")
+            if not await self.stop(victim, "making room"):
+                raise DesktopError(f"could not stop {victim} to make room; try again later")
+            running.remove(victim)
+            count -= 1
 
     async def stop(self, name: str, why: str) -> bool:
+        """Stop one desktop. No viewer is admitted from the moment it is chosen until the stop finished."""
         if number_of(name) is None:
             return False
-        code, _, _ = await self.runner(["stop", "--time", "10", name], 60)
+        self.stopping.add(name)
+        try:
+            code, _, _ = await self.runner(["stop", "--time", "10", name], 60)
+        finally:
+            self.stopping.discard(name)
         if not code:
             log.info("desktop %s stopped (%s)", name, why)
             self.last_used.pop(name, None)
+            self.reserved.pop(name, None)
         return not code
 
     async def reap_idle(self) -> list[str]:
@@ -350,13 +399,16 @@ class DesktopManager:
                 containers = await self.containers()
             except DesktopError:
                 return []
-            running = self._running_ours(containers)
+            self.registry.reconcile(containers)
+            running = [n for n in self._running_ours(containers) if not self._protected(n)]
             now = self.clock()
             for name in running:
                 self.last_used.setdefault(name, now)   # unknown (after a restart): grace from now
             stopped = []
             for name in idle_to_stop(running, self.last_used, self.viewers, self.busy_bots(), self.bot_of,
                                      now, idle_seconds):
+                if self.viewers.get(name) or self._protected(name):   # a viewer arrived during an earlier stop
+                    continue
                 if await self.stop(name, "idle"):
                     stopped.append(name)
             return stopped

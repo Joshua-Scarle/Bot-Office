@@ -145,7 +145,7 @@ def test_cap_stops_the_least_recently_used_idle_desktop(tmp_path):
     run(manager.ensure(BOT_A))
     clock.t += 10
     run(manager.ensure(BOT_B))
-    clock.t += 10
+    clock.t += bd.RESERVE_SECONDS + 1       # past the just-started reservation of both
     assert run(manager.ensure(BOT_C)) == "desktop-12"
     assert ["stop", "--time", "10", "desktop-10"] in podman.calls     # A was used least recently
     assert podman.containers["desktop-11"]["running"]
@@ -155,6 +155,7 @@ def test_cap_never_stops_a_desktop_in_use(tmp_path):
     manager, podman, clock, busy = make(tmp_path, desktop_max_running=2)
     run(manager.ensure(BOT_A))
     run(manager.ensure(BOT_B))
+    clock.t += bd.RESERVE_SECONDS + 1
     busy.add(BOT_A)                                   # A's bot has a running turn
     with manager.viewing("desktop-11", "view"):       # the owner watches B
         with pytest.raises(bd.DesktopError, match="all 2 desktops are in use"):
@@ -231,3 +232,62 @@ def test_corrupt_registry_starts_empty(tmp_path):
     assert bd.Registry(path).items() == []
     path.write_text(json.dumps({"bots": {BOT_A: 10, BOT_B: 10, "nope": 11, BOT_C: 5}}))
     assert bd.Registry(path).items() == [(BOT_A, 10)]
+
+
+# ---------------------------------------------------------------- review round 1
+def test_failed_eviction_never_exceeds_the_cap(tmp_path):
+    manager, podman, clock, _ = make(tmp_path, desktop_max_running=1)
+    run(manager.ensure(BOT_A))
+    clock.t += bd.RESERVE_SECONDS + 1
+    podman.fail.add("stop")
+    with pytest.raises(bd.DesktopError, match="could not stop desktop-10"):
+        run(manager.ensure(BOT_B))
+    assert sum(1 for a in podman.calls if a[0] == "run") == 1
+
+
+def test_unmanaged_labelled_desktops_count_toward_the_cap(tmp_path):
+    manager, podman, clock, _ = make(tmp_path, desktop_max_running=1)
+    podman.add("desktop-20", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_B})
+    manager.registry._map[BOT_C] = 20     # number taken by another mapping: desktop-20 stays unmanaged
+    with pytest.raises(bd.DesktopError, match="in use"):
+        run(manager.ensure(BOT_A))
+
+
+def test_a_just_started_desktop_is_not_evicted(tmp_path):
+    manager, podman, clock, _ = make(tmp_path, desktop_max_running=1)
+    run(manager.ensure(BOT_A))
+    with pytest.raises(bd.DesktopError, match="in use"):
+        run(manager.ensure(BOT_B))        # A was started seconds ago for someone about to connect
+    clock.t += bd.RESERVE_SECONDS + 1
+    assert run(manager.ensure(BOT_B)) == "desktop-11"
+
+
+def test_no_viewer_is_admitted_while_stopping(tmp_path):
+    manager, podman, clock, _ = make(tmp_path)
+    run(manager.ensure(BOT_A))
+    entered = []
+
+    async def slow_stop(argv, timeout):
+        if argv[0] == "stop":
+            try:
+                with manager.viewing("desktop-10", "view"):
+                    entered.append(True)
+            except bd.DesktopError:
+                entered.append(False)
+        return await FakePodman.__call__(podman, argv, timeout)
+    manager.runner = slow_stop
+    assert run(manager.stop("desktop-10", "test"))
+    assert entered == [False] and "desktop-10" not in manager.stopping
+    with manager.viewing("desktop-10", "view"):
+        pass
+
+
+def test_lost_registry_is_rebuilt_from_labels(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    podman.add("desktop-11", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_A})
+    (tmp_path / "desktops.json").write_text("{broken")
+    manager.registry = bd.Registry(tmp_path / "desktops.json")
+    assert list(tmp_path.glob("desktops.json.corrupt-*"))
+    assert run(manager.ensure(BOT_A)) == "desktop-11"          # its existing desktop, not a new desktop-10
+    assert not any(a[0] == "run" for a in podman.calls)
+    assert bd.Registry(tmp_path / "desktops.json").number(BOT_A) == 11

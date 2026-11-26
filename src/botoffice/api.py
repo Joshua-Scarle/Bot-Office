@@ -1688,6 +1688,13 @@ def create_app(
         if not mode or "binary" not in protocols or proxy_counts.get(name, 0) >= 4 or sum(proxy_counts.values()) >= 8:
             await ws.close(code=1008)
             return
+        # admitted as a viewer before any await: a desktop chosen for stopping refuses, one being viewed is kept
+        viewer = contextlib.ExitStack()
+        try:
+            viewer.enter_context(bot_desks.viewing(name, mode))
+        except bot_desktops.DesktopError:
+            await ws.close(code=1013)
+            return
         proxy_counts[name] = proxy_counts.get(name, 0) + 1
         writer = None
         try:
@@ -1724,19 +1731,19 @@ def create_app(
                     if time.monotonic() - last_traffic >= 1800:
                         return
 
-            with bot_desks.viewing(name, mode):
-                tasks = [asyncio.create_task(to_desktop()), asyncio.create_task(to_browser()),
-                         asyncio.create_task(idle_watch())]
-                try:
-                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*done, *pending, return_exceptions=True)
-                finally:
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+            tasks = [asyncio.create_task(to_desktop()), asyncio.create_task(to_browser()),
+                     asyncio.create_task(idle_watch())]
+            try:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*done, *pending, return_exceptions=True)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         finally:
+            viewer.close()
             proxy_counts[name] -= 1
             if writer:
                 writer.close()

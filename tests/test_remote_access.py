@@ -1163,3 +1163,29 @@ def test_server_cancel_cancels_the_app_and_closes_the_gate(tmp_path):
 
     asyncio.run(main())
     assert state.get("cancelled") and not any(m.get("body") == b"late" for m in sent)
+
+
+def test_cut_does_not_hang_when_the_close_frame_stalls(tmp_path):
+    clock = Clock()
+    mw, app, *_ = build_ws(tmp_path, clock=clock)
+    token = sign(user_claims(exp=NOW + 100))
+
+    async def drive():
+        scope = {"type": "websocket", "path": VNC_PATH,
+                 "headers": [(k.lower().encode(), v.encode()) for k, v in owner_ws(token).items()]}
+        first = [True]
+
+        async def receive():
+            if first[0]:
+                first[0] = False
+                return {"type": "websocket.connect"}
+            clock.t = NOW + 200
+            await asyncio.sleep(30)
+            return {"type": "websocket.disconnect", "code": 1000}
+
+        async def send(message):
+            if message["type"] == "websocket.close":
+                await asyncio.sleep(30)          # a client that never takes the close frame
+        await asyncio.wait_for(mw(scope, receive, send), 6)
+    asyncio.run(drive())
+    assert app.cancelled

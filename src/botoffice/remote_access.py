@@ -58,6 +58,7 @@ KEY_REFETCH_MIN_SECONDS = 60.0
 # never lives longer than this, nor past the Access JWT's exp (docs/REMOTE-DESKTOPS.md)
 MAX_REMOTE_WEBSOCKET_SECONDS = 3600.0
 WEBSOCKET_RECHECK_SECONDS = 15.0
+WEBSOCKET_CLOSE_SECONDS = 2.0
 REMOTE_WEBSOCKET_PATH = re.compile(r"^/v1/desktops/desktop-[1-9][0-9]?/vnc$")
 CLOCK_SKEW_SECONDS = 60
 MIN_RSA_BITS = 2048
@@ -751,19 +752,27 @@ class RemoteAccessMiddleware:
                 return {"type": "websocket.disconnect", "code": 1008}
             return message
 
+        app_task: list[asyncio.Future] = []
+
         async def cut(why: str) -> None:
+            """Stop forwarding at once, cancel the app, then send the close frame (bounded)."""
             if state["cut"]:
                 return
             state["cut"] = True
             log.warning("remote websocket closed: %s (%s)", why, identity.display_name)
+            current = asyncio.current_task()
+            for task in app_task:
+                if task is not current and not task.done():
+                    task.cancel()
             if not state["closed"]:
                 state["closed"] = True
-                with contextlib.suppress(OSError, RuntimeError):
-                    await send({"type": "websocket.close", "code": 1008})
+                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                    await asyncio.wait_for(send({"type": "websocket.close", "code": 1008}), WEBSOCKET_CLOSE_SECONDS)
 
         token = current_remote_identity.set(identity)
         try:
             task = asyncio.ensure_future(self.app(scope, bounded_receive, bounded_send))
+            app_task.append(task)
         finally:
             current_remote_identity.reset(token)
         try:
@@ -783,7 +792,10 @@ class RemoteAccessMiddleware:
         if not task.done():
             task.cancel()
             await asyncio.wait({task}, timeout=1.0)
-        if task.done() and not task.cancelled() and task.exception() is not None:
+        if not task.done():
+            task.add_done_callback(_observe)   # still unwinding: its outcome is logged when it ends
+            return
+        if not task.cancelled() and task.exception() is not None:
             if state["cut"]:
                 log.info("remote websocket app ended with %s after the cut", type(task.exception()).__name__)
             else:
