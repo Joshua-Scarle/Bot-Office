@@ -880,3 +880,72 @@ def test_verify_slot_released_after_worker_finishes(tmp_path):
     mw, probe, *_ = build(tmp_path)
     assert status(run(mw, headers=remote(sign(user_claims())))) == 200
     assert mw._pending_verify == 0
+
+
+# ---------------------------------------------------------------- 0.12.35 review round 7
+def _call(mw, app, headers):
+    sent = []
+    mw.app = app
+    scope = {"type": "http", "method": "GET", "path": "/v1/jobs/abc/events",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    return sent
+
+
+def test_app_timeout_error_propagates(tmp_path):
+    mw, probe, *_ = build(tmp_path)
+
+    async def app(scope, receive, send):
+        raise TimeoutError("backend slow")
+
+    with pytest.raises(TimeoutError):
+        _call(mw, app, remote(sign(service_claims(exp=NOW + 6000))))
+
+
+def test_deadline_does_not_wait_for_stubborn_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "MAX_REMOTE_REQUEST_SECONDS", 0.05)
+    mw, probe, *_ = build(tmp_path)
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"c0", "more_body": True})
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            await send({"type": "http.response.body", "body": b"late", "more_body": True})
+            await asyncio.sleep(0.01)
+
+    sent = _call(mw, app, remote(sign(service_claims(exp=NOW + 6000))))
+    assert [m.get("body") for m in sent if m["type"] == "http.response.body"] == [b"c0", b""]
+
+
+def test_sized_response_is_aborted_not_padded(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "MAX_REMOTE_REQUEST_SECONDS", 0.05)
+    mw, probe, *_ = build(tmp_path)
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-length", b"10")]})
+        await send({"type": "http.response.body", "body": b"12345", "more_body": True})
+        await asyncio.sleep(5)
+
+    sent = _call(mw, app, remote(sign(service_claims(exp=NOW + 6000))))
+    assert [m.get("body") for m in sent if m["type"] == "http.response.body"] == [b"12345"]
+
+
+def test_headers_not_sent_once_revoked(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+
+    async def app(scope, receive, send):
+        clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"secret"})
+
+    sent = _call(mw, app, remote(sign(service_claims(exp=NOW + 600))))
+    assert sent[0]["status"] == 403 and b"secret" not in b"".join(m.get("body", b"") for m in sent)

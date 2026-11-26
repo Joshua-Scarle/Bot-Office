@@ -666,10 +666,19 @@ class RemoteAccessMiddleware:
             limit = max(0.0, min(limit, identity.expires_at + grace - self.clock()))
         token = current_remote_identity.set(identity)
         try:
-            await asyncio.wait_for(self.app(scope, receive, send), timeout=limit)
-        except TimeoutError:
+            # the app runs as its own task, raced against a separate deadline: app exceptions (including
+            # its own TimeoutError) propagate unchanged, and the cutoff never waits for the app's cleanup
+            task = asyncio.ensure_future(self.app(scope, receive, send))
+            done, _ = await asyncio.wait({task}, timeout=limit)
+            if task in done:
+                task.result()
+                return
             log.warning("remote request ended at its deadline (%s %s %s)", identity.display_name, method, path)
-            await finish()
+            await finish()          # stops all forwarding first, then ends or aborts the response
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+            if task.done() and not task.cancelled() and task.exception() is not None:
+                log.warning("remote request cleanup raised %s", type(task.exception()).__name__)
         finally:
             current_remote_identity.reset(token)
 
@@ -698,31 +707,36 @@ class RemoteAccessMiddleware:
         return bool(entry) and entry[1] == identity.role
 
     def _bound_response(self, identity: RemoteIdentity, receive, send):
-        """0.12.35 review: every body frame re-checks the credential (the config itself is re-read at most
-        every 5 s); once it expired or was revoked the response ends and nothing more is sent. ``finish``
-        ends a response cut off at its deadline."""
-        state = {"started": False, "ended": False}
+        """0.12.35 review: the credential is re-checked before the headers and on every body frame (the
+        config itself is re-read at most every 5 s). Once it expired or was revoked, or the deadline hit,
+        nothing more is forwarded: a streamed response gets its terminal frame, a response that promised a
+        Content-Length is left incomplete so the server aborts the connection. ``end`` is that cutoff."""
+        state = {"started": False, "ended": False, "sized": False}
 
         async def end() -> None:
             if state["ended"]:
                 return
             state["ended"] = True
-            if state["started"]:
-                await send({"type": "http.response.body", "body": b"", "more_body": False})
-            else:
-                await self._deny("http", send, 403, "remote access denied")
+            try:
+                if not state["started"]:
+                    await self._deny("http", send, 403, "remote access denied")
+                elif not state["sized"]:
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+            except (OSError, RuntimeError) as exc:   # the client already went away
+                log.info("remote response cutoff: connection already closed (%s)", type(exc).__name__)
 
         async def bounded_send(message):
             if state["ended"]:
                 return
             kind = message.get("type")
-            if kind == "http.response.body" and not self._still_allowed(identity):
+            if kind in ("http.response.start", "http.response.body") and not self._still_allowed(identity):
                 log.warning("remote response ended: access no longer valid (%s)", identity.display_name)
                 await end()
                 return
             await send(message)
             if kind == "http.response.start":
                 state["started"] = True
+                state["sized"] = any(n.lower() == b"content-length" for n, _ in message.get("headers", []))
             elif kind == "http.response.body" and not message.get("more_body"):
                 state["ended"] = True
 
