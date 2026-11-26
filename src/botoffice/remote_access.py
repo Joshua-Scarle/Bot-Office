@@ -677,12 +677,12 @@ class RemoteAccessMiddleware:
             task = asyncio.ensure_future(self.app(scope, receive, send))
             try:
                 done, _ = await asyncio.wait({task}, timeout=limit)
-            finally:
-                if not task.done() and asyncio.current_task().cancelling():
-                    # the server cancelled us (client gone): nothing more is forwarded, the app is cancelled
-                    close_gate()
-                    task.cancel()
-                    task.add_done_callback(_observe)
+            except asyncio.CancelledError:
+                # the server cancelled us (client gone): nothing more is forwarded, the app is cancelled
+                close_gate()
+                task.cancel()
+                task.add_done_callback(_observe)
+                raise
             if task in done:
                 task.result()
                 return
