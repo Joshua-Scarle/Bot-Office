@@ -949,3 +949,38 @@ def test_headers_not_sent_once_revoked(tmp_path):
 
     sent = _call(mw, app, remote(sign(service_claims(exp=NOW + 600))))
     assert sent[0]["status"] == 403 and b"secret" not in b"".join(m.get("body", b"") for m in sent)
+
+
+def test_server_cancel_cancels_the_app_and_closes_the_gate(tmp_path):
+    mw, probe, *_ = build(tmp_path)
+    sent, state = [], {}
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            await send({"type": "http.response.body", "body": b"late", "more_body": True})
+            raise
+
+    mw.app = app
+    scope = {"type": "http", "method": "GET", "path": "/v1/jobs/abc/events",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in remote(sign(service_claims(exp=NOW + 6000))).items()]}
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    async def main():
+        outer = asyncio.ensure_future(mw(scope, receive, send))
+        await asyncio.sleep(0.05)
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+        await asyncio.sleep(0.05)
+
+    asyncio.run(main())
+    assert state.get("cancelled") and not any(m.get("body") == b"late" for m in sent)

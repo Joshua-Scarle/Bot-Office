@@ -538,6 +538,12 @@ def _strip_access_cookie(value: bytes) -> bytes:
     return b";".join(parts).strip()
 
 
+def _observe(task: asyncio.Future) -> None:
+    """Retrieve a detached app task's outcome so an exception is logged, never left unobserved."""
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("remote request cleanup raised %s", type(task.exception()).__name__)
+
+
 def _without_credentials(scope: dict) -> dict:
     scope = dict(scope)
     out = []
@@ -659,7 +665,7 @@ class RemoteAccessMiddleware:
         identity = replace(identity, host=host)
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
         scope = _without_credentials(scope)   # the app never sees the key, the Access JWT or a token secret
-        receive, send, finish = self._bound_response(identity, receive, send)
+        receive, send, finish, close_gate = self._bound_response(identity, receive, send)
         limit = MAX_REMOTE_REQUEST_SECONDS
         if identity.expires_at is not None:
             grace = CLOCK_SKEW_SECONDS if identity.via == "jwt" else 0   # same boundary as _check_claims
@@ -669,7 +675,14 @@ class RemoteAccessMiddleware:
             # the app runs as its own task, raced against a separate deadline: app exceptions (including
             # its own TimeoutError) propagate unchanged, and the cutoff never waits for the app's cleanup
             task = asyncio.ensure_future(self.app(scope, receive, send))
-            done, _ = await asyncio.wait({task}, timeout=limit)
+            try:
+                done, _ = await asyncio.wait({task}, timeout=limit)
+            finally:
+                if not task.done() and asyncio.current_task().cancelling():
+                    # the server cancelled us (client gone): nothing more is forwarded, the app is cancelled
+                    close_gate()
+                    task.cancel()
+                    task.add_done_callback(_observe)
             if task in done:
                 task.result()
                 return
@@ -745,7 +758,10 @@ class RemoteAccessMiddleware:
                 return {"type": "http.disconnect"}
             return await receive()
 
-        return bounded_receive, bounded_send, end
+        def close_gate() -> None:
+            state["ended"] = True
+
+        return bounded_receive, bounded_send, end, close_gate
 
     @staticmethod
     async def _deny(kind: str, send, status: int, detail: str) -> None:
