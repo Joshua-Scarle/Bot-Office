@@ -240,9 +240,15 @@ class Scheduler:
         except Exception:
             log.exception("stall sweep failed")
         try:
-            if self.settings.rules_sync_dir is not None and rules_sync.due(self.store):
-                rules_sync.run(self.store, self.memory, self.settings.rules_sync_dir,
-                               log_dir=self.settings.data_dir / "logs")
+            if self.settings.rules_sync_dir is not None and rules_sync.due(self.store) and not rules_sync.busy():
+                # off the loop: a large drop folder must not hold up claims or the watchdog
+                threading.Thread(target=self._rules_sync, name="botoffice-rules-sync", daemon=True).start()
+        except Exception:
+            log.exception("rules sync failed")
+
+    def _rules_sync(self) -> None:
+        try:
+            rules_sync.run(self.store, self.memory, self.settings.rules_sync_dir, log_dir=self.settings.data_dir / "logs")
         except Exception:
             log.exception("rules sync failed")
 

@@ -8,6 +8,7 @@ optional list. The task's goal carries the whole body (goal, context and state, 
 the next step, whether the owner is needed, the owner) and ends with ``Import key: grok-handoff/<key>``. A task
 whose key is already on any bot's task list (open or closed) is skipped, so re-running creates no duplicates.
 Tasks are created open (not started): starting stays the owner's call. Without --apply nothing is written.
+Run it once at a time (it checks, then creates: two concurrent runs could both create).
 The token is read from the token file and never printed.
 """
 from __future__ import annotations
@@ -54,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token-file", default=str(Path(__file__).resolve().parents[1] / "data" / "token"))
     args = parser.parse_args(argv)
     spec = json.loads(Path(args.spec).read_text())
+    keys = [task["key"] for task in spec["tasks"]]
+    if len(keys) != len(set(keys)):
+        print(f"ERROR: duplicate keys in the spec: {sorted({k for k in keys if keys.count(k) > 1})}", file=sys.stderr)
+        return 2
     token = Path(args.token_file).read_text().strip()
     bots = {bot["name"]: bot["id"] for bot in call(args.api, token, "GET", "/v1/bots")}
     present: set[str] = set()
@@ -78,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         made = call(args.api, token, "POST", f"/v1/bots/{bots[task['bot']]}/assignments", fields)
         print(f"created {task['key']} -> {task['bot']} task {made['id'][:8]}")
+        present.add(task["key"])
         created += 1
     print(f"done: {created} created, {skipped} already present" + ("" if args.apply else " (dry run)"))
     return 0

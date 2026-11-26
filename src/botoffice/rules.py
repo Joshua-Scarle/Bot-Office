@@ -32,10 +32,12 @@ import dataclasses
 import functools
 import hashlib
 import json
+import os
 import posixpath
 import re
 import shlex
 import sqlite3
+import stat
 import threading
 import time
 import unicodedata
@@ -432,50 +434,64 @@ def _rm_outside(command: str) -> bool:
 # 0.12.39: a bot saving a note to its own memory with a here-document (`cat >> memory.md <<'EOF' ... EOF`)
 # was carded because the presets, the approval classes and shell ask rules read the note's words as if
 # they ran ("No sudo" -> system, "ssh host" -> outbound, "git push" -> the E8 ask rule). The git guard
-# already treats a here-document written to a file as data (git_guard._heredoc). Only this exact,
-# plain form counts: every command is `cat >`/`cat >>`/`tee [-a]` from a here-document into memory.md
-# or WORKING.md in the job's own workspace (relative names only when the command runs there), and an
-# unquoted delimiter's body has no `$(` or backtick (the shell would run those while writing).
+# already treats a here-document written to a file as data (git_guard._heredoc). Only this exact, plain
+# form counts: every line is `cat > F <<'D'`, `cat >> F <<'D'`, `cat <<'D' >> F` or `tee [-a] F <<'D'
+# [>/dev/null]`, with a QUOTED delimiter (the shell expands nothing and joins no lines in the body, so
+# the body is the literal text up to the first line that is exactly D), F literally memory.md or
+# WORKING.md (bare or ./, the command running in the job's own workspace) or <workspace>/memory.md |
+# /WORKING.md, the file a regular file or not there yet (never a link), and no carriage return anywhere.
 _MEMORY_NOTE_FILES = ("memory.md", "WORKING.md")
-_NOTE_TARGET = r"(?P<t{n}>\S+)"
-_NOTE_DOC = r"<<-?\s*(?P<q{n}>['\"]?)(?P<d{n}>\w+)(?P=q{n})"
-_NOTE_FORMS = (r"cat\s*>>?\s*{t}\s*{d}", r"cat\s*{d}\s*>>?\s*{t}", r"tee\s+(?:-a\s+)?{t}\s*{d}(?:\s*>\s*/dev/null)?")
-_NOTE_LINE = re.compile(r"\s*(?:" + "|".join(
-    form.format(t=_NOTE_TARGET.format(n=n), d=_NOTE_DOC.format(n=n)) for n, form in enumerate(_NOTE_FORMS)) + r")\s*")
+_NOTE_TARGET = r"(?P<t{n}>(?:\./)?(?:memory|WORKING)\.md|/[A-Za-z0-9_./-]+/(?:memory|WORKING)\.md)"
+_NOTE_DOC = r"<<-?[ \t]*(?P<q{n}>['\"])(?P<d{n}>[A-Za-z_][A-Za-z0-9_]{{0,31}})(?P=q{n})"
+_NOTE_FORMS = (r"cat[ \t]+>>?[ \t]*{t}[ \t]+{d}", r"cat[ \t]+{d}[ \t]+>>?[ \t]*{t}",
+               r"tee[ \t]+(?:-a[ \t]+)?{t}[ \t]+{d}(?:[ \t]+>[ \t]*/dev/null)?")
+_NOTE_LINE = re.compile(r"[ \t]*(?:" + "|".join(
+    form.format(t=_NOTE_TARGET.format(n=n), d=_NOTE_DOC.format(n=n)) for n, form in enumerate(_NOTE_FORMS)) + r")[ \t]*")
 
 
 def _note_target_ok(target: str, action: Action) -> bool:
-    if target in _MEMORY_NOTE_FILES or target.removeprefix("./") in _MEMORY_NOTE_FILES:
-        return bool(action.workspace) and posixpath.normpath(action.cwd or "") == posixpath.normpath(action.workspace)
-    return bool(action.workspace) and posixpath.dirname(posixpath.normpath(target)) == posixpath.normpath(
-        action.workspace) and posixpath.basename(target) in _MEMORY_NOTE_FILES
+    workspace = action.workspace
+    if not workspace or not posixpath.isabs(workspace) or ".." in workspace.split("/"):
+        return False
+    name = target.removeprefix("./")
+    if name in _MEMORY_NOTE_FILES:
+        if (action.cwd or "").rstrip("/") != workspace.rstrip("/"):
+            return False  # a bare name is the workspace's file only when the command runs there
+        path = posixpath.join(workspace, name)
+    elif target in (posixpath.join(workspace, name) for name in _MEMORY_NOTE_FILES):
+        path = target
+    else:
+        return False
+    try:
+        if os.path.realpath(workspace) != os.path.abspath(workspace):
+            return False  # the workspace itself is reached through a link
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode)
 
 
 def memory_note_command(action: Action) -> str | None:
-    """The command with its here-document bodies set aside, when *action* is only a plain write of
+    """The command with its here-document bodies set aside, when *action* is only plain writes of
     notes into the job's own memory.md / WORKING.md (see above); else None."""
     command = action.command
-    if not command or "<<" not in command or len(command) > COMMAND_LIMIT:
+    if not command or "<<" not in command or "\r" in command or len(command) > COMMAND_LIMIT:
         return None
     try:
         text, documents = git_guard._heredocs(command)
     except (RecursionError, ValueError, IndexError):
         return None
-    if not documents or "<<" in "".join(body for _header, body in documents):
-        return None
     headers = [line for line in text.split("\n") if line.strip()]
-    if len(headers) != len(documents) or len(headers) > 8:
+    if not documents or len(headers) != len(documents) or len(headers) > 8:
         return None  # every line is one note write and nothing else runs
-    for line, (header, body) in zip(headers, documents, strict=True):
-        if line != header:
-            return None
+    for line, (header, _body) in zip(headers, documents, strict=True):
         found = _NOTE_LINE.fullmatch(line)
-        if found is None:
+        if line != header or found is None or line.count("<<") != 1:
             return None
         n = next(n for n in range(len(_NOTE_FORMS)) if found[f"t{n}"] is not None)
         if not _note_target_ok(found[f"t{n}"], action):
-            return None
-        if not found[f"q{n}"] and ("$(" in body or "`" in body or "${" in body):
             return None
     return text
 

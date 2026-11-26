@@ -338,7 +338,8 @@ NOTE = "- Since 0.12.26 BO has app admin. No sudo. ssh to the box is off; git pu
     f"cat >> {WS}/memory.md <<'EOF'\n{NOTE}EOF",
     f'tee -a WORKING.md <<"EOF" >/dev/null\n{NOTE}EOF',
     f"cat <<'EOF' >> memory.md\n{NOTE}EOF",
-    "cat >> memory.md <<EOF\n- plain note, git push later\nEOF",
+    f"cat > memory.md <<-'EOF'\n\t{NOTE}\tEOF",
+    f"cat >> memory.md <<'EOF'\n{NOTE}EOF\ncat >> WORKING.md <<'NOTE'\n- step 2\nNOTE",
 ])
 def test_memory_notes_with_risky_words_do_not_card(tmp_path, command):
     gate, job = _gate(tmp_path)
@@ -355,6 +356,14 @@ def test_memory_notes_with_risky_words_do_not_card(tmp_path, command):
     (f"cat >> /srv/data/workspaces/j2/memory.md <<'EOF'\n{NOTE}EOF", WS),       # another job's workspace
     (f"cat > ~/.claude/projects/p/memory/x.md <<'EOF'\n{NOTE}EOF", WS),         # outside the workspace
     (f"bash <<'EOF'\ngit push origin main\nEOF", WS),
+    ("cat >> memory.md <<EOF\n- plain note, git push later\nEOF", WS),           # unquoted: never exempt
+    ("cat >> memory.md <<EOF\n$\\\n(git push)\nEOF", WS),                       # line joins in an unquoted body
+    (f"cat >> memory.md <<'EOF'\r\n{NOTE}EOF\r\ngit push\r\nEOF", WS),           # CR desynchronises the parse
+    (f"cat >> memory.md;git push <<'EOF'\n{NOTE}EOF", WS),                       # a separator in the "file name"
+    (f"cat >> {WS}/../j2/memory.md <<'EOF'\n{NOTE}EOF", WS),
+    (f"cat >> /x$(git push)/memory.md <<'EOF'\n{NOTE}EOF", WS),
+    (f"cat >> memory.md <<'EOF' <<'TWO'\n{NOTE}EOF\ngit push\nTWO", WS),          # two documents on one line
+    (f"tee -a memory.md /etc/x <<'EOF'\n{NOTE}EOF", WS),
 ])
 def test_other_heredocs_still_ask(tmp_path, command, cwd):
     gate, job = _gate(tmp_path)
@@ -394,3 +403,108 @@ def test_handoff_import_creates_full_bodies_once(settings, tmp_path, monkeypatch
                      "## Items\na; b", "Owner: MS Lead (BO)", "Import key: grok-handoff/ms-x"):
             assert part in made[0].goal
         assert "already present" in capsys.readouterr().out
+
+
+def test_memory_note_through_a_link_still_asks(tmp_path):
+    gate, job = _gate(tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (tmp_path / "elsewhere").write_text("x")
+    (ws / "memory.md").symlink_to(tmp_path / "elsewhere")
+    command = f"cat >> memory.md <<'EOF'\n{NOTE}EOF"
+    action = Action(tool="Bash", command=command, cwd=str(ws), workspace=str(ws), data={"command": command})
+    assert memory_note_command(action) is None and gate.evaluate(job, action)[0] == "ask"
+    (ws / "memory.md").unlink()
+    (ws / "memory.md").write_text("- old\n")
+    assert memory_note_command(action) is not None and gate.evaluate(job, action)[0] == "allow"
+
+
+def test_priority_messages_have_their_own_hourly_cap(settings):
+    store = JobStore(settings.data_dir / "jobs.sqlite3")
+    turns = Turns(store, settings, {"codex": FakeAdapter()})
+    bot = store.create_bot("Idle", "", "codex", None)
+    from botoffice.store import URGENT_HOURLY
+    for _ in range(URGENT_HOURLY):
+        turns.post_message(bot, "now", source="inbox", sender="Grok", urgent=True)
+    with pytest.raises(InboxLimitError, match="priority limit"):
+        turns.post_message(bot, "now", source="inbox", sender="Grok", urgent=True)
+
+
+def test_sweep_rechecks_cancelled_wakes_busy_leads_and_resolved_turns(tmp_path, monkeypatch):
+    store, asg = _store(tmp_path)
+    owner = store.create_bot("MS Data Pipeline Engineer (BO)", "", "claude", None)
+    lead = store.create_bot("MS Lead (BO)", "", "claude", None)
+    task = _started_task(store, asg, owner, 9)
+    # closed between the pass's read and its write: left alone
+    real = stall_sweep._stalls
+
+    def close_then_list(db, cutoff, stamp):
+        items = real(db, cutoff, stamp)
+        with closing(store._connect()) as other:
+            other.execute("UPDATE assignments SET status='done' WHERE id=?", (str(task.id),))
+        return items
+    monkeypatch.setattr(stall_sweep, "_stalls", close_then_list)
+    assert stall_sweep.sweep(store, asg, 3)["woken"] == 0 and not _wake_jobs(store, owner)
+    monkeypatch.setattr(stall_sweep, "_stalls", real)
+    # a wake-up that _fire cancels (chat-only) uses no hourly slot, and the lead hears it did not run
+    with closing(store._connect()) as db:
+        db.execute("UPDATE assignments SET status='active' WHERE id=?", (str(task.id),))
+        db.execute("UPDATE bots SET chat_only=1 WHERE id=?", (str(owner.id),))
+    assert stall_sweep.sweep(store, asg, 3, per_hour=1)["woken"] == 1
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT COUNT(*) FROM stall_wakes").fetchone()[0] == 0
+    _age_sweeps(store, 4)
+    store.create("busy", "claude", bot_id=lead.id, source="chat")  # a busy lead is asked later
+    assert stall_sweep.sweep(store, asg, 3)["escalated"] == 0
+    _finish_all(store, lead)
+    assert stall_sweep.sweep(store, asg, 3)["escalated"] == 1
+    assert "did not run" in [j for j in _wake_jobs(store, lead)][0].prompt
+
+
+def test_stalled_last_turn_escalates_unless_the_wake_resolved_it(tmp_path):
+    store, asg = _store(tmp_path)
+    owner = store.create_bot("MPG Data Pipeline Engineer (BO)", "", "claude", None)
+    lead = store.create_bot("MPG Lead (BO)", "", "claude", None)
+    job = store.create("work", "claude", bot_id=owner.id, source="chat")
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET status='incomplete', outcome='blocked: x', finished_at=? WHERE id=?",
+                   ((now() - timedelta(hours=5)).isoformat(), str(job.id)))
+    assert stall_sweep.sweep(store, asg, 3)["woken"] == 1
+    wake = _wake_jobs(store, owner)[0]
+    with closing(store._connect()) as db:  # the wake-up turn ran and did not finish it
+        db.execute("UPDATE jobs SET status='incomplete', outcome='not_done: still blocked', finished_at=? WHERE id=?",
+                   (now().isoformat(), str(wake.id)))
+    _age_sweeps(store, 4)
+    assert stall_sweep.sweep(store, asg, 3)["escalated"] == 1  # not a fresh strike 1 on the wake's own job
+    assert len(_wake_jobs(store, lead)) == 1
+
+    # same again, but the wake-up turn ended done: resolved, the lead is not told
+    other = store.create_bot("MPG Site Tester (BO)", "", "claude", None)
+    job = store.create("work", "claude", bot_id=other.id, source="chat")
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET status='failed', finished_at=? WHERE id=?",
+                   ((now() - timedelta(hours=5)).isoformat(), str(job.id)))
+    _finish_all(store, lead)
+    assert stall_sweep.sweep(store, asg, 3)["woken"] == 1
+    wake = _wake_jobs(store, other)[0]
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET status='succeeded', outcome='done: retried, fixed', finished_at=? WHERE id=?",
+                   (now().isoformat(), str(wake.id)))
+    _age_sweeps(store, 4)
+    assert stall_sweep.sweep(store, asg, 3)["escalated"] == 0
+    assert len(_wake_jobs(store, lead)) == 1
+
+
+def test_rules_sync_dedup_is_exact_and_only_replaces_its_own_notes(tmp_path):
+    store = JobStore(tmp_path / "db.sqlite3")
+    bot = store.create_bot("Web Lead (BO)", "", "claude", None)
+    memory = Memory(tmp_path / "data")
+    memory.write_bot(bot.id, "- Never use staging.\n- my note about [rule:deploy] ids\n")
+    folder = tmp_path / "drop"
+    folder.mkdir()
+    (folder / "web-lead-bo.md").write_text("- [2026-11-21 | x] Use staging.\n- [2026-11-21 | x | id=deploy] Deploy rule.\n")
+    entry = rules_sync.run(store, memory, folder)["files"][0]
+    assert entry["added"] == 2
+    text = memory.read_bot(bot.id)
+    assert "- my note about [rule:deploy] ids" in text and "Never use staging." in text
+    assert "] Use staging." in text or "Use staging.\n" in text

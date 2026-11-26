@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -39,6 +40,8 @@ SECTION = "## Rules and decisions (synced; each with its date and source)"
 WHO = "rules sync"
 ET = ZoneInfo("America/New_York")
 MAX_FILE_BYTES = 200_000
+MAX_RULES_PER_FILE = 200
+_LOCK = threading.Lock()  # one run at a time (the daily pass and POST /v1/rules-sync/run)
 _RULE = re.compile(
     r"^\s*[-*]\s*\[\s*(?P<date>\d{4}-\d{2}-\d{2})(?:[ T](?P<time>\d{1,2}:\d{2})(?:\s*ET)?)?\s*\|\s*(?P<source>[^|\]]{1,200}?)"
     r"\s*(?:\|\s*id\s*=\s*(?P<id>[A-Za-z0-9][\w.-]{0,63})\s*)?\]\s*(?P<text>\S.*?)\s*$")
@@ -51,7 +54,16 @@ def slug(text: str) -> str:
 
 
 def norm(text: str) -> str:
-    return " ".join(re.sub(r"[^\w%#.-]+", " ", text.lower()).split())
+    """Whitespace and case folded; punctuation kept (a changed comma is a changed rule)."""
+    return " ".join(text.split()).casefold()
+
+
+# a memory line's own text: without the bullet and a leading "RULE (...)" / "[rule:key]" prefix
+_PREFIX = re.compile(r"^\s*(?:[-*+]\s+)?(?:RULE\s*\([^)]{0,200}\)\s*(?:\[rule:[\w.-]{1,64}\])?\s*:?\s*)?")
+
+
+def _text_of(line: str) -> str:
+    return norm(_PREFIX.sub("", line, count=1))
 
 
 def parse(text: str) -> tuple[str | None, list[dict]]:
@@ -82,13 +94,14 @@ def merge(memory: str, rule: dict) -> tuple[str, str]:
     line = note(rule)
     if rule["id"]:
         for index, existing in enumerate(lines):
-            if rule["id"] in _ID_MARK.findall(existing):
+            # only a note this sync wrote ("- RULE (" ... "[rule:key]") is ever replaced
+            if existing.startswith("- RULE (") and rule["id"] in _ID_MARK.findall(existing):
                 if norm(existing) == norm(line):
                     return memory, "present"
                 lines[index] = line
                 return "\n".join(lines), "changed"
     wanted = norm(rule["text"])
-    if any(wanted and wanted in norm(existing) for existing in lines):
+    if any(wanted and wanted == _text_of(existing) for existing in lines):
         return memory, "present"
     if SECTION not in lines:
         body = "\n".join(lines).rstrip("\n")
@@ -119,6 +132,11 @@ def _find_bot(store: JobStore, name: str | None, stem: str):
 
 def run(store: JobStore, memory, folder: Path | None, *, only_changed: bool = True, log_dir: Path | None = None) -> dict:
     """Import the drop folder. Returns {"files": [{file, bot, added, changed, present, error}], "at": iso}."""
+    with _LOCK:
+        return _run(store, memory, folder, only_changed=only_changed, log_dir=log_dir)
+
+
+def _run(store: JobStore, memory, folder: Path | None, *, only_changed: bool, log_dir: Path | None) -> dict:
     result: dict = {"at": datetime.now(UTC).isoformat(), "files": []}
     if folder is None or not folder.is_dir():
         result["error"] = f"no drop folder: {folder}"
@@ -135,6 +153,8 @@ def run(store: JobStore, memory, folder: Path | None, *, only_changed: bool = Tr
             if only_changed and seen.get(path.name) == digest:
                 continue
             name, rules = parse(raw.decode("utf-8", errors="replace"))
+            if len(rules) > MAX_RULES_PER_FILE:
+                raise ValueError(f"{len(rules)} rules; at most {MAX_RULES_PER_FILE} per file")
             bot = _find_bot(store, name, path.stem)
             if bot is None:
                 raise ValueError(f"no bot named {name!r}" if name else f"no bot matches the file name {path.stem!r}")
@@ -168,6 +188,10 @@ def _append(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(line)
+
+
+def busy() -> bool:
+    return _LOCK.locked()
 
 
 def due(store: JobStore, moment: datetime | None = None) -> bool:

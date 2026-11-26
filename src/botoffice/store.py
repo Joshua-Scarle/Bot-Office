@@ -113,6 +113,8 @@ SOURCE_PRIORITY = {"inbox": 2, "assignment": 2, "wakeup": 2, "routine": 3, "trig
 # 0.12.39: a priority inbox message (desk inbox post --priority) sorts before everything, even the owner's
 # own chat (0): it exists to wake the bot now. usage.budget_gate does not hold it.
 URGENT_PRIORITY = -1
+# priority messages per rolling hour, all senders together: they skip the inbox caps, so they have their own
+URGENT_HOURLY = 10
 
 
 class InboxLimit(ValueError):
@@ -2534,6 +2536,10 @@ class JobStore:
                                (cursor.isoformat(), fired.isoformat(), str(routine_id)))
                 if inbox_caps:
                     _inbox_limit(db, inbox_caps, sender=sender)
+                if priority is not None and priority < 0 and db.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE priority<0 AND created_at>=?",
+                        ((now() - timedelta(hours=1)).isoformat(),)).fetchone()[0] >= URGENT_HOURLY:
+                    raise InboxLimit(f"priority limit of {URGENT_HOURLY} messages per hour reached")
                 if bridge_hop:
                     thread_id, hop = bridge_hop
                     row = db.execute("SELECT hop FROM bridge_threads WHERE thread_id=?", (thread_id,)).fetchone()
