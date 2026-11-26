@@ -449,6 +449,10 @@ def test_secure_path_ok_reads_sudo_and_checks_every_directory(monkeypatch, tmp_p
     monkeypatch.setattr(sudo_review, "_SECURE_PATH", [])
     for out, expected in ((b"Defaults secure_path=/usr/sbin\\:/usr/bin\\:/bin\n", True),
                           (f"Defaults secure_path=/usr/bin\\:{writable}\n".encode(), False),
+                          # an empty entry is the current directory (Codex round 7)
+                          (b"Defaults secure_path=\\:/usr/bin\\:/bin\n", False),
+                          (b"Defaults secure_path=/usr/bin\\:\\:/bin\n", False),
+                          (b"Defaults secure_path=/usr/bin\\:/bin\\:\n", False),
                           (b"Defaults env_reset\n", False)):
         sudo_review._SECURE_PATH.clear()
         monkeypatch.setattr(sudo_review.subprocess, "run", lambda *a, _o=out, **k: Done(_o))
@@ -489,3 +493,13 @@ def test_secure_path_checks_intermediate_symlinks(tmp_path):
 @pytest.mark.parametrize("path", ["/usr/../usr/bin", "/usr/./bin", "usr/bin"])
 def test_secure_path_entries_with_dot_parts_or_relative_fail_closed(path):
     assert not sudo_review._root_only(path)
+
+
+@pytest.mark.parametrize("command", ["sudo service ../../../tmp/payload start", "sudo service /tmp/payload start",
+                                     "sudo service ./x restart", "sudo service .. start", "sudo service nginx start extra"])
+def test_service_needs_a_plain_name_and_no_extra_arguments(command):  # Codex round 8
+    assert sudo_review.hard_stop(command, "/srv/ws")
+
+
+def test_service_with_a_plain_name_reaches_review():
+    assert sudo_review.hard_stop("sudo service nginx restart", "/srv/ws") is None

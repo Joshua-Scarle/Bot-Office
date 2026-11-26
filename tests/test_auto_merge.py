@@ -613,6 +613,33 @@ def test_markers_must_be_affirmative_and_fixed_in_shape(tmp_path, comments, why)
     _card(tmp_path, fake_github(ready_pr(), comments=comments), why)
 
 
+@pytest.mark.parametrize("line", ["tests need to pass on", "tests must pass", "tests pass", "nothing passed",
+                                  "0 tests passed", "success", "the build has to be green", "green light from ops",
+                                  "tests to be passed", "ok, but flaky checks later", "!passed", "~ok", "-green",
+                                  "tests ?passed", "ci *green*", "e2e #ok"])
+def test_tested_line_must_be_a_completed_result_in_the_fixed_grammar(tmp_path, line):  # Codex round 7
+    comments = [note("writer-bot", f"Written-by: claude {SHA12}\nTested: {line} {SHA12}"),
+                note("review-bot", f"Reviewed-by: codex {SHA12}")]
+    _card(tmp_path, fake_github(ready_pr(), comments=comments), "Tested")
+
+
+@pytest.mark.parametrize("line", ["ok", "full suite passed on", "pytest 120 passed; e2e ok", "ci green", "all tests passed."])
+def test_tested_line_completed_results_count(tmp_path, line):
+    store, job = make(tmp_path)
+    comments = [note("writer-bot", f"Written-by: claude {SHA12}\nTested: {line} {SHA12}"),
+                note("review-bot", f"Reviewed-by: codex {SHA12}")]
+    rules = checker(Rules(store), fake_github(ready_pr(), comments=comments))
+    assert rules.decide(job, bash(f"{MERGE} 7 --repo acme/widgets {PIN}")).decision == "allow"
+
+
+@pytest.mark.parametrize("value", ["!claude", "-claude", "~claude", "claude?", "not-claude", "claude*", "#claude",
+                                   "claude (no)", "^claude", "claude!"])
+def test_review_marker_punctuation_cannot_qualify_a_name(tmp_path, value):  # Codex round 8
+    comments = [note("writer-bot", f"Written-by: codex {SHA12}\nTested: ok {SHA12}"),
+                note("review-bot", f"Reviewed-by: {value} {SHA12}")]
+    _card(tmp_path, fake_github(ready_pr(), comments=comments), "Reviewed-by")
+
+
 def test_affirmative_marker_shapes_pass(tmp_path):
     store, job = make(tmp_path)
     comments = [note("writer-bot", f"Written-by: Claude Code and grok @ {SHA12}\nTested: 120 passed, e2e green {SHA12}"),

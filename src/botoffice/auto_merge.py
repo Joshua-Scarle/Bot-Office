@@ -29,8 +29,8 @@ keeps the owner's card (fail safe):
   edit unseen) that is unedited, written by an authorized identity (``authorized_identities``) and
   whose marker line names the head commit (at least 12 hex characters of it, so any later push makes
   every marker stale). Lines must be affirmative and fixed in shape: Written-by / Reviewed-by hold only
-  CLI names (plus "approved" or "lgtm"), Tested must end saying it passed ("<what ran> passed", green,
-  ok ...) with no conditional (if, after, when, until, will ...); a line that
+  CLI names (plus "approved" or "lgtm"), Tested must be "[<what ran>] passed" (or green, ok,
+  succeeded), with <what ran> only test words (suite, pytest, e2e, ci ...) or counts; a line that
   says no, not, failed, skipped, pending, awaiting, requested or the like counts as no line at all. A Reviewed-by only counts from a login that is not the PR author, not an author or
   committer of the PR's commits and not the login that posted the Written-by (no self-approval);
 - READY_LABEL counts only when the issue timeline shows it was last applied by an authorized identity
@@ -112,10 +112,35 @@ _NEGATIVE = re.compile(r"\b(no|not|none|n/?a|never|todo|tbd|fail\w*|skip\w*|pend
                        r"waiting|requested|request|queued|scheduled|running|planned|expected|should|will|once|"
                        r"eventually|progress|ongoing|soon|next|if|when|after|before|until|unless|would|could|might|"
                        r"assum\w*|hopefully|implement\w*|fix(?:ed)?\s+is)\b|\?")
-# round 5: a marker is an affirmative statement in a fixed shape, not "anything without a negative word"
-# fixed shape: "<what ran> passed" - the line ends with the affirmative word (a trailing on/at/for before the
-# SHA is dropped), so "tests pass after the fix is implemented" is no claim
-_AFFIRMATIVE = re.compile(r"\b(?:passed|passes|pass|green|ok|succeeded|success|successful)[.!]?$")
+# a marker is an affirmative statement in a fixed grammar, not "anything without a negative word" (Codex
+# rounds 5-7: "tests pass after ...", "tests need to pass", "tests must pass" all ended in an affirmative word).
+# Tested: one or more parts joined by "," ";" "and" or "+", each "[<what ran>] <done>", where <what ran> is only
+# words from _TESTED_WHAT or a nonzero count and <done> is a completed result; e.g. "ok", "full suite passed",
+# "pytest 120 passed, e2e green". A trailing on/at/for/of before the (removed) SHA is dropped.
+_TESTED_DONE = frozenset({"passed", "green", "ok", "succeeded", "successful"})
+_TESTED_WHAT = frozenset({"the", "all", "full", "whole", "targeted", "unit", "e2e", "integration", "live", "local",
+                          "locally", "smoke", "regression", "ci", "qa", "pytest", "test", "tests", "suite", "suites",
+                          "check", "checks", "lint", "build", "typecheck", "mypy", "ruff", "flake8", "unittest",
+                          "playwright", "browser", "ui", "api", "manual", "manually", "codex", "claude"})
+
+
+def _tested_claim(value: str) -> bool:
+    """True when *value* (the SHA already removed) is a completed test result in the fixed grammar."""
+    if not re.fullmatch(r"[a-z0-9\s,;+():@]*\.?", value):
+        return False  # only plain separators: no "!passed", "~ok", "-green" or other punctuation (round 9)
+    claim = re.sub(r"[\s(@:,;-]*(?:\b(?:on|at|for|of)\b)?[\s()@:,;.!-]*$", "", value)
+    parts = [part.strip() for part in re.split(r"\s*(?:[,;+]|\band\b)\s*", claim)]
+    if not parts or any(not part for part in parts):
+        return False
+    for part in parts:
+        words = re.findall(r"[^\s]+", re.sub(r"[():@.]", " ", part))
+        if not words or words[-1] not in _TESTED_DONE:
+            return False
+        if not all(word in _TESTED_WHAT or re.fullmatch(r"0*[1-9][0-9]*", word) for word in words[:-1]):
+            return False
+    return True
+
+
 _MARKER_WORDS = frozenset(CLIS) | {"code", "cli", "and", "approved", "lgtm"}
 
 # set by the API at start-up (like git_guard.default_lookup): () -> the controller's GitHub token
@@ -372,11 +397,12 @@ def _markers(comments: list, head: str, identities: frozenset[str], after: float
             if _NEGATIVE.search(value):
                 continue  # 'Tested: failed', 'Reviewed-by: codex did not review': no claim at all
             if key == "tested":
-                claim = re.sub(r"[\s(@:,-]*(?:\b(?:on|at|for|of)\b)?[\s()@:,-]*$", "", value)
-                tested = tested or bool(_AFFIRMATIVE.search(claim))  # it must end saying it passed
+                tested = tested or _tested_claim(value)  # a completed result in the fixed grammar, nothing else
                 continue
-            if any(word not in _MARKER_WORDS for word in re.findall(r"[a-z][a-z0-9-]*", value)):
-                continue  # Written-by / Reviewed-by hold only CLI names (and approved / lgtm), nothing else
+            if not re.fullmatch(r"[a-z\s,()@:;&+/]*\.?", value) or any(
+                    word not in _MARKER_WORDS for word in re.findall(r"[a-z]+", value)):
+                continue  # Written-by / Reviewed-by hold only CLI names (and approved / lgtm) and plain separators:
+                # no "!claude", "-codex", "~grok" or other punctuation that could negate or qualify a name (round 8)
             clis = {cli for cli in CLIS if re.search(rf"\b{cli}\b", value)}
             if "antigravity" in clis:
                 clis = (clis - {"antigravity"}) | {"agy"}

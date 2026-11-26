@@ -232,7 +232,8 @@ def secure_path_ok() -> bool:
         done = subprocess.run(["sudo", "-n", "-l"], capture_output=True, timeout=5, check=False, stdin=subprocess.DEVNULL)
         found = re.search(r"secure_path=((?:[^,\n\\]|\\.)+)", done.stdout.decode(errors="replace"))
         if found:
-            dirs = [part for part in found.group(1).replace("\\:", ":").split(":") if part]
+            # an empty entry (":/usr/bin", "a::b", trailing ":") means the current directory: never secure
+            dirs = found.group(1).strip().replace("\\:", ":").split(":")
             answer = bool(dirs) and all(part.startswith("/") and _root_only(part) for part in dirs)
     except (OSError, subprocess.SubprocessError):
         answer = False
@@ -308,8 +309,10 @@ def _argument_stop(name: str, words: list[str], unsafe_cwd: bool, bare: str) -> 
     if name == "nginx" and any(word not in ("-t", "-v", "-V", "-q", "-s", "reload", "reopen", "stop", "quit")
                                for word in words):
         return "an nginx option outside the review list"
-    if name == "service" and (len(words) < 2 or words[1] not in ("start", "stop", "restart", "reload", "status")):
+    if name == "service" and (len(words) != 2 or words[1] not in ("start", "stop", "restart", "reload", "status")):
         return "a service action outside the review list"
+    if name == "service" and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@_.-]*", words[0]) or ".." in words[0]):
+        return "a service name that is not a plain name"  # "../../tmp/x" would run that file via /etc/init.d
     return None
 
 
