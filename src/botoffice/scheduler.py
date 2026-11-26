@@ -681,7 +681,8 @@ class Scheduler:
                 for message_id, stamp in claimed:  # right away: a failing prompt build must not hide them
                     sink.emit("steer", message_id=message_id, status="delivered", delivered_at=stamp)
                 prompt, bot_memory, shared = prepare_bot_workspace(
-                    self.store, self.memory, bot, job, workspace, timeout, handoff, steers=parked, moment=self.clock()
+                    self.store, self.memory, bot, job, workspace, timeout, handoff, steers=parked, moment=self.clock(),
+                    own_desktop=self.settings.desktop_mode == "per-bot",
                 )
                 self._snapshots[str(job.id)] = (bot_memory, shared)
                 run_job = job.model_copy(update={"prompt": prompt, "bot_name": bot.name,

@@ -108,6 +108,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 #section-dialog { max-width: 400px; border-radius: 14px; }
 .msg.inbox .body { border: 1px solid #6385ad; }
 #desktop-screen { height: min(65vh, 650px); min-height: 260px; background: #080a0e; }
+#desktop-control-banner { margin: 0; padding: 8px 12px; border-radius: 8px; background: #b3261e; color: #fff; font-weight: 600; }
+@media (max-width: 720px) { #desktop-screen { height: 58vh; min-height: 200px; } #desktop-panel .tools-bar button { flex: 1 1 auto; } #desktop-panel .tools-bar select { flex: 1 1 100%; } }
 #tools-dialog { width: min(900px, calc(100vw - 24px)); }
 .tools-content { padding: 18px; display: grid; gap: 10px; max-height: 90vh; overflow: auto; }
 .tools-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -551,7 +553,8 @@ dialog textarea { min-height: 90px; resize: vertical; }
   <div class="tools-content">
     <div class="tools-bar"><h2 id="tools-title">Desktop</h2><button id="tools-close">Close</button></div>
     <div id="desktop-panel">
-      <div class="tools-bar"><label for="desktop-select">Desktop</label><select id="desktop-select"></select><button id="desktop-connect">Connect / Reconnect</button><button id="desktop-take" disabled>Take over</button><button id="desktop-hand-back" title="Tell the bot that used this desktop last that you are done">Hand back</button></div>
+      <div class="tools-bar"><label for="desktop-select">Desktop</label><select id="desktop-select"></select><button id="desktop-connect">Connect / Reconnect</button><button id="desktop-take" disabled>Take control</button><button id="desktop-hand-back" title="Tell the bot that used this desktop last that you are done">Hand back</button></div>
+      <p id="desktop-control-banner" role="alert" hidden></p>
       <p id="desktop-status" role="status"></p><div id="desktop-screen" tabindex="0" aria-label="Remote desktop"></div>
     </div>
     <div id="agent-panel" hidden></div>
@@ -4630,45 +4633,65 @@ $("delete-go").onclick = async () => {
 
 /* ---- desktop and agent messages ---- */
 let desktopRfb = null;
+let desktopList = [];
 function disconnectDesktop() {
   if (desktopRfb) desktopRfb.disconnect();
   desktopRfb = null;
   $("desktop-take").disabled = true;
-  $("desktop-take").textContent = "Take over";
+  $("desktop-take").textContent = "Take control";
+  $("desktop-control-banner").hidden = true;
   $("desktop-screen").replaceChildren();
 }
 $("tools-close").onclick = () => $("tools-dialog").close();
 $("tools-dialog").addEventListener("close", disconnectDesktop);
+function desktopLabel(d) {
+  // remote-desktop: a bot's own desktop reads "<bot> · desktop-N · running"; pool desktops as before
+  if (d.kind === "per-bot") return (d.bot || "(deleted bot)") + " · " + d.name + " · " + d.status + (d.owner_controlling ? " · you control it" : "");
+  return d.name + " · " + d.status + (d.kind === "pool" ? " · shared" : "") + (d.bot ? " · " + d.bot : "");
+}
+async function loadDesktops(prefer) {
+  desktopList = await api("/v1/desktops");
+  const bot = currentBot();
+  const list = $("desktop-select");
+  const options = desktopList.map((d) => {
+    const option = el("option", "", desktopLabel(d));
+    option.value = d.name;
+    option.disabled = d.status !== "running" && d.kind !== "per-bot";   // a stopped bot desktop starts on Connect
+    return option;
+  });
+  if (bot && !desktopList.some((d) => d.kind === "per-bot" && d.bot_id === bot.id)) {
+    const option = el("option", "", bot.name + " · own desktop (created on Connect)");
+    option.value = "bot:" + bot.id;
+    options.unshift(option);
+  }
+  list.replaceChildren(...options);
+  const mine = bot && desktopList.find((d) => d.kind === "per-bot" && d.bot_id === bot.id);
+  list.value = prefer || (mine ? mine.name : bot ? "bot:" + bot.id : (desktopList.find((d) => d.status === "running") || {}).name || "");
+  $("desktop-status").textContent = options.length ? "View only by default. Press Connect." : "No desktops yet.";
+}
 $("desktop-open").onclick = async () => {
   $("tools-title").textContent = "Desktop";
-  $("agent-panel").hidden = true;
-  $("memory-panel").hidden = true;
-  $("routines-panel").hidden = true;
-  $("assignments-panel").hidden = true;
-  $("board-panel").hidden = true;
-  $("watchers-panel").hidden = true;
-  $("voice-panel").hidden = true;
+  for (const id of ["agent-panel", "memory-panel", "routines-panel", "assignments-panel", "board-panel", "watchers-panel", "voice-panel"]) $(id).hidden = true;
   $("desktop-panel").hidden = false;
   $("tools-dialog").showModal();
-  try {
-    const desktops = await api("/v1/desktops");
-    const bot = currentBot();
-    const list = $("desktop-select");
-    list.replaceChildren(...desktops.map((d) => {
-      const option = el("option", "", d.name + " · " + d.status + (d.bot ? " · " + d.bot : ""));
-      option.value = d.name; option.disabled = d.status !== "running";
-      if (bot && d.bot === bot.name) option.selected = true;
-      return option;
-    }));
-    $("desktop-status").textContent = desktops.length ? "Choose a running desktop." : "No desktop containers found.";
-  } catch (e) { $("desktop-status").textContent = e.message; }
+  try { await loadDesktops(); } catch (e) { $("desktop-status").textContent = e.message; }
 };
 let desktopMode = "view";
 async function connectDesktop() {
   disconnectDesktop();
-  const name = $("desktop-select").value;
+  let name = $("desktop-select").value;
   if (!name) return;
   try {
+    const entry = desktopList.find((d) => d.name === name);
+    if (name.startsWith("bot:")) {
+      $("desktop-status").textContent = "Starting the bot's desktop…";
+      name = (await api("/v1/bots/" + encodeURIComponent(name.slice(4)) + "/desktop", {method: "POST"})).name;
+      await loadDesktops(name);
+    } else if (entry && entry.kind === "per-bot" && entry.status !== "running") {
+      $("desktop-status").textContent = "Starting " + name + "…";
+      await api("/v1/desktops/" + encodeURIComponent(name) + "/start", {method: "POST"});
+      await loadDesktops(name);
+    }
     const grant = await api("/v1/desktops/" + encodeURIComponent(name) + "/ticket?mode=" + desktopMode, {method: "POST"});
     const {default: RFB} = await import("/static/vendor/novnc/core/rfb.js");
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -4676,8 +4699,20 @@ async function connectDesktop() {
     desktopRfb = new RFB($("desktop-screen"), url, {wsProtocols: ["binary", "bo-ticket." + grant.ticket]});
     desktopRfb.viewOnly = desktopMode === "view";
     desktopRfb.scaleViewport = true;
-    desktopRfb.addEventListener("connect", () => { $("desktop-status").textContent = desktopMode === "view" ? "Connected · view only" : "Connected · control enabled"; $("desktop-take").textContent = desktopMode === "view" ? "Take over" : "Release"; $("desktop-take").disabled = false; });
-    desktopRfb.addEventListener("disconnect", () => { $("desktop-status").textContent = "Disconnected. Reconnect to try again."; $("desktop-take").disabled = true; });
+    const who = (desktopList.find((d) => d.name === name) || {}).bot;
+    desktopRfb.addEventListener("connect", () => {
+      const control = desktopMode === "control";
+      $("desktop-status").textContent = control ? "Connected · you have control" : "Connected · view only";
+      $("desktop-take").textContent = control ? "Release control" : "Take control";
+      $("desktop-take").disabled = false;
+      $("desktop-control-banner").textContent = "You are controlling " + (who ? who + "'s desktop" : name) + ". The bot's clicks and typing wait until you release or hand back.";
+      $("desktop-control-banner").hidden = !control;
+    });
+    desktopRfb.addEventListener("disconnect", () => {
+      $("desktop-status").textContent = "Disconnected (remote sessions end after an hour or when your login expires). Press Connect to reconnect.";
+      $("desktop-take").disabled = true;
+      $("desktop-control-banner").hidden = true;
+    });
   } catch (e) { $("desktop-status").textContent = e.message; }
 };
 $("desktop-connect").onclick = () => { desktopMode = "view"; connectDesktop(); };
@@ -5211,9 +5246,10 @@ $("notify-enable").onclick = async () => {
 };
 $("desktop-hand-back").onclick = async () => {
   const name = $("desktop-select").value;
-  if (!name) return;
+  if (!name || name.startsWith("bot:")) return;
   try {
     await api("/v1/desktops/" + encodeURIComponent(name) + "/hand-back", {method: "POST"});
+    if (desktopMode === "control") { desktopMode = "view"; connectDesktop(); }
     $("desktop-status").textContent = "Handed back; the bot continues.";
   } catch (err) { $("desktop-status").textContent = err.message; }
 };
