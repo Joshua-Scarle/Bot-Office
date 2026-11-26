@@ -15,7 +15,7 @@ All names below (`office.example.test`, `you@example.test`, `yourteam.cloudflare
 
 | Role | Who | What it can do |
 | --- | --- | --- |
-| `owner` | A person whose email is listed in `owners` and who passed the Access login | The whole GUI and API, with no bearer token. State-changing requests must carry an `Origin` header equal to `https://<host>` (blocks cross-site requests that ride on the browser's cookie). |
+| `owner` | A person whose email is listed in `owners` and who passed the Access login | The whole GUI and API, with no bearer token. State-changing requests must carry an `Origin` header equal to `https://<host>` (blocks cross-site requests that ride on the browser's cookie). No websockets over remote access (0.12.35), so no remote VNC desktop: the JWT is only checked at the handshake. |
 | `remote-client` | A service token listed in `clients` | Only the routes in the allowlist in `src/botoffice/remote_access.py`: read bots, chat history, jobs, needs-you and assignments; post a chat message; answer a question card; cancel a job; start, stop or reply to an assignment. No settings, no command execution, no bot create or delete, no memory, rules, watchers, uploads, voice, desktops or `/v1/agent/*`. No websockets. |
 
 A job-scoped agent token is a separate thing and is never satisfied by a remote identity.
@@ -73,7 +73,7 @@ cloudflared tunnel route dns bot-office <hostname>
 ```
 
 Then use `deploy/remote-access/cloudflared-config.example.yml` as `/etc/cloudflared/config.yml` and run
-`sudo cloudflared service install`. Deploy Bot-Office 0.12.23 with the key in place before the tunnel
+`sudo cloudflared service install`. Deploy Bot-Office 0.12.35 or later with the key in place before the tunnel
 starts, so no request ever reaches an older build through it.
 
 ## Revoking access

@@ -22,27 +22,36 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import concurrent.futures
 import contextvars
 import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("botoffice.remote")
 
+# 0.12.35 review: JWT checks (which may wait on one JWKS refresh) run on their own small pool, so a burst of
+# remote requests can never take the default executor's threads away from the rest of the app.
+_VERIFY_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="botoffice-remote-verify")
+
 CONFIG_ENV = "BOT_OFFICE_REMOTE_ACCESS_FILE"
 CONFIG_NAME = "remote_access.json"
 CONFIG_RECHECK_SECONDS = 5.0
 KEY_CACHE_SECONDS = 3600.0
+KEY_MAX_STALE_SECONDS = 24 * 3600.0   # cached signing keys are never used longer than this without a refresh
+MAX_PENDING_VERIFY = 16               # JWT checks waiting at once; more get 503 at once
+MAX_REMOTE_REQUEST_SECONDS = 300.0    # hard cap on one remote request; an SSE client resumes with Last-Event-ID
 KEY_REFETCH_MIN_SECONDS = 60.0
 CLOCK_SKEW_SECONDS = 60
 MIN_RSA_BITS = 2048
@@ -59,6 +68,9 @@ CLOUDFLARE_HEADERS = (
 )
 JWT_HEADER = b"cf-access-jwt-assertion"
 KEY_HEADER = b"x-bot-office-key"
+# Remote credentials: never passed on to the app (0.12.35 review).
+CREDENTIAL_HEADERS = (JWT_HEADER, KEY_HEADER, b"cf-access-client-id", b"cf-access-client-secret")
+ACCESS_COOKIES = (b"CF_Authorization",)   # the Access session cookie: a replayable owner credential
 KEY_MIN_CHARS = 43          # 256 bits of base64url, the shortest key we accept
 KEY_MAX_CHARS = 256
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -128,6 +140,10 @@ class RemoteIdentity:
     identity: str      # lowercased email, or the service token's common name
     display_name: str
     role: str          # "owner" or "remote-client"
+    expires_at: float | None = field(default=None, compare=False)   # credential expiry: a stream ends then
+    via: str = field(default="jwt", compare=False)                   # "jwt" or "shared-key"
+    binding: tuple = field(default=(), compare=False)   # jwt: (team, audiences); shared key: (digest,)
+    host: str = field(default="", compare=False)        # the public hostname the request was checked against
 
 
 @dataclass(frozen=True)
@@ -190,8 +206,10 @@ def parse_config(raw: Any) -> RemoteConfig | None:
         name, role = entry.get("name"), entry.get("role")
         if not isinstance(name, str) or not name.strip():
             raise ConfigError("each client needs a name")
-        if role not in ROLES:
-            raise ConfigError("client role must be 'owner' or 'remote-client'")
+        # 0.12.35 review: a service token is always least privilege. "owner" is a person (an email
+        # in owners) only; a stolen owner-role token would otherwise be full control with no Origin check.
+        if not isinstance(role, str) or role != ROLE_CLIENT:
+            raise ConfigError("client role must be 'remote-client' (owner is only for emails in owners)")
         clients[common_name] = (name.strip(), role)
     return RemoteConfig(
         team_domain=team,
@@ -257,7 +275,7 @@ def check_shared_key(value: bytes, config: RemoteConfig, now: float) -> RemoteId
     name, expires_at = match
     if now >= expires_at:
         raise AccessDenied(f"key {name} has expired")
-    return RemoteIdentity("service", name, name, ROLE_CLIENT)
+    return RemoteIdentity("service", name, name, ROLE_CLIENT, expires_at, via="shared-key", binding=(presented,))
 
 
 class ConfigLoader:
@@ -300,6 +318,9 @@ class ConfigLoader:
             except (ConfigError, ValueError, OSError) as exc:
                 # logged once per file version (the signature gate above), never the file's contents
                 log.error("remote access config invalid, failing closed: %s", exc)
+                self._result = ConfigResult("broken")
+            except Exception as exc:   # noqa: BLE001  any other parse error also fails closed (never keeps the old config)
+                log.error("remote access config invalid, failing closed: %s", type(exc).__name__)
                 self._result = ConfigResult("broken")
             else:
                 self._result = ConfigResult("ok", cfg) if cfg else ConfigResult("disabled")
@@ -356,27 +377,56 @@ class KeyCache:
     def __init__(self, team_domain: str, fetcher: Callable[[str], dict], clock: Callable[[], float]):
         self.url = f"https://{team_domain}/cdn-cgi/access/certs"
         self._fetcher = fetcher
-        self._clock = clock
+        # cache age and retry throttle use a monotonic clock (a wall-clock step cannot stretch them);
+        # an injected test clock is used as is
+        self._clock = time.monotonic if clock is time.time else clock
         self._keys: dict[str, tuple[int, int]] = {}
         self._fetched_at: float | None = None
         self._attempt_at: float | None = None
+        self._inflight: threading.Event | None = None
         self._lock = threading.Lock()
 
     def get(self, kid: str) -> tuple[int, int] | None:
+        # 0.12.35 review: one refresh in flight at a time, run OUTSIDE the lock. A caller whose kid is
+        # cached goes on at once; a cache miss waits (bounded) for the refresh already running.
         with self._lock:
             now = self._clock()
             fresh = self._fetched_at is not None and now - self._fetched_at < KEY_CACHE_SECONDS
             if kid in self._keys and fresh:
                 return self._keys[kid]
-            if self._attempt_at is None or now - self._attempt_at >= KEY_REFETCH_MIN_SECONDS:
+            inflight = self._inflight
+            leader = False
+            if inflight is None and (self._attempt_at is None or now - self._attempt_at >= KEY_REFETCH_MIN_SECONDS):
                 self._attempt_at = now
-                try:
-                    self._keys = _parse_jwks(self._fetcher(self.url))
-                    self._fetched_at = now
-                except Exception as exc:   # noqa: BLE001  network, JSON or shape errors: keep what we have
-                    log.warning("could not fetch the Access signing keys (%s)", type(exc).__name__)
-            return self._keys.get(kid)
+                inflight = self._inflight = threading.Event()
+                leader = True
+            elif kid in self._keys or inflight is None:
+                return self._usable(kid)
+        if not leader:
+            inflight.wait(FETCH_TIMEOUT_SECONDS + 1)
+            with self._lock:
+                return self._usable(kid)
+        keys: dict[str, tuple[int, int]] | None = None
+        try:
+            keys = _parse_jwks(self._fetcher(self.url))
+        except Exception as exc:   # noqa: BLE001  network, JSON or shape errors: keep what we have
+            log.warning("could not fetch the Access signing keys (%s)", type(exc).__name__)
+        finally:
+            with self._lock:
+                if keys is not None:
+                    self._keys = keys
+                    self._fetched_at = self._clock()   # stamped when the refresh completed
+                self._inflight = None
+            inflight.set()
+        with self._lock:
+            return self._usable(kid)
 
+    def _usable(self, kid: str) -> tuple[int, int] | None:
+        """A cached key, but never one older than KEY_MAX_STALE_SECONDS (a retired key stops working even
+        while the key endpoint is unreachable). Call with the lock held."""
+        if self._fetched_at is None or self._clock() - self._fetched_at > KEY_MAX_STALE_SECONDS:
+            return None
+        return self._keys.get(kid)
 
 def rsa_pkcs1_sha256_verify(n: int, e: int, signing_input: bytes, signature: bytes) -> bool:
     k = (n.bit_length() + 7) // 8
@@ -429,16 +479,17 @@ class AccessVerifier:
             raise AccessDenied("unknown signing key")
         if not rsa_pkcs1_sha256_verify(key[0], key[1], f"{parts[0]}.{parts[1]}".encode("ascii"), signature):
             raise AccessDenied("bad signature")
-        self._check_claims(claims, config)
-        return self._identity(claims, config)
+        audiences = self._check_claims(claims, config)
+        return replace(self._identity(claims, config), binding=(config.team_domain, audiences))
 
-    def _check_claims(self, claims: dict, config: RemoteConfig) -> None:
+    def _check_claims(self, claims: dict, config: RemoteConfig) -> tuple[str, ...]:
         now = self._clock()
         if claims.get("iss") != f"https://{config.team_domain}":
             raise AccessDenied("wrong issuer")
         aud = claims.get("aud")
         auds = [aud] if isinstance(aud, str) else aud if isinstance(aud, list) else []
-        if not any(isinstance(a, str) and a in config.audience for a in auds):
+        matched = tuple(sorted({a for a in auds if isinstance(a, str) and a in config.audience}))
+        if not matched:
             raise AccessDenied("wrong audience")
         exp = claims.get("exp")
         if not _is_number(exp) or exp <= now - CLOCK_SKEW_SECONDS:
@@ -446,6 +497,7 @@ class AccessVerifier:
         for name in ("nbf", "iat"):
             if name in claims and (not _is_number(claims[name]) or claims[name] > now + CLOCK_SKEW_SECONDS):
                 raise AccessDenied(f"{name} is in the future")
+        return matched
 
     @staticmethod
     def _identity(claims: dict, config: RemoteConfig) -> RemoteIdentity:
@@ -455,19 +507,19 @@ class AccessVerifier:
                 raise AccessDenied("bad email claim")
             who = email.strip().lower()
             if who in config.owners:
-                return RemoteIdentity("user", who, who, ROLE_OWNER)
+                return RemoteIdentity("user", who, who, ROLE_OWNER, float(claims["exp"]))
             raise AccessDenied("email is not an owner")
         common = claims.get("common_name")
         if isinstance(common, str) and common:
             entry = config.clients.get(common)
             if entry:
-                return RemoteIdentity("service", common, entry[0], entry[1])
+                return RemoteIdentity("service", common, entry[0], entry[1], float(claims["exp"]))
             raise AccessDenied("unknown service token")
         raise AccessDenied("no identity claim")
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -479,6 +531,38 @@ def _host_of(raw: bytes | None) -> str:
         end = host.find("]")
         return host[1:end] if end > 0 else host
     return host.partition(":")[0].rstrip(".")
+
+
+def _strip_access_cookie(value: bytes) -> bytes:
+    parts = [p for p in value.split(b";") if p.strip() and p.strip().split(b"=", 1)[0].strip() not in ACCESS_COOKIES]
+    return b";".join(parts).strip()
+
+
+def _observe(task: asyncio.Future) -> None:
+    """Retrieve a detached app task's outcome so an exception is logged, never left unobserved."""
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("remote request cleanup raised %s", type(task.exception()).__name__)
+
+
+def _without_credentials(scope: dict) -> dict:
+    scope = dict(scope)
+    out = []
+    for n, v in scope.get("headers", []):
+        name = n.lower()
+        if name in CREDENTIAL_HEADERS:
+            continue
+        if name == b"cookie":
+            v = _strip_access_cookie(v)
+            if not v:
+                continue
+        out.append((n, v))
+    scope["headers"] = out
+    return scope
+
+
+def _log_path(path: str) -> str:
+    """A bounded, escaped path for log lines (no forged lines from encoded control characters)."""
+    return path[:200].encode("unicode_escape").decode("ascii")
 
 
 def route_allowed(method: str, path: str) -> bool:
@@ -496,6 +580,7 @@ class RemoteAccessMiddleware:
             self.loader = ConfigLoader(lambda: config_path(settings), clock)
         self.verifier = AccessVerifier(fetcher, clock)
         self.clock = clock
+        self._pending_verify = 0   # touched only on the event loop thread
 
     async def __call__(self, scope, receive, send):
         kind = scope["type"]
@@ -510,10 +595,11 @@ class RemoteAccessMiddleware:
         hostnames = result.config.hostnames if result.config else ()
         remote = host in hostnames or any(h in headers for h in CLOUDFLARE_HEADERS)
         if not remote:
-            await self.app(scope, receive, send)
+            # local requests keep the bearer-token policy; a stray key header is dropped, not passed on
+            await self.app(_without_credentials(scope) if KEY_HEADER in headers else scope, receive, send)
             return
         method = scope.get("method", "GET").upper() if kind == "http" else "GET"
-        path = scope.get("path", "")
+        path = _log_path(scope.get("path", ""))
         if result.state == "broken":
             log.error("remote request refused: configuration is invalid (%s %s)", method, path)
             await self._deny(kind, send, 503, "remote access misconfigured")
@@ -536,8 +622,16 @@ class RemoteAccessMiddleware:
             if tokens:
                 if config.team_domain is None:
                     raise AccessDenied("Cloudflare Access is not set up")
-                identity = await asyncio.to_thread(
-                    self.verifier.verify, tokens[0].decode("latin-1"), config)
+                if self._pending_verify >= MAX_PENDING_VERIFY:
+                    log.warning("remote request refused: too many JWT checks waiting (%s %s)", method, path)
+                    await self._deny(kind, send, 503, "remote access busy")
+                    return
+                loop = asyncio.get_running_loop()
+                self._pending_verify += 1
+                work = _VERIFY_POOL.submit(self.verifier.verify, tokens[0].decode("latin-1"), config)
+                # the slot is released when the worker is really done (or the queued job was cancelled)
+                work.add_done_callback(lambda _f: loop.call_soon_threadsafe(self._release_verify))
+                identity = await asyncio.wrap_future(work)
             else:
                 identity = check_shared_key(keys[0], config, self.clock())
         except AccessDenied as exc:
@@ -551,30 +645,123 @@ class RemoteAccessMiddleware:
 
         origin = (headers.get(b"origin") or [b""])[0].decode("latin-1")
         expected_origin = "https://" + (headers.get(b"host") or [b""])[0].decode("latin-1").strip().lower()
+        if kind == "websocket":
+            # 0.12.35 review: no remote websockets for any role (the only one is VNC). The JWT is checked at
+            # the handshake only, so a long-lived socket would outlive expiry or revocation. Fail closed.
+            log.warning("remote websocket refused (%s)", identity.display_name)
+            await self._deny(kind, send, 403, "not allowed over remote access")
+            return
         if identity.role == ROLE_CLIENT:
-            if kind == "websocket":
-                log.warning("remote client websocket refused (%s)", identity.display_name)
-                await self._deny(kind, send, 403, "not allowed for this client")
-                return
-            if not route_allowed(method, path):
+            if not route_allowed(method, scope.get("path", "")):
                 log.warning("remote client route refused: %s %s %s", identity.display_name, method, path)
                 await self._deny(kind, send, 403, "not allowed for this client")
                 return
-        elif identity.kind == "user":
-            if (kind == "websocket" or method not in SAFE_METHODS) and origin != expected_origin:
+        elif identity.role == ROLE_OWNER:
+            if method not in SAFE_METHODS and origin != expected_origin:
                 log.warning("cross-site request refused: %s %s %s", identity.identity, method, path)
                 await self._deny(kind, send, 403, "cross-site request refused")
                 return
 
+        identity = replace(identity, host=host)
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
-        if keys:   # the app never sees the key
-            scope = dict(scope)
-            scope["headers"] = [(n, v) for n, v in scope.get("headers", []) if n.lower() != KEY_HEADER]
+        scope = _without_credentials(scope)   # the app never sees the key, the Access JWT or a token secret
+        receive, send, finish, close_gate = self._bound_response(identity, receive, send)
+        limit = MAX_REMOTE_REQUEST_SECONDS
+        if identity.expires_at is not None:
+            grace = CLOCK_SKEW_SECONDS if identity.via == "jwt" else 0   # same boundary as _check_claims
+            limit = max(0.0, min(limit, identity.expires_at + grace - self.clock()))
         token = current_remote_identity.set(identity)
         try:
-            await self.app(scope, receive, send)
+            # the app runs as its own task, raced against a separate deadline: app exceptions (including
+            # its own TimeoutError) propagate unchanged, and the cutoff never waits for the app's cleanup
+            task = asyncio.ensure_future(self.app(scope, receive, send))
+            try:
+                done, _ = await asyncio.wait({task}, timeout=limit)
+            except asyncio.CancelledError:
+                # the server cancelled us (client gone): nothing more is forwarded, the app is cancelled
+                close_gate()
+                task.cancel()
+                task.add_done_callback(_observe)
+                raise
+            if task in done:
+                task.result()
+                return
+            log.warning("remote request ended at its deadline (%s %s %s)", identity.display_name, method, path)
+            await finish()          # stops all forwarding first, then ends or aborts the response
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+            if task.done() and not task.cancelled() and task.exception() is not None:
+                log.warning("remote request cleanup raised %s", type(task.exception()).__name__)
         finally:
             current_remote_identity.reset(token)
+
+    def _release_verify(self) -> None:
+        self._pending_verify -= 1
+
+    def _still_allowed(self, identity: RemoteIdentity) -> bool:
+        if identity.expires_at is not None and identity.expires_at <= self.clock() - (
+                CLOCK_SKEW_SECONDS if identity.via == "jwt" else 0):
+            return False
+        result = self.loader.get()
+        if result.state != "ok" or result.config is None:
+            return False
+        config = result.config
+        if identity.host not in config.hostnames:
+            return False
+        if identity.via == "shared-key":
+            entry = config.shared_keys.get(identity.binding[0]) if identity.binding else None
+            return bool(entry) and self.clock() < entry[1]
+        team, audiences = identity.binding if identity.binding else (None, ())
+        if team is None or team != config.team_domain or not set(audiences) & set(config.audience):
+            return False
+        if identity.kind == "user":
+            return identity.identity in config.owners
+        entry = config.clients.get(identity.identity)
+        return bool(entry) and entry[1] == identity.role
+
+    def _bound_response(self, identity: RemoteIdentity, receive, send):
+        """0.12.35 review: the credential is re-checked before the headers and on every body frame (the
+        config itself is re-read at most every 5 s). Once it expired or was revoked, or the deadline hit,
+        nothing more is forwarded: a streamed response gets its terminal frame, a response that promised a
+        Content-Length is left incomplete so the server aborts the connection. ``end`` is that cutoff."""
+        state = {"started": False, "ended": False, "sized": False}
+
+        async def end() -> None:
+            if state["ended"]:
+                return
+            state["ended"] = True
+            try:
+                if not state["started"]:
+                    await self._deny("http", send, 403, "remote access denied")
+                elif not state["sized"]:
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+            except (OSError, RuntimeError) as exc:   # the client already went away
+                log.info("remote response cutoff: connection already closed (%s)", type(exc).__name__)
+
+        async def bounded_send(message):
+            if state["ended"]:
+                return
+            kind = message.get("type")
+            if kind in ("http.response.start", "http.response.body") and not self._still_allowed(identity):
+                log.warning("remote response ended: access no longer valid (%s)", identity.display_name)
+                await end()
+                return
+            await send(message)
+            if kind == "http.response.start":
+                state["started"] = True
+                state["sized"] = any(n.lower() == b"content-length" for n, _ in message.get("headers", []))
+            elif kind == "http.response.body" and not message.get("more_body"):
+                state["ended"] = True
+
+        async def bounded_receive():
+            if state["ended"]:
+                return {"type": "http.disconnect"}
+            return await receive()
+
+        def close_gate() -> None:
+            state["ended"] = True
+
+        return bounded_receive, bounded_send, end, close_gate
 
     @staticmethod
     async def _deny(kind: str, send, status: int, detail: str) -> None:

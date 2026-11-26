@@ -11,6 +11,7 @@ file into the Claude environment's network secret yourself, then delete the file
 Bot-Office re-reads remote_access.json within 5 seconds; no restart is needed.
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -20,7 +21,8 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DATA = Path(os.environ.get("BOT_OFFICE_DATA", Path.home() / "bot-office" / "data"))
+DATA = Path(os.environ.get("BOT_OFFICE_DATA") or os.environ.get("BOT_OFFICE_DATA_DIR")
+            or Path.home() / "bot-office" / "data")
 
 
 def load(path: Path) -> dict:
@@ -44,10 +46,18 @@ def save(path: Path, cfg: dict) -> None:
 
 
 def write_secret(path: Path, value: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="ascii") as handle:
-        handle.write(value + "\n")
-    os.chmod(path, 0o600)
+    # a fresh 0600 file in the same directory, then an atomic rename: an old file's permissions or a
+    # symlink at the target can never see the new key (0.12.35 review)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".remote_key.", suffix=".txt")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(value + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def main() -> int:
@@ -59,7 +69,14 @@ def main() -> int:
     ap.add_argument("--name", default="claude-cloud")
     ap.add_argument("--days", type=float, default=7.0, help="key lifetime in days (default 7, max 30)")
     args = ap.parse_args()
+    # one shared_key.py at a time: a concurrent new and revoke can never bring a revoked key back
+    args.config.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.config.parent / ".remote_access.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return run(args)
 
+
+def run(args) -> int:
     cfg = load(args.config)
     keys = cfg.get("shared_keys", {})
 

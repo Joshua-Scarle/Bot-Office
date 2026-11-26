@@ -104,8 +104,7 @@ def service_claims(common="abc123.access", **over):
 CONFIG = {
     "enabled": True, "team_domain": TEAM, "audience": [AUD], "hostnames": [HOST],
     "owners": ["You@Example.Test"],
-    "clients": {"abc123.access": {"name": "claude-cloud", "role": "remote-client"},
-                "own456.access": {"name": "owner-token", "role": "owner"}},
+    "clients": {"abc123.access": {"name": "claude-cloud", "role": "remote-client"}},
 }
 
 
@@ -415,13 +414,16 @@ def test_owner_post_requires_exact_origin(tmp_path):
     assert status(ok) == 200
 
 
-def test_owner_websocket_needs_origin(tmp_path):
+def test_owner_websocket_refused_over_remote(tmp_path):
+    # 0.12.35 review: no remote websockets for any role, even an owner with the right Origin
     mw, probe, *_ = build(tmp_path)
     token = sign(user_claims())
-    bad = run(mw, path="/v1/desktops/desktop-1/vnc", headers=remote(token), kind="websocket")
-    assert bad == [{"type": "websocket.close", "code": 1008}]
-    good = run(mw, path="/v1/desktops/desktop-1/vnc", headers=remote(token, origin=f"https://{HOST}"), kind="websocket")
-    assert probe.seen and good == []
+    for headers in (remote(token), remote(token, origin=f"https://{HOST}")):
+        sent = run(mw, path="/v1/desktops/desktop-1/vnc", headers=headers, kind="websocket")
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+    assert not probe.seen
+    # a local websocket is untouched
+    assert run(mw, path="/v1/desktops/desktop-1/vnc", headers={"host": "127.0.0.1:8787"}, kind="websocket") == []
 
 
 def test_remote_client_allowlist(tmp_path):
@@ -465,10 +467,50 @@ def test_unknown_service_token_403(tmp_path):
     assert status(run(mw, headers=remote(sign(service_claims("nope.access"))))) == 403
 
 
-def test_service_token_with_owner_role_skips_origin_check(tmp_path):
-    mw, probe, *_ = build(tmp_path)
+def test_service_token_can_never_be_owner(tmp_path):
+    # 0.12.35 review: an owner-role client entry makes the whole config broken (fail closed)
+    cfg = {**CONFIG, "clients": {"own456.access": {"name": "owner-token", "role": "owner"}}}
+    mw, probe, *_ = build(tmp_path, cfg)
     sent = run(mw, "POST", "/v1/settings", remote(sign(service_claims("own456.access"))))
-    assert status(sent) == 200 and probe.seen[0][1].role == "owner"
+    assert status(sent) == 503 and not probe.seen
+
+
+@pytest.mark.parametrize("role", [[], {}, ["remote-client"], None, 1])
+def test_unhashable_client_role_reload_fails_closed(tmp_path, role):
+    mw, probe, path, clock = build(tmp_path)
+    token = sign(service_claims())
+    assert status(run(mw, headers=remote(token))) == 200
+    path.write_text(json.dumps({**CONFIG, "clients": {"abc123.access": {"name": "x", "role": role}}}))
+    os.utime(path, ns=(1, 1_700_000_000_000_000_000))
+    clock.t += 6
+    assert status(run(mw, headers=remote(token))) == 503
+    clock.t += 6   # the next check still refuses: the old config is never reused
+    assert status(run(mw, headers=remote(token))) == 503
+
+
+def test_credentials_never_reach_the_app(tmp_path):
+    seen = []
+    async def app(scope, receive, send):
+        seen.append({n for n, _ in scope["headers"]})
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+    loader = ra.ConfigLoader(lambda: write_config(tmp_path), Clock())
+    mw = ra.RemoteAccessMiddleware(app, loader, fetcher=Fetcher(), clock=Clock())
+    assert status(run(mw, headers=remote(sign(user_claims()), **{"cf-access-client-secret": "s"}))) == 200
+    assert status(run(mw, headers={"host": "127.0.0.1:8787", "x-bot-office-key": "anything"})) == 200
+    for names in seen:
+        assert not names & {b"cf-access-jwt-assertion", b"x-bot-office-key", b"cf-access-client-secret"}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_non_finite_exp_refused(tmp_path, bad):
+    mw, probe, *_ = build(tmp_path)
+    assert status(run(mw, headers=remote(sign(user_claims(exp=bad))))) == 403
+
+
+def test_logged_path_is_escaped():
+    assert ra._log_path("/v1/x\nFAKE line") == "/v1/x\\nFAKE line"
+    assert len(ra._log_path("/" + "a" * 500)) == 200
 
 
 def test_config_reload_revokes_a_client(tmp_path):
@@ -671,3 +713,274 @@ def test_local_request_ignores_key_header(tmp_path):
 def test_bad_shared_key_config_is_broken(tmp_path, bad):
     mw, probe, *_ = build(tmp_path, bad)
     assert status(run(mw, headers=keyed())) == 503
+
+
+# ---------------------------------------------------------------- 0.12.35 review round 2
+def test_access_cookie_is_stripped_others_kept():
+    scope = {"headers": [(b"cookie", b"a=1; CF_Authorization=secret; b=2"), (b"host", b"h")]}
+    out = dict(ra._without_credentials(scope)["headers"])
+    assert out[b"cookie"] == b"a=1; b=2" and out[b"host"] == b"h"
+    only = {"headers": [(b"cookie", b"CF_Authorization=secret")]}
+    assert ra._without_credentials(only)["headers"] == []
+
+
+def test_jwks_fetch_runs_outside_the_lock(tmp_path):
+    import threading as _t
+    seen = []
+    cache = None
+    def fetcher(url):
+        seen.append(cache._lock.acquire(blocking=False))   # the lock must be free during the fetch
+        if seen[-1]:
+            cache._lock.release()
+        return {"keys": [jwk("k1")]}
+    cache = ra.KeyCache(TEAM, fetcher, Clock())
+    assert cache.get("k1") is not None and seen == [True]
+
+
+def test_jwks_cache_miss_waits_for_the_refresh_in_flight():
+    import threading as _t
+    started, release = _t.Event(), _t.Event()
+    calls = []
+    def fetcher(url):
+        calls.append(1)
+        started.set()
+        release.wait(5)
+        return {"keys": [jwk("k1")]}
+    cache = ra.KeyCache(TEAM, fetcher, Clock())
+    out = {}
+    leader = _t.Thread(target=lambda: out.setdefault("a", cache.get("k1")))
+    leader.start(); started.wait(5)
+    follower = _t.Thread(target=lambda: out.setdefault("b", cache.get("k1")))
+    follower.start()
+    release.set(); leader.join(5); follower.join(5)
+    assert out["a"] is not None and out["b"] is not None and len(calls) == 1
+
+
+# ---------------------------------------------------------------- 0.12.35 review round 5
+def test_cached_keys_expire_when_refresh_keeps_failing():
+    clock = Clock()
+    fetcher = Fetcher()
+    cache = ra.KeyCache(TEAM, fetcher, clock)
+    assert cache.get("k1") is not None
+    fetcher.fail = True
+    clock.t += ra.KEY_CACHE_SECONDS + 1
+    assert cache.get("k1") is not None            # stale but inside the maximum: still usable
+    clock.t += ra.KEY_MAX_STALE_SECONDS
+    assert cache.get("k1") is None                 # past the maximum stale life: fail closed
+
+
+def _stream(mw, headers, chunks_then):
+    """The app streams 3 chunks; between chunks ``chunks_then`` may change the world."""
+    sent = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        for i in range(3):
+            await send({"type": "http.response.body", "body": f"c{i}".encode(), "more_body": True})
+            chunks_then(i)
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    mw.app = app
+    scope = {"type": "http", "method": "GET", "path": "/v1/jobs/abc/events",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    return [m.get("body") for m in sent if m["type"] == "http.response.body"]
+
+
+def test_stream_ends_when_jwt_expires(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    def tick(i):
+        if i == 0:
+            clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1
+    bodies = _stream(mw, remote(sign(service_claims(exp=NOW + 600))), tick)
+    assert bodies == [b"c0", b""]   # the final frame is checked too
+
+
+def test_stream_ends_when_client_revoked(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    def tick(i):
+        if i == 1:
+            path.write_text(json.dumps({**CONFIG, "clients": {}}))
+            os.utime(path, ns=(1, 1_700_000_000_000_000_000))
+            clock.t += 6
+    bodies = _stream(mw, remote(sign(service_claims(exp=NOW + 6000))), tick)
+    assert bodies == [b"c0", b"c1", b""]
+
+
+def test_stream_unbounded_while_still_valid(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    bodies = _stream(mw, remote(sign(service_claims(exp=NOW + 6000))), lambda i: None)
+    assert bodies == [b"c0", b"c1", b"c2", b""]
+
+
+def test_too_many_pending_jwt_checks_get_503(tmp_path):
+    mw, probe, *_ = build(tmp_path)
+    mw._pending_verify = ra.MAX_PENDING_VERIFY
+    sent = run(mw, headers=remote(sign(user_claims())))
+    assert status(sent) == 503 and detail(sent) == "remote access busy"
+
+
+# ---------------------------------------------------------------- 0.12.35 review round 6
+def test_stream_ends_when_shared_key_with_same_name_replaced(tmp_path):
+    other = "b" * 64
+    cfg = {**KEY_CONFIG, "shared_keys": {**KEY_CONFIG["shared_keys"]}}
+    mw, probe, path, clock = build(tmp_path, cfg)
+    def tick(i):
+        if i == 0:   # the key is replaced by another key with the SAME name
+            path.write_text(json.dumps({**KEY_CONFIG, "shared_keys": {other: {"name": "claude-cloud",
+                                                                             "expires_at": "2099-01-01T00:00:00Z"}}}))
+            os.utime(path, ns=(1, 1_700_000_000_000_000_000))
+            clock.t += 6
+    assert _stream(mw, keyed(), tick) == [b"c0", b""]
+
+
+def test_stream_ends_when_audience_or_host_changes(tmp_path):
+    for change in ({"audience": ["other-aud"]}, {"hostnames": ["other.example.test"]}):
+        mw, probe, path, clock = build(tmp_path)
+        def tick(i, change=change):
+            if i == 0:
+                path.write_text(json.dumps({**CONFIG, **change}))
+                os.utime(path, ns=(1, 1_700_000_000_000_000_000 + len(str(change))))
+                clock.t += 6
+        assert _stream(mw, remote(sign(service_claims(exp=NOW + 6000))), tick) == [b"c0", b""]
+
+
+def test_remote_request_has_a_hard_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "MAX_REMOTE_REQUEST_SECONDS", 0.05)
+    mw, probe, *_ = build(tmp_path)
+    sent = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"c0", "more_body": True})
+        await asyncio.sleep(5)
+
+    mw.app = app
+    scope = {"type": "http", "method": "GET", "path": "/v1/jobs/abc/events",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in remote(sign(service_claims(exp=NOW + 6000))).items()]}
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    assert [m.get("body") for m in sent if m["type"] == "http.response.body"] == [b"c0", b""]
+
+
+def test_verify_slot_released_after_worker_finishes(tmp_path):
+    mw, probe, *_ = build(tmp_path)
+    assert status(run(mw, headers=remote(sign(user_claims())))) == 200
+    assert mw._pending_verify == 0
+
+
+# ---------------------------------------------------------------- 0.12.35 review round 7
+def _call(mw, app, headers):
+    sent = []
+    mw.app = app
+    scope = {"type": "http", "method": "GET", "path": "/v1/jobs/abc/events",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    return sent
+
+
+def test_app_timeout_error_propagates(tmp_path):
+    mw, probe, *_ = build(tmp_path)
+
+    async def app(scope, receive, send):
+        raise TimeoutError("backend slow")
+
+    with pytest.raises(TimeoutError):
+        _call(mw, app, remote(sign(service_claims(exp=NOW + 6000))))
+
+
+def test_deadline_does_not_wait_for_stubborn_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "MAX_REMOTE_REQUEST_SECONDS", 0.05)
+    mw, probe, *_ = build(tmp_path)
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"c0", "more_body": True})
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            await send({"type": "http.response.body", "body": b"late", "more_body": True})
+            await asyncio.sleep(0.01)
+
+    sent = _call(mw, app, remote(sign(service_claims(exp=NOW + 6000))))
+    assert [m.get("body") for m in sent if m["type"] == "http.response.body"] == [b"c0", b""]
+
+
+def test_sized_response_is_aborted_not_padded(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "MAX_REMOTE_REQUEST_SECONDS", 0.05)
+    mw, probe, *_ = build(tmp_path)
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-length", b"10")]})
+        await send({"type": "http.response.body", "body": b"12345", "more_body": True})
+        await asyncio.sleep(5)
+
+    sent = _call(mw, app, remote(sign(service_claims(exp=NOW + 6000))))
+    assert [m.get("body") for m in sent if m["type"] == "http.response.body"] == [b"12345"]
+
+
+def test_headers_not_sent_once_revoked(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+
+    async def app(scope, receive, send):
+        clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"secret"})
+
+    sent = _call(mw, app, remote(sign(service_claims(exp=NOW + 600))))
+    assert sent[0]["status"] == 403 and b"secret" not in b"".join(m.get("body", b"") for m in sent)
+
+
+def test_server_cancel_cancels_the_app_and_closes_the_gate(tmp_path):
+    mw, probe, *_ = build(tmp_path)
+    sent, state = [], {}
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            await send({"type": "http.response.body", "body": b"late", "more_body": True})
+            raise
+
+    mw.app = app
+    scope = {"type": "http", "method": "GET", "path": "/v1/jobs/abc/events",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in remote(sign(service_claims(exp=NOW + 6000))).items()]}
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    async def main():
+        outer = asyncio.ensure_future(mw(scope, receive, send))
+        await asyncio.sleep(0.05)
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+        await asyncio.sleep(0.05)
+
+    asyncio.run(main())
+    assert state.get("cancelled") and not any(m.get("body") == b"late" for m in sent)
