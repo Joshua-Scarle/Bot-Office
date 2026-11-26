@@ -100,12 +100,12 @@ class ViewSessions:
         self._next = 0
 
     def configure(self, step: float, cap: float) -> None:
-        self.step, self.cap = step, max(cap, MAX_REMOTE_WEBSOCKET_SECONDS)
+        self.step, self.cap = step, cap   # a cap under 1 h also shortens the first hour (open)
 
     def open(self, who: str, path: str, started: float) -> int:
         self._next += 1
         self._open[self._next] = {"who": who, "path": path, "started": started,
-                                  "budget": MAX_REMOTE_WEBSOCKET_SECONDS, "extensions": 0}
+                                  "budget": min(MAX_REMOTE_WEBSOCKET_SECONDS, self.cap), "extensions": 0}
         return self._next
 
     def close(self, key: int) -> None:

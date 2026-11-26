@@ -105,8 +105,9 @@ pytest`); bot-to-bot messages (`bot-msg`, `desk message`, `desk grok send --kind
 
 - A card waits **24 h** (attended: Settings → approval timeout, default 1440 min; unattended:
   `BOT_OFFICE_APPROVAL_TTL_MIN`, default 1440). Grants after approval: 24 h, one use, as before.
-- The same action asked again by the same bot (any turn) **reuses** the waiting card; one that timed out
-  unanswered in the last 72 h is raised again instead of a duplicate.
+- The same action asked again by the same bot (any turn of the same task: the same assignment, or chat
+  turns) **reuses** the waiting card; one that timed out unanswered in the last 72 h is raised again
+  instead of a duplicate. 0.12.47: a card never moves to another assignment.
 - **Daily digest**: Needs-you shows one "Cards still waiting" line for cards older than 6 h (clear it to
   hide it until the next day).
 

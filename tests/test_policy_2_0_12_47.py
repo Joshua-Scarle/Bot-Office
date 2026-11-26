@@ -1,5 +1,6 @@
 """0.12.47 policy-2: a refused or waiting step never ends the work; approved cards re-run the step in a
 resume turn; denies wake the bot to carry on; own-desktop input without a card; capped desktop sessions."""
+import sqlite3
 from contextlib import closing
 
 import pytest
@@ -205,6 +206,7 @@ def test_public_pr_review_line_still_asks(office):
     ("cat pw | xargs desk type", "ask"),
     ("cat pw | xargs -I{} desk type {}", "ask"),
     ("cat pw | xargs -IX desk type X", "ask"),
+    ("cat pw | xargs sh -c 'desk type \"$1\"' _", "ask"),
     ("find . -name pw -exec desk type {} ;", "ask"),
     ("grep -n 'desk type' notes.md", "allow"),
     ("desk --slot desktop-1 click 1 2", "ask"),
@@ -291,9 +293,14 @@ def test_refused_use_keeps_the_session_a_gap_resets_it():
 def test_loop_and_no_progress_stop():
     clock = Clock()
     lim = limits(clock)
+    lim.screenshot("desktop-10", "a" * 32)
     for _ in range(bd.LOOP_ACTIONS - 1):
         assert lim.check("desktop-10", "click", "same") is None
+        lim.screenshot("desktop-10", "a" * 32)       # the screen does not change
     assert lim.check("desktop-10", "click", "same") == "loop"
+    blind = limits(clock)                            # the same click without looking: not judged as a loop
+    for _ in range(3 * bd.LOOP_ACTIONS):
+        assert blind.check("desktop-15", "click", "next") is None
     assert "stopped" in lim.check("desktop-10", "click", "other")
     assert lim.extend("desktop-10", "I need it anyway", True)[0] is False
     assert lim.over("desktop-10", 0).startswith("loop")
@@ -312,9 +319,17 @@ def test_loop_and_no_progress_stop():
         assert paging.check("desktop-12", "click", "next") is None
         paging.screenshot("desktop-12", f"{n:032x}")
     keys = limits(clock)
+    keys.screenshot("desktop-13", "b" * 32)
     for _ in range(bd.LOOP_KEYS - 1):
         assert keys.check("desktop-13", "key", "Page_Down") is None
+        keys.screenshot("desktop-13", "b" * 32)
     assert keys.check("desktop-13", "key", "Page_Down") == "loop"
+    often = limits(clock)                            # a screenshot every 10 s for minutes: no progress
+    stopped = None
+    for _ in range(30):
+        stopped = stopped or often.screenshot("desktop-16", "c" * 32)
+        clock.t += 10
+    assert stopped == "no progress"
 
 
 def test_agent_api_refuses_after_the_limit_and_extends(settings, tmp_path):
@@ -345,8 +360,11 @@ def test_agent_api_loop_stop_is_audited(settings, tmp_path):
         fake_manager(d, tmp_path)
         a = d.bot("A")
         _, ha = run_job(d.store, a)
-        codes = [d.client.post("/v1/agent/desktop", headers=ha, json={"command": "click", "input": "ee" * 16}).status_code
-                 for _ in range(bd.LOOP_ACTIONS)]
+        codes = []
+        for _ in range(bd.LOOP_ACTIONS):
+            d.client.post("/v1/agent/desktop", headers=ha, json={"shot": "ab" * 16})
+            codes.append(d.client.post("/v1/agent/desktop", headers=ha,
+                                       json={"command": "click", "input": "ee" * 16}).status_code)
         assert codes[:-1] == [200] * (bd.LOOP_ACTIONS - 1) and codes[-1] == 429
         assert any(r["tool"] == "desk session stop" for r in audit(d.store))
 
@@ -444,3 +462,51 @@ def test_no_desk_activity_stops_even_during_a_turn():
     lim.check("desktop-10", "click", "a")
     clock.t += 21 * 60
     assert lim.over("desktop-10", bd.SESSION_GRACE) == "no desk activity"
+
+
+def test_viewing_cap_under_an_hour_is_honoured():
+    sessions = remote_access.ViewSessions()
+    sessions.configure(3600, 30 * 60)
+    key = sessions.open("owner@example.test", "/v1/desktops/desktop-10/vnc", 0.0)
+    assert sessions.ends_at(key) == 30 * 60
+    assert not sessions.extend("owner@example.test", "/v1/desktops/desktop-10/vnc", 1.0)[0]["extended"]
+
+
+def test_unused_resume_card_can_be_approved_again(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    first = start(store, rules.approve(approval)["resume_job_id"])
+    store.finish(first.id, JobStatus.SUCCEEDED, outcome="done")
+    rules.resume_ended(store.get(first.id))
+    assert rules.get(approval)["status"] == "expired"
+    again = rules.approve(approval)
+    assert again["status"] == "approved" and again["resume_job_id"] not in (None, str(first.id))
+    second = start(store, again["resume_job_id"])
+    assert rules.decide(second, bash(ASKS)).decision == "allow"
+
+
+def test_cards_do_not_move_between_assignments(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    b = running(store, bot)
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET assignment_id=? WHERE id=?", ("11111111-1111-4111-8111-111111111111", str(a.id)))
+        db.execute("UPDATE jobs SET assignment_id=? WHERE id=?", ("22222222-2222-4222-8222-222222222222", str(b.id)))
+    first = rules.decide(store.get(a.id), bash(ASKS)).approval_id
+    second = rules.decide(store.get(b.id), bash(ASKS)).approval_id
+    assert first != second and rules.get(first)["job_id"] == str(a.id)
+
+
+def test_deny_audit_commits_with_the_decision(tmp_path, monkeypatch):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+
+    def broken(*a, **k):
+        raise sqlite3.OperationalError("audit table locked")
+    monkeypatch.setattr(store, "policy_audit_insert", broken)
+    with pytest.raises(sqlite3.OperationalError):
+        rules.deny(approval, follow_up=False)
+    assert rules.get(approval)["status"] == "pending"

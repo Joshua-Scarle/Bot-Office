@@ -1500,6 +1500,15 @@ class JobStore:
                               (str(root), str(root), until.isoformat())).fetchall()
         return [(row["reply_text"] or "", (row["outcome"] or "").partition(": ")[2]) for row in rows]
 
+    def policy_audit_insert(self, db: sqlite3.Connection, *, bot_id: str | None, job_id: str | None, source: str,
+                            tool: str, summary: str, policy: str, legacy: str = "") -> None:
+        """policy_audit_event inside the caller's transaction: raises, so the decision fails with it."""
+        bot = db.execute("SELECT name FROM bots WHERE id=?", (bot_id,)).fetchone() if bot_id else None
+        db.execute("INSERT INTO policy_audit (at,bot_id,bot,job_id,source,provider,tool,summary,policy,legacy) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (now().isoformat(), bot_id, bot[0] if bot else None, job_id, source[:32], "", tool[:80],
+                    summary[:2000], policy[:300], legacy[:300]))
+
     def policy_audit_event(self, *, bot_id: str | None, job_id: str | None, source: str, tool: str, summary: str,
                            policy: str, legacy: str = "") -> bool:
         """0.12.47: one row in the append-only policy_audit table for an owner decision or a desktop

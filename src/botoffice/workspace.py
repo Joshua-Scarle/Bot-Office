@@ -151,8 +151,8 @@ Bot-Office asks the owner and runs it once approved, as for any send or post.
 A desktop session lasts {session} minutes of continuous use (it starts again after {idle} minutes with no desk
 use). If a task genuinely needs longer, run `desk extend --reason ...` during your turn in the last 15 minutes:
 +{step} minutes each time, up to {cap} minutes in total. Nothing extends by itself. Repeating the same action
-{loop} times in a row while the screen does not change, or {loop} identical screenshots in a row, stops the
-session: try another approach then.
+{loop} times in a row while your screenshots show the screen unchanged, or {loop} identical screenshots in a
+row, stops the session: try another approach then.
 
 The owner can watch your desktop and take control from Bot-Office. While they control it, `desk click`,
 `type` and `key` are refused with a note: wait for the hand-back (screenshot and open still work).

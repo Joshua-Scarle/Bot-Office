@@ -177,8 +177,11 @@ never the text) and reports each screenshot's digest.
   itself. Every request, granted or refused, is a `policy_audit` row (tool `desk extend`).
 - 5 minutes past the limit the reaper stops the desktop even during a turn (not while the owner
   controls it). The idle stop still applies.
-- **Loop / no-progress stop**: the same action 8 times in a row (20 for `desk key`) with no change of
-  screen in between, or 8 identical screenshots in a row, stops the session and the desktop at once
+- **Loop / no-progress stop**: the same action 8 times in a row (20 for `desk key`) while a screenshot
+  during that streak shows the screen unchanged, or 8 identical screenshots in a row over at least
+  2 minutes, stops the session and the desktop at once. Repeated clicks the bot never looks at are not
+  judged a loop (the session limit bounds them); no desk use for the idle time stops the desktop even
+  during a turn
   (`policy_audit` tool `desk session stop`). An extension cannot restart it; desk works again after the
   idle gap. A Next button clicked with the screen changing each time is progress, not a loop.
 - The counters live in the controller's memory: a Bot-Office restart starts every session afresh.

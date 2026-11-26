@@ -415,6 +415,8 @@ class Session:
     extensions: list = field(default_factory=list)   # (at, reason)
     actions: list = field(default_factory=list)      # recent action fingerprints
     shots: list = field(default_factory=list)        # recent (digest, at) of screenshots
+    shot_run: tuple = ("", 0.0, 0)                   # the current identical-screenshot run: (digest, since, count)
+    seen_same: int = 0          # screenshots, since the action streak began, that show the screen unchanged
     stopped: str = ""           # "loop" / "no progress": refused until a gap with no desk use
 
 
@@ -468,8 +470,12 @@ class SessionLimits:
         if command and command != "screenshot":
             limit = LOOP_KEYS if command == "key" else LOOP_ACTIONS
             session.actions = (session.actions + [f"{command}:{fingerprint or ''}"])[-LOOP_KEYS:]
+            if len(session.actions) == 1 or session.actions[-1] != session.actions[-2]:
+                session.seen_same = 0   # a new streak: it needs its own proof that the screen did not change
             recent = session.actions[-limit:]
-            if len(recent) == limit and len(set(recent)) == 1:
+            # a loop needs evidence: the same action again and again AND a screenshot during the streak showing
+            # the screen unchanged (unobserved clicks on a Next button are not judged; the time limit bounds them)
+            if len(recent) == limit and len(set(recent)) == 1 and session.seen_same > 0:
                 session.stopped = "loop: the same action repeated"
                 return "loop"
         return None
@@ -480,9 +486,14 @@ class SessionLimits:
         now = self.clock()
         if session.shots and session.shots[-1][0] != digest:
             session.actions = []   # the screen changed: repeating an action (a Next button) is progress
+            session.seen_same = 0
+        elif session.shots and session.actions:
+            session.seen_same += 1   # unchanged screen during an action streak
         session.shots = (session.shots + [(digest, now)])[-LOOP_SHOTS:]
-        if (len(session.shots) == LOOP_SHOTS and len({d for d, _ in session.shots}) == 1 and not session.stopped
-                and now - session.shots[0][1] >= SHOTS_SPAN):
+        run_digest, since, count = session.shot_run
+        session.shot_run = (digest, since, count + 1) if run_digest == digest else (digest, now, 1)
+        _, since, count = session.shot_run
+        if count >= LOOP_SHOTS and now - since >= SHOTS_SPAN and not session.stopped:
             session.stopped = "no progress: the screen did not change"
             return "no progress"
         return None

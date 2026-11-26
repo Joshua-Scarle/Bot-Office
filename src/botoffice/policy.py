@@ -652,7 +652,7 @@ def secret_like(text: str) -> bool:
     visible here), a secret word, a known token prefix, or one long word mixing letters with digits or symbols."""
     if not text.strip():
         return False
-    if re.search(r"\$[{(A-Za-z_]|`|<\(|@/|@~", text) or _SECRET_WORDS.search(text):
+    if re.search(r"\$[{(A-Za-z_0-9@*#?!-]|`|<\(|@/|@~", text) or _SECRET_WORDS.search(text):
         return True
     words = text.split()
     plain = re.compile(r"(?i)https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+|[\w-]+\.[a-z]{2,5}|[\w./~-]*/[\w./-]*|\d[\d.,:/ -]*")
