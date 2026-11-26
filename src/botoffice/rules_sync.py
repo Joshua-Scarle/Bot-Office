@@ -56,8 +56,8 @@ def slug(text: str) -> str:
 
 
 def norm(text: str) -> str:
-    """Whitespace and case folded; punctuation kept (a changed comma is a changed rule)."""
-    return " ".join(text.split()).casefold()
+    """Whitespace folded only: a changed letter case or comma is a changed rule."""
+    return " ".join(text.split())
 
 
 # a memory line's own text: without the bullet and a leading "RULE (...)" / "[rule:key]" prefix
@@ -103,12 +103,30 @@ def note(rule: dict) -> str:
     return f"- RULE ({rule['when']}; source: {rule['source']}){mark} {rule['text']}"
 
 
+def _live_lines(lines: list[str]) -> list[int]:
+    """Indexes of the lines outside fenced code blocks (``` or ~~~)."""
+    out, fence = [], None
+    for index, line in enumerate(lines):
+        mark = line.lstrip()[:3]
+        if fence is None and mark in ("```", "~~~"):
+            fence = mark
+            continue
+        if fence is not None:
+            if mark == fence:
+                fence = None
+            continue
+        out.append(index)
+    return out
+
+
 def merge(memory: str, rule: dict) -> tuple[str, str]:
     """(new memory text, what happened: "present" | "changed" | "added")."""
     lines = memory.split("\n") if memory else []
     line = note(rule)
+    live = _live_lines(lines)  # never a line inside a fenced code block
     if rule["id"]:
-        for index, existing in enumerate(lines):
+        for index in live:
+            existing = lines[index]
             # only a note this sync wrote ("- RULE (" ... "[rule:key]") is ever replaced
             found = _SYNCED_ID.match(existing)
             if found and found.group(1) == rule["id"]:
@@ -117,12 +135,15 @@ def merge(memory: str, rule: dict) -> tuple[str, str]:
                 lines[index] = line
                 return "\n".join(lines), "changed"
     wanted, whole = norm(rule["text"]), norm(line)
-    for index, existing in enumerate(lines):
+    for index in live:
+        existing = lines[index]
         if norm(existing) == whole:
             return memory, "present"
         if wanted and wanted == _text_of(existing):
-            if not rule["id"] or _SYNCED_ID.match(existing):
+            if not rule["id"]:
                 return memory, "present"
+            if _SYNCED_ID.match(existing):
+                continue  # another id's note with the same words: this id still gets its own note
             # the same text written by hand: adopted as this rule's note (same words, now tracked by id),
             # so a later change of the rule replaces it instead of leaving the old text behind
             lines[index] = line

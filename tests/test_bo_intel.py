@@ -635,3 +635,17 @@ def test_manual_sweep_stops_when_paused(tmp_path):
     assert stall_sweep.sweep(store, asg, 3, paused=lambda: True) == {"woken": 0, "escalated": 0, "skipped": 0,
                                                                      "paused": True}
     assert not _wake_jobs(store, bot)
+
+
+def test_round5_case_fences_and_same_text_ids():
+    rule = lambda text, id_=None: {"id": id_, "when": "2026-11-21", "source": "x", "text": text,
+                                   "moment": None}
+    memory = "```\n- Use staging\n```\n"
+    after, what = rules_sync.merge(memory, rule("Use staging", "s"))
+    assert what == "added" and after.startswith("```\n- Use staging\n```\n")  # the example is left alone
+    after, _ = rules_sync.merge(after, rule("Write to `Reports`", "r"))
+    after, what = rules_sync.merge(after, rule("Write to `reports`", "r"))
+    assert what == "changed" and "`reports`" in after and "`Reports`" not in after
+    after, _ = rules_sync.merge(after, rule("Same words", "a"))
+    after, what = rules_sync.merge(after, rule("Same words", "b"))
+    assert what == "added" and "[rule:a] Same words" in after and "[rule:b] Same words" in after

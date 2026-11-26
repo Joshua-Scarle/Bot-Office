@@ -294,6 +294,9 @@ def _sweep(store: JobStore, assignments, hours: float, per_hour: int, stamp: dat
             break  # PAUSE appeared during the pass: nothing more is woken
         with closing(assignments._tx()) as db:
             try:
+                if paused is not None and paused():  # again, now that this item holds the write lock
+                    db.rollback()
+                    break
                 cfg = _config_db(db)  # the leads map and exclude list as they are now, in this transaction
                 done = _step(assignments, db, item, cfg, _skipped_bots(db, cfg), hours, per_hour, stamp, cutoff)
                 db.commit()
