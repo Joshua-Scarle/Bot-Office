@@ -445,13 +445,38 @@ def test_aborted_scoped_start_ends_podman_and_stops_the_container(monkeypatch):
     real_once = bd._podman_once
 
     async def once(argv, timeout, scoped):
+        if argv[0] == "ps":
+            return 0, json.dumps([{"Names": ["desktop-12"], "Id": "abc123", "State": "running", "Ports": [],
+                                   "Labels": {bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_A}}]).encode(), b""
         if argv[0] == "stop":
             calls.append(argv)
             return 0, b"", b""
         return await real_once(argv, timeout, scoped)
     monkeypatch.setattr(bd, "_podman_once", once)
     code, _, _ = run(bd.podman(["start", "desktop-12"], 0.5))
-    assert code == 124 and calls == [["stop", "--time", "5", "desktop-12"]]
+    assert code == 124 and calls == [["stop", "--time", "5", "abc123"]]     # by id, only because it is ours
+
+
+def test_abort_never_stops_a_foreign_container(monkeypatch):
+    calls = []
+
+    async def once(argv, timeout, scoped):
+        calls.append(argv)
+        if argv[0] == "ps":
+            return 0, json.dumps([{"Names": ["desktop-12"], "Id": "f00", "State": "running", "Ports": [],
+                                   "Labels": {}}]).encode(), b""
+        return 0, b"", b""
+    monkeypatch.setattr(bd, "_podman_once", once)
+    run(bd._stop_if_ours("desktop-12"))
+    assert not any(a[0] == "stop" for a in calls)
+
+
+def test_scope_launch_oserror_falls_back(monkeypatch):
+    monkeypatch.setattr(bd, "_scope_ok", True)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    monkeypatch.setattr(bd, "scope_prefix", lambda argv, unit, ok: ["/nonexistent/systemd-run", "--"] if ok else [])
+    monkeypatch.setattr(bd.isolation, "wrap", lambda argv, **kw: ["true"])
+    assert run(bd.podman(["start", "desktop-12"]))[0] == 0 and bd._scope_ok is False
 
 
 def test_scope_failure_falls_back_once(monkeypatch):
@@ -475,10 +500,10 @@ def test_double_cancel_waits_for_cleanup(monkeypatch):
     real_once = bd._podman_once
 
     async def once(argv, timeout, scoped):
-        if argv[0] == "stop":
+        if argv[0] == "ps":
             await asyncio.sleep(0.3)
             state["stopped"] = True
-            return 0, b"", b""
+            return 0, b"[]", b""
         return await real_once(argv, timeout, scoped)
     monkeypatch.setattr(bd, "_podman_once", once)
 

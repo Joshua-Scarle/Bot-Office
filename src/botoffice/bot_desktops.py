@@ -62,6 +62,22 @@ async def _reap(proc) -> None:
     await proc.wait()
 
 
+async def _finish(coro) -> None:
+    """Run cleanup to the end even if the caller is cancelled (any number of times) meanwhile; a pending
+    cancellation is re-raised only after the cleanup is done."""
+    task = asyncio.ensure_future(coro)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("desktop cleanup failed: %s", type(task.exception()).__name__)
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 async def _scopes_available(environ: dict[str, str] | None = None) -> bool:
     """Probed once with ``systemd-run --user --scope -- true``. Without scopes, desktops still work but stop
     when Bot-Office restarts (their state is kept): said in the log. Availability is preferred over restart
@@ -86,7 +102,7 @@ async def _scopes_available(environ: dict[str, str] | None = None) -> bool:
                     ok = False
                 finally:
                     if probe.returncode is None:
-                        await asyncio.shield(_reap(probe))
+                        await _finish(_reap(probe))
         if not ok and not isolation.active():
             log.warning("desktops start without their own systemd scope: a Bot-Office restart stops them "
                         "(state is kept; the next use starts them again)")
@@ -106,6 +122,22 @@ def scope_prefix(argv: list[str], unit: str, available: bool) -> list[str]:
     return [tool, "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", "--"] if tool else []
 
 
+async def _stop_if_ours(name: str) -> None:
+    """After an aborted run/start: stop that container by id, and only if it is labelled as a per-bot desktop
+    (never a container someone else created under the same name meanwhile)."""
+    code, out, _ = await podman(["ps", "-a", "--filter", f"name=^{name}$", "--format", "json"], 15)
+    try:
+        found = parse_ps(out).get(name) if not code else None
+    except ValueError:
+        found = None
+    if found is None or not found.bot_id or not found.id:
+        return
+    if found.running:
+        code, _, _ = await podman(["stop", "--time", "5", found.id], 30)
+        if code:
+            log.warning("could not stop %s after an aborted command; it counts toward the cap until stopped", name)
+
+
 def _target(argv: list[str]) -> str | None:
     """The container a run/start acts on (its --name, or start's last argument)."""
     if argv[:1] == ["run"] and "--name" in argv:
@@ -119,12 +151,17 @@ async def _podman_once(argv: list[str], timeout: float, scoped: bool) -> tuple[i
     options, header = isolation.exec_options()
     unit = f"bo-desktop-{argv[0]}-{uuid.uuid4().hex[:12]}"
     scope = scope_prefix(argv, unit, scoped)
-    proc = await asyncio.create_subprocess_exec(
-        *([*scope, shutil.which("podman") or "podman", *argv] if scope else
-          isolation.wrap(["podman", *argv], env_stdin=True, runtime_dir=True)),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        **({"stdin": asyncio.subprocess.DEVNULL} | options),
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *([*scope, shutil.which("podman") or "podman", *argv] if scope else
+              isolation.wrap(["podman", *argv], env_stdin=True, runtime_dir=True)),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **({"stdin": asyncio.subprocess.DEVNULL} | options),
+        )
+    except OSError:
+        if not scope:
+            raise
+        return 127, b"", SCOPE_FAILED[0] + b" (could not run systemd-run)"
 
     async def abort() -> None:
         # end podman itself (the process systemd-run exec'd into, or the launcher), then stop whatever it
@@ -137,18 +174,15 @@ async def _podman_once(argv: list[str], timeout: float, scoped: bool) -> tuple[i
             await _reap(proc)
         target = _target(argv)
         if target:
-            await podman(["stop", "--time", "5", target], 30)
+            await _stop_if_ours(target)
 
     try:
         out, err = await asyncio.wait_for(proc.communicate(header) if header else proc.communicate(), timeout)
     except TimeoutError:
-        await abort()
+        await _finish(abort())
         return 124, b"", b"timed out"
     except asyncio.CancelledError:
-        cleanup = asyncio.ensure_future(abort())
-        while not cleanup.done():   # however often we are cancelled, the cleanup finishes first
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.shield(cleanup)
+        await _finish(abort())   # however often we are cancelled, the cleanup finishes first
         raise
     return proc.returncode or 0, out, err
 
