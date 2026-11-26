@@ -147,12 +147,59 @@ def _fetch_visibility(api: str, owner: str, repo: str, token: str) -> str | None
     return "private" if private is True else "public" if private is False else None
 
 
+def _real_gh() -> str | None:
+    """The gh binary on PATH that is not Bot-Office's own shim (bin/gh)."""
+    import shutil
+    shim_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "bin"))
+    path = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep)
+                           if d and os.path.realpath(d) != shim_dir)
+    return shutil.which("gh", path=path)
+
+
+def gh_cli_get(endpoint: str, jq: str) -> str | None:
+    """0.12.45: a read-only GET through the host's own gh login, for a controller without a token file
+    (data/github-token). Never for a bot, never a write; the answer only, never the credential."""
+    import subprocess
+    program = _real_gh()
+    if program is None or not re.fullmatch(r"[A-Za-z0-9_./-]{1,200}", endpoint):
+        return None
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("BOT_OFFICE_", "GH_", "GITHUB_"))}
+    try:
+        done = subprocess.run([program, "api", "--method", "GET", endpoint, "--jq", jq], capture_output=True, text=True,
+                              timeout=API_TIMEOUT + 2, env=env, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = done.stdout.strip()
+    return value if done.returncode == 0 and value and len(value) < 200 else None
+
+
 class Visibility(DefaultBranches):
-    """0.12.45: cached repo visibility for git_guard.visibility_lookup (pushes to public repos ask)."""
+    """0.12.45: cached repo visibility for git_guard.visibility_lookup (pushes to public repos ask). With
+    no controller token, the host's gh login answers (gh_cli_get); with neither, None (pushes ask)."""
 
     def __init__(self, token: Callable[[], str | None], fetch: Callable[[str, str, str, str], str | None] | None = None,
-                 api: str | None = None):
+                 api: str | None = None, cli: bool = True):
         super().__init__(token, fetch or _fetch_visibility, api)
+        self._cli = cli
+
+    def __call__(self, owner: str, repo: str) -> str | None:
+        if self._token() or not self._cli:
+            return super().__call__(owner, repo)
+        key = (owner.lower(), repo.lower().removesuffix(".git"))
+        stamp = time.monotonic()
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached and cached[0] > stamp:
+                return cached[1]
+        if not all(re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", part) for part in key):
+            return None
+        value = gh_cli_get(f"repos/{key[0]}/{key[1]}", ".visibility")
+        value = value if value in ("public", "private", "internal") else None
+        with self._lock:
+            if len(self._cache) > 5000:
+                self._cache.clear()
+            self._cache[key] = (stamp + (DEFAULT_TTL if value else UNKNOWN_TTL), value)
+        return value
 
 
 class Login:
@@ -172,6 +219,9 @@ class Login:
                 return self._cached[1]
         token = self._token()
         value = None
+        if not token:
+            login = gh_cli_get("user", ".login")  # 0.12.45: the host's gh login, read only
+            value = login if isinstance(login, str) and re.fullmatch(r"[A-Za-z0-9-]{1,39}", login) else None
         if token:
             request = urllib.request.Request(f"{self._api.rstrip('/')}/user", headers={
                 "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": "bot-office"})
