@@ -359,3 +359,43 @@ def test_pool_mode_reaper_leaves_per_bot_desktops_alone(tmp_path):
     clock.t += 10 ** 6
     assert run(manager.reap_idle()) == []
     assert podman.containers["desktop-10"]["running"]
+
+
+# ---------------------------------------------------------------- review round 9
+def test_reaper_rechecks_idleness_before_each_stop(tmp_path):
+    manager, podman, clock, busy = make(tmp_path)
+    run(manager.ensure(BOT_A))
+    run(manager.ensure(BOT_B))
+    clock.t += 3600
+    original = podman.__call__
+
+    async def runner(argv, timeout):
+        if argv[0] == "stop" and argv[-1] == podman.containers["desktop-10"]["id"]:
+            with manager.viewing("desktop-11", "view"):   # someone looks at B and leaves during A's stop
+                pass
+        return await original(argv, timeout)
+    manager.runner = runner
+    assert run(manager.reap_idle()) == ["desktop-10"]
+    assert podman.containers["desktop-11"]["running"]
+
+
+def test_cancelled_podman_command_is_ended_and_reaped(tmp_path, monkeypatch):
+    import sys
+    calls = {}
+
+    def wrap(argv, **kw):
+        return [sys.executable, "-c", "import time; time.sleep(30)"]
+    monkeypatch.setattr(bd.isolation, "wrap", wrap)
+
+    async def main():
+        task = asyncio.ensure_future(bd.podman(["stop", "x"], 60))
+        await asyncio.sleep(0.5)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            calls["cancelled"] = True
+    import time
+    start = time.monotonic()
+    run(main())
+    assert calls["cancelled"] and time.monotonic() - start < 10

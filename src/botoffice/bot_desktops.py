@@ -65,6 +65,14 @@ async def podman(argv: list[str], timeout: float = 60.0) -> tuple[int, bytes, by
         proc.terminate() if isolation.active() else proc.kill()
         await proc.wait()
         return 124, b"", b"timed out"
+    except asyncio.CancelledError:
+        # never leave a podman command running past its caller (a stop guard or the lock would be released
+        # while it still acts): end it and wait for it, then let the cancellation through
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate() if isolation.active() else proc.kill()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(proc.wait())
+        raise
     return proc.returncode or 0, out, err
 
 
@@ -439,8 +447,9 @@ class DesktopManager:
             stopped = []
             for name in idle_to_stop(running, self.last_used, self.viewers, self.busy_bots(), self.bot_of,
                                      now, idle_seconds):
-                # re-checked right before each stop: a viewer or a turn may have arrived during an earlier stop
-                if self.viewers.get(name) or self._protected(name) or self.bot_of(name) in self.busy_bots():
+                # re-checked right before each stop: a viewer, a turn or a use may have come during an earlier stop
+                if (self.viewers.get(name) or self._protected(name) or self.bot_of(name) in self.busy_bots()
+                        or self.clock() - self.last_used.get(name, self.clock()) < idle_seconds):
                     continue
                 if await self.stop(name, "idle"):
                     stopped.append(name)

@@ -1682,9 +1682,11 @@ def create_app(
             raise HTTPException(status_code=409, detail="this desktop is no longer that bot's; reload the list")
         if not any(item["name"] == name and item["status"] == "running" for item in await vnc.desktops()):
             raise HTTPException(status_code=404, detail="desktop is not running")
+        if bot is not None and bot_desks.bot_of(name) != str(bot):   # again, after the await
+            raise HTTPException(status_code=409, detail="this desktop is no longer that bot's; reload the list")
         # bound to who asked: a remote owner's ticket only opens a socket from that same verified person
         binding = vnc.binding_for(remote_access.current_remote_identity.get())
-        return {"ticket": tickets.issue(name, mode, binding), "expires_in": vnc.TICKET_TTL}
+        return {"ticket": tickets.issue(name, mode, binding, str(bot) if bot else None), "expires_in": vnc.TICKET_TTL}
 
     @app.websocket("/v1/desktops/{name}/vnc")
     async def desktop_vnc(ws: WebSocket, name: str) -> None:
@@ -1696,7 +1698,7 @@ def create_app(
         protocols = ws.scope.get("subprotocols", [])
         ticket = next((p[10:] for p in protocols if p.startswith("bo-ticket.")), "")
         binding = vnc.binding_for(remote_access.current_remote_identity.get())
-        mode = (tickets.consume(ticket, name, binding)
+        mode = (tickets.consume(ticket, name, binding, bot_desks.bot_of)
                 if vnc.same_origin(ws.headers.get("origin"), ws.headers.get("host", "")) else None)
         if not mode or "binary" not in protocols or proxy_counts.get(name, 0) >= 4 or sum(proxy_counts.values()) >= 8:
             await ws.close(code=1008)

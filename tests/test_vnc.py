@@ -197,3 +197,15 @@ def test_ticket_bound_to_identity():
     assert tickets.consume(t, "desktop-12", remote) == "control"
     t = tickets.issue("desktop-12")
     assert tickets.consume(t, "desktop-12") == "view"                     # local default
+
+
+def test_bot_bound_ticket_checked_on_use():
+    tickets = vnc.Tickets()
+    owner = {"desktop-12": "bot-a"}
+    t = tickets.issue("desktop-12", "view", vnc.LOCAL, "bot-a")
+    owner["desktop-12"] = "bot-b"                      # remapped between ticket and socket
+    assert tickets.consume(t, "desktop-12", vnc.LOCAL, owner.get) is None
+    t = tickets.issue("desktop-12", "view", vnc.LOCAL, "bot-b")
+    assert tickets.consume(t, "desktop-12", vnc.LOCAL) is None          # no owner lookup: refused
+    t = tickets.issue("desktop-12", "view", vnc.LOCAL, "bot-b")
+    assert tickets.consume(t, "desktop-12", vnc.LOCAL, owner.get) == "view"
