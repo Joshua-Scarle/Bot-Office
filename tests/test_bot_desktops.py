@@ -247,10 +247,10 @@ def test_failed_eviction_never_exceeds_the_cap(tmp_path):
 
 def test_unmanaged_labelled_desktops_count_toward_the_cap(tmp_path):
     manager, podman, clock, _ = make(tmp_path, desktop_max_running=1)
-    podman.add("desktop-20", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_B})
-    manager.registry._map[BOT_C] = 20     # number taken by another mapping: desktop-20 stays unmanaged
+    podman.add("desktop-20", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: "not-a-bot-id"})  # not ours to manage
     with pytest.raises(bd.DesktopError, match="in use"):
         run(manager.ensure(BOT_A))
+    assert not any(a[0] == "stop" for a in podman.calls)
 
 
 def test_a_just_started_desktop_is_not_evicted(tmp_path):
@@ -291,3 +291,30 @@ def test_lost_registry_is_rebuilt_from_labels(tmp_path):
     assert run(manager.ensure(BOT_A)) == "desktop-11"          # its existing desktop, not a new desktop-10
     assert not any(a[0] == "run" for a in podman.calls)
     assert bd.Registry(tmp_path / "desktops.json").number(BOT_A) == 11
+
+
+# ---------------------------------------------------------------- review round 2
+def test_labels_override_a_stale_registry_entry(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    podman.add("desktop-11", running=False, labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_A})
+    manager.registry._map = {BOT_A: 15, BOT_B: 11}     # damaged: A points at nothing, B at A's container
+    assert run(manager.ensure(BOT_A)) == "desktop-11"
+    assert podman.calls[-1] == ["start", "desktop-11"] and not any(a[0] == "run" for a in podman.calls)
+    assert manager.registry.number(BOT_B) is None
+    assert run(manager.ensure(BOT_B)) == "desktop-10"   # B gets a fresh number, never A's desktop
+
+
+def test_reaper_rechecks_busy_bots_before_each_stop(tmp_path):
+    manager, podman, clock, busy = make(tmp_path)
+    run(manager.ensure(BOT_A))
+    run(manager.ensure(BOT_B))
+    clock.t += 3600
+    original = podman.__call__
+
+    async def runner(argv, timeout):
+        if argv[0] == "stop" and argv[-1] == "desktop-10":
+            busy.add(BOT_B)                  # B starts a turn while A's desktop is being stopped
+        return await original(argv, timeout)
+    manager.runner = runner
+    assert run(manager.reap_idle()) == ["desktop-10"]
+    assert podman.containers["desktop-11"]["running"]

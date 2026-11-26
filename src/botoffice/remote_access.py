@@ -728,6 +728,8 @@ class RemoteAccessMiddleware:
         def valid() -> bool:
             return self.clock() < deadline and self._still_allowed(identity)
 
+        cut_event = asyncio.Event()
+
         async def bounded_send(message):
             if state["cut"] or state["closed"]:
                 return
@@ -735,7 +737,20 @@ class RemoteAccessMiddleware:
             if kind in ("websocket.accept", "websocket.send") and not valid():
                 await cut("expired or revoked before a frame")
                 return
-            await send(message)
+            # a frame still waiting on the client (backpressure) when the cut comes is abandoned, never delivered
+            sending = asyncio.ensure_future(send(message))
+            stopper = asyncio.ensure_future(cut_event.wait())
+            try:
+                await asyncio.wait({sending, stopper}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                stopper.cancel()
+                if not sending.done():
+                    sending.cancel()
+                    state["aborted"] = True
+                    sending.add_done_callback(_observe)
+            if not sending.done() or sending.cancelled():
+                return
+            sending.result()
             if kind == "websocket.accept":
                 state["accepted"] = True
             elif kind == "websocket.close":
@@ -759,14 +774,16 @@ class RemoteAccessMiddleware:
             if state["cut"]:
                 return
             state["cut"] = True
+            cut_event.set()
             log.warning("remote websocket closed: %s (%s)", why, identity.display_name)
             current = asyncio.current_task()
             for task in app_task:
                 if task is not current and not task.done():
                     task.cancel()
+            await asyncio.sleep(0)   # let an abandoned in-flight frame observe the cut first
             if not state["closed"]:
                 state["closed"] = True
-                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                with contextlib.suppress(OSError, RuntimeError, TimeoutError, asyncio.CancelledError):
                     await asyncio.wait_for(send({"type": "websocket.close", "code": 1008}), WEBSOCKET_CLOSE_SECONDS)
 
         token = current_remote_identity.set(identity)

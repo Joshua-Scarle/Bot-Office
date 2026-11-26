@@ -174,11 +174,12 @@ class Registry:
         return sorted(self._map.items(), key=lambda item: item[1])
 
     def reconcile(self, containers: dict[str, Container]) -> None:
-        """Adopt labelled per-bot containers missing from the map (registry lost or damaged): each bot keeps
-        its existing desktop. A number or bot already mapped is never re-assigned; for a bot with several
-        labelled containers the lowest number wins."""
-        changed = False
-        for container in sorted(containers.values(), key=lambda c: number_of(c.name) or 0):
+        """Container labels win over the file (registry lost, damaged or stale): every bot whose labelled
+        per-bot container exists is mapped to it (the lowest number when it has several), and a mapping that
+        points at another bot's labelled container is dropped. Nothing is ever created or removed here."""
+        labelled: dict[str, int] = {}
+        owner_of: dict[int, str] = {}
+        for container in containers.values():
             number = number_of(container.name)
             if not number or not container.bot_id:
                 continue
@@ -186,10 +187,16 @@ class Registry:
                 bot = str(uuid.UUID(container.bot_id))
             except ValueError:
                 continue
-            if bot not in self._map and number not in self._map.values():
-                self._map[bot] = number
-                changed = True
-        if changed:
+            owner_of[number] = bot
+            if bot not in labelled or number < labelled[bot]:
+                labelled[bot] = number
+        fixed = {bot: n for bot, n in self._map.items() if owner_of.get(n, bot) == bot}
+        for bot, number in labelled.items():
+            fixed = {b: n for b, n in fixed.items() if n != number or b == bot}
+            fixed[bot] = number
+        if fixed != self._map:
+            log.warning("desktop registry corrected from container labels")
+            self._map = fixed
             self.save()
 
     def allocate(self, bot_id: str, containers: dict[str, Container]) -> int:
@@ -407,7 +414,8 @@ class DesktopManager:
             stopped = []
             for name in idle_to_stop(running, self.last_used, self.viewers, self.busy_bots(), self.bot_of,
                                      now, idle_seconds):
-                if self.viewers.get(name) or self._protected(name):   # a viewer arrived during an earlier stop
+                # re-checked right before each stop: a viewer or a turn may have arrived during an earlier stop
+                if self.viewers.get(name) or self._protected(name) or self.bot_of(name) in self.busy_bots():
                     continue
                 if await self.stop(name, "idle"):
                     stopped.append(name)

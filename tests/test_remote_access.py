@@ -1189,3 +1189,41 @@ def test_cut_does_not_hang_when_the_close_frame_stalls(tmp_path):
         await asyncio.wait_for(mw(scope, receive, send), 6)
     asyncio.run(drive())
     assert app.cancelled
+
+
+def test_a_frame_stalled_at_the_cut_is_never_delivered(tmp_path):
+    clock = Clock()
+    path = write_config(tmp_path)
+    delivered, state = [], {}
+
+    async def app(scope, receive, send):
+        await receive()
+        await send({"type": "websocket.accept"})
+        state["sending"] = True
+        await send({"type": "websocket.send", "bytes": b"late"})   # stalls on a slow client
+        await asyncio.sleep(30)
+
+    mw = ra.RemoteAccessMiddleware(app, ra.ConfigLoader(lambda: path, clock), fetcher=Fetcher(), clock=clock)
+    mw.ws_recheck = 0.01
+    token = sign(user_claims(exp=NOW + 100))
+
+    async def drive():
+        scope = {"type": "websocket", "path": VNC_PATH,
+                 "headers": [(k.lower().encode(), v.encode()) for k, v in owner_ws(token).items()]}
+
+        async def receive():
+            if "connected" not in state:
+                state["connected"] = True
+                return {"type": "websocket.connect"}
+            await asyncio.sleep(30)
+
+        async def send(message):
+            if message["type"] == "websocket.send":
+                clock.t = NOW + 200          # the JWT expires while this frame waits on the client
+                await asyncio.sleep(0.5)
+            delivered.append(message)
+        await asyncio.wait_for(mw(scope, receive, send), 6)
+    asyncio.run(drive())
+    assert state.get("sending")
+    assert not any(m.get("bytes") == b"late" for m in delivered)
+    assert delivered[-1] == {"type": "websocket.close", "code": 1008}

@@ -4634,7 +4634,9 @@ $("delete-go").onclick = async () => {
 /* ---- desktop and agent messages ---- */
 let desktopRfb = null;
 let desktopList = [];
+let desktopGeneration = 0;   // bumped by every connect/disconnect: an older pending connect gives up
 function disconnectDesktop() {
+  desktopGeneration += 1;
   const old = desktopRfb;
   desktopRfb = null;   // first, so the old connection's own disconnect event is ignored
   if (old) old.disconnect();
@@ -4680,6 +4682,8 @@ $("desktop-open").onclick = async () => {
 let desktopMode = "view";
 async function connectDesktop() {
   disconnectDesktop();
+  const generation = desktopGeneration;
+  const stale = () => generation !== desktopGeneration || !$("tools-dialog").open;
   let name = $("desktop-select").value;
   if (!name) return;
   try {
@@ -4687,14 +4691,19 @@ async function connectDesktop() {
     if (name.startsWith("bot:")) {
       $("desktop-status").textContent = "Starting the bot's desktop…";
       name = (await api("/v1/bots/" + encodeURIComponent(name.slice(4)) + "/desktop", {method: "POST"})).name;
+      if (stale()) return;
       await loadDesktops(name);
     } else if (entry && entry.kind === "per-bot" && entry.status !== "running") {
       $("desktop-status").textContent = "Starting " + name + "…";
       await api("/v1/desktops/" + encodeURIComponent(name) + "/start", {method: "POST"});
+      if (stale()) return;
       await loadDesktops(name);
     }
+    if (stale()) return;
     const grant = await api("/v1/desktops/" + encodeURIComponent(name) + "/ticket?mode=" + desktopMode, {method: "POST"});
+    if (stale()) return;
     const {default: RFB} = await import("/static/vendor/novnc/core/rfb.js");
+    if (stale()) return;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     const url = scheme + "//" + location.host + "/v1/desktops/" + encodeURIComponent(name) + "/vnc";
     // events are tied to this connection: a previous one's late "disconnect" must not change the current state
@@ -4718,7 +4727,7 @@ async function connectDesktop() {
       $("desktop-take").disabled = true;
       $("desktop-control-banner").hidden = true;
     });
-  } catch (e) { $("desktop-status").textContent = e.message; }
+  } catch (e) { if (!stale()) $("desktop-status").textContent = e.message; }
 };
 $("desktop-connect").onclick = () => { desktopMode = "view"; connectDesktop(); };
 $("desktop-take").onclick = () => {
@@ -5253,8 +5262,19 @@ $("desktop-hand-back").onclick = async () => {
   const name = $("desktop-select").value;
   if (!name || name.startsWith("bot:")) return;
   try {
+    const wasControlling = desktopMode === "control";
+    if (wasControlling) {
+      // release control first, so the bot's first click after the hand-back is not refused
+      desktopMode = "view";
+      disconnectDesktop();
+      for (let i = 0; i < 20; i++) {
+        const d = (await api("/v1/desktops")).find((x) => x.name === name);
+        if (!d || !d.owner_controlling) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
     await api("/v1/desktops/" + encodeURIComponent(name) + "/hand-back", {method: "POST"});
-    if (desktopMode === "control") { desktopMode = "view"; connectDesktop(); }
+    if (wasControlling) connectDesktop();
     $("desktop-status").textContent = "Handed back; the bot continues.";
   } catch (err) { $("desktop-status").textContent = err.message; }
 };
