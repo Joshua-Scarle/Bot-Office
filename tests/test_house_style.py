@@ -148,8 +148,8 @@ def _job(**kw):
 
 def test_every_prompt_carries_the_style():
     job = _job()
-    assert house_style.HOUSE_STYLE_REMINDER not in workspace.build_resume_prompt(job)  # claude: system prompt
-    for provider in ("antigravity", "cursor", "opencode"):
+    # every engine, Claude too: its recorded system prompt keeps an older session on the old text
+    for provider in ("claude", "codex", "antigravity", "cursor", "opencode"):
         assert house_style.HOUSE_STYLE_REMINDER in workspace.build_resume_prompt(_job(provider=provider))
     assert "in the house style" in workspace._reply_rule(job)
     assert "plain text" not in workspace._base_reply_rule(job)
@@ -172,7 +172,7 @@ def test_fresh_prompt_and_cli_system_prompts_carry_the_style(bot_job):
     job, workspace, prompt = bot_job
     assert HOUSE_STYLE in prompt
     resume = (workspace / "prompt-resume.txt").read_text()
-    assert (house_style.HOUSE_STYLE_REMINDER in resume) == (job.provider not in house_style.SYSTEM_STYLE_PROVIDERS)
+    assert house_style.HOUSE_STYLE_REMINDER in resume
     for session in (None, "sess-1"):
         codex = CodexAdapter()._exec_args(workspace, job, session)
         assert "developer_instructions=" + json.dumps(HOUSE_STYLE, ensure_ascii=False) in codex
