@@ -800,7 +800,7 @@ def test_stream_ends_when_jwt_expires(tmp_path):
         if i == 0:
             clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1
     bodies = _stream(mw, remote(sign(service_claims(exp=NOW + 600))), tick)
-    assert bodies == [b"c0", b""]
+    assert bodies == [b"c0", b""]   # the final frame is checked too
 
 
 def test_stream_ends_when_client_revoked(tmp_path):
@@ -825,3 +825,58 @@ def test_too_many_pending_jwt_checks_get_503(tmp_path):
     mw._pending_verify = ra.MAX_PENDING_VERIFY
     sent = run(mw, headers=remote(sign(user_claims())))
     assert status(sent) == 503 and detail(sent) == "remote access busy"
+
+
+# ---------------------------------------------------------------- 0.12.35 review round 6
+def test_stream_ends_when_shared_key_with_same_name_replaced(tmp_path):
+    other = "b" * 64
+    cfg = {**KEY_CONFIG, "shared_keys": {**KEY_CONFIG["shared_keys"]}}
+    mw, probe, path, clock = build(tmp_path, cfg)
+    def tick(i):
+        if i == 0:   # the key is replaced by another key with the SAME name
+            path.write_text(json.dumps({**KEY_CONFIG, "shared_keys": {other: {"name": "claude-cloud",
+                                                                             "expires_at": "2099-01-01T00:00:00Z"}}}))
+            os.utime(path, ns=(1, 1_700_000_000_000_000_000))
+            clock.t += 6
+    assert _stream(mw, keyed(), tick) == [b"c0", b""]
+
+
+def test_stream_ends_when_audience_or_host_changes(tmp_path):
+    for change in ({"audience": ["other-aud"]}, {"hostnames": ["other.example.test"]}):
+        mw, probe, path, clock = build(tmp_path)
+        def tick(i, change=change):
+            if i == 0:
+                path.write_text(json.dumps({**CONFIG, **change}))
+                os.utime(path, ns=(1, 1_700_000_000_000_000_000 + len(str(change))))
+                clock.t += 6
+        assert _stream(mw, remote(sign(service_claims(exp=NOW + 6000))), tick) == [b"c0", b""]
+
+
+def test_remote_request_has_a_hard_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(ra, "MAX_REMOTE_REQUEST_SECONDS", 0.05)
+    mw, probe, *_ = build(tmp_path)
+    sent = []
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"c0", "more_body": True})
+        await asyncio.sleep(5)
+
+    mw.app = app
+    scope = {"type": "http", "method": "GET", "path": "/v1/jobs/abc/events",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in remote(sign(service_claims(exp=NOW + 6000))).items()]}
+
+    async def receive():
+        return {"type": "http.request", "body": b""}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    assert [m.get("body") for m in sent if m["type"] == "http.response.body"] == [b"c0", b""]
+
+
+def test_verify_slot_released_after_worker_finishes(tmp_path):
+    mw, probe, *_ = build(tmp_path)
+    assert status(run(mw, headers=remote(sign(user_claims())))) == 200
+    assert mw._pending_verify == 0

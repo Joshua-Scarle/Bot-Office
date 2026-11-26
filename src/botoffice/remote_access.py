@@ -34,7 +34,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,7 @@ CONFIG_RECHECK_SECONDS = 5.0
 KEY_CACHE_SECONDS = 3600.0
 KEY_MAX_STALE_SECONDS = 24 * 3600.0   # cached signing keys are never used longer than this without a refresh
 MAX_PENDING_VERIFY = 16               # JWT checks waiting at once; more get 503 at once
+MAX_REMOTE_REQUEST_SECONDS = 300.0    # hard cap on one remote request; an SSE client resumes with Last-Event-ID
 KEY_REFETCH_MIN_SECONDS = 60.0
 CLOCK_SKEW_SECONDS = 60
 MIN_RSA_BITS = 2048
@@ -141,6 +142,8 @@ class RemoteIdentity:
     role: str          # "owner" or "remote-client"
     expires_at: float | None = field(default=None, compare=False)   # credential expiry: a stream ends then
     via: str = field(default="jwt", compare=False)                   # "jwt" or "shared-key"
+    binding: tuple = field(default=(), compare=False)   # jwt: (team, audiences); shared key: (digest,)
+    host: str = field(default="", compare=False)        # the public hostname the request was checked against
 
 
 @dataclass(frozen=True)
@@ -272,7 +275,7 @@ def check_shared_key(value: bytes, config: RemoteConfig, now: float) -> RemoteId
     name, expires_at = match
     if now >= expires_at:
         raise AccessDenied(f"key {name} has expired")
-    return RemoteIdentity("service", name, name, ROLE_CLIENT, expires_at, via="shared-key")
+    return RemoteIdentity("service", name, name, ROLE_CLIENT, expires_at, via="shared-key", binding=(presented,))
 
 
 class ConfigLoader:
@@ -374,7 +377,9 @@ class KeyCache:
     def __init__(self, team_domain: str, fetcher: Callable[[str], dict], clock: Callable[[], float]):
         self.url = f"https://{team_domain}/cdn-cgi/access/certs"
         self._fetcher = fetcher
-        self._clock = clock
+        # cache age and retry throttle use a monotonic clock (a wall-clock step cannot stretch them);
+        # an injected test clock is used as is
+        self._clock = time.monotonic if clock is time.time else clock
         self._keys: dict[str, tuple[int, int]] = {}
         self._fetched_at: float | None = None
         self._attempt_at: float | None = None
@@ -474,16 +479,17 @@ class AccessVerifier:
             raise AccessDenied("unknown signing key")
         if not rsa_pkcs1_sha256_verify(key[0], key[1], f"{parts[0]}.{parts[1]}".encode("ascii"), signature):
             raise AccessDenied("bad signature")
-        self._check_claims(claims, config)
-        return self._identity(claims, config)
+        audiences = self._check_claims(claims, config)
+        return replace(self._identity(claims, config), binding=(config.team_domain, audiences))
 
-    def _check_claims(self, claims: dict, config: RemoteConfig) -> None:
+    def _check_claims(self, claims: dict, config: RemoteConfig) -> tuple[str, ...]:
         now = self._clock()
         if claims.get("iss") != f"https://{config.team_domain}":
             raise AccessDenied("wrong issuer")
         aud = claims.get("aud")
         auds = [aud] if isinstance(aud, str) else aud if isinstance(aud, list) else []
-        if not any(isinstance(a, str) and a in config.audience for a in auds):
+        matched = tuple(sorted({a for a in auds if isinstance(a, str) and a in config.audience}))
+        if not matched:
             raise AccessDenied("wrong audience")
         exp = claims.get("exp")
         if not _is_number(exp) or exp <= now - CLOCK_SKEW_SECONDS:
@@ -491,6 +497,7 @@ class AccessVerifier:
         for name in ("nbf", "iat"):
             if name in claims and (not _is_number(claims[name]) or claims[name] > now + CLOCK_SKEW_SECONDS):
                 raise AccessDenied(f"{name} is in the future")
+        return matched
 
     @staticmethod
     def _identity(claims: dict, config: RemoteConfig) -> RemoteIdentity:
@@ -613,12 +620,12 @@ class RemoteAccessMiddleware:
                     log.warning("remote request refused: too many JWT checks waiting (%s %s)", method, path)
                     await self._deny(kind, send, 503, "remote access busy")
                     return
+                loop = asyncio.get_running_loop()
                 self._pending_verify += 1
-                try:
-                    identity = await asyncio.get_running_loop().run_in_executor(
-                        _VERIFY_POOL, self.verifier.verify, tokens[0].decode("latin-1"), config)
-                finally:
-                    self._pending_verify -= 1
+                work = _VERIFY_POOL.submit(self.verifier.verify, tokens[0].decode("latin-1"), config)
+                # the slot is released when the worker is really done (or the queued job was cancelled)
+                work.add_done_callback(lambda _f: loop.call_soon_threadsafe(self._release_verify))
+                identity = await asyncio.wrap_future(work)
             else:
                 identity = check_shared_key(keys[0], config, self.clock())
         except AccessDenied as exc:
@@ -649,14 +656,25 @@ class RemoteAccessMiddleware:
                 await self._deny(kind, send, 403, "cross-site request refused")
                 return
 
+        identity = replace(identity, host=host)
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
         scope = _without_credentials(scope)   # the app never sees the key, the Access JWT or a token secret
-        receive, send = self._bound_response(identity, receive, send)
+        receive, send, finish = self._bound_response(identity, receive, send)
+        limit = MAX_REMOTE_REQUEST_SECONDS
+        if identity.expires_at is not None:
+            grace = CLOCK_SKEW_SECONDS if identity.via == "jwt" else 0   # same boundary as _check_claims
+            limit = max(0.0, min(limit, identity.expires_at + grace - self.clock()))
         token = current_remote_identity.set(identity)
         try:
-            await self.app(scope, receive, send)
+            await asyncio.wait_for(self.app(scope, receive, send), timeout=limit)
+        except TimeoutError:
+            log.warning("remote request ended at its deadline (%s %s %s)", identity.display_name, method, path)
+            await finish()
         finally:
             current_remote_identity.reset(token)
+
+    def _release_verify(self) -> None:
+        self._pending_verify -= 1
 
     def _still_allowed(self, identity: RemoteIdentity) -> bool:
         if identity.expires_at is not None and identity.expires_at <= self.clock() - (
@@ -666,35 +684,54 @@ class RemoteAccessMiddleware:
         if result.state != "ok" or result.config is None:
             return False
         config = result.config
+        if identity.host not in config.hostnames:
+            return False
+        if identity.via == "shared-key":
+            entry = config.shared_keys.get(identity.binding[0]) if identity.binding else None
+            return bool(entry) and self.clock() < entry[1]
+        team, audiences = identity.binding if identity.binding else (None, ())
+        if team is None or team != config.team_domain or not set(audiences) & set(config.audience):
+            return False
         if identity.kind == "user":
             return identity.identity in config.owners
-        if identity.via == "shared-key":
-            return any(name == identity.identity and self.clock() < exp for name, exp in config.shared_keys.values())
         entry = config.clients.get(identity.identity)
         return bool(entry) and entry[1] == identity.role
 
     def _bound_response(self, identity: RemoteIdentity, receive, send):
-        """0.12.35 review: a long response (a job's event stream) ends as soon as the credential expired or
-        was revoked; every body chunk re-checks (the config itself is re-read at most every 5 s)."""
-        state = {"ended": False}
+        """0.12.35 review: every body frame re-checks the credential (the config itself is re-read at most
+        every 5 s); once it expired or was revoked the response ends and nothing more is sent. ``finish``
+        ends a response cut off at its deadline."""
+        state = {"started": False, "ended": False}
+
+        async def end() -> None:
+            if state["ended"]:
+                return
+            state["ended"] = True
+            if state["started"]:
+                await send({"type": "http.response.body", "body": b"", "more_body": False})
+            else:
+                await self._deny("http", send, 403, "remote access denied")
 
         async def bounded_send(message):
             if state["ended"]:
                 return
-            if message.get("type") == "http.response.body" and message.get("more_body") \
-                    and not self._still_allowed(identity):
-                state["ended"] = True
-                log.warning("remote stream ended: access no longer valid (%s)", identity.display_name)
-                await send({"type": "http.response.body", "body": b"", "more_body": False})
+            kind = message.get("type")
+            if kind == "http.response.body" and not self._still_allowed(identity):
+                log.warning("remote response ended: access no longer valid (%s)", identity.display_name)
+                await end()
                 return
             await send(message)
+            if kind == "http.response.start":
+                state["started"] = True
+            elif kind == "http.response.body" and not message.get("more_body"):
+                state["ended"] = True
 
         async def bounded_receive():
             if state["ended"]:
                 return {"type": "http.disconnect"}
             return await receive()
 
-        return bounded_receive, bounded_send
+        return bounded_receive, bounded_send, end
 
     @staticmethod
     async def _deny(kind: str, send, status: int, detail: str) -> None:
