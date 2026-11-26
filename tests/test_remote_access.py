@@ -104,8 +104,7 @@ def service_claims(common="abc123.access", **over):
 CONFIG = {
     "enabled": True, "team_domain": TEAM, "audience": [AUD], "hostnames": [HOST],
     "owners": ["You@Example.Test"],
-    "clients": {"abc123.access": {"name": "claude-cloud", "role": "remote-client"},
-                "own456.access": {"name": "owner-token", "role": "owner"}},
+    "clients": {"abc123.access": {"name": "claude-cloud", "role": "remote-client"}},
 }
 
 
@@ -465,10 +464,50 @@ def test_unknown_service_token_403(tmp_path):
     assert status(run(mw, headers=remote(sign(service_claims("nope.access"))))) == 403
 
 
-def test_service_token_with_owner_role_skips_origin_check(tmp_path):
-    mw, probe, *_ = build(tmp_path)
+def test_service_token_can_never_be_owner(tmp_path):
+    # 0.12.35 review: an owner-role client entry makes the whole config broken (fail closed)
+    cfg = {**CONFIG, "clients": {"own456.access": {"name": "owner-token", "role": "owner"}}}
+    mw, probe, *_ = build(tmp_path, cfg)
     sent = run(mw, "POST", "/v1/settings", remote(sign(service_claims("own456.access"))))
-    assert status(sent) == 200 and probe.seen[0][1].role == "owner"
+    assert status(sent) == 503 and not probe.seen
+
+
+@pytest.mark.parametrize("role", [[], {}, ["remote-client"], None, 1])
+def test_unhashable_client_role_reload_fails_closed(tmp_path, role):
+    mw, probe, path, clock = build(tmp_path)
+    token = sign(service_claims())
+    assert status(run(mw, headers=remote(token))) == 200
+    path.write_text(json.dumps({**CONFIG, "clients": {"abc123.access": {"name": "x", "role": role}}}))
+    os.utime(path, ns=(1, 1_700_000_000_000_000_000))
+    clock.t += 6
+    assert status(run(mw, headers=remote(token))) == 503
+    clock.t += 6   # the next check still refuses: the old config is never reused
+    assert status(run(mw, headers=remote(token))) == 503
+
+
+def test_credentials_never_reach_the_app(tmp_path):
+    seen = []
+    async def app(scope, receive, send):
+        seen.append({n for n, _ in scope["headers"]})
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+    loader = ra.ConfigLoader(lambda: write_config(tmp_path), Clock())
+    mw = ra.RemoteAccessMiddleware(app, loader, fetcher=Fetcher(), clock=Clock())
+    assert status(run(mw, headers=remote(sign(user_claims()), **{"cf-access-client-secret": "s"}))) == 200
+    assert status(run(mw, headers={"host": "127.0.0.1:8787", "x-bot-office-key": "anything"})) == 200
+    for names in seen:
+        assert not names & {b"cf-access-jwt-assertion", b"x-bot-office-key", b"cf-access-client-secret"}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_non_finite_exp_refused(tmp_path, bad):
+    mw, probe, *_ = build(tmp_path)
+    assert status(run(mw, headers=remote(sign(user_claims(exp=bad))))) == 403
+
+
+def test_logged_path_is_escaped():
+    assert ra._log_path("/v1/x\nFAKE line") == "/v1/x\\nFAKE line"
+    assert len(ra._log_path("/" + "a" * 500)) == 200
 
 
 def test_config_reload_revokes_a_client(tmp_path):

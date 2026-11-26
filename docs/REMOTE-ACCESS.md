@@ -73,7 +73,7 @@ cloudflared tunnel route dns bot-office <hostname>
 ```
 
 Then use `deploy/remote-access/cloudflared-config.example.yml` as `/etc/cloudflared/config.yml` and run
-`sudo cloudflared service install`. Deploy Bot-Office 0.12.23 with the key in place before the tunnel
+`sudo cloudflared service install`. Deploy Bot-Office 0.12.35 or later with the key in place before the tunnel
 starts, so no request ever reaches an older build through it.
 
 ## Revoking access

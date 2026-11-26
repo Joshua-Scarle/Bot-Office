@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -59,6 +60,8 @@ CLOUDFLARE_HEADERS = (
 )
 JWT_HEADER = b"cf-access-jwt-assertion"
 KEY_HEADER = b"x-bot-office-key"
+# Remote credentials: never passed on to the app (0.12.35 review).
+CREDENTIAL_HEADERS = (JWT_HEADER, KEY_HEADER, b"cf-access-client-id", b"cf-access-client-secret")
 KEY_MIN_CHARS = 43          # 256 bits of base64url, the shortest key we accept
 KEY_MAX_CHARS = 256
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -190,8 +193,10 @@ def parse_config(raw: Any) -> RemoteConfig | None:
         name, role = entry.get("name"), entry.get("role")
         if not isinstance(name, str) or not name.strip():
             raise ConfigError("each client needs a name")
-        if role not in ROLES:
-            raise ConfigError("client role must be 'owner' or 'remote-client'")
+        # 0.12.35 review: a service token is always least privilege. "owner" is a person (an email
+        # in owners) only; a stolen owner-role token would otherwise be full control with no Origin check.
+        if not isinstance(role, str) or role != ROLE_CLIENT:
+            raise ConfigError("client role must be 'remote-client' (owner is only for emails in owners)")
         clients[common_name] = (name.strip(), role)
     return RemoteConfig(
         team_domain=team,
@@ -300,6 +305,9 @@ class ConfigLoader:
             except (ConfigError, ValueError, OSError) as exc:
                 # logged once per file version (the signature gate above), never the file's contents
                 log.error("remote access config invalid, failing closed: %s", exc)
+                self._result = ConfigResult("broken")
+            except Exception as exc:   # noqa: BLE001  any other parse error also fails closed (never keeps the old config)
+                log.error("remote access config invalid, failing closed: %s", type(exc).__name__)
                 self._result = ConfigResult("broken")
             else:
                 self._result = ConfigResult("ok", cfg) if cfg else ConfigResult("disabled")
@@ -467,7 +475,7 @@ class AccessVerifier:
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -479,6 +487,17 @@ def _host_of(raw: bytes | None) -> str:
         end = host.find("]")
         return host[1:end] if end > 0 else host
     return host.partition(":")[0].rstrip(".")
+
+
+def _without_credentials(scope: dict) -> dict:
+    scope = dict(scope)
+    scope["headers"] = [(n, v) for n, v in scope.get("headers", []) if n.lower() not in CREDENTIAL_HEADERS]
+    return scope
+
+
+def _log_path(path: str) -> str:
+    """A bounded, escaped path for log lines (no forged lines from encoded control characters)."""
+    return path[:200].encode("unicode_escape").decode("ascii")
 
 
 def route_allowed(method: str, path: str) -> bool:
@@ -510,10 +529,11 @@ class RemoteAccessMiddleware:
         hostnames = result.config.hostnames if result.config else ()
         remote = host in hostnames or any(h in headers for h in CLOUDFLARE_HEADERS)
         if not remote:
-            await self.app(scope, receive, send)
+            # local requests keep the bearer-token policy; a stray key header is dropped, not passed on
+            await self.app(_without_credentials(scope) if KEY_HEADER in headers else scope, receive, send)
             return
         method = scope.get("method", "GET").upper() if kind == "http" else "GET"
-        path = scope.get("path", "")
+        path = _log_path(scope.get("path", ""))
         if result.state == "broken":
             log.error("remote request refused: configuration is invalid (%s %s)", method, path)
             await self._deny(kind, send, 503, "remote access misconfigured")
@@ -556,20 +576,18 @@ class RemoteAccessMiddleware:
                 log.warning("remote client websocket refused (%s)", identity.display_name)
                 await self._deny(kind, send, 403, "not allowed for this client")
                 return
-            if not route_allowed(method, path):
+            if not route_allowed(method, scope.get("path", "")):
                 log.warning("remote client route refused: %s %s %s", identity.display_name, method, path)
                 await self._deny(kind, send, 403, "not allowed for this client")
                 return
-        elif identity.kind == "user":
+        elif identity.role == ROLE_OWNER:
             if (kind == "websocket" or method not in SAFE_METHODS) and origin != expected_origin:
                 log.warning("cross-site request refused: %s %s %s", identity.identity, method, path)
                 await self._deny(kind, send, 403, "cross-site request refused")
                 return
 
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
-        if keys:   # the app never sees the key
-            scope = dict(scope)
-            scope["headers"] = [(n, v) for n, v in scope.get("headers", []) if n.lower() != KEY_HEADER]
+        scope = _without_credentials(scope)   # the app never sees the key, the Access JWT or a token secret
         token = current_remote_identity.set(identity)
         try:
             await self.app(scope, receive, send)
