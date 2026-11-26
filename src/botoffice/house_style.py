@@ -9,12 +9,12 @@ formatting habits (headers, bold labels, bullet dumps).
 only (the job keeps the reply as written, and files are never touched). It is deliberately
 conservative: it never rewrites sentences, and it never touches fenced code or inline code.
 
-1. A leading ``#`` header on a short reply: a short title ("## Summary") is dropped; a longer one
-   keeps its words as a plain line.
+1. A leading ``#`` header on a short reply: a generic title ("## Summary", "## Status") is dropped; any
+   other keeps its words as a plain line.
 2. Bold labels at the start of a line or bullet (``- **Health check:** ok``): the bold is removed, so
    the label reads as plain text (``- Health check: ok``).
-3. A trailing filler line ("Let me know if you need anything else."): removed when something else
-   remains.
+3. A trailing generic closing ("Let me know if you need anything else.", "Hope this helps!"): removed
+   when something else remains. A "Let me know if <something specific>" is kept: it may be an instruction.
 """
 from __future__ import annotations
 
@@ -48,33 +48,44 @@ HOUSE_STYLE_REMINDER = ("Reply in the house style: warm, plain conversational pr
 
 # a reply up to this size counts as "short" for the leading-header rule
 SHORT_REPLY_CHARS = 1500
-SHORT_TITLE_WORDS = 4
 
-_FENCE = re.compile(r"^\s{0,3}(```|~~~)")
-_HEADER = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+_HEADER = re.compile(r"^\s{0,3}#{1,6}\s+(\S.*)$")
+# a leading header with one of these titles says nothing on its own and is dropped; any other keeps its words
+GENERIC_TITLES = {"summary", "status", "status update", "update", "result", "results", "answer", "overview",
+                  "tl;dr", "tldr", "done", "report", "quick update", "short answer", "the answer", "recap"}
 # "**Label:**", "**Label**:" or "__Label:__" at the start of a line, optionally after a bullet or number;
 # the label is short (up to 6 words, no asterisks or backticks)
 _BOLD_LABEL = re.compile(
     r"^(?P<lead>\s*(?:[-*+]\s+|\d+[.)]\s+)?)"
     r"(?P<mark>\*\*|__)(?P<label>[^*_`\n]{1,60}?)(?P<colon_in>:?)(?P=mark)(?P<colon_out>:?)(?=\s|$)")
 _FILLER = re.compile(
-    r"^\s*(?:let me know (?:if|whether|when|how)|just let me know|feel free to|"
-    r"(?:i )?hope (?:this|that) helps|happy to help|glad to help|"
-    r"if you (?:have any (?:other |more |further )?questions|need anything else|'d like (?:anything|more)))"
-    r".{0,160}$",
+    r"^\s*(?:"
+    r"(?:just )?let me know if (?:you )?(?:have any (?:other |more |further )?questions|need anything(?: else)?|"
+    r"(?:would|'d) like (?:anything else|more(?: detail| details| info)?|any changes)|"
+    r"want (?:anything else|more(?: detail| details)?|any changes)|there'?s anything else(?: I can do)?|"
+    r"I can help(?: with anything else)?)(?: here| on this| with this)?"
+    r"|feel free to (?:ask|reach out|let me know)(?: if [^.!?]{0,60})?"
+    r"|(?:I )?hope (?:this|that) helps"
+    r"|(?:I'?m )?(?:always )?happy to help(?: further| with anything else)?"
+    r")\s*[.!]?\s*$",
     re.IGNORECASE)
 
 
 def _fenced(lines: list[str]) -> list[bool]:
-    """Per line: is it part of a fenced code block (fence lines included)?"""
-    inside, marker, out = False, "", []
+    """Per line: is it part of a fenced code block (fence lines included)? A block closes only on a fence of
+    the same character, at least as long, with nothing after it (CommonMark)."""
+    opener, out = "", []
     for line in lines:
         hit = _FENCE.match(line)
-        if hit and (not inside or hit.group(1) == marker):
-            out.append(True)
-            inside, marker = (not inside), hit.group(1)
+        if not opener:
+            if hit and not (hit.group(1)[0] == "`" and "`" in hit.group(2)):
+                opener = hit.group(1)
+            out.append(bool(opener))
             continue
-        out.append(inside)
+        out.append(True)
+        if hit and hit.group(1)[0] == opener[0] and len(hit.group(1)) >= len(opener) and not hit.group(2).strip():
+            opener = ""
     return out
 
 
@@ -104,13 +115,16 @@ def tidy_reply(text: str) -> str:
         hit = _HEADER.match(lines[first])
         rest = "\n".join(lines[first + 1:]).strip()
         if hit and rest:
-            title = hit.group(1).strip().strip("*_").strip()
-            if len(title.split()) <= SHORT_TITLE_WORDS and not title.endswith(("?", "!")):
+            title = hit.group(1).rstrip()
+            if title.endswith("#") and title.rstrip("#")[-1:].isspace():  # "## Title ##": closing hashes
+                title = title.rstrip("#")
+            title = title.strip().strip("*_").strip()
+            if title.lower().rstrip(":.") in GENERIC_TITLES:
                 del lines[first], code[first]
                 while first < len(lines) and not lines[first].strip() and not code[first]:
                     del lines[first], code[first]
-            else:
-                lines[first] = title
+            elif title:
+                lines[first] = title  # its words stay, as a plain line
 
     # 2. bold labels at the start of a line
     lines = [line if code[i] else _unbold_label(line) for i, line in enumerate(lines)]

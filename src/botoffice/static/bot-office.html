@@ -1948,6 +1948,7 @@ function fillBody(body, m, text) {
    code, fenced code, links (http, https and mailto only), bare URLs, headings (as a bold line), lists
    (nested, ordered), quotes, rules and short tables. Asterisk runs that open nothing are dropped, so a
    raw "**" never shows. */
+const MD_INLINE_MAX = 4000;
 const MD_INLINE = new RegExp([
   "(?<tick>`+)(?<code>[^`]|[^`][\\s\\S]*?[^`])\\k<tick>(?!`)",
   "\\[(?<label>[^\\]\\n]+)\\]\\(\\s*<?(?<href>[^\\s()<>]+(?:\\([^\\s()<>]*\\)[^\\s()<>]*)*)>?(?:\\s+\"[^\"\\n]*\")?\\s*\\)",
@@ -1974,13 +1975,26 @@ function mdLink(parent, label, url, plainLabel) {
   if (plainLabel) a.append(label); else mdInline(a, label, true);
   parent.append(a);
 }
+/* a bare URL's trailing punctuation belongs to the sentence; a ")" stays when the URL opened one (Foo_(bar)) */
+function mdTrimUrl(url) {
+  let u = url;
+  for (;;) {
+    const last = u.slice(-1);
+    if (/[.,;:!?\]'"]/.test(last)) u = u.slice(0, -1);
+    else if (last === ")" && (u.match(/\(/g) || []).length < (u.match(/\)/g) || []).length) u = u.slice(0, -1);
+    else return u;
+  }
+}
 function mdText(parent, text) {
-  // an unmatched run of two or more asterisks (a half-written bold) never shows as raw symbols
-  const clean = text.replace(/\*{2,}/g, "");
+  // an unmatched run of two or more asterisks at a word's edge (a half-written bold) never shows as raw
+  // symbols; one inside a token (src/**/x, 2**3) is part of it
+  const clean = text.replace(/\*{2,}/g, (run, at, all) => (at > 0 && /\S/.test(all[at - 1]) &&
+    at + run.length < all.length && /\S/.test(all[at + run.length])) ? run : "");
   if (clean) parent.append(clean);
 }
 /* noLink: inside a link's label (a link never holds another link) */
 function mdInline(parent, text, noLink) {
+  if (text.length > MD_INLINE_MAX) { parent.append(text); return; }  // bounds the regex work on a huge line
   const re = new RegExp(MD_INLINE.source, "g");
   let last = 0, hit;
   while ((hit = re.exec(text))) {
@@ -1991,7 +2005,7 @@ function mdInline(parent, text, noLink) {
     else if (g.label !== undefined) { if (noLink) mdInline(parent, g.label, true); else mdLink(parent, g.label, g.href, false); }
     else if (g.auto !== undefined || g.bare !== undefined) {
       // trailing punctuation belongs to the sentence, not the URL
-      const url = g.auto !== undefined ? g.auto : g.bare.replace(/[.,;:!?)\]]+$/, "");
+      const url = g.auto !== undefined ? g.auto : mdTrimUrl(g.bare);
       if (g.bare !== undefined) last = re.lastIndex = hit.index + url.length;
       if (noLink) parent.append(url); else mdLink(parent, url, url, true);
     } else if (g.bi !== undefined) {
@@ -2005,6 +2019,11 @@ function mdInline(parent, text, noLink) {
 const MD_FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([\w+#.-]*)/;
 const MD_BULLET = /^(\s*)([-*+•]|\d{1,9}[.)])\s+(.*)$/;
 const MD_TABLE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+/* "Title ##" loses its closing hashes, "C#" keeps its own (no regex: a long line must not backtrack) */
+function mdHeadingText(text) {
+  const t = text.trimEnd(), bare = t.replace(/#+$/, "");
+  return bare !== t && (!bare || /\s$/.test(bare)) ? bare.trimEnd() : t;
+}
 function mdCells(line) {
   let s = line.trim();
   if (s.startsWith("|")) s = s.slice(1);
@@ -2052,8 +2071,8 @@ function renderMarkdown(text) {
       continue;
     }
     if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) { root.append(el("hr")); endBlock(); continue; }
-    const heading = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(line);
-    if (heading) { const h = el("p", "md-h"); mdInline(h, heading[1]); root.append(h); endBlock(); continue; }
+    const heading = /^\s{0,3}#{1,6}\s+(\S.*)$/.exec(line);
+    if (heading) { const h = el("p", "md-h"); mdInline(h, mdHeadingText(heading[1])); root.append(h); endBlock(); continue; }
     if (/^\s{0,3}>/.test(line)) {
       const quoted = [];
       for (; i < lines.length && /^\s{0,3}>/.test(lines[i]); i++) quoted.push(lines[i].replace(/^\s{0,3}>\s?/, ""));
@@ -2061,7 +2080,8 @@ function renderMarkdown(text) {
       const box = el("blockquote"); box.append(renderMarkdown(quoted.join("\n"))); root.append(box); endBlock();
       continue;
     }
-    if (line.includes("|") && i + 1 < lines.length && MD_TABLE_RULE.test(lines[i + 1]) && lines[i + 1].includes("-")) {
+    if (line.includes("|") && i + 1 < lines.length && MD_TABLE_RULE.test(lines[i + 1]) &&
+        mdCells(lines[i + 1]).length === mdCells(line).length) {
       const head = mdCells(line), wrap = el("div", "md-table"), table = el("table");
       const thead = el("thead"), hr = el("tr");
       for (const c of head) { const th = el("th"); mdInline(th, c); hr.append(th); }
@@ -2069,6 +2089,7 @@ function renderMarkdown(text) {
       const tbody = el("tbody");
       for (i += 2; i < lines.length && lines[i].includes("|") && lines[i].trim(); i++) {
         const tr = el("tr"), cells = mdCells(lines[i]);
+        if (cells.length > head.length) cells.splice(head.length - 1, cells.length, cells.slice(head.length - 1).join(" | "));
         for (let k = 0; k < head.length; k++) { const td = el("td"); mdInline(td, cells[k] || ""); tr.append(td); }
         tbody.append(tr);
       }

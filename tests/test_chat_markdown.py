@@ -48,7 +48,7 @@ def _renderer() -> str:
     html = HTML.read_text()
     consts = (html[html.index("const MD_INLINE"):html.index("function mdSafeUrl(")] + "\n"
               + html[html.index("const MD_FENCE"):html.index("function mdCells(")])
-    names = ("mdSafeUrl", "mdLink", "mdText", "mdInline", "mdCells", "renderMarkdown")
+    names = ("mdSafeUrl", "mdLink", "mdTrimUrl", "mdText", "mdInline", "mdHeadingText", "mdCells", "renderMarkdown")
     return "\n".join([STUB, consts, *(_js_function(html, n) for n in names)])
 
 
@@ -73,8 +73,8 @@ def test_raw_double_asterisks_never_show():
     outs = render("**Status:** done", "a half-written **bold", "**", "5 * 3 = 15 and 2**3", "`a ** b` stays")
     assert inner(outs[0]) == "<p><strong>Status:</strong> done</p>"
     assert inner(outs[1]) == "<p>a half-written bold</p>"
-    assert "**" not in "".join(outs[:4])
-    assert "5 * 3" in outs[3]  # a lone asterisk is just a character
+    assert "**" not in "".join(outs[:3])
+    assert inner(outs[3]) == "<p>5 * 3 = 15 and 2**3</p>"  # inside a token, asterisks are part of it
     assert inner(outs[4]) == "<p><code>a ** b</code> stays</p>"  # code keeps its asterisks
 
 
@@ -149,3 +149,22 @@ def test_main_chat_renders_bot_words_only():
     assert 'fillBody(body, m, m.text);' in html  # chat bubbles
     assert "bubble.append(renderMarkdown(m.text));" in html  # the bot-to-bot overlay
     assert ".msg .body.md-body { white-space: normal; }" in html
+
+
+def test_review_r1_edge_cases():
+    outs = render("Use src/**/test.py here", "see https://en.wikipedia.org/wiki/Foo_(bar) now",
+                  "## C#", "## Title ##", "a | b\n---\nkeep | every | word",
+                  "| a | b |\n|---|---|\n| keep | every | word |")
+    assert inner(outs[0]) == "<p>Use src/**/test.py here</p>"
+    assert 'href="https://en.wikipedia.org/wiki/Foo_(bar)"' in outs[1]
+    assert inner(outs[2]) == '<p class="md-h">C#</p>' and inner(outs[3]) == '<p class="md-h">Title</p>'
+    assert "<table>" not in outs[4] and "word" in outs[4]  # a rule without the header's columns is no table
+    assert "<td>every | word</td>" in outs[5]  # extra cells join the last one, no text is lost
+
+
+def test_huge_lines_render_fast():
+    import time
+    started = time.monotonic()
+    outs = render("# " + "a " * 9000 + "b", "x" + " " * 15000 + "y", "** " * 6000, "*a " * 6000)
+    assert time.monotonic() - started < 10
+    assert all(o.startswith('<div class="md">') for o in outs)

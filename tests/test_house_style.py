@@ -30,6 +30,12 @@ def test_leading_long_header_keeps_its_words():
         "The deploy finished cleanly tonight\nTests pass.")
 
 
+def test_a_meaningful_header_keeps_its_words():
+    assert tidy_reply("# Do not deploy\nThe tests passed.") == "Do not deploy\nThe tests passed."
+    assert tidy_reply("## C#\nIt compiles.") == "C#\nIt compiles."
+    assert tidy_reply("## Status ##\nAll good.") == "All good."
+
+
 def test_header_is_kept_on_a_long_reply_or_alone():
     long = "## Report\n" + "word " * 400
     assert tidy_reply(long) == long.strip("\n")
@@ -54,9 +60,16 @@ def test_bold_mid_sentence_and_long_labels_stay():
 
 def test_trailing_filler_goes():
     assert tidy_reply("It's live.\n\nLet me know if you need anything else!") == "It's live."
-    assert tidy_reply("It's live. Let me know if anything looks off.") == "It's live."
+    assert tidy_reply("It's live. Let me know if you need anything else.") == "It's live."
     assert tidy_reply("Done.\nHope this helps.") == "Done."
-    assert tidy_reply("Done.\nFeel free to ask for the full log.") == "Done."
+    assert tidy_reply("Done.\nFeel free to ask if you want the full log.") == "Done."
+    assert tidy_reply("Done.\nHappy to help!") == "Done."
+
+
+def test_a_specific_let_me_know_stays():
+    text = "The migration finished.\nLet me know if the replica is still lagging before you switch traffic."
+    assert tidy_reply(text) == text
+    assert tidy_reply("It's live. Let me know if anything looks off.") == "It's live. Let me know if anything looks off."
 
 
 def test_filler_alone_or_a_real_question_stays():
@@ -68,8 +81,24 @@ def test_filler_alone_or_a_real_question_stays():
 def test_code_blocks_are_never_touched():
     text = "```\n## not a header\n- **Key:** value\nLet me know if\n```"
     assert tidy_reply(text) == text
-    text = "Here:\n```md\n- **Key:** value\n```\nLet me know if it works."
+    text = "Here:\n```md\n- **Key:** value\n```\nLet me know if you have any questions."
     assert tidy_reply(text) == "Here:\n```md\n- **Key:** value\n```"
+
+
+def test_nested_and_unclosed_fences():
+    text = "````md\n```\n**Key:** value\n````\n**Note:** x"
+    assert tidy_reply(text) == "````md\n```\n**Key:** value\n````\nNote: x"
+    text = "```\n**Key:** value\n``` not a close\n**Key:** value"
+    assert tidy_reply(text) == text
+    assert tidy_reply("```\n- **Key:** value") == "```\n- **Key:** value"
+
+
+def test_huge_header_is_fast():
+    import time
+    started = time.monotonic()
+    tidy_reply("# " + "a " * 600 + "#" + " " * 400 + "x\nbody")
+    tidy_reply("# " + " " * 5000 + "a" + " " * 5000 + "\nbody")
+    assert time.monotonic() - started < 1
 
 
 def test_plain_replies_are_unchanged():
@@ -118,7 +147,7 @@ def test_fresh_prompt_and_cli_system_prompts_carry_the_style(bot_job):
     assert house_style.HOUSE_STYLE_REMINDER in (workspace / "prompt-resume.txt").read_text()
     for session in (None, "sess-1"):
         codex = CodexAdapter()._exec_args(workspace, job, session)
-        assert "developer_instructions=" + json.dumps(HOUSE_STYLE) in codex
+        assert "developer_instructions=" + json.dumps(HOUSE_STYLE, ensure_ascii=False) in codex
         claude = ClaudeAdapter()._exec_args(workspace, job, session)
         assert claude[claude.index("--append-system-prompt") + 1] == HOUSE_STYLE
     # not for a job without a bot (probes, reviews)
