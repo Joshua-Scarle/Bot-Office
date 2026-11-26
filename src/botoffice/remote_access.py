@@ -370,30 +370,43 @@ class KeyCache:
         self._keys: dict[str, tuple[int, int]] = {}
         self._fetched_at: float | None = None
         self._attempt_at: float | None = None
+        self._inflight: threading.Event | None = None
         self._lock = threading.Lock()
 
     def get(self, kid: str) -> tuple[int, int] | None:
-        # 0.12.35 review: the fetch runs OUTSIDE the lock, by one caller at a time; everyone else gets the
-        # cached keys at once instead of queueing behind a slow network call.
+        # 0.12.35 review: one refresh in flight at a time, run OUTSIDE the lock. A caller whose kid is
+        # cached goes on at once; a cache miss waits (bounded) for the refresh already running.
         with self._lock:
             now = self._clock()
             fresh = self._fetched_at is not None and now - self._fetched_at < KEY_CACHE_SECONDS
             if kid in self._keys and fresh:
                 return self._keys[kid]
-            if self._attempt_at is not None and now - self._attempt_at < KEY_REFETCH_MIN_SECONDS:
+            inflight = self._inflight
+            leader = False
+            if inflight is None and (self._attempt_at is None or now - self._attempt_at >= KEY_REFETCH_MIN_SECONDS):
+                self._attempt_at = now
+                inflight = self._inflight = threading.Event()
+                leader = True
+            elif kid in self._keys or inflight is None:
                 return self._keys.get(kid)
-            self._attempt_at = now
+        if not leader:
+            inflight.wait(FETCH_TIMEOUT_SECONDS + 1)
+            with self._lock:
+                return self._keys.get(kid)
+        keys: dict[str, tuple[int, int]] | None = None
         try:
             keys = _parse_jwks(self._fetcher(self.url))
         except Exception as exc:   # noqa: BLE001  network, JSON or shape errors: keep what we have
             log.warning("could not fetch the Access signing keys (%s)", type(exc).__name__)
+        finally:
             with self._lock:
-                return self._keys.get(kid)
+                if keys is not None:
+                    self._keys = keys
+                    self._fetched_at = self._clock()   # stamped when the refresh completed
+                self._inflight = None
+            inflight.set()
         with self._lock:
-            self._keys = keys
-            self._fetched_at = now
             return self._keys.get(kid)
-
 
 def rsa_pkcs1_sha256_verify(n: int, e: int, signing_input: bytes, signature: bytes) -> bool:
     k = (n.bit_length() + 7) // 8
@@ -539,6 +552,7 @@ class RemoteAccessMiddleware:
             self.loader = ConfigLoader(lambda: config_path(settings), clock)
         self.verifier = AccessVerifier(fetcher, clock)
         self.clock = clock
+        self.socket_check_seconds = CONFIG_RECHECK_SECONDS   # idle owner websockets are re-checked this often
 
     async def __call__(self, scope, receive, send):
         kind = scope["type"]
@@ -612,16 +626,19 @@ class RemoteAccessMiddleware:
 
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
         scope = _without_credentials(scope)   # the app never sees the key, the Access JWT or a token secret
+        stop = None
         if kind == "websocket":
-            receive, send = self._guard_socket(identity, receive, send)
+            receive, send, stop = self._guard_socket(identity, receive, send)
         token = current_remote_identity.set(identity)
         try:
             await self.app(scope, receive, send)
         finally:
             current_remote_identity.reset(token)
+            if stop:
+                stop()
 
     def _still_allowed(self, identity: RemoteIdentity) -> bool:
-        if identity.expires_at is not None and self.clock() > identity.expires_at + CLOCK_SKEW_SECONDS:
+        if identity.expires_at is not None and identity.expires_at <= self.clock() - CLOCK_SKEW_SECONDS:
             return False
         result = self.loader.get()
         if result.state != "ok" or result.config is None:
@@ -631,35 +648,64 @@ class RemoteAccessMiddleware:
         return identity.identity in result.config.clients
 
     def _guard_socket(self, identity: RemoteIdentity, receive, send):
-        """0.12.35 review: an owner websocket is re-checked on every message; it is closed (1008) once the
-        JWT expired, the owner was removed or remote access was turned off or broken."""
-        closed = False
+        """0.12.35 review: an owner websocket is checked before the accept, on every message, and by a
+        watchdog while idle; it is closed (1008) once the JWT expired, the owner was removed or remote
+        access was turned off or broken. App close and peer disconnect are terminal; sends are serialized."""
+        state = {"closed": False, "watch": None}
+        lock = asyncio.Lock()
 
         async def close() -> None:
-            nonlocal closed
-            if not closed:
-                closed = True
+            async with lock:
+                if state["closed"]:
+                    return
+                state["closed"] = True
                 log.warning("remote websocket closed: access no longer valid (%s)", identity.display_name)
                 await send({"type": "websocket.close", "code": 1008})
 
+        async def watch() -> None:
+            while not state["closed"]:
+                wait = self.socket_check_seconds
+                if identity.expires_at is not None:
+                    left = identity.expires_at + CLOCK_SKEW_SECONDS - self.clock()
+                    wait = max(0.0, min(wait, left + 0.01))
+                await asyncio.sleep(wait)
+                if not state["closed"] and not self._still_allowed(identity):
+                    await close()
+                    return
+
         async def guarded_receive():
-            if closed:
+            if state["closed"]:
                 return {"type": "websocket.disconnect", "code": 1008}
             message = await receive()
-            if message.get("type") == "websocket.receive" and not self._still_allowed(identity):
+            if message.get("type") == "websocket.disconnect":
+                state["closed"] = True
+                return message
+            if state["closed"]:
+                return {"type": "websocket.disconnect", "code": 1008}
+            if not self._still_allowed(identity):
                 await close()
                 return {"type": "websocket.disconnect", "code": 1008}
             return message
 
         async def guarded_send(message):
-            if closed:
-                return
-            if message.get("type") == "websocket.send" and not self._still_allowed(identity):
+            kind = message.get("type")
+            if kind != "websocket.close" and not self._still_allowed(identity):
                 await close()
                 return
-            await send(message)
+            async with lock:
+                if state["closed"]:
+                    return
+                await send(message)
+                if kind == "websocket.close":
+                    state["closed"] = True
+                elif kind == "websocket.accept" and state["watch"] is None:
+                    state["watch"] = asyncio.ensure_future(watch())
 
-        return guarded_receive, guarded_send
+        def stop() -> None:
+            if state["watch"] is not None:
+                state["watch"].cancel()
+
+        return guarded_receive, guarded_send, stop
 
     @staticmethod
     async def _deny(kind: str, send, status: int, detail: str) -> None:

@@ -789,3 +789,71 @@ def test_jwks_fetch_runs_outside_the_lock(tmp_path):
         return {"keys": [jwk("k1")]}
     cache = ra.KeyCache(TEAM, fetcher, Clock())
     assert cache.get("k1") is not None and seen == [True]
+
+
+def test_idle_owner_websocket_closed_by_watchdog(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    mw.socket_check_seconds = 0.01
+    sent = []
+
+    async def app(scope, receive, send):
+        await send({"type": "websocket.accept"})
+        clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1     # the JWT expires while the socket is idle
+        await asyncio.sleep(0.2)
+
+    mw.app = app
+    scope = {"type": "websocket", "path": "/v1/desktops/x/vnc",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in _owner_ws_headers(NOW + 600).items()]}
+
+    async def receive():
+        await asyncio.sleep(10)
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    assert sent == [{"type": "websocket.accept"}, {"type": "websocket.close", "code": 1008}]
+
+
+def test_no_second_close_after_app_closed(tmp_path):
+    mw, probe, path, clock = build(tmp_path)
+    sent = []
+
+    async def app(scope, receive, send):
+        await send({"type": "websocket.accept"})
+        await send({"type": "websocket.close", "code": 1000})
+        clock.t = NOW + 10_000
+        await receive()
+        await send({"type": "websocket.send", "text": "x"})
+
+    mw.app = app
+    scope = {"type": "websocket", "path": "/v1/desktops/x/vnc",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in _owner_ws_headers(NOW + 600).items()]}
+
+    async def receive():
+        return {"type": "websocket.receive", "text": "late"}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(mw(scope, receive, send))
+    assert sent == [{"type": "websocket.accept"}, {"type": "websocket.close", "code": 1000}]
+
+
+def test_jwks_cache_miss_waits_for_the_refresh_in_flight():
+    import threading as _t
+    started, release = _t.Event(), _t.Event()
+    calls = []
+    def fetcher(url):
+        calls.append(1)
+        started.set()
+        release.wait(5)
+        return {"keys": [jwk("k1")]}
+    cache = ra.KeyCache(TEAM, fetcher, Clock())
+    out = {}
+    leader = _t.Thread(target=lambda: out.setdefault("a", cache.get("k1")))
+    leader.start(); started.wait(5)
+    follower = _t.Thread(target=lambda: out.setdefault("b", cache.get("k1")))
+    follower.start()
+    release.set(); leader.join(5); follower.join(5)
+    assert out["a"] is not None and out["b"] is not None and len(calls) == 1
