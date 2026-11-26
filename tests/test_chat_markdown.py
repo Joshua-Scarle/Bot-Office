@@ -48,13 +48,14 @@ def _renderer() -> str:
     html = HTML.read_text()
     consts = (html[html.index("const MD_INLINE"):html.index("function mdSafeUrl(")] + "\n"
               + html[html.index("const MD_FENCE"):html.index("function mdCells(")])
-    names = ("mdSafeUrl", "mdLink", "mdTrimUrl", "mdText", "mdInline", "mdHeadingText", "mdCells", "renderMarkdown")
+    names = ("mdSafeUrl", "mdLink", "mdTrimUrl", "mdText", "mdInline", "mdHeadingText", "mdCells", "mdTableRule",
+             "renderMarkdown")
     return "\n".join([STUB, consts, *(_js_function(html, n) for n in names)])
 
 
 def render(*texts: str) -> list[str]:
     script = _renderer() + f"\nfor (const t of {json.dumps(list(texts))}) console.log(JSON.stringify(renderMarkdown(t).html));"
-    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(["node", "-"], input=script, capture_output=True, text=True, check=True).stdout
     return [json.loads(line) for line in out.splitlines()]
 
 
@@ -165,6 +166,16 @@ def test_review_r1_edge_cases():
 def test_huge_lines_render_fast():
     import time
     started = time.monotonic()
-    outs = render("# " + "a " * 9000 + "b", "x" + " " * 15000 + "y", "** " * 6000, "*a " * 6000)
+    outs = render("# " + "a " * 9000 + "b", "x" + " " * 15000 + "y", "** " * 6000, "*a " * 6000,
+                  "# Title " + "#" * 100_000 + "x", "A | B\n" + " " * 100_000 + "x", "# T " + "#" * 3000 + "x",
+                  "A | B\n" + " " * 3000 + "-- | --x", ">" * 20_000 + "text", ">" * 3000 + "text")
     assert time.monotonic() - started < 10
     assert all(o.startswith('<div class="md">') for o in outs)
+
+
+def test_review_r2_edge_cases():
+    outs = render("A | B\n--- | ---\n```sh | example\necho hi\n```\nAfter", "```bad`info\nImportant prose",
+                  ">>> deep")
+    assert '<code class="lang-sh">echo hi</code>' in outs[0] and outs[0].endswith("<p>After</p></div>")
+    assert "<pre" not in outs[1] and "Important prose" in outs[1]
+    assert outs[2].count("<blockquote>") == 3 and "deep" in outs[2]

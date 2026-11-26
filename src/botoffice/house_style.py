@@ -54,18 +54,18 @@ _HEADER = re.compile(r"^\s{0,3}#{1,6}\s+(\S.*)$")
 # a leading header with one of these titles says nothing on its own and is dropped; any other keeps its words
 GENERIC_TITLES = {"summary", "status", "status update", "update", "result", "results", "answer", "overview",
                   "tl;dr", "tldr", "done", "report", "quick update", "short answer", "the answer", "recap"}
-# "**Label:**", "**Label**:" or "__Label:__" at the start of a line, optionally after a bullet or number;
-# the label is short (up to 6 words, no asterisks or backticks)
+# "**Label:**" or "**Label**:" at the start of a line, optionally after a bullet or number;
+# the label is short (up to 6 words, no asterisks or backticks); __x__ is left alone (__init__)
 _BOLD_LABEL = re.compile(
     r"^(?P<lead>\s*(?:[-*+]\s+|\d+[.)]\s+)?)"
-    r"(?P<mark>\*\*|__)(?P<label>[^*_`\n]{1,60}?)(?P<colon_in>:?)(?P=mark)(?P<colon_out>:?)(?=\s|$)")
+    r"\*\*(?P<label>[^*`\n]{1,60}?)(?P<colon_in>:?)\*\*(?P<colon_out>:?)(?=\s|$)")
 _FILLER = re.compile(
     r"^\s*(?:"
     r"(?:just )?let me know if (?:you )?(?:have any (?:other |more |further )?questions|need anything(?: else)?|"
     r"(?:would|'d) like (?:anything else|more(?: detail| details| info)?|any changes)|"
     r"want (?:anything else|more(?: detail| details)?|any changes)|there'?s anything else(?: I can do)?|"
     r"I can help(?: with anything else)?)(?: here| on this| with this)?"
-    r"|feel free to (?:ask|reach out|let me know)(?: if [^.!?]{0,60})?"
+    r"|feel free to (?:ask|reach out|let me know)"
     r"|(?:I )?hope (?:this|that) helps"
     r"|(?:I'?m )?(?:always )?happy to help(?: further| with anything else)?"
     r")\s*[.!]?\s*$",
@@ -86,6 +86,22 @@ def _fenced(lines: list[str]) -> list[bool]:
         out.append(True)
         if hit and hit.group(1)[0] == opener[0] and len(hit.group(1)) >= len(opener) and not hit.group(2).strip():
             opener = ""
+    return out
+
+
+def _code_like(lines: list[str], fenced: list[bool]) -> list[bool]:
+    """Per line: fenced code, an indented code block (4+ spaces or a tab after a blank line), or a line that
+    starts inside an inline code span opened on an earlier line of the same paragraph."""
+    out, ticks, indented, prev_blank = [], 0, False, True
+    for line, fence in zip(lines, fenced):
+        if fence or not line.strip():
+            out.append(fence)
+            ticks, indented, prev_blank = 0, False, not line.strip()
+            continue
+        indented = (indented or prev_blank) and line.startswith(("    ", "\t"))
+        out.append(indented or ticks % 2 == 1)
+        ticks += line.count("`")
+        prev_blank = False
     return out
 
 
@@ -118,7 +134,9 @@ def tidy_reply(text: str) -> str:
             title = hit.group(1).rstrip()
             if title.endswith("#") and title.rstrip("#")[-1:].isspace():  # "## Title ##": closing hashes
                 title = title.rstrip("#")
-            title = title.strip().strip("*_").strip()
+            title = title.strip()
+            if len(title) > 4 and title.startswith("**") and title.endswith("**"):
+                title = title[2:-2].strip()
             if title.lower().rstrip(":.") in GENERIC_TITLES:
                 del lines[first], code[first]
                 while first < len(lines) and not lines[first].strip() and not code[first]:
@@ -126,8 +144,8 @@ def tidy_reply(text: str) -> str:
             elif title:
                 lines[first] = title  # its words stay, as a plain line
 
-    # 2. bold labels at the start of a line
-    lines = [line if code[i] else _unbold_label(line) for i, line in enumerate(lines)]
+    # 2. bold labels at the start of a line (never inside inline code that spans lines, or indented code)
+    lines = [line if skip else _unbold_label(line) for line, skip in zip(lines, _code_like(lines, code))]
 
     # 3. a trailing filler line, when something else remains
     last = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].strip()), None)

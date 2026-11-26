@@ -2018,11 +2018,18 @@ function mdInline(parent, text, noLink) {
 }
 const MD_FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([\w+#.-]*)/;
 const MD_BULLET = /^(\s*)([-*+•]|\d{1,9}[.)])\s+(.*)$/;
-const MD_TABLE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 /* "Title ##" loses its closing hashes, "C#" keeps its own (no regex: a long line must not backtrack) */
 function mdHeadingText(text) {
-  const t = text.trimEnd(), bare = t.replace(/#+$/, "");
-  return bare !== t && (!bare || /\s$/.test(bare)) ? bare.trimEnd() : t;
+  const t = text.trimEnd();
+  let end = t.length;
+  while (end > 0 && t[end - 1] === "#") end--;
+  return end < t.length && (end === 0 || /\s/.test(t[end - 1])) ? t.slice(0, end).trimEnd() : t;
+}
+/* a table's delimiter row: every cell is dashes with optional colons, as many cells as the header has */
+function mdTableRule(line, columns) {
+  if (!line.includes("-")) return false;
+  const cells = mdCells(line);
+  return cells.length === columns && cells.every((c) => /^:?-{2,}:?$/.test(c));
 }
 function mdCells(line) {
   let s = line.trim();
@@ -2030,15 +2037,22 @@ function mdCells(line) {
   if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
   return s.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
 }
-function renderMarkdown(text) {
+function renderMarkdown(text, depth) {
   const root = el("div", "md");
+  if ((depth || 0) > 8) { root.append(String(text || "")); return root; }  // quotes nest at most 8 deep
   const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
   let para = null, lists = [], gap = false;
   const endBlock = () => { para = null; lists = []; gap = false; };
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (line.length > MD_INLINE_MAX) {  // a huge line is plain text: no block or inline regex runs over it
+      lists = []; gap = false;
+      if (!para) { para = el("p"); root.append(para); } else para.append(document.createElement("br"));
+      para.append(line);
+      continue;
+    }
     const fence = MD_FENCE.exec(line);
-    if (fence) {
+    if (fence && !(fence[1][0] === "`" && line.slice(line.indexOf(fence[1]) + fence[1].length).includes("`"))) {
       const code = [], close = fence[1][0];
       for (i++; i < lines.length && !new RegExp("^\\s{0,3}\\" + close + "{" + fence[1].length + ",}\\s*$").test(lines[i]); i++) code.push(lines[i]);
       const pre = el("pre", "md-code"), node = el("code", fence[2] ? "lang-" + fence[2].replace(/[^\w-]/g, "") : "", code.join("\n"));
@@ -2077,17 +2091,16 @@ function renderMarkdown(text) {
       const quoted = [];
       for (; i < lines.length && /^\s{0,3}>/.test(lines[i]); i++) quoted.push(lines[i].replace(/^\s{0,3}>\s?/, ""));
       i--;
-      const box = el("blockquote"); box.append(renderMarkdown(quoted.join("\n"))); root.append(box); endBlock();
+      const box = el("blockquote"); box.append(renderMarkdown(quoted.join("\n"), (depth || 0) + 1)); root.append(box); endBlock();
       continue;
     }
-    if (line.includes("|") && i + 1 < lines.length && MD_TABLE_RULE.test(lines[i + 1]) &&
-        mdCells(lines[i + 1]).length === mdCells(line).length) {
+    if (line.includes("|") && i + 1 < lines.length && mdTableRule(lines[i + 1], mdCells(line).length)) {
       const head = mdCells(line), wrap = el("div", "md-table"), table = el("table");
       const thead = el("thead"), hr = el("tr");
       for (const c of head) { const th = el("th"); mdInline(th, c); hr.append(th); }
       thead.append(hr); table.append(thead);
       const tbody = el("tbody");
-      for (i += 2; i < lines.length && lines[i].includes("|") && lines[i].trim(); i++) {
+      for (i += 2; i < lines.length && lines[i].includes("|") && lines[i].trim() && !MD_FENCE.test(lines[i]); i++) {
         const tr = el("tr"), cells = mdCells(lines[i]);
         if (cells.length > head.length) cells.splice(head.length - 1, cells.length, cells.slice(head.length - 1).join(" | "));
         for (let k = 0; k < head.length; k++) { const td = el("td"); mdInline(td, cells[k] || ""); tr.append(td); }

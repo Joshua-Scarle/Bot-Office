@@ -62,7 +62,7 @@ def test_trailing_filler_goes():
     assert tidy_reply("It's live.\n\nLet me know if you need anything else!") == "It's live."
     assert tidy_reply("It's live. Let me know if you need anything else.") == "It's live."
     assert tidy_reply("Done.\nHope this helps.") == "Done."
-    assert tidy_reply("Done.\nFeel free to ask if you want the full log.") == "Done."
+    assert tidy_reply("Done.\nFeel free to ask.") == "Done."
     assert tidy_reply("Done.\nHappy to help!") == "Done."
 
 
@@ -91,6 +91,16 @@ def test_nested_and_unclosed_fences():
     text = "```\n**Key:** value\n``` not a close\n**Key:** value"
     assert tidy_reply(text) == text
     assert tidy_reply("```\n- **Key:** value") == "```\n- **Key:** value"
+
+
+def test_review_r2_cases():
+    text = "The migration is live.\nFeel free to reach out if replication lag exceeds 30 seconds."
+    assert tidy_reply(text) == text
+    assert tidy_reply("## __init__\nThis method initializes the object.") == "__init__\nThis method initializes the object."
+    assert tidy_reply("## **Do not deploy**\nTests pass.") == "Do not deploy\nTests pass."
+    for text in ("Use `alpha\n**Status:** ok\nomega`.", "Example:\n\n    **Status:** ok"):
+        assert tidy_reply(text) == text
+    assert tidy_reply("- a\n\n**Note:** x") == "- a\n\nNote: x"
 
 
 def test_huge_header_is_fast():

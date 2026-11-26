@@ -197,7 +197,7 @@ const shape = (n) => typeof n === "string" ? n : [n.tag, ...n.kids.map(shape)];
 """
     consts = html[html.index("const MD_INLINE"):html.index("function mdSafeUrl(")] + "\n" + \
         html[html.index("const MD_FENCE"):html.index("function mdCells(")]
-    script = "\n".join([stub, consts, *(_js_function(html, f) for f in ("mdSafeUrl", "mdLink", "mdTrimUrl", "mdText", "mdHeadingText", "mdCells")),
+    script = "\n".join([stub, consts, *(_js_function(html, f) for f in ("mdSafeUrl", "mdLink", "mdTrimUrl", "mdText", "mdHeadingText", "mdCells", "mdTableRule")),
                         _js_function(html, "mdInline"), _js_function(html, "renderMarkdown"),
                         'console.log(JSON.stringify(shape(renderMarkdown("**Hatch range:** <b>x</b> `a`\\n- one\\n- two\\n\\n```\\ncode\\n```"))))'])
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
