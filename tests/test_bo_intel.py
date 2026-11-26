@@ -288,7 +288,7 @@ def test_rules_sync_imports_once_dated_and_updates_changed(tmp_path):
     assert memory.read_bot(bot.id) == text
     # a changed rule (same id) is replaced in place; a new one is added under the section
     (folder / "el.md").write_text(RULES.replace("Remove DEMO_ITEM_LIMIT.", "Remove DEMO_ITEM_LIMIT entirely.")
-                                  + "- [2026-11-23 | the owner] One folder per task.\n")
+                                  + "- [2026-11-23 | owner] One folder per task.\n")
     changed = {e["file"]: e for e in rules_sync.run(store, memory, folder)["files"]}["el.md"]
     assert (changed["changed"], changed["added"], changed["present"]) == (1, 1, 1)
     final = memory.read_bot(bot.id)
@@ -360,3 +360,37 @@ def test_other_heredocs_still_ask(tmp_path, command, cwd):
     gate, job = _gate(tmp_path)
     assert memory_note_command(Action(tool="Bash", command=command, cwd=cwd, workspace=WS)) is None
     assert _judge(gate, job, command, cwd) in ("ask", "review")  # review: sudo goes to the auto-review
+
+
+# --- C. handoff task import -------------------------------------------------------------------
+
+def test_handoff_import_creates_full_bodies_once(settings, tmp_path, monkeypatch, capsys):
+    script = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "import_handoff_tasks.py"))
+    main = script["main"]
+    client = TestClient(create_app(settings, {"codex": FakeAdapter(enabled=False)}))
+    with client:
+        store = client.app.state.store
+        lead = store.create_bot("MS Lead (BO)", "", "codex", None)
+
+        def call(api, token, method, path, data=None):
+            response = client.request(method, path, headers={"Authorization": "Bearer " + token}, json=data)
+            assert response.status_code < 400, response.text
+            return response.json()
+        main.__globals__["call"] = call
+        token = tmp_path / "token"
+        token.write_text("test-token")
+        task = {"key": "ms-x", "bot": "MS Lead (BO)", "title": "Remove the cap", "source": "ms-lead.md",
+                "context": "ctx", "decisions": "Owner Nov 22: remove it", "next": "do it", "joshua": "No.",
+                "done_when": "gone", "list": "a; b"}
+        spec = tmp_path / "spec.json"
+        spec.write_text(json.dumps({"tasks": [task]}))
+        assert main([str(spec), "--token-file", str(token)]) == 0  # dry run
+        assert Assignments(store).list(lead.id) == []
+        assert main([str(spec), "--apply", "--token-file", str(token)]) == 0
+        assert main([str(spec), "--apply", "--token-file", str(token)]) == 0
+        made = Assignments(store).list(lead.id)
+        assert len(made) == 1 and made[0].status == "open"
+        for part in ("## Goal\nRemove the cap", "## Decisions and rules\nOwner Nov 22", "## Next step\ndo it",
+                     "## Items\na; b", "Owner: MS Lead (BO)", "Import key: grok-handoff/ms-x"):
+            assert part in made[0].goal
+        assert "already present" in capsys.readouterr().out

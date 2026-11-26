@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "botoffice"
-version = "0.12.38"
+version = "0.12.39"
 description = "Self-hosted workspace for persistent, provider-agnostic agent employees"
 requires-python = ">=3.12"
 dependencies = [
