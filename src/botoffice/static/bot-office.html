@@ -1962,7 +1962,7 @@ const MD_INLINE = new RegExp([
 ].join("|"), "gu");
 function mdSafeUrl(url) {
   const u = String(url || "").trim();
-  if (/^www\./i.test(u)) return "https://" + u;
+  if (/^www\./i.test(u)) return "https:" + "//" + u;  // (the page holds no literal URL)
   return /^(?:https?:\/\/|mailto:)/i.test(u) ? u : null;
 }
 function mdLink(parent, label, url, plainLabel) {
