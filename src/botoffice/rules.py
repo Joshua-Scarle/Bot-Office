@@ -28,6 +28,7 @@ its text. Pattern rules are tripwires, not a sandbox: shell indirection can evad
 """
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import json
@@ -428,6 +429,57 @@ def _rm_outside(command: str) -> bool:
     return False
 
 
+# 0.12.39: a bot saving a note to its own memory with a here-document (`cat >> memory.md <<'EOF' ... EOF`)
+# was carded because the presets, the approval classes and shell ask rules read the note's words as if
+# they ran ("No sudo" -> system, "ssh host" -> outbound, "git push" -> the E8 ask rule). The git guard
+# already treats a here-document written to a file as data (git_guard._heredoc). Only this exact,
+# plain form counts: every command is `cat >`/`cat >>`/`tee [-a]` from a here-document into memory.md
+# or WORKING.md in the job's own workspace (relative names only when the command runs there), and an
+# unquoted delimiter's body has no `$(` or backtick (the shell would run those while writing).
+_MEMORY_NOTE_FILES = ("memory.md", "WORKING.md")
+_NOTE_TARGET = r"(?P<t{n}>\S+)"
+_NOTE_DOC = r"<<-?\s*(?P<q{n}>['\"]?)(?P<d{n}>\w+)(?P=q{n})"
+_NOTE_FORMS = (r"cat\s*>>?\s*{t}\s*{d}", r"cat\s*{d}\s*>>?\s*{t}", r"tee\s+(?:-a\s+)?{t}\s*{d}(?:\s*>\s*/dev/null)?")
+_NOTE_LINE = re.compile(r"\s*(?:" + "|".join(
+    form.format(t=_NOTE_TARGET.format(n=n), d=_NOTE_DOC.format(n=n)) for n, form in enumerate(_NOTE_FORMS)) + r")\s*")
+
+
+def _note_target_ok(target: str, action: Action) -> bool:
+    if target in _MEMORY_NOTE_FILES or target.removeprefix("./") in _MEMORY_NOTE_FILES:
+        return bool(action.workspace) and posixpath.normpath(action.cwd or "") == posixpath.normpath(action.workspace)
+    return bool(action.workspace) and posixpath.dirname(posixpath.normpath(target)) == posixpath.normpath(
+        action.workspace) and posixpath.basename(target) in _MEMORY_NOTE_FILES
+
+
+def memory_note_command(action: Action) -> str | None:
+    """The command with its here-document bodies set aside, when *action* is only a plain write of
+    notes into the job's own memory.md / WORKING.md (see above); else None."""
+    command = action.command
+    if not command or "<<" not in command or len(command) > COMMAND_LIMIT:
+        return None
+    try:
+        text, documents = git_guard._heredocs(command)
+    except (RecursionError, ValueError, IndexError):
+        return None
+    if not documents or "<<" in "".join(body for _header, body in documents):
+        return None
+    headers = [line for line in text.split("\n") if line.strip()]
+    if len(headers) != len(documents) or len(headers) > 8:
+        return None  # every line is one note write and nothing else runs
+    for line, (header, body) in zip(headers, documents, strict=True):
+        if line != header:
+            return None
+        found = _NOTE_LINE.fullmatch(line)
+        if found is None:
+            return None
+        n = next(n for n in range(len(_NOTE_FORMS)) if found[f"t{n}"] is not None)
+        if not _note_target_ok(found[f"t{n}"], action):
+            return None
+        if not found[f"q{n}"] and ("$(" in body or "`" in body or "${" in body):
+            return None
+    return text
+
+
 def presets_hit(action: Action, first_party: bool = False) -> list[str]:
     hits: list[str] = []
     command = action.command
@@ -676,6 +728,10 @@ class Rules:
         marker = secret_hit(action, bot_id, self.extra_secrets)
         if marker:
             return "never", "secrets", f"protected path ({marker})"
+        stripped = memory_note_command(action)
+        if stripped is not None:
+            # 0.12.39: a note written to the bot's own memory is data; judge only the command that writes it
+            action = dataclasses.replace(action, command=stripped)
         first_party = team.is_first_party_tool(action.tool, job)  # the controller's own bot-to-bot tools: not outbound
         hits = presets_hit(action, first_party)
         if job.source in STRICT_SOURCES and "outbound" not in hits and _GROK_SEND.search(action.command or ""):

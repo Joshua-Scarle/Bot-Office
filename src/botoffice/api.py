@@ -34,6 +34,7 @@ from . import slash as slash_mod
 from . import rules as action_rules
 from . import usage as budgets
 from . import remote_access
+from . import rules_sync, stall_sweep
 from .auth import auth_dependency, bearer
 from .catalog import (
     ENGINE_LABELS,
@@ -421,6 +422,14 @@ class BridgeInbox(BaseModel):
     text: str = Field(min_length=1, max_length=10000)
     thread_id: str | None = Field(default=None, max_length=200)
     hop: int | None = None
+    # 0.12.39: a priority message always wakes the recipient (claimed first, no hourly inbox cap or budget hold)
+    priority: bool = False
+
+
+class StallSweepConfig(BaseModel):
+    """0.12.39 stall sweep: bot (name or id, or "*" = default) -> its section lead; bots never swept."""
+    leads: dict[str, str] | None = None
+    exclude: list[str] | None = None
 
 
 CHAT_PAGE = Path(__file__).parent / "static" / "bot-office.html"
@@ -2047,6 +2056,10 @@ def create_app(
                 can_steer=lambda job: blocked(job) is None)
         except TurnError as exc:
             status = 429 if "limit" in str(exc) or "hop" in str(exc) else 400
+            # 0.12.39: a refused send stays visible in the sender's chat after its turn ends
+            with contextlib.suppress(Exception):
+                store.add_message(sender.id, "system", f"Message to {target.name} not sent: {str(exc)[:200]}.",
+                                  source="inbox")
             raise HTTPException(status_code=status, detail=str(exc)) from exc
         if item.get("delivery") == "steer":
             item["note"] = (f"Delivered to {target.name} while it works; it reads it within its current task and "
@@ -2080,6 +2093,15 @@ def create_app(
             sender = bot.name
         else:
             sender = (body.from_bot or "").strip() or None
+        def not_sent(why: str) -> None:
+            # 0.12.39: a send that did not go out stays visible in the sending bot's chat, not only in
+            # the tool output of a turn that may already be over
+            if binding and binding.bot_id:
+                with contextlib.suppress(Exception):
+                    store.add_message(binding.bot_id, "system",
+                                      f"Grok send to {body.to.strip()[:80]} ({body.kind}) was not delivered: {why}.",
+                                      source="inbox")
+
         try:
             result = await asyncio.to_thread(
                 grok_bridge.send_to_grok, to=body.to, kind=body.kind, text=body.text, thread_id=body.thread_id,
@@ -2087,7 +2109,15 @@ def create_app(
             )
         except grok_bridge.DeskError as exc:
             status = 400 if str(exc).startswith(("kind must", "to and text")) else 502
+            code = re.search(r"\bHTTP (\d{3})\b", str(exc))
+            not_sent(f"the webhook answered HTTP {code.group(1)}" if code else
+                     str(exc)[:120] if status == 400 else "the webhook refused it or could not be reached")
             raise HTTPException(status_code=status, detail=str(exc)) from exc
+        except Exception:
+            not_sent("the webhook could not be reached")
+            raise
+        if str(result).startswith("dropped") and body.kind.strip().lower() not in grok_bridge.DROPPED_KINDS:
+            not_sent(str(result)[:160])  # an ack is never sent, by design: no line for it
         return {"result": result}
 
     @app.post("/v1/bridge/inbox", dependencies=[Depends(auth)])
@@ -2095,7 +2125,8 @@ def create_app(
         """An inbound bridge message (``desk inbox post``, master token only)."""
         try:
             status, detail = grok_bridge.post_inbox(to=body.to, text=body.text, sender=body.sender,
-                                                    thread_id=body.thread_id, hop=body.hop, turns=scheduler.turns)
+                                                    thread_id=body.thread_id, hop=body.hop, turns=scheduler.turns,
+                                                    priority=body.priority)
         except grok_bridge.DeskError as exc:
             raise HTTPException(status_code=404 if str(exc).startswith("bot not found") else 400,
                                 detail=str(exc)) from exc
@@ -2877,6 +2908,32 @@ def create_app(
     async def delete_rule(rule_id: int) -> None:
         if not rules.delete_rule(rule_id):
             raise HTTPException(status_code=404, detail="rule not found")
+
+    # ---- 0.12.39: stall sweep config and runs, rules sync (master token only) ----
+    @app.get("/v1/stall-sweep", dependencies=[Depends(auth)])
+    async def get_stall_sweep() -> dict:
+        return {**stall_sweep.config(store), "hours": settings.stall_sweep_hours,
+                "per_hour": settings.stall_sweep_per_hour}
+
+    @app.put("/v1/stall-sweep", dependencies=[Depends(auth)])
+    async def put_stall_sweep(body: StallSweepConfig) -> dict:
+        try:
+            return stall_sweep.update(store, leads=body.leads, exclude=body.exclude)
+        except stall_sweep.StallSweepError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/stall-sweep/run", dependencies=[Depends(auth)])
+    async def run_stall_sweep() -> dict:
+        if scheduler.paused():
+            raise HTTPException(status_code=409, detail="paused (data/PAUSE): nothing is woken")
+        return await asyncio.to_thread(stall_sweep.sweep, store, scheduler.assignments, settings.stall_sweep_hours,
+                                       per_hour=settings.stall_sweep_per_hour)
+
+    @app.post("/v1/rules-sync/run", dependencies=[Depends(auth)])
+    async def run_rules_sync(all_files: bool = False) -> dict:
+        """Import the drop folder now (only new or changed files unless all_files; dedup applies either way)."""
+        return await asyncio.to_thread(rules_sync.run, store, scheduler.memory, settings.rules_sync_dir,
+                                       only_changed=not all_files, log_dir=settings.data_dir / "logs")
 
     @app.get("/v1/approvals", dependencies=[Depends(auth)])
     async def list_approvals(status: str | None = None) -> list[dict]:

@@ -52,6 +52,12 @@ class Settings:
     desktops: tuple[str, ...] = ("desktop-1", "desktop-2")
     # 0.10.0: an active assignment without progress this long is flagged stalled (no model call)
     stall_hours: float = 6
+    # 0.12.39 stall sweeper (stall_sweep.py): N hours without progress wakes the owner, N more its lead
+    # (0 = off), and at most this many such wakes an hour
+    stall_sweep_hours: float = 3
+    stall_sweep_per_hour: int = 6
+    # 0.12.39 rules sync (rules_sync.py): drop folder of rule files re-imported into bots' memory daily
+    rules_sync_dir: Path | None = None
     # upper bound of a bot's own turn timeout (bots.job_timeout, 60 s .. this)
     max_turn_timeout: int = 3600
     # 0.11.0: unattended approval requests expire after this many minutes
@@ -91,6 +97,10 @@ class Settings:
             raise ValueError("BOT_OFFICE_MAX_RETRIES_PER_HOUR must not be negative")
         if self.inbox_per_sender_hourly < 1 or self.inbox_global_hourly < 1:
             raise ValueError("BOT_OFFICE_INBOX_PER_SENDER_HOURLY and BOT_OFFICE_INBOX_HOURLY must be at least 1")
+        if not 0 <= self.stall_sweep_hours <= 24 * 30:
+            raise ValueError("BOT_OFFICE_STALL_SWEEP_HOURS must be between 0 and 720")
+        if not 1 <= self.stall_sweep_per_hour <= 100:
+            raise ValueError("BOT_OFFICE_STALL_SWEEP_PER_HOUR must be between 1 and 100")
         if not 0 < self.stall_hours <= 24 * 30:
             raise ValueError("BOT_OFFICE_STALL_HOURS must be between 0 and 720")
         if not 60 <= self.max_turn_timeout <= 24 * 3600:
@@ -149,6 +159,10 @@ class Settings:
             catchup_hours=int(os.environ.get("BOT_OFFICE_CATCHUP_HOURS") or "24"),
             run_lanes=int(os.environ.get("BOT_OFFICE_RUN_LANES") or "3"),
             stall_hours=float(os.environ.get("BOT_OFFICE_STALL_HOURS") or "6"),
+            stall_sweep_hours=float(os.environ.get("BOT_OFFICE_STALL_SWEEP_HOURS") or "3"),
+            stall_sweep_per_hour=int(os.environ.get("BOT_OFFICE_STALL_SWEEP_PER_HOUR") or "6"),
+            rules_sync_dir=Path(rules_dir).expanduser() if (rules_dir := os.environ.get("BOT_OFFICE_RULES_SYNC_DIR"))
+            else Path("~/bo-sync/rules").expanduser(),
             max_turn_timeout=int(os.environ.get("BOT_OFFICE_MAX_TURN_TIMEOUT") or "3600"),
             approval_ttl_min=int(os.environ.get("BOT_OFFICE_APPROVAL_TTL_MIN") or "30"),
             trigger_runs_per_hour=int(os.environ.get("BOT_OFFICE_TRIGGER_RUNS_PER_HOUR") or "60"),

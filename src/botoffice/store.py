@@ -110,6 +110,9 @@ AGENT_STATUS = {"succeeded": "done", "failed": "failed", "cancelled": "failed", 
 # lower runs first; chat, edit and API turns (Joshua) are 0
 STORED_ERROR_LIMIT = 2000
 SOURCE_PRIORITY = {"inbox": 2, "assignment": 2, "wakeup": 2, "routine": 3, "trigger": 3}
+# 0.12.39: a priority inbox message (desk inbox post --priority) sorts before everything, even the owner's
+# own chat (0): it exists to wake the bot now. usage.budget_gate does not hold it.
+URGENT_PRIORITY = -1
 
 
 class InboxLimit(ValueError):

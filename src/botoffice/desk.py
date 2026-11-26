@@ -21,7 +21,7 @@ USAGE = (
     " [--thread ID] [--from NAME]\n"
     "       desk team list | status BOT | read BOT [--limit N] [--since X] | message [--queue] BOT TEXT | ask BOT TEXT [--timeout S]\n"
     "       desk grok install-config\n"
-    "       desk inbox post --to BOT --from NAME --text TEXT [--thread ID] [--hop N]"
+    "       desk inbox post --to BOT --from NAME --text TEXT [--thread ID] [--hop N] [--priority]"
 )
 
 

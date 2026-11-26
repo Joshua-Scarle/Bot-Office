@@ -177,6 +177,20 @@ class Memory:
         with self._lock(self.bot_dir(bot_id)):
             self._write_dated(self.bot_path(bot_id), text, who)
 
+    def edit_bot(self, bot_id: UUID | str, change, who: str, moment: datetime | None = None) -> str:
+        """0.12.39 (rules_sync): replace the bot's memory.md with ``change(current)`` under its lock; the
+        notes that are new get *moment* (when the note was decided, not when it was copied) and *who*.
+        Returns the text now stored."""
+        _private_dir(self.data_dir / "bots")
+        path = self.bot_path(bot_id)
+        with self._lock(self.bot_dir(bot_id)):
+            before, mtime = self._read(path), freshness._mtime(path)
+            after = change(before)
+            if after != before:
+                _atomic_write(path, after)
+                freshness.record(path, before, after, who, mtime, moment)
+            return after
+
     def prepare_merge(self, path: Path, base: str, ours: str) -> tuple[str, Merge]:
         """The merge against the file as it is now, computed without the lock (run it off the
         event loop); merge_write reuses it if the file has not changed since."""

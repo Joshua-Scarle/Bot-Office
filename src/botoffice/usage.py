@@ -160,10 +160,12 @@ def over_budget(db: sqlite3.Connection, bot_id: str, stamp: datetime) -> str | N
 
 def budget_gate(db: sqlite3.Connection, job_id: str, stamp: datetime) -> str | None:
     """Claim-time check (inside the claim transaction): the reason an unattended job must wait."""
-    job = db.execute("SELECT j.bot_id, j.source, b.scheduled_runs FROM jobs j JOIN bots b ON b.id=j.bot_id "
+    job = db.execute("SELECT j.bot_id, j.source, j.priority, b.scheduled_runs FROM jobs j JOIN bots b ON b.id=j.bot_id "
                      "WHERE j.id=?", (job_id,)).fetchone()
     if job is None or job["source"] not in budget_sources(job["scheduled_runs"]):
         return None
+    if job["priority"] is not None and job["priority"] < 0:
+        return None  # 0.12.39: a priority inbox message (store.URGENT_PRIORITY) always wakes the bot
     return over_budget(db, job["bot_id"], stamp)
 
 

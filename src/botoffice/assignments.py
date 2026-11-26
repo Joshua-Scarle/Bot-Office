@@ -1554,11 +1554,13 @@ class Assignments:
         return fired
 
     def _fire(self, db: sqlite3.Connection, wakeup: sqlite3.Row, *, change: tuple[str, str, str] | None = None,
-              reply: tuple[str, str] | None = None) -> int:
+              reply: tuple[str, str] | None = None, custom: tuple[str, str] | None = None) -> int:
         """Mark *wakeup* fired and queue its turn, or cancel it (daily cap, bot gone, assignment closed or
         out of budget, or ``continuation.decide`` stops it: chat-only bot, auto-continue off, task
         waiting on the owner or blocked) with a chat line. Runs inside the caller's transaction. A *reply*
-        wake-up (0.11.12, ``wake_for_replies``) is (prompt, chat text): the other bot's reply, not a note."""
+        wake-up (0.11.12, ``wake_for_replies``) is (prompt, chat text): the other bot's reply, not a note.
+        A *custom* one (0.12.39, stall_sweep) is (prompt, chat text) as well, but it does not count the
+        automatic turns in a row (it fires at most once per stall strike; the caps still apply)."""
         stamp = now()
 
         def cancel(reason: str) -> int:
@@ -1604,6 +1606,8 @@ class Assignments:
         text = "Wake-up" + (f": {wakeup['note']}" if wakeup["note"] else "")
         if reply:
             prompt, text = reply
+        if custom:
+            prompt, text = custom
         if row is not None:
             if not self._budget_left(row):
                 return cancel(f'the budget of "{row["title"]}" is used up')
