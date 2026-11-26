@@ -69,3 +69,4 @@ def _github_repos_are_private(monkeypatch):
     monkeypatch.setattr(github_access, "_fetch_visibility", lambda api, owner, repo, token: "private")
     monkeypatch.setattr(git_guard, "visibility_lookup", lambda owner, repo: "private")
     monkeypatch.setattr(github_access.Login, "__call__", lambda self: None)  # no GET /user from tests
+    monkeypatch.setattr(github_access, "gh_cli_get", lambda endpoint, jq: None)  # nor the host's gh login

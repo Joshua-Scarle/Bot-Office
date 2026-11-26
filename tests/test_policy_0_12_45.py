@@ -435,3 +435,13 @@ def test_policy_describes_itself():
     described = policy.describe()
     assert set(described["ask"]) == set(policy.ASK_CLASSES) and described["version"] == "0.12.45"
     assert policy.slugs("MPG Data Pipeline Engineer (BO)") >= {"mpg-dpe", "mpg-data-pipeline-engineer"}
+
+
+def test_without_a_token_file_the_hosts_gh_login_answers_read_only(monkeypatch):
+    from botoffice import github_access
+    calls = []
+    monkeypatch.setattr(github_access, "gh_cli_get", lambda endpoint, jq: calls.append((endpoint, jq)) or "private")
+    lookup = github_access.Visibility(lambda: None)
+    assert lookup("Acme", "App.git") == "private" and lookup("acme", "app") == "private"
+    assert calls == [("repos/acme/app", ".visibility")]  # cached
+    assert lookup("acme", "a;b") is None  # not a repo name: not asked
