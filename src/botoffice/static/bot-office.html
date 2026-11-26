@@ -4654,8 +4654,10 @@ function desktopLabel(d) {
   if (d.kind === "per-bot") return (d.bot || "(deleted bot)") + " · " + d.name + " · " + d.status + (d.owner_controlling ? " · you control it" : "");
   return d.name + " · " + d.status + (d.kind === "pool" ? " · shared" : "") + (d.bot ? " · " + d.bot : "");
 }
-async function loadDesktops(prefer) {
-  desktopList = await api("/v1/desktops");
+async function loadDesktops(prefer, stale) {
+  const fresh = await api("/v1/desktops");
+  if (stale && stale()) return;   // a newer connect or selection owns the list now
+  desktopList = fresh;
   const bot = currentBot();
   const list = $("desktop-select");
   const options = desktopList.map((d) => {
@@ -4694,13 +4696,22 @@ async function connectDesktop() {
       $("desktop-status").textContent = "Starting the bot's desktop…";
       name = (await api("/v1/bots/" + encodeURIComponent(name.slice(4)) + "/desktop", {method: "POST"})).name;
       if (stale()) return;
-      await loadDesktops(name);
+      await loadDesktops(name, stale);
     } else if (entry && entry.kind === "per-bot" && entry.status !== "running") {
       $("desktop-status").textContent = "Starting " + name + "…";
-      await api("/v1/desktops/" + encodeURIComponent(name) + "/start", {method: "POST"});
+      // the server answers with the bot's desktop as it is now; connect to that, and only if it is still that bot's
+      const started = (await api("/v1/desktops/" + encodeURIComponent(name) + "/start", {method: "POST"})).name;
       if (stale()) return;
-      await loadDesktops(name);
+      await loadDesktops(started, stale);
+      if (stale()) return;
+      const now = desktopList.find((d) => d.name === started);
+      if (!now || now.kind !== "per-bot" || now.bot_id !== entry.bot_id) {
+        $("desktop-status").textContent = "That desktop changed while starting; choose it again.";
+        return;
+      }
+      name = started;
     }
+    if (stale()) return;
     if (stale()) return;
     const grant = await api("/v1/desktops/" + encodeURIComponent(name) + "/ticket?mode=" + desktopMode, {method: "POST"});
     if (stale()) return;
