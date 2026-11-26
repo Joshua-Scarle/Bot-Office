@@ -566,3 +566,39 @@ def test_a_user_wakeup_named_stall_is_still_a_turn(tmp_path):
         db.execute("INSERT INTO wakeups (id,bot_id,note,status,created_at,job_id) VALUES ('w1',?,'stall review','fired',?,?)",
                    (str(bot.id), now().isoformat(), str(later.id)))
     assert stall_sweep.sweep(store, asg, 3)["woken"] == 0
+
+
+def test_round3_rule_marks_and_adopted_hand_written_rules(tmp_path):
+    store = JobStore(tmp_path / "db.sqlite3")
+    bot = store.create_bot("MS Lead (BO)", "", "claude", None)
+    memory = Memory(tmp_path / "data")
+    memory.write_bot(bot.id, "- RULE (owner via lead, Nov 23 2026): one folder per task.\n")
+    folder = tmp_path / "drop"
+    folder.mkdir()
+    rules = folder / "ms-lead-bo.md"
+    rules.write_text("- [2026-11-21 | x] [rule:retention] Keep weekly snapshots.\n"
+                     "- [2026-11-23 | owner | id=folders] one folder per task.\n")
+    entry = rules_sync.run(store, memory, folder)["files"][0]
+    assert (entry["added"], entry["changed"]) == (1, 1)
+    text = memory.read_bot(bot.id)
+    assert text.count("one folder per task") == 1 and "[rule:folders] one folder per task." in text
+    assert "[rule:-] [rule:retention] Keep weekly" in text
+    rules.write_text("- [2026-11-21 | y | id=retention] Keep monthly snapshots.\n"
+                     "- [2026-11-23 | owner | id=folders] one folder per task, dated runs.\n")
+    entry = rules_sync.run(store, memory, folder)["files"][0]
+    assert (entry["added"], entry["changed"]) == (1, 1)
+    text = memory.read_bot(bot.id)
+    assert "Keep weekly snapshots" in text and "Keep monthly snapshots" in text  # an id-less note is never replaced
+    assert text.count("one folder per task") == 1 and "dated runs" in text
+
+
+def test_escalation_without_a_lead_counts_as_skipped(tmp_path):
+    store, asg = _store(tmp_path)
+    bot = store.create_bot("Helper Bot", "", "claude", None)
+    _started_task(store, asg, bot, 9)
+    assert stall_sweep.sweep(store, asg, 3)["woken"] == 1
+    _finish_all(store, bot)
+    _age_sweeps(store, 4)
+    assert stall_sweep.sweep(store, asg, 3) == {"woken": 0, "escalated": 0, "skipped": 1}
+    assert any("no section lead" in line for line in _system_lines(store, bot))
+    assert stall_sweep.sweep(store, asg, 3, blocking=False)["skipped"] == 1

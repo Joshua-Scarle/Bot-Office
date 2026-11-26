@@ -64,8 +64,17 @@ def _table(db: sqlite3.Connection) -> None:
 
 
 def config(store: JobStore) -> dict:
+    return _parse_config(store.get_meta(META_KEY))
+
+
+def _config_db(db: sqlite3.Connection) -> dict:
+    row = db.execute("SELECT value FROM meta WHERE key=?", (META_KEY,)).fetchone()
+    return _parse_config(row[0] if row else None)
+
+
+def _parse_config(raw: str | None) -> dict:
     try:
-        saved = json.loads(store.get_meta(META_KEY) or "{}")
+        saved = json.loads(raw or "{}")
     except ValueError:
         saved = {}
     if not isinstance(saved, dict):
@@ -273,7 +282,6 @@ def sweep(store: JobStore, assignments, hours: float, *, per_hour: int = 6, stam
 
 def _sweep(store: JobStore, assignments, hours: float, per_hour: int, stamp: datetime, counts: dict) -> dict:
     cutoff = stamp - timedelta(hours=hours)
-    cfg = config(store)
     with closing(store._connect()) as db:
         _table(db)
         db.commit()
@@ -281,6 +289,7 @@ def _sweep(store: JobStore, assignments, hours: float, per_hour: int, stamp: dat
     for item in sorted(items, key=lambda item: item["since"]):
         with closing(assignments._tx()) as db:
             try:
+                cfg = _config_db(db)  # the leads map and exclude list as they are now, in this transaction
                 done = _step(assignments, db, item, cfg, _skipped_bots(db, cfg), hours, per_hour, stamp, cutoff)
                 db.commit()
             except Exception:
@@ -311,11 +320,12 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
     age = (stamp - datetime.fromisoformat(item["since"])).total_seconds() / 3600
     what = item["what"].replace("your ", "", 1)
     if fresh:
+        job_id = _wake(assignments, db, bot["id"], "stall check", _owner_prompt(item, hours, age), item["subject"])
         if item["assignment"]:
             db.execute("UPDATE assignments SET stalled_at=COALESCE(stalled_at, ?), dismissed_at=NULL WHERE id=?",
                        (stamp.isoformat(), item["assignment"]))
-            assignment_event(db, item["assignment"], "stalled", f"no progress for {age:.0f} h; owner woken")
-        job_id = _wake(assignments, db, bot["id"], "stall check", _owner_prompt(item, hours, age), item["subject"])
+            assignment_event(db, item["assignment"], "stalled", f"no progress for {age:.0f} h; " + (
+                "owner woken" if job_id else "the owner's wake-up did not run"))
         _line(db, bot["id"], f"Stall check: {what} has had no progress for {age:.0f} h, so Bot-Office woke "
                              f"{bot['name']} to look at it." if job_id else
                              f"Stall check: {what} has had no progress for {age:.0f} h; the wake-up did not run "
@@ -335,6 +345,7 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
         lead = None
     if lead is not None and _busy(db, lead["id"]):
         return "skipped"  # asked on a later pass, once the lead is free
+    told = None
     if lead is None:
         _line(db, bot["id"], f"Stall check: still no progress on {what} after {age:.0f} h, and no section lead "
                              "is set to tell (PUT /v1/stall-sweep leads).")
@@ -346,4 +357,4 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
               f"{lead['name']}, but its wake-up did not run ({lead['name']}'s chat says why).")
     db.execute("UPDATE stall_sweeps SET strike=2, last_at=?, lead_id=? WHERE subject=?",
                (stamp.isoformat(), lead["id"] if lead else None, item["subject"]))
-    return "escalated"
+    return "escalated" if told else "skipped"

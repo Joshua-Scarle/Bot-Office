@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     spec = json.loads(Path(args.spec).read_text())
     keys = [task["key"] for task in spec["tasks"]]
-    bad = [key for key in keys if not re.fullmatch(r"[A-Za-z0-9][\w.-]{0,79}", str(key))]
+    bad = [key for key in keys if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9][\w.-]{0,79}", key)]
     if bad:
         print(f"ERROR: keys must be letters, digits, '_', '.' or '-': {bad}", file=sys.stderr)
         return 2

@@ -86,7 +86,9 @@ def parse(text: str) -> tuple[str | None, list[dict]]:
 
 
 def note(rule: dict) -> str:
-    mark = f" [rule:{rule['id']}]" if rule["id"] else ""
+    # every synced note carries a mark right after its metadata ("[rule:-]" without an id), so rule text that
+    # itself starts with "[rule:x]" can never be read as the note's id
+    mark = f" [rule:{rule['id']}]" if rule["id"] else " [rule:-]"
     return f"- RULE ({rule['when']}; source: {rule['source']}){mark} {rule['text']}"
 
 
@@ -104,8 +106,16 @@ def merge(memory: str, rule: dict) -> tuple[str, str]:
                 lines[index] = line
                 return "\n".join(lines), "changed"
     wanted, whole = norm(rule["text"]), norm(line)
-    if any(norm(existing) == whole or (wanted and wanted == _text_of(existing)) for existing in lines):
-        return memory, "present"
+    for index, existing in enumerate(lines):
+        if norm(existing) == whole:
+            return memory, "present"
+        if wanted and wanted == _text_of(existing):
+            if not rule["id"] or _SYNCED_ID.match(existing):
+                return memory, "present"
+            # the same text written by hand: adopted as this rule's note (same words, now tracked by id),
+            # so a later change of the rule replaces it instead of leaving the old text behind
+            lines[index] = line
+            return "\n".join(lines), "changed"
     if SECTION not in lines:
         body = "\n".join(lines).rstrip("\n")
         return (body + ("\n\n" if body else "") + SECTION + "\n" + line + "\n"), "added"
