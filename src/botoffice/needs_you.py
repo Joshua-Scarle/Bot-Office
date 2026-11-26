@@ -326,6 +326,7 @@ def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None)
             "command": row["summary"], "fingerprint": row["input_hash"], "length": len(row["summary"]),
             "at": row["created_at"], "actions": ["rerun", "deny"] if expired else ["approve", "deny"],
         })
+    _approval_digest(db, bots, items)
     for row in db.execute("SELECT * FROM gate_log WHERE preset='secrets' AND effect='never' AND dismissed_at IS NULL "
                           "AND created_at>=? ORDER BY id DESC LIMIT 20", (since,)):
         bot = bots.get(row["bot_id"])
@@ -337,6 +338,34 @@ def _approvals(db, bots: dict, items: list[dict], store: JobStore | None = None)
             "title": "Protected file", "ask": f"{bot['name']} tried to touch a protected file (blocked): {row['summary']}",
             "at": row["created_at"], "actions": ["dismiss"],
         })
+
+
+DIGEST_AFTER = timedelta(hours=6)
+
+
+def _approval_digest(db, bots: dict, items: list[dict]) -> None:
+    """0.12.42: once a day, one line for the cards still waiting after DIGEST_AFTER (cards now wait a
+    day, so they do not die unseen overnight); clearing it hides it until the next day."""
+    stamp = now()
+    rows = db.execute("SELECT id, bot_id, preset, created_at FROM approvals WHERE status='pending' AND created_at<=? "
+                      "ORDER BY id", ((stamp - DIGEST_AFTER).isoformat(),)).fetchall()
+    rows = [row for row in rows if row["bot_id"] in bots]
+    if not rows:
+        return
+    oldest = rows[0]
+    try:
+        hours = int((stamp - datetime.fromisoformat(oldest["created_at"])).total_seconds() // 3600)
+    except (TypeError, ValueError):
+        hours = 0
+    names = sorted({bots[row["bot_id"]]["name"] for row in rows})
+    items.append({
+        "id": f"d:approvals:{stamp.date().isoformat()}", "kind": "digest", "state": "waiting", "bot_id": oldest["bot_id"],
+        "bot_name": bots[oldest["bot_id"]]["name"], "notify": False, "title": "Cards still waiting",
+        "ask": (f"{len(rows)} approval card{'s' if len(rows) != 1 else ''} waiting over {int(DIGEST_AFTER.total_seconds() // 3600)} h "
+                f"(oldest #{oldest['id']}, {hours} h): " + ", ".join(f"#{row['id']} {row['preset'] or 'rule'}" for row in rows[:12])
+                + (" …" if len(rows) > 12 else "") + f" — from {', '.join(names[:6])}"),
+        "approval_ids": [row["id"] for row in rows], "at": oldest["created_at"], "actions": ["clear"],
+    })
 
 
 def _refused_without_bot(db, items: list[dict]) -> None:

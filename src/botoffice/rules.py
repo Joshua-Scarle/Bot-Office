@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from . import auto_merge, git_guard, github_access, nested_agents, sudo_review, team
+from . import auto_merge, git_guard, github_access, nested_agents, policy, sudo_review, team
 from .domain import Job
 from .store import JobStore, now
 
@@ -62,6 +62,8 @@ KINDS = ("shell", "path", "domain", "preset", "tool")
 SCOPES = ("attended", "unattended", "all")
 PRESETS = ("outbound", "destructive", "secrets", "network", nested_agents.PRESET)
 GRANT_HOURS = 24
+# 0.12.42: a card that timed out unanswered is raised again (not duplicated) for this long
+REUSE_HOURS = 72
 PASS_SECONDS = 600
 PATTERN_LIMIT = 500
 SUMMARY_LIMIT = 300
@@ -693,6 +695,55 @@ class Rules:
         self.sudo = sudo_review.Reviewer(Path(store.path).parent / "sudo-review.jsonl")
         # 0.12.31: a qualifying PR merge is checked against GitHub instead of the card (auto_merge.py)
         self.auto_merge = auto_merge.Checker(Path(store.path).parent / "auto-merge.jsonl")
+        # 0.12.42: the live checkout this controller runs from (policy scope); the bots list, cached
+        self.live_root = os.environ.get("BOT_OFFICE_LIVE_ROOT") or str(Path(__file__).resolve().parents[2])
+        self._bot_names: tuple[float, list[tuple[str, str]]] = (0.0, [])
+        self._job_bots: dict[str, str | None] = {}
+
+    # --- 0.12.42: the bot's scope for the policy and the git guard ---
+
+    def _bots(self) -> list[tuple[str, str]]:
+        stamp, names = self._bot_names
+        if time.monotonic() - stamp < 60 and names:
+            return names
+        with closing(self.store._connect()) as db:
+            names = [(row["id"], row["name"]) for row in db.execute("SELECT id, name FROM bots")]
+        self._bot_names = (time.monotonic(), names)
+        return names
+
+    def _job_bot(self, job_id: str) -> str | None:
+        if job_id in self._job_bots:
+            return self._job_bots[job_id]
+        try:
+            UUID(job_id)
+        except ValueError:
+            return None
+        with closing(self.store._connect()) as db:
+            row = db.execute("SELECT bot_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+        value = row["bot_id"] if row else None
+        if len(self._job_bots) > 20000:
+            self._job_bots.clear()
+        self._job_bots[job_id] = value
+        return value
+
+    def scope(self, job: Job, action: Action) -> policy.Scope:
+        bot_id = str(job.bot_id) if job.bot_id else None
+        bots = self._bots() if bot_id else []
+        name = next((n for i, n in bots if i == bot_id), "")
+        # the job's own workspace; without a workspaces dir (a bare Rules, tests) the CLI's directory, as the
+        # git guard takes it
+        workspace = action.workspace or (str(self.workspaces / str(job.id)) if self.workspaces is not None
+                                         else (action.cwd or ""))
+        return policy.Scope(workspace=workspace, cwd=action.cwd or workspace or None, bot_id=bot_id, bot_name=name,
+                            live_root=self.live_root, other_bot_names=tuple(n for i, n in bots if i != bot_id),
+                            own_job_dir=lambda job_id: bool(bot_id) and self._job_bot(job_id) == bot_id)
+
+    def _saved_allow(self, own: list[sqlite3.Row], action: Action, hits: list[str]) -> bool:
+        """0.12.42: an allow rule of the owner's (global or this bot's, this scope; not a preset) matches
+        the action: it opens a policy class (policy.OVERRIDABLE), as the owner's allow rules opened the
+        approval classes before. Rules are written with the master token only."""
+        return any(rule["effect"] == "allow" and rule["kind"] != "preset" and _rule_matches(rule, action, hits)
+                   for rule in own)
 
     # --- rules CRUD (master token only) ---
 
@@ -776,7 +827,9 @@ class Rules:
             return "never", preset, "a rule forbids it"
         # 0.12.4: the git guard sits above every rule, class, bot setting, run kind and CLI access
         # level: no "allow" (a rule, a class switched off) reaches past it
-        guarded = git_guard.classify(action.tool, action.command, action.data, action.cwd)
+        scope = self.scope(job, action)
+        guarded = git_guard.classify(action.tool, action.command, action.data, action.cwd,
+                                     roots=scope.roots, excluded=scope.excluded())
         if guarded:
             # 0.12.31: one plain PR merge naming its repository may skip the card when GitHub shows the
             # PR ready (auto_merge.judge); trigger runs and a switched-off office keep the card, and so
@@ -791,6 +844,19 @@ class Rules:
         sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
+        # 0.12.42: the Grok-Bot-style policy (policy.py): the risky classes ask, everything else is judged
+        # by the owner's own rules below; a saved allow rule for the exact command opens OVERRIDABLE classes
+        verdict = policy.judge(action.tool, action.command, action.paths, action.data, scope, first_party)
+        if verdict.effect == "ask" and verdict.key in policy.SUDO_ROUTED and _is_shell(action) and \
+                policy.runs_sudo(action.command):
+            pass  # sudo goes to the sudo auto-review below (its own hard-stop list), as since 0.12.28
+        elif verdict.effect == "ask" and not (verdict.overridable and job.source not in STRICT_SOURCES
+                                               and self._saved_allow(own, action, hits)):
+            from . import approval_classes
+            chosen = approval_classes.match(self.store, action.tool, action.command)
+            if chosen is not None:  # the owner's own class (purchases, a custom one ...) names the card
+                return "ask", chosen.key, f"{chosen.label.lower()} waits for your approval"
+            return "ask", verdict.key, f"{verdict.reason} waits for your approval"
         # 0.12.24: a specific allow rule (a shell, path, tool or domain pattern for this exact kind of
         # action) outranks a generic ask *preset* rule (outbound, destructive, nested-agent). An ask
         # rule with its own pattern (git push, merge, deploy, HTTP writes, mail) still wins, and so do
@@ -836,8 +902,8 @@ class Rules:
         return "allow", preset, ""
 
     def _sudo_route(self, job: Job, action: Action, hits: list[str]) -> tuple[str, str | None, str] | None:
-        if not _is_shell(action) or not sudo_review.is_sudo(action.command):
-            return None
+        if not _is_shell(action) or not sudo_review.is_sudo(action.command) or not policy.runs_sudo(action.command):
+            return None  # 0.12.42: the word "sudo" in prose (a here-document, a grep) is not sudo
         if job.source in STRICT_SOURCES or set(hits) - {"destructive"} or not job.bot_id:
             return None
         bot = self.store.get_bot(job.bot_id)
@@ -937,6 +1003,7 @@ class Rules:
         if effect == "auto-merge":
             effect, why = self._auto_merge(job, provider, action, preset)
         if effect == "allow":
+            self._audit(job, provider, action, why)
             return Decision("allow", "allow", why, preset)
         if effect == "never":
             reason = f"Blocked by Bot-Office: {why}. Do not retry this or work around it."
@@ -980,6 +1047,44 @@ class Rules:
                   "Write any draft you need (e.g. to outbox/ in this workspace), then end the turn with "
                   "BOT-OFFICE-STATUS: waiting_on_user — approval #" + str(approval))
         return Decision("deny", "ask", reason, preset, approval)
+
+    # --- 0.12.42: the append-only audit of what the policy now lets run without a card ---
+
+    def _audit(self, job: Job, provider: str, action: Action, why: str) -> None:
+        """An allowed action the pre-0.12.42 standard rules would have carded (policy.legacy_asks): one
+        row in policy_audit (append-only, GET /v1/policy/audit). Never raises; never blocks the action."""
+        try:
+            if action.tool == git_guard.PUSH_TOOL:
+                return  # the push command itself was audited
+            first_party = team.is_first_party_tool(action.tool, job)
+            legacy = policy.legacy_asks(action.command, presets_hit(action, first_party))
+            if not legacy:
+                return
+            verdict = policy.judge(action.tool, action.command, action.paths, action.data, self.scope(job, action),
+                                   first_party)
+            reason = verdict.reason or verdict.key or why
+            bot = self.store.get_bot(job.bot_id) if job.bot_id else None
+            with closing(self.store._connect()) as db:
+                if db.execute("SELECT COUNT(*) FROM policy_audit WHERE job_id=?",
+                              (str(job.id),)).fetchone()[0] >= GATE_LOG_PER_JOB:
+                    return
+                db.execute("INSERT INTO policy_audit (at,bot_id,bot,job_id,source,provider,tool,summary,policy,legacy) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (now().isoformat(), str(job.bot_id) if job.bot_id else None, getattr(bot, "name", None),
+                            str(job.id), job.source, provider[:32], action.tool[:80], action.summary,
+                            (f"{reason} ({why})" if why and why != reason else reason)[:300], ", ".join(legacy)[:300]))
+        except Exception:  # noqa: BLE001 — the audit never decides anything
+            return
+
+    def audit(self, limit: int = 200, bot_id: str | None = None, since: str | None = None) -> list[dict]:
+        query, args = "SELECT * FROM policy_audit WHERE 1=1", []
+        if bot_id:
+            query, args = query + " AND bot_id=?", [*args, bot_id]
+        if since:
+            query, args = query + " AND at>=?", [*args, since]
+        with closing(self.store._connect()) as db:
+            return [dict(row) for row in db.execute(query + " ORDER BY id DESC LIMIT ?",
+                                                    (*args, max(1, min(limit, 2000)))).fetchall()]
 
     # --- the pre-push check after an approval (fix3 #3: bound to the exact update) ---
 
@@ -1141,11 +1246,28 @@ class Rules:
         with closing(self.store._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                row = db.execute("SELECT id FROM approvals WHERE bot_id=? AND job_id=? AND input_hash=? "
-                                 "AND status='pending'", (str(job.bot_id), str(job.id), action.fingerprint)).fetchone()
+                # 0.12.42: the same action asked again (this turn or a later one of the same bot) reuses
+                # the card that is still waiting, and one that timed out unanswered within REUSE_HOURS is
+                # raised again instead of a duplicate (#205/#214/#220 were one gh issue comment)
+                row = db.execute("SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='pending' "
+                                 "ORDER BY job_id=? DESC, id DESC LIMIT 1",
+                                 (str(job.bot_id), action.fingerprint, str(job.id))).fetchone()
                 if row:
                     db.commit()
                     return int(row["id"])
+                old = db.execute("SELECT id, summary FROM approvals WHERE bot_id=? AND input_hash=? AND status='expired' "
+                                 "AND resume_job_id IS NULL AND created_at>=? ORDER BY id DESC LIMIT 1",
+                                 (str(job.bot_id), action.fingerprint,
+                                  (stamp - timedelta(hours=REUSE_HOURS)).isoformat())).fetchone()
+                if old and db.execute("UPDATE approvals SET status='pending', decided_at=NULL, expires_at=? "
+                                      "WHERE id=? AND status='expired' AND resume_job_id IS NULL",
+                                      (self._expiry(stamp, unattended), old["id"])).rowcount:
+                    db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
+                               (str(job.bot_id), "system", "chat",
+                                f"Approval #{old['id']} asked again (it had timed out): {_short(old['summary'])}",
+                                stamp.isoformat(), old["id"]))
+                    db.commit()
+                    return int(old["id"])
                 if db.execute("SELECT COUNT(*) FROM approvals WHERE job_id=?",
                               (str(job.id),)).fetchone()[0] >= APPROVALS_PER_JOB:
                     db.commit()

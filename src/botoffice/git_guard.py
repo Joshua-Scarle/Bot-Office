@@ -57,7 +57,9 @@ hash-object help init interpret-trailers log ls-files ls-remote ls-tree maintena
 name-rev notes pack-objects prune pull push range-diff read-tree rebase reflog remote repack replace
 request-pull reset restore rev-list rev-parse revert rm shortlog show show-branch show-ref sparse-checkout stash
 status submodule subtree switch symbolic-ref tag update-index update-ref var verify-commit verify-tag version
-whatchanged worktree write-tree lfs flow""".split())
+whatchanged worktree write-tree lfs flow merge-tree merge-file merge-one-file check-ignore check-attr
+check-ref-format check-mailmap column for-each-repo mktag mktree pack-refs patch-id prune-packed rerere show-index
+stripspace unpack-file unpack-objects verify-pack annotate get-tar-commit-id diagnose bugreport replay""".split())
 GH_GROUPS = frozenset("""actions agent-task alias api attestation auth browse cache codespace completion config
 copilot extension gist gpg-key help issue label licenses org pr preview project release repo ruleset run search
 secret ssh-key status variable workflow version""".split())
@@ -122,10 +124,17 @@ class Ctx:
     sends: list = None  # fix3 #4: why a part of the command sends something out (the "send" class)
     # 0.12.24: a redirect next to an agent name (`<<<claude`): the word list may not be what runs
     no_subscription: bool = False
+    # 0.12.42: the bot's scope (policy.Scope.roots): deleting inside these is the bot's own work; inside
+    # *excluded* (another bot's dirs) it asks. Only the controller sets them (hooks and shims: none, stricter)
+    roots: tuple = ()
+    excluded: tuple = ()
+    vars: dict = None  # literal shell variables set earlier in the command (`J=/x; rm -r $J/y`)
 
     def __post_init__(self):
         if self.sends is None:
             self.sends = []
+        if self.vars is None:
+            self.vars = {}
 
 
 # fix3 #5: the controller sets this to its cached GitHub API lookup (owner, repo) -> default branch or
@@ -333,7 +342,70 @@ def _heredoc(header: str, body: str, ctx: Ctx, depth: int) -> None:
         _raw_code(body, ctx, depth)
 
 
+_LITERAL_VALUE = re.compile(r"^[^$`\s*?\[{]*$")
+
+
+def _record_vars(words: list[str], ctx: Ctx) -> None:
+    """A command of only assignments sets shell variables; a literal value is remembered for
+    _outside, any other value forgets the name (a prefix assignment `X=1 cmd` changes nothing here)."""
+    for word in words:
+        name, _, value = word.partition("=")
+        if _LITERAL_VALUE.match(value):
+            ctx.vars[name] = value
+        else:
+            ctx.vars.pop(name, None)
+
+
+# 0.12.42: a test run with the office's environment stripped (`env -u BOT_OFFICE_AGENT_TOKEN ... PYTHONPATH=src
+# timeout 900 python -m pytest ...`) takes capabilities away from the child; it is not switching off the push
+# check for a push. Only this exact shape: -u of BOT_OFFICE_* (or the API key / GitHub token) names, plain
+# VAR=value words that are not hook or credential settings, an optional timeout, then pytest.
+_TEST_UNSET = re.compile(r"^(?:BOT_OFFICE_\w+|ANTHROPIC_API_KEY|GH_TOKEN|GITHUB_TOKEN)$")
+
+
+def _test_run(rest: list[str]) -> bool:
+    i, unset = 0, False
+    while i < len(rest):
+        word = rest[i]
+        if word in ("-u", "--unset") and i + 1 < len(rest):
+            name, i = rest[i + 1], i + 2
+        elif word.startswith("--unset="):
+            name, i = word[len("--unset="):], i + 1
+        elif word.startswith("-u") and len(word) > 2:
+            name, i = word[2:], i + 1
+        else:
+            break
+        if not _TEST_UNSET.match(name):
+            return False
+        unset = True
+    if not unset:
+        return False
+    while i < len(rest) and _ASSIGN.match(rest[i]):
+        if _HOOK_ENV.match(rest[i].split("=", 1)[0]) or _HOOK_KEYS.match(rest[i].split("=", 1)[0]) or \
+                "$(" in rest[i] or "`" in rest[i]:
+            return False
+        i += 1
+    if i < len(rest) and _base(rest[i]) == "timeout":
+        i += 1
+        while i < len(rest) and rest[i].startswith("-"):
+            i += 1
+        i += 1
+    if i >= len(rest):
+        return False
+    program = _base(rest[i])
+    if program in ("pytest", "py.test"):
+        return True
+    if program.startswith("python") and INTERPRETERS.match(program):
+        j = i + 1
+        while j < len(rest) and rest[j] in ("-I", "-u", "-B", "-q", "-E", "-s"):
+            j += 1
+        return j + 1 < len(rest) and rest[j] == "-m" and rest[j + 1] == "pytest"
+    return False
+
+
 def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
+    if words and all(_ASSIGN.match(word) and "/" not in word.split("=", 1)[0] for word in words):
+        _record_vars(words, ctx)
     cursor = 0
     while cursor < len(words):
         word = words[cursor]
@@ -348,6 +420,8 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
         rest = words[index + 1:]
         if program in ("echo", "printf"):
             return  # prints its words; a substitution in them was scanned as a nested command
+        if program == "env" and _test_run(rest):
+            continue  # 0.12.42: a test run with the office's variables taken away (see _test_run)
         if program in ("export", "unset", "declare", "typeset", "local", "readonly", "env", "setenv", "unsetenv"):
             for item in rest:
                 _hook_env(item.split("=", 1)[0].lstrip("-"))
@@ -626,6 +700,11 @@ def _outside(path: str, ctx: Ctx, root_counts: bool = False, follow: bool = Fals
         return False
     if path == "/dev/null":
         return False
+    path = _known_vars(path, ctx)
+    if ctx.roots or ctx.excluded:
+        scoped = _scoped(path, ctx, root_counts, follow)
+        if scoped is not None:
+            return scoped
     if path.startswith("~") or "$(" in path or "`" in path:
         return True
     if "$" in path:
@@ -658,6 +737,69 @@ def _outside(path: str, ctx: Ctx, root_counts: bool = False, follow: bool = Fals
 
 def _within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+_VAR_PREFIX = re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def _known_vars(path: str, ctx: Ctx) -> str:
+    """*path* with a leading literal variable set earlier in the command (_record_vars) filled in."""
+    found = _VAR_PREFIX.match(path)
+    if found and ctx.vars:
+        name = found.group(1) or found.group(2)
+        if name in ctx.vars:
+            return ctx.vars[name] + path[found.end():]
+    return path
+
+
+def _scoped(path: str, ctx: Ctx, root_counts: bool, follow: bool) -> bool | None:
+    """0.12.42: with the bot's scope known: True inside another bot's dir (or a root itself, with
+    *root_counts*), False inside a root, None when the scope does not decide (the checks below do)."""
+    if path == "~" or path.startswith("~/"):
+        path = os.path.expanduser("~") + path[1:]
+    if "$" in path or "`" in path or path.startswith("~"):
+        return None
+    base = path.rstrip("/").rsplit("/", 1)[-1]
+    if any(ch in base for ch in "*?[") and base.startswith("."):
+        return None
+    if not os.path.isabs(path):
+        if ctx.cwd is None:
+            return None
+        path = posixpath.join(ctx.cwd, path)
+    full = posixpath.normpath(path)
+    parent, name = posixpath.split(full)
+    real = os.path.realpath(full) if follow or path.endswith("/") else posixpath.join(os.path.realpath(parent), name)
+    for excluded in ctx.excluded:
+        if _within(full, excluded) or _within(real, os.path.realpath(excluded)):
+            return True
+    for root in ctx.roots:
+        root = posixpath.normpath(root)
+        if root_counts and (full == root or real == os.path.realpath(root)):
+            return True
+        if _within(full, root) and _within(real, os.path.realpath(root)) and full != root and real != os.path.realpath(root):
+            return False
+    return None
+
+
+# 0.12.42: caches a tool rebuilds on its own; deleting one is never data loss
+CACHE_ARTEFACTS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis"})
+
+
+def _cache_artefact(target: str, ctx: Ctx) -> bool:
+    path = _known_vars(target, ctx)
+    if path == "~" or path.startswith("~/"):
+        path = os.path.expanduser("~") + path[1:]
+    if not path or "$" in path or "`" in path or ".." in path.split("/") or path.startswith("~"):
+        return False
+    head, _, base = path.rstrip("/").rpartition("/")
+    if any(ch in head for ch in "*?[{"):
+        return False
+    if base in CACHE_ARTEFACTS:
+        pass
+    elif not (base.endswith(".pyc") and not any(ch in base[:-4] for ch in "?[{") and base.count("*") <= 1):
+        return False
+    full = posixpath.normpath(path if os.path.isabs(path) else posixpath.join(ctx.cwd or "/nonexistent", path))
+    return not any(_within(full, excluded) for excluded in ctx.excluded) and full.count("/") >= 3
 
 
 def _positionals(args: list[str]) -> list[str]:
@@ -711,6 +853,8 @@ def _delete(program: str, args: list[str], ctx: Ctx) -> None:
         return
     follow = program in ("rsync", "shred", "srm", "wipe")
     for target in _positionals(args):
+        if program in ("rm", "rmdir", "unlink", "trash", "trash-put", "gio") and _cache_artefact(target, ctx):
+            continue  # 0.12.42: build caches (__pycache__, .pytest_cache ...) are rebuilt by their tools
         if _outside(target, ctx, root_counts=True, follow=follow) or (program == "rsync" and re.match(r"^[^/]*:", target)):
             _hit(f"deleting files outside the workspace ({program})")
 
@@ -974,6 +1118,9 @@ def _git_push(rest: list[str], directory: str | None, overrides: dict) -> None:
     refspecs = positional[1:]
     if remote and (_DEFAULT_REF.match(remote) or _dynamic(remote) and not refspecs):
         _hit("git push naming the default branch")
+    public = public_push(remote_url(directory, remote or "origin"))
+    if public:
+        _hit(public)
     default = remote_default(directory, remote or "origin")
     local = local_default(directory, remote or "origin")
     for refspec in refspecs:
@@ -1370,6 +1517,49 @@ def mcp_repo(data: dict) -> tuple[str, str] | None:
     return None
 
 
+# 0.12.42 (Joshua, Nov 26): any push to a public repo waits for his card; feature pushes to private repos
+# do not. The controller sets visibility_lookup (github_access.Visibility, cached GitHub API answers);
+# hooks and shims leave it None, so there a GitHub push is "not verified" and goes to the controller.
+visibility_lookup = None
+KNOWN_PUBLIC = frozenset({("joshua-scarle", "bot-office")})
+
+
+def repo_visibility(owner: str, repo: str) -> str | None:
+    """"public", "private" or "internal" for github.com/<owner>/<repo>, or None (not known here)."""
+    if not owner or not repo or _dynamic(owner + repo):
+        return None
+    key = (owner.lower(), repo.lower().removesuffix(".git"))
+    if key in KNOWN_PUBLIC:
+        return "public"
+    if visibility_lookup is None:
+        return None
+    try:
+        value = visibility_lookup(*key)
+    except Exception:  # noqa: BLE001
+        return None
+    return value if value in ("public", "private", "internal") else None
+
+
+def public_push(url: str | None) -> str | None:
+    """Why a push to *url* waits for the owner: a public GitHub repo, one whose visibility is not
+    verified, or a host that is not GitHub. None for a private GitHub repo, a local path, or a URL not
+    known here (the pre-push check sees the real one)."""
+    if not url or _dynamic(url):
+        return None
+    normalised = normalise_remote(url)
+    if not normalised or normalised.startswith("file:"):
+        return None
+    hub = github_repo(normalised)
+    if hub is None:
+        return f"git push to {normalised.split('/', 1)[0]} (not GitHub, so whether it is public is not known)"
+    visibility = repo_visibility(*hub)
+    if visibility == "private":
+        return None
+    if visibility == "public":
+        return f"git push to the public repository {hub[0]}/{hub[1]}"
+    return f"git push to {hub[0]}/{hub[1]}, whose visibility is not verified (pushes to public repos ask)"
+
+
 def repo_default(owner: str, repo: str) -> str | None:
     """The default branch of github.com/<owner>/<repo> from the controller's cached lookup, or None
     (no lookup here, no token, not found)."""
@@ -1503,6 +1693,9 @@ def classify_push(report: dict | None) -> str | None:
     hub = github_repo(normalise_remote(str(report.get("url") or "")))
     if hub and repo_default(*hub):
         default = repo_default(*hub)  # fix3 #5: GitHub's own answer (the controller's cached lookup)
+    public = public_push(str(report.get("url") or ""))
+    if public and report["updates"]:
+        return public
     if len(report["updates"]) > 500:
         return "a push of too many refs to check"
     for update in report["updates"]:
@@ -1988,10 +2181,11 @@ def readable_event(event) -> bool:
 
 # --- entry point ----------------------------------------------------------------------------------
 
-def classify(tool: str, command: str = "", tool_input: dict | None = None, cwd: str | None = None) -> str | None:
+def classify(tool: str, command: str = "", tool_input: dict | None = None, cwd: str | None = None,
+             roots: tuple = (), excluded: tuple = ()) -> str | None:
     """Why this tool call must wait for the owner (a short phrase), or None. Never raises: a call
-    it cannot read is a hit."""
-    ctx = Ctx(root=cwd or None, cwd=cwd or None)
+    it cannot read is a hit. *roots* / *excluded*: the bot's scope (0.12.42, the controller only)."""
+    ctx = Ctx(root=cwd or None, cwd=cwd or None, roots=tuple(roots), excluded=tuple(excluded))
     if tool == PUSH_TOOL:
         try:
             return classify_push(tool_input)

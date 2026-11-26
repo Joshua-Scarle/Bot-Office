@@ -247,6 +247,21 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
         )"""
     )
     db.execute("CREATE INDEX IF NOT EXISTS gate_log_time ON gate_log(created_at)")
+    # 0.12.42: actions the approval policy let run that the old standard rules would have carded
+    # (rules.Rules._audit); append-only: no row is changed or removed
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS policy_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, bot_id TEXT, bot TEXT, job_id TEXT,
+            source TEXT, provider TEXT, tool TEXT, summary TEXT NOT NULL, policy TEXT NOT NULL DEFAULT '',
+            legacy TEXT NOT NULL DEFAULT ''
+        )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS policy_audit_job ON policy_audit(job_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS policy_audit_at ON policy_audit(at)")
+    db.execute("CREATE TRIGGER IF NOT EXISTS policy_audit_no_update BEFORE UPDATE ON policy_audit "
+               "BEGIN SELECT RAISE(ABORT, 'policy_audit is append-only'); END")
+    db.execute("CREATE TRIGGER IF NOT EXISTS policy_audit_no_delete BEFORE DELETE ON policy_audit "
+               "BEGIN SELECT RAISE(ABORT, 'policy_audit is append-only'); END")
     db.execute(
         """CREATE TABLE IF NOT EXISTS watchers (
             id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,

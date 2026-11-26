@@ -143,6 +143,18 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.42
+
+**Approvals follow the Grok Bot rule: only risky outbound, costly or irreversible actions wait for Joshua.** One policy in code (`src/botoffice/policy.py`, documented in [docs/permissions.md](docs/permissions.md)) replaces the per-bot "E8 safety gate" ask rules, which matched words anywhere in a command (a `ready-to-deploy` label, "git push" in a grep or a report, `sudo` in a here-document).
+
+- **No card:** reads of any kind (gh list/view, `gh api` GET, git fetch/clone, curl GET), local edits, here-document and echo text, git commit, local merge/rebase/cherry-pick in worktrees, feature pushes to private repos, PR create/comment/review on Joshua's private repos, nested `claude -p` / `codex exec` in work dirs, `__pycache__`/`.pytest_cache`/`node_modules` cleanup, test runs with `env -u BOT_OFFICE_*`, bot-to-bot messages, connector reads.
+- **Card:** email/texts/DMs (send class), issue comments and new issues on any repo, posts on public or other people's repos, `desk grok send` questions, web writes to other hosts, ssh/scp, publishing, deploys and service control not covered by a saved allow rule, desktop/printer control, connector writes, credential deletes, writes outside the bot's scope (the live checkout, other bots' dirs, profiles, /etc), git changes to the live checkout, system administration, nested agents outside work dirs. The git guard (above everything) now also asks for **any push to a public GitHub repo** or one whose visibility it cannot verify.
+- **Audit:** every allowed action the old rules would have carded is written to the append-only `policy_audit` table: `GET /v1/policy/audit` (and `GET /v1/policy`).
+- **Cards wait 24 h** (attended and unattended, configurable), a repeated action reuses its card (a timed-out one is raised again, not duplicated), and Needs-you shows a daily "Cards still waiting" line.
+- **Approval classes judge commands, not text** (`grep sudo` or `desk help 2>&1` no longer ask).
+- **Rules data:** `scripts/migrate_rules_0_12_42.py` (API only, idempotent, JSON backup) removes the E8 and Nov 26 interim ask rules from every bot except MPG DevOps (BO).
+- **Rollback:** check out the `backup/pre-0.12.42-*` tag and restart, then re-add the rules from the backup JSON; the new table is ignored by older code.
+
 ## What changed in 0.12.44
 
 - **Bot desktops survive a Bot-Office restart.** A desktop started by Bot-Office ran inside the service's cgroup, so `systemctl --user restart bot-office` stopped it (its state was kept; the next use started it again). `podman run`/`start` now run in a transient systemd scope of their own (`systemd-run --user --scope`) in the single-user layout. Found in the 0.12.43 live test.

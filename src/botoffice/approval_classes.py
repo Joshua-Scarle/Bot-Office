@@ -25,7 +25,8 @@ KEY = "approval_classes"
 CUSTOM_LIMIT = 30
 LABEL_LIMIT = 80
 PATTERN_LIMIT = 500
-TIMEOUT_DEFAULT = 60
+# 0.12.42: a card for a risky action waits a day (it used to die after an hour while Joshua slept)
+TIMEOUT_DEFAULT = 24 * 60
 TIMEOUT_MAX = 7 * 24 * 60
 CUSTOM_KINDS = ("shell", "tool")
 # an owner's pattern sees at most this much of a command (the bot controls the input); a longer
@@ -73,12 +74,20 @@ def _git_push_risky(command: str) -> bool:
 
 
 def _delete_outside(command: str) -> bool:
-    from .rules import _PROTECTED_WRITE_DIRS, _RM_RECURSIVE, _WRITE_OPS, _rm_outside
-    if _RM_RECURSIVE.search(command) and _rm_outside(command):
-        return True
-    if any(name in command for name in _PROTECTED_WRITE_DIRS) and _WRITE_OPS.search(command):
-        return True
-    return bool(re.search(r"\bdd\s[^;&|\n]*\bof=", command))
+    # 0.12.42: judged as the commands that run (policy.delete_outside), not words in their text
+    # (`desk help 2>&1` or a grep for "sudo" were carded before)
+    from . import policy
+    return policy.delete_outside(command)
+
+
+def _system(command: str) -> bool:
+    from . import policy
+    return policy.system_command(command)
+
+
+def _release(command: str) -> bool:
+    from . import policy
+    return policy.release_command(command)
 
 
 @dataclass(frozen=True)
@@ -123,17 +132,12 @@ BUILTIN: tuple[ApprovalClass, ...] = (
     ApprovalClass(
         "release", "Merging, releasing, force-pushing",
         "Merging pull requests, publishing releases or packages, and pushing to main or with --force.", True,
-        shell=_shell(r"\bgh\s+pr\s+merge\b",
-                     r"\bgh\s+release\s+(?:create|upload|edit|delete)\b",
-                     r"\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\b(?:docker|podman)\s+push\b"),
         tools=_tool_re(r"merge_pull_request", r"create_release", r"publish_\w+"), mcp_only=True,
-        check=_git_push_risky),
+        check=_release),
     ApprovalClass(
         "system", "Admin and system changes",
         "sudo, services (systemctl), scheduled jobs (crontab), user accounts, shutdown and reboot.", True,
-        shell=_shell(r"\bsudo\b|\bpkexec\b|\bsu\s+-",
-                     r"\b(?:systemctl|loginctl|crontab|shutdown|reboot|mkfs\S*|visudo|useradd|userdel|usermod)\b",
-                     r"\bpodman\s+(?:system\s+prune|volume\s+rm)\b")),
+        check=_system),
     ApprovalClass(
         "delete", "Deleting outside the bot's workspace",
         "Deleting or overwriting files elsewhere on the computer, or deleting email, files and records "

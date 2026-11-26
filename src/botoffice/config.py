@@ -73,7 +73,7 @@ class Settings:
     # upper bound of a bot's own turn timeout (bots.job_timeout, 60 s .. this)
     max_turn_timeout: int = 3600
     # 0.11.0: unattended approval requests expire after this many minutes
-    approval_ttl_min: int = 30
+    approval_ttl_min: int = 1440
     # all watcher-triggered runs per rolling hour
     trigger_runs_per_hour: int = 60
     # hour (ET) of the model-free daily digest
@@ -191,7 +191,7 @@ class Settings:
             rules_sync_dir=Path(rules_dir).expanduser() if (rules_dir := os.environ.get("BOT_OFFICE_RULES_SYNC_DIR"))
             else Path("~/bo-sync/rules").expanduser(),
             max_turn_timeout=int(os.environ.get("BOT_OFFICE_MAX_TURN_TIMEOUT") or "3600"),
-            approval_ttl_min=int(os.environ.get("BOT_OFFICE_APPROVAL_TTL_MIN") or "30"),
+            approval_ttl_min=int(os.environ.get("BOT_OFFICE_APPROVAL_TTL_MIN") or "1440"),  # 0.12.42: a day
             trigger_runs_per_hour=int(os.environ.get("BOT_OFFICE_TRIGGER_RUNS_PER_HOUR") or "60"),
             digest_hour=int(os.environ.get("BOT_OFFICE_DIGEST_HOUR") or "8"),
             private_dir=Path(private) if (private := os.environ.get("BOT_OFFICE_PRIVATE_DIR")) else None,
