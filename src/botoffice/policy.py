@@ -1,6 +1,6 @@
-"""0.12.42 the approval policy (Grok-Bot style): one place that says what waits for Joshua's card.
+"""0.12.42 the approval policy (Grok-Bot style): one place that says what waits for the owner's card.
 
-Joshua, Nov 26 2026: "I only ask for approval for things like send emails or irreversible outbound
+The owner, Nov 26 2026: "I only ask for approval for things like send emails or irreversible outbound
 actions that are risky ... or other costly or highly risky actions ... commit should never be
 blocked". Bots keep full CLI access; this module judges what they do, by the commands that would run
 (never the prose around them: here-document bodies written to files, echo/printf text, grep
@@ -24,10 +24,10 @@ roots.
 
 ALLOW: everything else, notably reads of any kind (gh list/view/api GET, git fetch/pull/clone, curl
 GET), local edits, git commit/merge/rebase/cherry-pick in worktrees, feature pushes to private repos,
-PR workflow writes on Joshua's own private repos, nested claude -p / codex exec runs in work dirs,
+PR workflow writes on the owner's own private repos, nested claude -p / codex exec runs in work dirs,
 build-artefact cleanup and bot-to-bot messages. When one of those would have asked under the old E8
 rules (``legacy_asks``), rules.py writes it to the append-only ``policy_audit`` table (GET
-/v1/policy/audit), so Joshua can see what Bot-Office now does on its own.
+/v1/policy/audit), so the owner can see what Bot-Office now does on its own.
 
 A tripwire, not a sandbox (a bot with full CLI access, as the same Unix user, can get around it).
 """
@@ -46,7 +46,7 @@ VERSION = "0.12.42"
 ASK_CLASSES: dict[str, tuple[str, str]] = {
     "post": ("Posting on GitHub", "issue comments and new issues on any repo; PR comments, reviews and edits on "
                                   "public or other people's repos; releases, gists, labels, new repos"),
-    "message": ("Messaging people", "desk grok send other than a result/FYI report (questions and blockers to Joshua)"),
+    "message": ("Messaging people", "desk grok send other than a result/FYI report (questions and blockers to the owner)"),
     "http-write": ("Web writes", "curl/wget/httpie POST, PUT, PATCH, DELETE or uploads to a host other than this one"),
     "remote": ("Other computers", "ssh, scp, sftp and rsync to another machine"),
     "publish": ("Publishing", "npm/pypi/cargo/gem publish, docker/podman push, GitHub releases and gists"),
@@ -63,15 +63,27 @@ ASK_CLASSES: dict[str, tuple[str, str]] = {
     "nested-agent": ("Nested agent outside work dirs", "claude -p / codex exec with permission checks off, run "
                                                        "outside the bot's workspace and the work roots"),
 }
-# the owner's own allow rules (master token only; a bot cannot write one) may let these run: Joshua's routine
+# the owner's own allow rules (master token only; a bot cannot write one) may let these run: the owner's routine
 # deploy rules, a review run he allowed. Never the Bot-Office safeguards: credentials, scope, the live checkout.
 LOCKED_CLASSES = frozenset({"credentials", "scope", "live-checkout"})
 OVERRIDABLE = frozenset(ASK_CLASSES) - LOCKED_CLASSES
 # a sudo command in these classes goes to the sudo auto-review (sudo_review.py) instead of a policy card
 SUDO_ROUTED = frozenset({"deploy", "system", "scope"})
 
-# the GitHub owners whose private repos count as Joshua's own (PR workflow writes need no card)
-OWN_OWNERS_DEFAULT = ("joshua-scarle",)
+# the GitHub owners whose private repos count as the owner's own (PR workflow writes need no card)
+# the GitHub owners whose private repos count as the owner's own: the controller token's login (owner_lookup,
+# set by the API at start-up) plus BOT_OFFICE_OWN_GITHUB_OWNERS="a,b"
+OWN_OWNERS_DEFAULT: tuple[str, ...] = ()
+owner_lookup = None  # () -> the GitHub login of the controller's token, or None
+
+
+def own_owners() -> tuple[str, ...]:
+    named = [item.strip() for item in os.environ.get("BOT_OFFICE_OWN_GITHUB_OWNERS", "").split(",") if item.strip()]
+    try:
+        login = owner_lookup() if owner_lookup is not None else None
+    except Exception:  # noqa: BLE001
+        login = None
+    return tuple(dict.fromkeys([*OWN_OWNERS_DEFAULT, *named, *([login] if isinstance(login, str) and login else [])]))
 # shared work roots: a bot may write and clean up there (other bots' named dirs excepted)
 WORK_ROOTS_DEFAULT = ("~/bo-work", "~/bot-office-work", "~/bot-office-reports", "/tmp")
 # per-bot dirs inside these roots: one bot's dir is out of another bot's scope
@@ -183,8 +195,56 @@ _RUNNER_VALUE_OPTS = {
     "env": {"-u", "--unset", "-C", "--chdir", "-S"}, "setsid": set(), "nohup": set(), "time": set(),
     "command": set(), "chronic": set(), "caffeinate": set(), "doas": {"-u"}, "runuser": {"-u", "-g"},
 }
-_QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
-_REDIRECT = re.compile(r"(?<![<>&])(?:&>>?|\d?>>?|>\|)[ \t]*(?!&)('[^'\n]*'|\"[^\"\n]*\"|[^\s;&|<>()'\"]+)")
+def redirect_targets(text: str) -> list[str]:
+    """The operands of `>`, `>>`, `>|`, `&>` and `N>` outside quotes, dequoted (`> "$HOME/x"` is
+    $HOME/x). Not `>&N` (a descriptor), not `>(...)` (process substitution)."""
+    out: list[str] = []
+    i, n, quote = 0, len(text), ""
+    while i < n:
+        c = text[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+            i += 1
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if c != ">":
+            i += 1
+            continue
+        i += 1
+        if i < n and text[i] in ">|":
+            i += 1
+        while i < n and text[i] in " \t":
+            i += 1
+        if i < n and text[i] in "&(":
+            i += 1
+            continue
+        word: list[str] = []
+        while i < n and text[i] not in " \t\n;&|<>()":
+            c = text[i]
+            if c in "'\"":
+                stop = text.find(c, i + 1)
+                stop = n if stop < 0 else stop
+                word.append(text[i + 1:stop])
+                i = stop + 1
+            elif c == "\\" and i + 1 < n:
+                word.append(text[i + 1])
+                i += 2
+            else:
+                word.append(c)
+                i += 1
+        if word:
+            out.append("".join(word))
+    return out
 
 
 def _expand(word: str, variables: dict[str, str], scope: Scope) -> str:
@@ -218,7 +278,7 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
                 _merge(out, inner)
             elif any(git_guard.INTERPRETERS.match(b) for b in bases):
                 out.code.append(body)
-        out.redirects += [m.group(1) for m in _REDIRECT.finditer(_QUOTED.sub("Q", text))]
+        out.redirects += redirect_targets(text)
         commands, nested = git_guard.split_words(text)
     except (RecursionError, ValueError, IndexError):
         out.unreadable = True
@@ -243,6 +303,7 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
                     variables[name] = scope.expand(value)
             continue
         words = [_expand(w, variables, scope) if "$" in w or w.startswith("~") else w for w in words]
+        out.redirects = [_expand(t, variables, scope) if "$" in t or t.startswith("~") else t for t in out.redirects]
         cwd = _unwrap(words, cwd, scope, out, depth)
         out.cwds.append(cwd)
     return out
@@ -272,12 +333,28 @@ def _unwrap(words: list[str], cwd: str | None, scope: Scope, out: Parsed, depth:
             while j < len(words) and (words[j].startswith("-") or (program == "env" and _ASSIGN.match(words[j]))):
                 if program == "env" and words[j] in ("-C", "--chdir") and j + 1 < len(words):
                     cwd = _join(cwd, words[j + 1])
+                split = None
+                if program == "env" and words[j] in ("-S", "--split-string") and j + 1 < len(words):
+                    split, skip = words[j + 1], 2
+                elif program == "env" and words[j].startswith("--split-string="):
+                    split, skip = words[j].split("=", 1)[1], 1
+                elif program == "env" and words[j].startswith("-S") and len(words[j]) > 2:
+                    split, skip = words[j][2:], 1
+                if split is not None:  # env -S "cmd args": the string is the command (env splits it)
+                    try:
+                        inner = git_guard.split_words(split)[0]
+                    except (RecursionError, ValueError, IndexError):
+                        out.unreadable = True
+                        return cwd
+                    words = [*(inner[0] if inner else []), *words[j + skip:]]
+                    break
                 j += 2 if words[j] in values else 1
-            if program == "timeout" and j < len(words):
-                j += 1  # the duration
-            if program == "flock" and j < len(words):
-                j += 1  # the lock file
-            words = words[j:]
+            else:
+                if program == "timeout" and j < len(words):
+                    j += 1  # the duration
+                if program == "flock" and j < len(words):
+                    j += 1  # the lock file
+                words = words[j:]
             continue
         break
     if not words:
@@ -451,7 +528,7 @@ def _desk(args: list[str], notes: list[str]) -> Verdict | None:
                 and _option(args, "--from") is None:
             notes.append("grok report (result/fyi)")
             return None
-        return _ask("message", f"desk grok send --kind {kind or '(none)'} (a message for Joshua)")
+        return _ask("message", f"desk grok send --kind {kind or '(none)'} (a message for the owner)")
     notes.append("bot-to-bot" if sub in ("message", "say") else "desk read")
     return None
 
@@ -472,19 +549,28 @@ _GIT_STATE = frozenset({"checkout", "switch", "reset", "merge", "pull", "rebase"
 
 def _git(args: list[str], cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | None:
     directory = cmd.cwd
+    explicit: list[str | None] = []  # --git-dir / --work-tree: the repo git really changes
     i = 0
     while i < len(args) and args[i].startswith("-"):
         if args[i] == "-C" and i + 1 < len(args):
             directory = _join(directory, scope.expand(args[i + 1]))
             i += 2
             continue
-        i += 2 if args[i] in ("-c", "--git-dir", "--work-tree", "--namespace") else 1
+        name, eq, value = args[i].partition("=")
+        if name in ("--git-dir", "--work-tree"):
+            if not eq and i + 1 < len(args):
+                value, i = args[i + 1], i + 1
+            explicit.append(_join(directory, scope.expand(value)) if value else None)
+        i += 2 if args[i] in ("-c", "--namespace") else 1
     sub = args[i] if i < len(args) else ""
     if sub in ("send-email", "imap-send", "request-pull"):
         return _ask("message", f"git {sub} (email to people)")
     if sub in _GIT_STATE and scope.live_root:
-        top = git_guard._git_out(directory, "rev-parse", "--show-toplevel") if directory else None
         live = _real(scope.live_root)
+        for place in explicit:
+            if place is None or _within(_real(place), live):
+                return _ask("live-checkout", f"git {sub} with --git-dir/--work-tree in or near the live checkout")
+        top = git_guard._git_out(directory, "rev-parse", "--show-toplevel") if directory else None
         if top and _real(top) == live:
             return _ask("live-checkout", f"git {sub} in the Bot-Office live checkout ({scope.live_root})")
     if sub == "push":
@@ -548,7 +634,7 @@ def _gh(args: list[str], cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | 
         return _ask("post", f"gh issue {action} on {named} (people read issues)")
     if group == "pr" and action in _GH_PR_WRITES:
         if action in _GH_PR_FLOW and _own_private(repo, scope):
-            notes.append(f"gh pr {action} on Joshua's private repo {named}")
+            notes.append(f"gh pr {action} on the owner's private repo {named}")
             return None
         return _ask("post", f"gh pr {action} on {named} ({'public or not verified private' if repo else 'repo unknown'})")
     if group == "release" and action in ("create", "upload", "edit", "delete", "delete-asset"):
@@ -608,7 +694,7 @@ def _gh_api(args: list[str], positional: list[str], cmd: Cmd, scope: Scope, note
         path = path.replace("{owner}", repo[0]).replace("{repo}", repo[1])
     found = _API_PR_FLOW.match(path)
     if found and method in ("POST", "PATCH", "PUT") and _own_private((found.group(1), found.group(2)), scope):
-        notes.append(f"gh api {method} {path} (PR workflow on Joshua's private repo)")
+        notes.append(f"gh api {method} {path} (PR workflow on the owner's private repo)")
         return None
     return _ask("post", f"gh api {method} {endpoint or '(no endpoint)'}")
 
@@ -626,69 +712,98 @@ _HTTP_VALUE_OPTS = frozenset({"-H", "--header", "-A", "--user-agent", "-o", "--o
                               "--password", "--http-user", "--http-password", "-a", "--auth", "--unix-socket"})
 
 
+_CURL_VALUE_LETTERS = frozenset("AbcCdDeEFHKmoPQrTuUwxXyYz")
+_WGET_VALUE_SHORT = frozenset({"-O", "-o", "-a", "-P", "-t", "-T", "-U", "-e", "-i", "-B", "-w", "-Q", "-l", "-A", "-R",
+                               "-D", "-I", "-X"})
+_HTTPIE = ("http", "https", "xh", "xhs", "httpie")
+
+
 def _http(program: str, args: list[str], notes: list[str]) -> Verdict | None:
+    """curl/wget/httpie: a write (a method other than GET/HEAD, a body, an upload) to a host other than
+    this machine asks. Each `--next` transfer of curl is judged on its own."""
+    transfers, current = [], []
+    for arg in args:
+        if program not in ("wget", *_HTTPIE) and arg in ("--next", "-:"):
+            transfers.append(current)
+            current = []
+        else:
+            current.append(arg)
+    transfers.append(current)
+    for transfer in transfers:
+        found = _http_transfer(program, transfer)
+        if found:
+            return found
+    notes.append(f"network read or local call ({program})")
+    return None
+
+
+def _http_transfer(program: str, args: list[str]) -> Verdict | None:
     method, body, urls = "", False, []
-    values = set(_HTTP_VALUE_OPTS)
-    if program == "wget":
-        values |= {"-O"}
-        values.discard("-T")  # wget -T is the timeout (a value), curl -T is an upload
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg == "-T" and program != "wget":
-            body = True
-            method = method or "PUT"
-            i += 2
-            continue
-        if arg in values or (program == "wget" and arg == "-T"):
-            i += 2
-            continue
-        if arg in ("-X", "--request", "--method") and i + 1 < len(args):
-            method = args[i + 1].upper()
-            i += 2
-            continue
-        if arg.startswith(("--request=", "--method=")):
-            method = arg.split("=", 1)[1].upper()
-        elif arg.startswith("-X") and len(arg) > 2 and not arg.startswith("--"):
-            method = arg[2:].lstrip("=").upper()
-        elif arg in _HTTP_BODY or arg.startswith(tuple(f"{flag}=" for flag in _HTTP_BODY if flag.startswith("--"))):
-            body = True
-            if "=" not in arg:
-                i += 1
-        elif arg.startswith("-d") and len(arg) > 2 and not arg.startswith("--"):
-            body = True
-        elif program != "wget" and len(arg) > 2 and arg[0] == "-" and arg[1] != "-" and re.fullmatch(r"-[A-Za-z0-9#:]+", arg):
-            cluster = arg[1:]  # fused short options (-sXPOST, -sd, -sT): curl reads each letter
-            if "X" in cluster:
-                rest = cluster[cluster.index("X") + 1:]
-                if rest:
-                    method = rest.upper()
-                elif i + 1 < len(args):
-                    method = args[i + 1].upper()
-                    i += 1
-            elif any(letter in cluster for letter in "dFT"):
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if arg.startswith("--"):
+            name, eq, value = arg.partition("=")
+            if name in ("--request", "--method"):
+                method = (value if eq else nxt).upper()
+                i += 1 if eq else 2
+                continue
+            if name in _HTTP_BODY or name in ("--upload-file", "--post-data", "--post-file", "--body-data",
+                                              "--body-file", "--form", "--form-string", "--json"):
                 body = True
-                if cluster[-1] in "dFT" and i + 1 < len(args):
-                    i += 1  # its value
-            elif cluster[-1] in "HAoubcemwxrKE" and i + 1 < len(args):
-                i += 1  # the last letter takes the next word
-        elif program in ("http", "https", "xh", "xhs", "httpie") and re.fullmatch(
-                r"GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS", arg, re.IGNORECASE) and not urls:
+                i += 1 if eq else 2
+                continue
+            if name in _HTTP_VALUE_OPTS or name in ("--url",):
+                if name == "--url":
+                    urls.append(value if eq else nxt)
+                i += 1 if eq else 2
+                continue
+            i += 1
+            continue
+        if arg.startswith("-") and len(arg) > 1 and program == "wget":
+            i += 2 if arg in _WGET_VALUE_SHORT else 1
+            continue
+        if arg.startswith("-") and len(arg) > 1 and program not in _HTTPIE:
+            # curl short options, fused or not: a value letter takes the rest of the word or the next word
+            letters, k, took = arg[1:], 0, False
+            while k < len(letters):
+                letter = letters[k]
+                if letter in _CURL_VALUE_LETTERS:
+                    value = letters[k + 1:] or nxt
+                    took = not letters[k + 1:]
+                    if letter == "X":
+                        method = value.upper()
+                    elif letter in "dF":
+                        body = True
+                    elif letter == "T":
+                        body, method = True, method or "PUT"
+                    break
+                k += 1
+            i += 2 if took else 1
+            continue
+        if arg.startswith("-") and len(arg) > 1:  # httpie / xh options
+            if arg in ("-f", "--form", "--multipart", "--raw"):
+                body = True
+            i += 2 if arg in ("-a", "--auth", "-A", "--auth-type", "-o", "--output", "--session", "--verify",
+                              "--cert", "--cert-key", "--proxy", "--timeout") else 1
+            continue
+        if program in _HTTPIE and re.fullmatch(r"GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS", arg, re.IGNORECASE) and not urls:
             method = arg.upper()
-        elif not arg.startswith("-"):
+        else:
             urls.append(arg)
         i += 1
-    if program in ("http", "https", "xh", "xhs", "httpie") and not method and any(
-            re.match(r"^[\w.-]+(?:=(?!=)|:=|@)", u) for u in urls[1:]):
-        method = "POST"
-    writes = method in ("POST", "PUT", "PATCH", "DELETE") or (body and method not in ("GET", "HEAD"))
+    if program in _HTTPIE:
+        if not method and any(re.match(r"^[\w.-]+(?:=(?!=)|:=|@)", u) for u in urls[1:]):
+            method = "POST"
+        urls = urls[:1]
+    writes = method not in ("", "GET", "HEAD", "OPTIONS") or (body and method not in ("GET", "HEAD"))
     if not writes:
-        notes.append(f"network read ({program})")
         return None
-    hosts = [_host(u) for u in (urls[:1] if program in ("http", "https", "xh", "xhs", "httpie") else urls)]
+    hosts = [_host(u) for u in urls]
     if not hosts or any(host is None or host not in LOOPBACK for host in hosts):
-        return _ask("http-write", f"{program} {method or 'POST'} to {', '.join(h or 'an unknown host' for h in hosts) or 'an unknown host'}")
-    notes.append(f"{program} {method or 'POST'} to this machine")
+        named = ", ".join(h or "an unknown host" for h in hosts) or "an unknown host"
+        return _ask("http-write", f"{program} {method or 'POST'} to {named}")
     return None
 
 
@@ -702,7 +817,9 @@ def _host(url: str) -> str | None:
 
 
 def _publish(program: str, args: list[str]) -> Verdict | None:
-    first = args[0].lower() if args else ""
+    # the verb anywhere among the words (global options such as --registry URL come before it)
+    verbs = {a.lower() for a in args if not a.startswith("-")}
+    first = next((v for v in ("publish", "upload", "push", "copy") if v in verbs), args[0].lower() if args else "")
     if program in ("npm", "pnpm", "yarn", "bun") and first == "publish":
         return _ask("publish", f"{program} publish")
     if program == "twine" and first == "upload" or program in ("cargo", "poetry", "uv", "flit", "hatch") and first == "publish":
@@ -720,9 +837,32 @@ _SYSTEMCTL_READS = frozenset({"status", "show", "cat", "is-active", "is-enabled"
 _DEPLOY_SCRIPT = re.compile(r"^(?:deploy|go-live|release)(?:[._-][\w.-]*)?$", re.IGNORECASE)
 
 
+_DEPLOY_VERBS = {
+    "railway": ("up", "redeploy", "down", "delete", "deploy"),
+    "kubectl": ("apply", "rollout", "delete", "scale", "edit", "patch", "replace", "create", "set", "drain", "cordon"),
+    "oc": ("apply", "rollout", "delete", "scale", "edit", "patch", "replace", "create", "set"),
+    "terraform": ("apply", "destroy", "import"), "tofu": ("apply", "destroy", "import"), "pulumi": ("up", "destroy"),
+    "helm": ("install", "upgrade", "uninstall", "rollback", "delete"),
+    "netlify": ("deploy",), "fly": ("deploy", "destroy", "scale"), "flyctl": ("deploy", "destroy", "scale"),
+    "wrangler": ("deploy", "publish"), "firebase": ("deploy",), "heroku": ("releases:rollback", "ps:scale", "destroy"),
+}
+_SERVICE_WRITES = frozenset({"start", "stop", "restart", "reload", "try-restart", "reload-or-restart", "try-reload-or-restart",
+                             "enable", "disable", "reenable", "mask", "unmask", "kill", "isolate", "daemon-reload",
+                             "daemon-reexec", "edit", "set-property", "reset-failed", "link", "revert", "preset",
+                             "set-default", "reboot", "poweroff", "halt", "suspend", "hibernate", "kexec", "switch-root",
+                             "terminate-session", "kill-session", "kill-user", "terminate-user", "enable-linger",
+                             "disable-linger", "set-environment", "unset-environment", "import-environment", "freeze",
+                             "thaw", "clean", "bind", "mount-image"})
+
+
 def _deploy(program: str, args: list[str]) -> Verdict | None:
     positional = [a for a in args if not a.startswith("-")]
     first = positional[0].lower() if positional else ""
+    lowered = {p.lower() for p in positional}
+    if program in _DEPLOY_VERBS:
+        verb = next((v for v in _DEPLOY_VERBS[program] if v in lowered), None)
+        if verb:
+            return _ask("deploy", f"{program} {verb}")
     if _DEPLOY_SCRIPT.match(program):
         return _ask("deploy", f"{program} (a deploy script)")
     if program in git_guard.SHELLS and positional and _DEPLOY_SCRIPT.match(git_guard._base(positional[0])):
@@ -748,8 +888,9 @@ def _deploy(program: str, args: list[str]) -> Verdict | None:
         return _ask("deploy", f"{program} {first}")
     if program == "ansible-playbook":
         return _ask("deploy", "ansible-playbook")
-    if program in ("systemctl", "loginctl") and first and first not in _SYSTEMCTL_READS:
-        return _ask("deploy", f"{program} {first} (service control)")
+    if program in ("systemctl", "loginctl") and ((first and first not in _SYSTEMCTL_READS) or lowered & _SERVICE_WRITES):
+        verb = next(iter(sorted(lowered & _SERVICE_WRITES)), first)
+        return _ask("deploy", f"{program} {verb} (service control)")
     if program == "systemd-run":
         return _ask("deploy", "systemd-run (starts a service or a timer)")
     if program == "crontab" and not ({"-l"} >= set(args) and args):
@@ -783,6 +924,10 @@ def _file_op(program: str, args: list[str], cmd: Cmd, scope: Scope, notes: list[
             if index + 1 < len(args):
                 positional.append(args[index + 1])
             skip = True
+        elif program in ("cp", "mv", "install", "ln") and arg.startswith("--target-directory="):
+            positional.append(arg.split("=", 1)[1])
+        elif program in ("cp", "mv", "install", "ln") and arg.startswith("-t") and len(arg) > 2:
+            positional.append(arg[2:])
         elif program == "sed" and arg in ("-e", "-f", "--expression", "--file"):
             skip = True
     if program == "sed":
@@ -1073,9 +1218,9 @@ def describe() -> dict:
             "allow": ["reads of any kind (gh list/view/status/checks, gh api GET, git fetch/pull/clone/ls-remote, curl GET)",
                       "local edits in the workspace and work roots", "here-document text, echo text, grep patterns, "
                       "commit messages", "git commit, local merge/rebase/cherry-pick in worktrees",
-                      "feature-branch pushes to private repos", "PR create/edit/review/comment on Joshua's private repos",
+                      "feature-branch pushes to private repos", "PR create/edit/review/comment on the owner's private repos",
                       "PR merges that pass the auto-merge check", "nested claude -p / codex exec in work roots",
                       "build-artefact cleanup (__pycache__, .pytest_cache, node_modules, dist ...)",
                       "bot-to-bot messages (bot-msg, desk message, desk grok send --kind result|fyi)",
                       "connector reads"],
-            "work_roots": list(WORK_ROOTS_DEFAULT), "own_github_owners": list(OWN_OWNERS_DEFAULT)}
+            "work_roots": list(WORK_ROOTS_DEFAULT), "own_github_owners": list(own_owners())}

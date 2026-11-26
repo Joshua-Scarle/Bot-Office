@@ -25,7 +25,7 @@ KEY = "approval_classes"
 CUSTOM_LIMIT = 30
 LABEL_LIMIT = 80
 PATTERN_LIMIT = 500
-# 0.12.42: a card for a risky action waits a day (it used to die after an hour while Joshua slept)
+# 0.12.42: a card for a risky action waits a day (it used to die after an hour while the owner slept)
 TIMEOUT_DEFAULT = 24 * 60
 TIMEOUT_MAX = 7 * 24 * 60
 CUSTOM_KINDS = ("shell", "tool")

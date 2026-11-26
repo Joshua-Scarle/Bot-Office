@@ -63,8 +63,9 @@ def _no_real_sudo_review(monkeypatch):
 @pytest.fixture(autouse=True)
 def _github_repos_are_private(monkeypatch):
     """0.12.42: a push to a public GitHub repo (or one whose visibility is not verified) asks. Tests never
-    ask GitHub: every repo reads as private (Joshua-Scarle/Bot-Office stays public, git_guard.KNOWN_PUBLIC);
+    ask GitHub: every repo reads as private;
     tests about visibility set their own lookup."""
     from botoffice import git_guard, github_access
     monkeypatch.setattr(github_access, "_fetch_visibility", lambda api, owner, repo, token: "private")
     monkeypatch.setattr(git_guard, "visibility_lookup", lambda owner, repo: "private")
+    monkeypatch.setattr(github_access.Login, "__call__", lambda self: None)  # no GET /user from tests

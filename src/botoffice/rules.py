@@ -736,7 +736,8 @@ class Rules:
                                          else (action.cwd or ""))
         return policy.Scope(workspace=workspace, cwd=action.cwd or workspace or None, bot_id=bot_id, bot_name=name,
                             live_root=self.live_root, other_bot_names=tuple(n for i, n in bots if i != bot_id),
-                            own_job_dir=lambda job_id: bool(bot_id) and self._job_bot(job_id) == bot_id)
+                            own_job_dir=lambda job_id: bool(bot_id) and self._job_bot(job_id) == bot_id,
+                            own_owners=policy.own_owners())
 
     def _saved_allow(self, own: list[sqlite3.Row], action: Action, hits: list[str]) -> bool:
         """0.12.42: an allow rule of the owner's (global or this bot's, this scope; not a preset) matches
@@ -1249,19 +1250,30 @@ class Rules:
                 # 0.12.42: the same action asked again (this turn or a later one of the same bot) reuses
                 # the card that is still waiting, and one that timed out unanswered within REUSE_HOURS is
                 # raised again instead of a duplicate (#205/#214/#220 were one gh issue comment)
-                row = db.execute("SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='pending' "
+                # The card follows the latest turn that asked (approving it resumes that turn, which has the
+                # newest context); the earlier turn already ended waiting on the owner.
+                assignment = str(job.assignment_id) if job.assignment_id else None
+                plan_json = json.dumps(plan) if plan else None
+                row = db.execute("SELECT id, job_id FROM approvals WHERE bot_id=? AND input_hash=? AND status='pending' "
                                  "ORDER BY job_id=? DESC, id DESC LIMIT 1",
                                  (str(job.bot_id), action.fingerprint, str(job.id))).fetchone()
                 if row:
+                    if row["job_id"] != str(job.id):
+                        db.execute("UPDATE approvals SET job_id=?, assignment_id=?, source=?, scope=?, push_plan=? "
+                                   "WHERE id=? AND status='pending' AND resume_job_id IS NULL",
+                                   (str(job.id), assignment, job.source or "api", "unattended" if unattended else "attended",
+                                    plan_json, row["id"]))
                     db.commit()
                     return int(row["id"])
                 old = db.execute("SELECT id, summary FROM approvals WHERE bot_id=? AND input_hash=? AND status='expired' "
                                  "AND resume_job_id IS NULL AND created_at>=? ORDER BY id DESC LIMIT 1",
                                  (str(job.bot_id), action.fingerprint,
                                   (stamp - timedelta(hours=REUSE_HOURS)).isoformat())).fetchone()
-                if old and db.execute("UPDATE approvals SET status='pending', decided_at=NULL, expires_at=? "
+                if old and db.execute("UPDATE approvals SET status='pending', decided_at=NULL, expires_at=?, job_id=?, "
+                                      "assignment_id=?, source=?, scope=?, push_plan=? "
                                       "WHERE id=? AND status='expired' AND resume_job_id IS NULL",
-                                      (self._expiry(stamp, unattended), old["id"])).rowcount:
+                                      (self._expiry(stamp, unattended), str(job.id), assignment, job.source or "api",
+                                       "unattended" if unattended else "attended", plan_json, old["id"])).rowcount:
                     db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
                                (str(job.bot_id), "system", "chat",
                                 f"Approval #{old['id']} asked again (it had timed out): {_short(old['summary'])}",

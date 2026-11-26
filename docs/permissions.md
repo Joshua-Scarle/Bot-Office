@@ -1,8 +1,8 @@
 # Bot-Office permissions (0.12.42): the Grok-Bot-style approval policy
 
-Joshua, Nov 26 2026: "I only ask for approval for things like send emails or irreversible outbound
+The owner, Nov 26 2026: "I only ask for approval for things like send emails or irreversible outbound
 actions that are risky ... or other costly or highly risky actions ... commit should never be blocked."
-Bots keep `cli_access: full` (never YOLO). Bot-Office stops a tool call for Joshua's card only for the
+Bots keep `cli_access: full` (never YOLO). Bot-Office stops a tool call for the owner's card only for the
 classes below. The code is `src/botoffice/policy.py` (one place), called from `rules.Rules.evaluate`.
 
 Judged by the **commands that would run**, never by prose: here-document bodies written to files,
@@ -19,7 +19,7 @@ the shell commands it spells out as string literals are judged).
    deleting branches/tags/releases/repos, repo settings, PR merges (unless the 0.12.31 auto-merge check
    passes), deletes outside the bot's scope, switching off the push check or the credential path, and
    (new) **any push to a public GitHub repo or one whose visibility Bot-Office could not verify**
-   (Joshua-Scarle/Bot-Office is public). The controller asks GitHub for visibility (cached 1 h).
+   (acme/office is public). The controller asks GitHub for visibility (cached 1 h).
 4. **Send class** (locked): email, texts, DMs, chat messages to people (mail programs, connector send
    tools, known sending endpoints).
 5. **The policy's ask classes** (below).
@@ -27,12 +27,12 @@ the shell commands it spells out as string literals are judged).
    approval classes in Settings (now word-level: `grep sudo` or `desk help 2>&1` no longer ask), and the
    strict profile for watcher (trigger) runs.
 
-## Ask (a card for Joshua)
+## Ask (a card for the owner)
 
 | Class | What |
 |-------|------|
-| `post` | Issue comments and new issues on **any** repo (people read issues: decided Nov 26, consistent with the Grok Bot rule "outbound to people asks"); PR comments/reviews/edits/new PRs on public or other people's repos; `gh api` writes other than the PR workflow on Joshua's private repos; GraphQL mutations; new repos, forks, labels, rulesets, secrets |
-| `message` | `desk grok send` other than a plain `--kind result|fyi` report (questions and blockers go to Joshua) |
+| `post` | Issue comments and new issues on **any** repo (people read issues: decided Nov 26, consistent with the Grok Bot rule "outbound to people asks"); PR comments/reviews/edits/new PRs on public or other people's repos; `gh api` writes other than the PR workflow on the owner's private repos; GraphQL mutations; new repos, forks, labels, rulesets, secrets |
+| `message` | `desk grok send` other than a plain `--kind result|fyi` report (questions and blockers go to the owner) |
 | `http-write` | curl/wget/httpie POST/PUT/PATCH/DELETE/uploads to any host but this machine; inline code that posts |
 | `remote` | ssh, scp, sftp, rsync to another host |
 | `publish` | npm/pypi/cargo/gem publish, docker/podman push, GitHub releases, gists |
@@ -46,7 +46,7 @@ the shell commands it spells out as string literals are judged).
 | `nested-agent` | claude/codex/… with permission checks off, run outside the workspace and the work roots, or in a directory not known |
 
 A saved specific allow rule (an anchored `^...$` shell rule for the whole command, or a tool rule) lets
-`deploy`, `nested-agent`, `remote`, `http-write` and `connector` actions run: that is how Joshua's
+`deploy`, `nested-agent`, `remote`, `http-write` and `connector` actions run: that is how the owner's
 routine deploys stay automatic. It never opens `post`, `message`, `credentials`, `scope`,
 `live-checkout`, `publish`, `devices`, `system`, the git guard or the send class.
 
@@ -56,12 +56,12 @@ Reads of any kind (`gh pr/issue list/view/status/checks`, `gh api` GET, `git fet
 `curl` GET), local edits and writes in the job workspace, the bot's older workspaces and the work roots
 (`~/bo-work`, `~/bot-office-work`, `~/bot-office-reports`, `/tmp`); git commit, merge, rebase,
 cherry-pick in worktrees; feature-branch pushes to private repos; PR create/edit/ready/review/comment and
-labels on Joshua's own private repos; PR merges that pass the auto-merge check; nested `claude -p` /
+labels on the owner's own private repos; PR merges that pass the auto-merge check; nested `claude -p` /
 `codex exec` runs in the work roots; build-artefact cleanup (`__pycache__`, `.pytest_cache`,
 `node_modules`, `dist` ...); test runs with the office variables unset (`env -u BOT_OFFICE_* ... python -m
 pytest`); bot-to-bot messages (`bot-msg`, `desk message`, `desk grok send --kind result|fyi`); connector reads.
 
-## Bot-Office safeguards (Joshua trusts Bot-Office less than Grok Bot)
+## Bot-Office safeguards (the owner trusts Bot-Office less than Grok Bot)
 
 - **Audit**: every allowed action that the old standard rules (E8 per-bot set, outbound preset, regex
   classes) would have carded is written to the append-only table `policy_audit` (SQLite triggers refuse

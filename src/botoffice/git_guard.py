@@ -1517,11 +1517,13 @@ def mcp_repo(data: dict) -> tuple[str, str] | None:
     return None
 
 
-# 0.12.42 (Joshua, Nov 26): any push to a public repo waits for his card; feature pushes to private repos
+# 0.12.42 (The owner, Nov 26): any push to a public repo waits for his card; feature pushes to private repos
 # do not. The controller sets visibility_lookup (github_access.Visibility, cached GitHub API answers);
 # hooks and shims leave it None, so there a GitHub push is "not verified" and goes to the controller.
 visibility_lookup = None
-KNOWN_PUBLIC = frozenset({("joshua-scarle", "bot-office")})
+# repos always treated as public, even before GitHub answers: BOT_OFFICE_PUBLIC_REPOS="owner/repo,owner/repo"
+KNOWN_PUBLIC = frozenset(tuple(item.strip().lower().split("/", 1)) for item in
+                         os.environ.get("BOT_OFFICE_PUBLIC_REPOS", "").split(",") if item.count("/") == 1)
 
 
 def repo_visibility(owner: str, repo: str) -> str | None:
