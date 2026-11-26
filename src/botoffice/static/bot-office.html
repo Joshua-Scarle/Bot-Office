@@ -4681,7 +4681,10 @@ $("desktop-open").onclick = async () => {
   for (const id of ["agent-panel", "memory-panel", "routines-panel", "assignments-panel", "board-panel", "watchers-panel", "voice-panel"]) $(id).hidden = true;
   $("desktop-panel").hidden = false;
   $("tools-dialog").showModal();
-  try { await loadDesktops(); } catch (e) { $("desktop-status").textContent = e.message; }
+  disconnectDesktop();
+  const generation = desktopGeneration;
+  const stale = () => generation !== desktopGeneration || !$("tools-dialog").open;
+  try { await loadDesktops(undefined, stale); } catch (e) { if (!stale()) $("desktop-status").textContent = e.message; }
 };
 let desktopMode = "view";
 async function connectDesktop() {
@@ -4692,6 +4695,8 @@ async function connectDesktop() {
   if (!name) return;
   try {
     const entry = desktopList.find((d) => d.name === name);
+    // a bot's own desktop: the ticket request names the bot, and the server refuses if the desktop is not its
+    const wantBot = name.startsWith("bot:") ? name.slice(4) : (entry && entry.kind === "per-bot" ? entry.bot_id : "");
     if (name.startsWith("bot:")) {
       $("desktop-status").textContent = "Starting the bot's desktop…";
       name = (await api("/v1/bots/" + encodeURIComponent(name.slice(4)) + "/desktop", {method: "POST"})).name;
@@ -4713,7 +4718,8 @@ async function connectDesktop() {
     }
     if (stale()) return;
     if (stale()) return;
-    const grant = await api("/v1/desktops/" + encodeURIComponent(name) + "/ticket?mode=" + desktopMode, {method: "POST"});
+    const grant = await api("/v1/desktops/" + encodeURIComponent(name) + "/ticket?mode=" + desktopMode
+      + (wantBot ? "&bot=" + encodeURIComponent(wantBot) : ""), {method: "POST"});
     if (stale()) return;
     const {default: RFB} = await import("/static/vendor/novnc/core/rfb.js");
     if (stale()) return;

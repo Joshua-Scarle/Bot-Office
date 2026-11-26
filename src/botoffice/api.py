@@ -1670,11 +1670,16 @@ def create_app(
             raise _desktop_error(exc) from exc
 
     @app.post("/v1/desktops/{name}/ticket", dependencies=[Depends(auth)])
-    async def desktop_ticket(name: str, mode: str = Query(default="view", pattern="^(view|control)$")) -> dict:
+    async def desktop_ticket(name: str, mode: str = Query(default="view", pattern="^(view|control)$"),
+                             bot: UUID | None = None) -> dict:
         try:
             vnc.desktop_port(name)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail="desktop not found") from exc
+        # with ?bot=, the viewer only connects if this desktop is still that bot's own (it may have been
+        # remapped between the page's list and this request)
+        if bot is not None and bot_desks.bot_of(name) != str(bot):
+            raise HTTPException(status_code=409, detail="this desktop is no longer that bot's; reload the list")
         if not any(item["name"] == name and item["status"] == "running" for item in await vnc.desktops()):
             raise HTTPException(status_code=404, detail="desktop is not running")
         # bound to who asked: a remote owner's ticket only opens a socket from that same verified person

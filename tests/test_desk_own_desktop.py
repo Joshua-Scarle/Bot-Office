@@ -173,6 +173,9 @@ def test_owner_start_listing_and_hand_back(settings, tmp_path, monkeypatch):
         with manager.viewing("desktop-10", "control"):
             refused = d.client.post("/v1/desktops/desktop-10/hand-back", headers=MASTER)
             assert refused.status_code == 409 and "release control" in refused.json()["detail"]
+        other = d.bot("Other")
+        assert d.client.post(f"/v1/desktops/desktop-10/ticket?bot={other.id}", headers=MASTER).status_code == 409
+        assert d.client.post(f"/v1/desktops/desktop-10/ticket?bot={a.id}", headers=MASTER).status_code == 200
         handed = d.client.post("/v1/desktops/desktop-10/hand-back", headers=MASTER)
         assert handed.status_code == 200 and handed.json()["bot_id"] == str(a.id)
 
