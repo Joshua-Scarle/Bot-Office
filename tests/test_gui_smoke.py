@@ -171,6 +171,7 @@ function currentBot() { return {id: 'bot'}; }
 function setStatus(s) { status = s; }
 function addImages(files) { added.push(...files); return files.length; }
 function getToken() { return 'test-token'; }
+let REMOTE_OWNER = false;
 let fetched = [], mode = 'ok', cancelled = 0, reads = 0;
 async function fetch(url, options) {
   fetched.push([options.headers ? 'auth' : 'plain', url]);
@@ -313,6 +314,7 @@ def test_api_gives_up_on_a_stalled_request():
 const assert = require('assert');
 class AuthError extends Error {}
 function getToken() { return 't'; }
+let REMOTE_OWNER = false;
 let mode = 'hang';
 globalThis.fetch = (url, options) => new Promise((resolve, reject) => {
   if (mode === 'ok') return resolve({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ a: 1 }) });
