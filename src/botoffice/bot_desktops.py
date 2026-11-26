@@ -401,7 +401,8 @@ async def _rfb_ready(port: int) -> bool:
 
 LOOP_ACTIONS = 8        # the same desk action (command and input) this many times in a row: a loop
 LOOP_KEYS = 20          # ... for `desk key` (paging down a long page repeats one key)
-LOOP_SHOTS = 8          # this many identical screenshots in a row: no progress
+LOOP_SHOTS = 8          # this many identical screenshots in a row, over at least SHOTS_SPAN: no progress
+SHOTS_SPAN = 120.0
 EXTEND_WINDOW = 15 * 60  # an extension is accepted only in the last 15 minutes of the session (no stacking)
 MIN_REASON = 10
 
@@ -413,7 +414,7 @@ class Session:
     budget: float               # seconds from started
     extensions: list = field(default_factory=list)   # (at, reason)
     actions: list = field(default_factory=list)      # recent action fingerprints
-    shots: list = field(default_factory=list)        # recent screenshot digests
+    shots: list = field(default_factory=list)        # recent (digest, at) of screenshots
     stopped: str = ""           # "loop" / "no progress": refused until a gap with no desk use
 
 
@@ -476,10 +477,12 @@ class SessionLimits:
     def screenshot(self, name: str, digest: str) -> str | None:
         session = self._current(name)
         session.last_activity = self.clock()
-        if session.shots and session.shots[-1] != digest:
+        now = self.clock()
+        if session.shots and session.shots[-1][0] != digest:
             session.actions = []   # the screen changed: repeating an action (a Next button) is progress
-        session.shots = (session.shots + [digest])[-LOOP_SHOTS:]
-        if len(session.shots) == LOOP_SHOTS and len(set(session.shots)) == 1 and not session.stopped:
+        session.shots = (session.shots + [(digest, now)])[-LOOP_SHOTS:]
+        if (len(session.shots) == LOOP_SHOTS and len({d for d, _ in session.shots}) == 1 and not session.stopped
+                and now - session.shots[0][1] >= SHOTS_SPAN):
             session.stopped = "no progress: the screen did not change"
             return "no progress"
         return None
@@ -508,14 +511,18 @@ class SessionLimits:
                       f"{round(self.cap / 60)} minutes in total)")
 
     def over(self, name: str, grace: float) -> str | None:
-        """Why the reaper should stop this desktop now (over its budget by *grace*, or stopped), else None."""
+        """Why the reaper should stop this desktop now (stopped by the loop check, over its budget by *grace*,
+        or no desk use for the idle time, also during a turn), else None."""
         session = self.sessions.get(name)
         if session is None:
             return None
         if session.stopped:
             return session.stopped
-        if self.clock() - session.started >= session.budget + grace:
+        now = self.clock()
+        if now - session.started >= session.budget + grace:
             return "session time limit"
+        if self.idle > 0 and now - session.last_activity >= self.idle:
+            return "no desk activity"
         return None
 
 
@@ -694,19 +701,23 @@ class DesktopManager:
         return not code
 
     async def stop_now(self, name: str, why: str) -> bool:
-        """Stop one per-bot desktop at once (the loop / no-progress stop), from a fresh listing, under the lock."""
+        """Stop one per-bot desktop at once (the loop / no-progress stop), from a fresh listing, under the lock;
+        only if it is still the same stopped session after the listing (a new session meanwhile keeps it)."""
+        session = self.limits.sessions.get(name)
         async with self._lock:
             try:
                 await self.containers()
             except DesktopError:
                 return False
-            if name not in self._ids or self.owner_controlling(name):
+            current = self.limits.sessions.get(name)
+            if (name not in self._ids or self.owner_controlling(name) or current is not session
+                    or session is None or not session.stopped):
                 return False
             return await self.stop(name, why)
 
     async def reap_idle(self) -> list[str]:
         idle_seconds = self.settings.desktop_idle_minutes * 60
-        if idle_seconds <= 0 or not self.enabled:   # pool mode (rollback) leaves per-bot desktops alone
+        if not self.enabled:   # pool mode (rollback) leaves per-bot desktops alone
             return []
         async with self._lock:
             try:
@@ -719,11 +730,16 @@ class DesktopManager:
                 self.last_used.setdefault(name, now)   # unknown (after a restart): grace from now
             stopped = []
             for name in running:
+                # 0.12.47: session limit, loop stop, or no desk use for the idle time (also during a turn); not
+                # while the owner watches or controls it. Re-checked right before the stop.
                 why = self.limits.over(name, SESSION_GRACE)
-                if why and not self.owner_controlling(name) and await self.stop(name, why):
+                if why and not self.viewers.get(name) and not self.owner_controlling(name) \
+                        and self.limits.over(name, SESSION_GRACE) == why and await self.stop(name, why):
                     self.audit(name, "desk session stop", f"{name} stopped: {why}")
                     stopped.append(name)
             running = [n for n in running if n not in stopped]
+            if idle_seconds <= 0:
+                return stopped
             for name in idle_to_stop(running, self.last_used, self.viewers, self.busy_bots(), self.bot_of,
                                      now, idle_seconds):
                 # re-checked right before each stop: a viewer, a turn or a use may have come during an earlier stop

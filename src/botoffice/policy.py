@@ -177,6 +177,7 @@ def slugs(name: str) -> set[str]:
 class Cmd:
     words: list[str]
     cwd: str | None  # where it runs (None: not known)
+    fed: bool = False  # 0.12.47: run by xargs/parallel, which add or substitute arguments at run time
 
 
 @dataclass
@@ -417,9 +418,11 @@ def _unwrap(words: list[str], cwd: str | None, scope: Scope, out: Parsed, depth:
     while i < len(words) and _ASSIGN.match(words[i]):
         i += 1
     words = words[i:]
+    fed = False
     while words:
         program = git_guard._base(words[0])
         if program in _RUNNER_VALUE_OPTS:
+            fed = fed or program == "xargs"
             if program in ("sudo", "doas"):
                 out.sudo = True
             values = _RUNNER_VALUE_OPTS[program]
@@ -476,7 +479,7 @@ def _unwrap(words: list[str], cwd: str | None, scope: Scope, out: Parsed, depth:
         return cwd
     if git_guard.INTERPRETERS.match(program):
         out.code += git_guard.inline_code(program, words[1:])
-    out.commands.append(Cmd(words, cwd))
+    out.commands.append(Cmd(words, cwd, fed))
     return cwd
 
 
@@ -594,7 +597,13 @@ def _command(cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | None:
         notes.append("bot-to-bot")
         return None
     if program == "desk" or (git_guard.INTERPRETERS.match(program) and args and git_guard._base(args[0]) == "desk"):
-        return _desk(args[1:] if program != "desk" else args, notes)
+        return _desk(args[1:] if program != "desk" else args, notes, fed=cmd.fed)
+    for index, word in enumerate(args if program in ("find", "parallel", "watch", "unbuffer", "script") else ()):
+        # desk run by another program (find -exec, parallel, watch ...): its words may be filled in at run time
+        if git_guard._base(word) == "desk" and index + 1 < len(args):
+            found = _desk(args[index + 1:], notes, fed=True)
+            if found:
+                return found
     if program == "git":
         return _git(args, cmd, scope, notes)
     if program == "gh":
@@ -661,7 +670,7 @@ def secret_like(text: str) -> bool:
     return False
 
 
-def _desk(args: list[str], notes: list[str]) -> Verdict | None:
+def _desk(args: list[str], notes: list[str], fed: bool = False) -> Verdict | None:
     slot = any(a == "--slot" or a.startswith("--slot=") for a in args)
     rest = list(args)
     while rest and rest[0].startswith("-"):   # desk's own leading options (--slot NAME): never the subcommand
@@ -677,7 +686,7 @@ def _desk(args: list[str], notes: list[str]) -> Verdict | None:
             return _ask("post", f"desk {sub} that sends or posts on a website: {_option(rest, '--sends') or ''}"[:200])
         if sub == "type":
             text = " ".join(rest[rest.index("type") + 1:])
-            if not text.strip() or secret_like(text):
+            if fed or not text.strip() or secret_like(text):
                 # no text here (it comes from xargs, a pipe...) or it may be a secret: the owner decides
                 return _ask("devices", "desk type of what may be a secret or password")
         if sub not in ("click", "type", "key"):

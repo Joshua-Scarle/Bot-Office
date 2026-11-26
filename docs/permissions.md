@@ -74,7 +74,11 @@ what may be a secret or password, desk input on a shared pool desktop and printe
 There is no desk path to the owner's own computer. Leaving the box through the browser is a web action:
 the bot adds `--sends "<what>"` to a click or key that sends, posts, publishes or buys, and that asks
 like any send or post (class `post`). This is the bot's own marking: Bot-Office cannot see what a click
-does, so it is an instruction plus a tripwire, not enforcement.
+does, so it is an instruction plus a tripwire, not enforcement (accepted residual, Codex r1 High). What
+bounds it: a bot's own desktop starts with no logins (no browser-state copying), and typing a password or
+token asks, so a send as a person needs an account the owner logged in or approved on that desktop; after
+the owner approves such a login, clicks on that site run without a card. Anonymous web forms are reachable.
+The owner can still switch on the "Controlling printers and the screen" class to card every desk input.
 
 ## Allow (no card)
 

@@ -203,6 +203,10 @@ def test_public_pr_review_line_still_asks(office):
     ("desk type my password is x", "ask"),
     ("desk type ghp_abcdefghijklmnopqrstu", "ask"),
     ("cat pw | xargs desk type", "ask"),
+    ("cat pw | xargs -I{} desk type {}", "ask"),
+    ("cat pw | xargs -IX desk type X", "ask"),
+    ("find . -name pw -exec desk type {} ;", "ask"),
+    ("grep -n 'desk type' notes.md", "allow"),
     ("desk --slot desktop-1 click 1 2", "ask"),
     ("desk --slot=desktop-1 type hi", "ask"),
     ("desk click 10 20 --sends 'the reply to Bob'", "ask"),
@@ -297,7 +301,11 @@ def test_loop_and_no_progress_stop():
     for n in range(bd.LOOP_SHOTS - 1):
         other.check("desktop-11", "click", f"x{n}")
         assert other.screenshot("desktop-11", "f" * 32) is None
+        clock.t += 30
     assert other.screenshot("desktop-11", "f" * 32) == "no progress"
+    quick = limits(clock)                      # identical shots within a few seconds: waiting, not stuck
+    for _ in range(3 * bd.LOOP_SHOTS):
+        assert quick.screenshot("desktop-14", "e" * 32) is None
     assert "stopped" in other.check("desktop-11", "key", "Return")
     paging = limits(clock)                     # a Next button with the screen changing each time: progress
     for n in range(3 * bd.LOOP_ACTIONS):
@@ -360,3 +368,79 @@ def test_local_view_has_no_limit(settings):
     with Desk(settings) as d:
         r = d.client.post("/v1/desktops/desktop-10/extend-view", headers=MASTER, json={"reason": "long task"})
         assert r.status_code == 200 and r.json()["limited"] is False
+
+
+# --- Codex round 1 regressions ---
+
+def test_approved_but_not_yet_bound_is_not_recarded(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    rules.mark_approved(approval)               # the window before approve() binds the resume turn
+    retry = rules.decide(origin, bash(ASKS))
+    assert retry.approval_id == approval and "already granted" in retry.reason
+
+
+def test_a_grant_for_one_task_does_not_swallow_another_tasks_card(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    rules.approve(approval)
+    other = running(store, bot)
+    decision = rules.decide(other, bash(ASKS))
+    assert decision.effect == "ask" and "already granted" not in decision.reason
+
+
+def test_resume_step_now_allowed_by_policy_uses_the_grant(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    resume = start(store, rules.approve(approval)["resume_job_id"])
+    with closing(store._connect()) as db:      # the owner opens it with an allow rule meanwhile
+        db.execute("INSERT INTO action_rules (bot_id,effect,kind,pattern,scope,note,created_at) VALUES "
+                   "(NULL,'allow','shell',?, 'all','test',?)", ("^" + ASKS.replace(".", "\\.").replace("?", "\\?")
+                                                               .replace("$", "\\$") + "$", "2026-11-26T00:00:00"))
+    decision = rules.decide(resume, bash(ASKS))
+    assert (decision.decision, decision.effect) == ("allow", "allow"), decision
+    assert rules.get(approval)["status"] == "consumed"
+    assert rules.resume_ended(resume) == []
+
+
+def test_deny_whose_follow_up_cannot_be_queued_still_denies_and_says_so(tmp_path, monkeypatch):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(store, "enqueue_message", broken)
+    item = rules.deny(approval)
+    assert item["status"] == "denied" and item["follow_up_error"] == "OSError" and item["followup_job_id"] is None
+    assert any("could not be woken" in m.text for m in store.list_messages(bot.id))
+
+
+def test_stale_loop_stop_spares_a_new_session(settings, tmp_path):
+    import asyncio
+    with Desk(settings) as d:
+        manager = fake_manager(d, tmp_path)
+        a = d.bot("A")
+        _, ha = run_job(d.store, a)
+        assert d.client.post("/v1/agent/desktop", headers=ha, json={"command": "click", "input": "aa" * 16}).status_code == 200
+        name = manager.name_of(str(a.id))
+        manager.limits.sessions[name].stopped = "loop: test"
+        old = manager.limits.sessions[name]
+        manager.limits.sessions[name] = bd.Session(started=0, last_activity=0, budget=3600)   # a new session meanwhile
+        assert asyncio.run(manager.stop_now(name, "loop")) is False
+        manager.limits.sessions[name] = old
+        assert asyncio.run(manager.stop_now(name, "loop")) is True
+
+
+def test_no_desk_activity_stops_even_during_a_turn():
+    clock = Clock()
+    lim = limits(clock)
+    lim.check("desktop-10", "click", "a")
+    clock.t += 21 * 60
+    assert lim.over("desktop-10", bd.SESSION_GRACE) == "no desk activity"
