@@ -1369,7 +1369,9 @@ class Rules:
                     "ORDER BY a.id DESC LIMIT 1",
                     # the same task: this job, the same assignment, or the bot's chat turns (never a routine,
                     # wake-up or other unassigned run: a scheduled run gets a fresh card, 0.12.18)
-                    (str(job.bot_id), action.fingerprint, str(job.id), str(job.assignment_id or ""),
+                    # a scheduled run (wake-up, routine, watcher, inbox) only for its own asks: it needs a fresh card
+                    (str(job.bot_id), action.fingerprint, str(job.id),
+                     "" if (job.source or "") in ("wakeup", "routine", "trigger", "inbox") else str(job.assignment_id or ""),
                      str(job.assignment_id) if job.assignment_id else None, job.source or "api",
                      str(job.id))).fetchone()
                 if granted:

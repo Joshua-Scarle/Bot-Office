@@ -607,3 +607,17 @@ def test_two_routines_do_not_share_a_card(tmp_path):
     other = rules.decide(routine_run(r2), bash(ASKS)).approval_id
     same = rules.decide(routine_run(r1), bash(ASKS)).approval_id
     assert other != first and same == first
+
+
+def test_an_assignment_wake_up_gets_a_fresh_card(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    task = "77777777-7777-4777-8777-777777777777"
+    first, wake = running(store, bot, source="assignment"), running(store, bot, source="wakeup")
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET assignment_id=? WHERE id IN (?,?)", (task, str(first.id), str(wake.id)))
+    first, wake = store.get(first.id), store.get(wake.id)
+    approval = rules.decide(first, bash(ASKS)).approval_id
+    store.finish(first.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    rules.approve(approval)
+    again = rules.decide(wake, bash(ASKS))
+    assert again.effect == "ask" and again.approval_id != approval
