@@ -68,7 +68,7 @@ ASK_CLASSES: dict[str, tuple[str, str]] = {
 LOCKED_CLASSES = frozenset({"credentials", "scope", "live-checkout"})
 OVERRIDABLE = frozenset(ASK_CLASSES) - LOCKED_CLASSES
 # a sudo command in these classes goes to the sudo auto-review (sudo_review.py) instead of a policy card
-SUDO_ROUTED = frozenset({"deploy", "system", "scope"})
+SUDO_ROUTED = frozenset({"deploy", "system"})
 
 # the GitHub owners whose private repos count as the owner's own (PR workflow writes need no card)
 # the GitHub owners whose private repos count as the owner's own: the controller token's login (owner_lookup,
@@ -183,7 +183,8 @@ class Parsed:
     commands: list[Cmd]
     code: list[str]  # inline interpreter code (python -c, a here-document fed to python ...)
     unreadable: bool = False
-    redirects: list[str] = field(default_factory=list)  # `> file` targets (outside quotes)
+    # `> file` targets (outside quotes): (target, the directory its command runs in, known?)
+    redirects: list[tuple[str, str | None, bool]] = field(default_factory=list)
     cwds: list[str | None] = field(default_factory=list)  # every directory a part runs in
     sudo: bool = False  # a part runs through sudo / doas / pkexec
 
@@ -195,11 +196,14 @@ _RUNNER_VALUE_OPTS = {
     "env": {"-u", "--unset", "-C", "--chdir", "-S"}, "setsid": set(), "nohup": set(), "time": set(),
     "command": set(), "chronic": set(), "caffeinate": set(), "doas": {"-u"}, "runuser": {"-u", "-g"},
 }
-def redirect_targets(text: str) -> list[str]:
+def redirect_targets(text: str) -> tuple[list[tuple[int, str]], int]:
     """The operands of `>`, `>>`, `>|`, `&>` and `N>` outside quotes, dequoted (`> "$HOME/x"` is
-    $HOME/x). Not `>&N` (a descriptor), not `>(...)` (process substitution)."""
-    out: list[str] = []
-    i, n, quote = 0, len(text), ""
+    $HOME/x), each with the number of the simple command it belongs to (commands split where
+    git_guard.split_words splits them: ; & | newline ( ), not inside $( )), and how many non-empty
+    commands there are. Not `>&N` (a descriptor), not `>(...)` (process substitution)."""
+    out: list[tuple[int, str]] = []
+    i, n, quote, depth = 0, len(text), "", 0
+    segment, content = 0, False
     while i < n:
         c = text[i]
         if quote:
@@ -211,15 +215,36 @@ def redirect_targets(text: str) -> list[str]:
             i += 1
             continue
         if c in "'\"":
-            quote = c
+            quote, content = c, True
             i += 1
             continue
         if c == "\\":
+            content = True
             i += 2
             continue
-        if c != ">":
+        if text.startswith("$(", i):
+            depth, content = depth + 1, True
+            i += 2
+            continue
+        if c == ")" and depth:
+            depth -= 1
             i += 1
             continue
+        if depth:
+            i += 1
+            continue
+        if c in ";&|\n()":
+            if content:
+                segment += 1
+            content = False
+            i += 1
+            continue
+        if c != ">":
+            if c not in " \t\r":
+                content = True
+            i += 1
+            continue
+        content = True
         i += 1
         if i < n and text[i] in ">|":
             i += 1
@@ -243,8 +268,8 @@ def redirect_targets(text: str) -> list[str]:
                 word.append(c)
                 i += 1
         if word:
-            out.append("".join(word))
-    return out
+            out.append((segment, "".join(word)))
+    return out, segment + (1 if content else 0)
 
 
 def _expand(word: str, variables: dict[str, str], scope: Scope) -> str:
@@ -278,7 +303,7 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
                 _merge(out, inner)
             elif any(git_guard.INTERPRETERS.match(b) for b in bases):
                 out.code.append(body)
-        out.redirects += redirect_targets(text)
+        found_redirects, segments = redirect_targets(text)
         commands, nested = git_guard.split_words(text)
     except (RecursionError, ValueError, IndexError):
         out.unreadable = True
@@ -288,8 +313,14 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
     variables: dict[str, str] = {}
     cwd = scope.cwd
     out.cwds.append(cwd)
-    for words in commands:
+    matched = segments == len(commands)  # else a redirect is judged against every directory seen
+    if not matched:
+        out.redirects += [(target, None, False) for _seg, target in found_redirects]
+    for index, words in enumerate(commands):
         variables["\0cwd"] = cwd or ""
+        if matched:
+            out.redirects += [(_expand(t, variables, scope) if "$" in t or t.startswith("~") else t, cwd, True)
+                              for seg, t in found_redirects if seg == index]
         # a line of only assignments sets shell variables (a prefix assignment does not change $X in its own line)
         if words and all(_ASSIGN.match(w) for w in words):
             for word in words:
@@ -303,7 +334,6 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
                     variables[name] = scope.expand(value)
             continue
         words = [_expand(w, variables, scope) if "$" in w or w.startswith("~") else w for w in words]
-        out.redirects = [_expand(t, variables, scope) if "$" in t or t.startswith("~") else t for t in out.redirects]
         cwd = _unwrap(words, cwd, scope, out, depth)
         out.cwds.append(cwd)
     return out
@@ -425,10 +455,16 @@ class Verdict:
     effect: str  # "ask" | "allow"
     key: str  # an ASK_CLASSES key, or the allow reason's key
     reason: str
+    keys: frozenset = frozenset()  # every class a part of the action hit (ask)
+
+    @property
+    def all_keys(self) -> frozenset:
+        return self.keys or frozenset({self.key})
 
     @property
     def overridable(self) -> bool:
-        return self.effect == "ask" and self.key in OVERRIDABLE
+        """An allow rule may open it only when every class it hit may be opened."""
+        return self.effect == "ask" and self.all_keys <= OVERRIDABLE
 
 
 def _ask(key: str, reason: str) -> Verdict:
@@ -454,22 +490,29 @@ def judge(tool: str, command: str, paths: list[str], data: dict, scope: Scope, f
     if parsed.unreadable:
         return _ask("scope", "a command too long or too nested to check")
     allow_notes: list[str] = []
-    for target in dict.fromkeys(parsed.redirects):
-        for where in dict.fromkeys(parsed.cwds or [scope.cwd]):
-            found = _write_target(where, target, scope, f"writing {target}")
+    findings: list[Verdict] = []
+    for target, where, known in dict.fromkeys(parsed.redirects):
+        for place in ([where] if known else dict.fromkeys(parsed.cwds or [scope.cwd])):
+            found = _write_target(place, target, scope, f"writing {target}")
             if found:
-                return found
+                findings.append(found)
     for cmd in parsed.commands:
         found = _command(cmd, scope, allow_notes)
         if found:
-            return found
+            findings.append(found)
     for code in parsed.code:
         found = _code(code, scope)
         if found:
-            return found
+            findings.append(found)
     bypass = _nested_agent(command, parsed, scope)
     if bypass:
-        return bypass
+        findings.append(bypass)
+    if findings:
+        # every part is judged; the strictest finding names the card: a locked class (no allow rule opens
+        # it) before one no rule may open, before the rest, so a harmless-looking first part cannot mask it
+        findings.sort(key=lambda v: (v.key not in LOCKED_CLASSES, v.key in OVERRIDABLE))
+        first = findings[0]
+        return Verdict("ask", first.key, first.reason, keys=frozenset(v.key for v in findings))
     return Verdict("allow", allow_notes[0] if allow_notes else "ordinary", "; ".join(dict.fromkeys(allow_notes)))
 
 
@@ -493,6 +536,10 @@ def _command(cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | None:
     if program == "gh":
         return _gh(args, cmd, scope, notes)
     if program in HTTP_PROGRAMS:
+        for target in _http_outputs(program, args):
+            found = _write_target(cmd.cwd, target, scope, f"{program} writing {target}")
+            if found:
+                return found
         return _http(program, args, notes)
     if program in ("ssh", "scp", "sftp", "mosh", "sshpass", "telnet"):
         return _ask("remote", f"{program} to another machine")
@@ -676,7 +723,7 @@ def _gh_api(args: list[str], positional: list[str], cmd: Cmd, scope: Scope, note
     method = (_option(args, "-X") or _option(args, "--method") or next(
         (a[2:].lstrip("=") for a in args if a.startswith("-X") and len(a) > 2), "")).upper()
     fields = any(a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith(("--field=", "--raw-field=",
-                                                                                         "--input=")) for a in args)
+                 "--input=")) or (a[:2] in ("-f", "-F") and len(a) > 2) for a in args)
     endpoint = positional[0] if positional else ""
     if endpoint == "graphql":
         text = " ".join(args)
@@ -807,6 +854,31 @@ def _http_transfer(program: str, args: list[str]) -> Verdict | None:
     return None
 
 
+def _http_outputs(program: str, args: list[str]) -> list[str]:
+    """Files and directories a download writes (-o/-O FILE, --output, --output-document, -P DIR ...)."""
+    out = []
+    long_opts = ("--output", "--output-document", "--directory-prefix", "--output-dir", "--dump-header", "--cookie-jar",
+                 "--trace", "--trace-ascii", "--stderr", "--output-file", "--append-output")
+    short = {"wget": ("-O", "-o", "-a", "-P"), "curl": ("-o", "-D", "-c")}.get(program, ("-o",))
+    for index, arg in enumerate(args):
+        nxt = args[index + 1] if index + 1 < len(args) else ""
+        name, eq, value = arg.partition("=")
+        if name in long_opts:
+            out.append(value if eq else nxt)
+        elif arg in short:
+            out.append(nxt)
+        elif program == "curl" and len(arg) > 2 and arg[0] == "-" and arg[1] != "-":
+            letters = arg[1:]
+            for k, letter in enumerate(letters):
+                if letter in _CURL_VALUE_LETTERS:
+                    if letter in "oDc":
+                        out.append(letters[k + 1:] or nxt)
+                    break
+        elif program == "wget" and len(arg) > 2 and arg[:2] in short:
+            out.append(arg[2:])
+    return [o for o in out if o and o != "-"]
+
+
 def _host(url: str) -> str | None:
     if "$" in url or "`" in url:
         return None
@@ -909,6 +981,7 @@ def _system(program: str, args: list[str]) -> Verdict | None:
 
 
 def _file_op(program: str, args: list[str], cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | None:
+    explicit: list[str] = []
     positional = []
     only = False
     skip = False
@@ -922,12 +995,12 @@ def _file_op(program: str, args: list[str], cmd: Cmd, scope: Scope, notes: list[
             only = True
         elif program in ("cp", "mv", "install", "ln") and arg in ("-t", "--target-directory"):
             if index + 1 < len(args):
-                positional.append(args[index + 1])
+                explicit.append(args[index + 1])
             skip = True
         elif program in ("cp", "mv", "install", "ln") and arg.startswith("--target-directory="):
-            positional.append(arg.split("=", 1)[1])
+            explicit.append(arg.split("=", 1)[1])
         elif program in ("cp", "mv", "install", "ln") and arg.startswith("-t") and len(arg) > 2:
-            positional.append(arg[2:])
+            explicit.append(arg[2:])
         elif program == "sed" and arg in ("-e", "-f", "--expression", "--file"):
             skip = True
     if program == "sed":
@@ -946,6 +1019,8 @@ def _file_op(program: str, args: list[str], cmd: Cmd, scope: Scope, notes: list[
     targets = positional
     if program in ("cp", "install", "ln", "rsync") and len(positional) > 1:
         targets = positional[-1:]
+    if explicit:  # -t DIR: every positional is a source, DIR the destination (wherever the option is)
+        targets = [*explicit, *(positional if program == "mv" else [])]
     if program == "mkdir":
         targets = positional
     for target in targets:
@@ -1129,7 +1204,7 @@ def delete_outside(command: str) -> bool:
     parsed = parse(command, scope)
     if parsed.unreadable:
         return True
-    targets = [t for t in parsed.redirects]
+    targets = [target for target, _where, _known in parsed.redirects]
     for cmd in parsed.commands:
         program = git_guard._base(cmd.words[0])
         if program == "dd":

@@ -169,7 +169,28 @@ ASKED = [
     ("systemctl --host status restart sshd", "deploy"),
     ("npm --registry https://registry.npmjs.org publish", "publish"),
     ("kubectl --context prod apply -f x.yaml", "deploy"),
+    # Codex review round 2
+    ("gh api repos/acme/app/issues/1/comments -fbody=hi", "post"),
+    ("cp -t /etc /tmp/a", "scope"),
+    ("cp --target-directory=/etc /tmp/a", "scope"),
+    ("curl -o /etc/test https://example.com", "scope"),
+    ("wget -O /etc/test https://example.com", "scope"),
+    ("curl -d x https://example.com; touch /etc/test", "scope"),  # the strictest part names the card
 ]
+
+
+def test_a_saved_allow_cannot_open_a_locked_part_and_sudo_does_not_reroute_it(office):
+    gate, bot = office["gate"], office["bot"]
+    gate.add_rule(bot_id=bot.id, effect="allow", kind="shell", pattern=r"example\.com", note="x")
+    assert judge(office, "curl -d x https://example.com")[0] == "allow"  # the rule opens the web write alone
+    assert judge(office, "curl -d x https://example.com; touch /etc/test")[0] == "ask"
+    effect, preset, _ = judge(office, "sudo true; touch /etc/test")
+    assert effect == "ask" and preset != "sudo-review"  # a card, never the auto-review
+
+
+def test_each_redirect_is_judged_where_its_command_runs(office):
+    assert judge(office, "cd /etc && cat passwd; cd /tmp && echo hi > note")[0] == "allow"
+    assert judge(office, "cd /etc; echo x > hosts")[0] == "ask"
 
 
 # an enabled Settings class that also matches names the card (the owner's own labels)

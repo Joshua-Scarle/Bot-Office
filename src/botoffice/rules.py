@@ -848,7 +848,7 @@ class Rules:
         # 0.12.42: the Grok-Bot-style policy (policy.py): the risky classes ask, everything else is judged
         # by the owner's own rules below; a saved allow rule for the exact command opens OVERRIDABLE classes
         verdict = policy.judge(action.tool, action.command, action.paths, action.data, scope, first_party)
-        if verdict.effect == "ask" and verdict.key in policy.SUDO_ROUTED and _is_shell(action) and \
+        if verdict.effect == "ask" and verdict.all_keys <= policy.SUDO_ROUTED and _is_shell(action) and \
                 policy.runs_sudo(action.command):
             pass  # sudo goes to the sudo auto-review below (its own hard-stop list), as since 0.12.28
         elif verdict.effect == "ask" and not (verdict.overridable and job.source not in STRICT_SOURCES
