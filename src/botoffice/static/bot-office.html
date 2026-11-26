@@ -108,6 +108,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 #section-dialog { max-width: 400px; border-radius: 14px; }
 .msg.inbox .body { border: 1px solid #6385ad; }
 #desktop-screen { height: min(65vh, 650px); min-height: 260px; background: #080a0e; }
+#desktop-panel, #desktop-panel > * { min-width: 0; }   /* the VNC canvas must never widen the dialog */
+#desktop-screen { width: 100%; max-width: 100%; overflow: hidden; }
 #desktop-control-banner { margin: 0; padding: 8px 12px; border-radius: 8px; background: #b3261e; color: #fff; font-weight: 600; }
 @media (max-width: 720px) { #desktop-screen { height: 58vh; min-height: 200px; } #desktop-panel .tools-bar button { flex: 1 1 auto; } #desktop-panel .tools-bar select { flex: 1 1 100%; } }
 #tools-dialog { width: min(900px, calc(100vw - 24px)); }
