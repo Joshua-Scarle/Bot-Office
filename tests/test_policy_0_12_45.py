@@ -206,6 +206,19 @@ def test_an_unquoted_heredoc_runs_its_substitutions(office):
     assert judge(office, "python3 - <<'EOF'\nprint(1)\nEOF")[0] == "allow"
 
 
+def test_review_round_6_inline_code_and_graphql_files(office, tmp_path):
+    assert judge(office, "python3 -c \"import urllib.request; urllib.request.urlopen('https://example.com/api', data=b'hi')\"")[0] == "ask"
+    assert judge(office, "python3 -c \"from pathlib import Path; Path.home().joinpath('.ssh/authorized_keys').write_text('x')\"")[0] == "ask"
+    query = tmp_path / "c.graphql"
+    query.write_text("mutation { addComment(input: {subjectId: \"x\", body: \"y\"}) { clientMutationId } }")
+    assert judge(office, f"gh api graphql -F query=@{query}")[:2] == ("ask", "post")
+    assert judge(office, "gh api graphql -F query=@/nonexistent/q.graphql")[0] == "ask"
+    read = tmp_path / "r.graphql"
+    read.write_text("query { viewer { login } }")
+    assert judge(office, f"gh api graphql -F query=@{read}")[0] == "allow"
+    assert judge(office, "python3 -c \"import json; print(json.dumps({'a': 1}))\"")[0] == "allow"
+
+
 def test_each_redirect_is_judged_where_its_command_runs(office):
     assert judge(office, "cd /etc && cat passwd; cd /tmp && echo hi > note")[0] == "allow"
     assert judge(office, "cd /etc; echo x > hosts")[0] == "ask"

@@ -790,6 +790,24 @@ def _gh_api(args: list[str], positional: list[str], cmd: Cmd, scope: Scope, note
     endpoint = positional[0] if positional else ""
     if endpoint == "graphql":
         text = " ".join(args)
+        for index, arg in enumerate(args):  # a query read from a file (-F query=@f, --input f): read it
+            value = None
+            if "=@" in arg:
+                value = arg.split("=@", 1)[1]
+            elif arg == "--input" and index + 1 < len(args):
+                value = args[index + 1]
+            elif arg.startswith("--input="):
+                value = arg.split("=", 1)[1]
+            elif index > 0 and args[index - 1] in ("-F", "--field") and "=@" in arg:
+                value = arg.split("=@", 1)[1]
+            if value is None:
+                continue
+            path = _path(cmd.cwd, value, scope) if value != "-" else None
+            try:
+                with open(path or "", encoding="utf-8", errors="replace") as handle:
+                    text += " " + handle.read(512 * 1024)
+            except (OSError, TypeError, ValueError):
+                return _ask("post", "gh api graphql with a query that cannot be read here")
         if re.search(r"\bmutation\b", text):
             return _ask("post", "gh api graphql mutation")
         notes.append("network read (gh api graphql)")
@@ -1151,11 +1169,24 @@ _CODE_HTTP_WRITE = re.compile(r"\brequests\.(?:post|put|patch|delete)\s*\(|\bhtt
 _CODE_URL = re.compile(r"https?://([^/\s'\"`:]+)", re.I)
 
 
+# urllib with a body (urlopen(url, data) / Request(..., data=...)), http.client requests with a write method
+_CODE_HTTP_WRITE_2 = re.compile(r"\burlopen\s*\([^)]*?,|\bRequest\s*\([^)]*\b(?:data|method)\s*=|\.request\s*\(\s*['\"]"
+                                r"(?:POST|PUT|PATCH|DELETE)|\bsocket\b|\bsmtplib\b|\bftplib\b|\bparamiko\b", re.I)
+# inline code that names a guarded place and writes, moves or deletes files
+_CODE_GUARDED = re.compile(r"\.ssh\b|\.gnupg|\.bashrc|\.bash_profile|\.profile\b|\.zshrc|\.gitconfig|\.config/(?:systemd|gh|git|"
+                           r"bot-office)|['\"]/etc/|['\"]/usr/|['\"]/boot/|authorized_keys|crontab")
+_CODE_FILE_WRITE = re.compile(r"write_text|write_bytes|\.write\s*\(|open\s*\([^)]*['\"][wax+]|\bshutil\.|\bos\.(?:remove|unlink|"
+                              r"rename|replace|rmdir|chmod|symlink|link)|\.unlink\s*\(|\.rename\s*\(|\.replace\s*\(|"
+                              r"\.touch\s*\(|writeFile|appendFile|rmSync|unlinkSync|File\.write|IO\.write")
+
+
 def _code(code: str, scope: Scope) -> Verdict | None:
-    """Inline interpreter code: an HTTP write to another host asks, and so do the shell commands it
-    spells out as literals (subprocess.run(["gh", "issue", "comment", ...]))."""
+    """Inline interpreter code: an HTTP write to another host asks, writing to a guarded place asks,
+    and so do the shell commands it spells out as literals (subprocess.run(["gh", "issue", ...]))."""
     text = code[:git_guard.SCAN_LIMIT]
-    if _CODE_HTTP_WRITE.search(text):
+    if _CODE_GUARDED.search(text) and _CODE_FILE_WRITE.search(text):
+        return _ask("scope", "inline code that writes to a guarded place (~/.ssh, profiles, /etc ...)")
+    if _CODE_HTTP_WRITE.search(text) or _CODE_HTTP_WRITE_2.search(text):
         hosts = [h.lower() for h in _CODE_URL.findall(text)]
         if not hosts or any(h not in LOOPBACK for h in hosts):
             return _ask("http-write", "inline code that sends an HTTP write")
