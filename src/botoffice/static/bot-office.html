@@ -465,7 +465,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
     <button id="new-section" class="ghost new-section" type="button" title="Create a section to group bots">+ New section</button>
     <nav id="bot-list" class="bot-list"></nav>
     <div id="sidebar-live" class="sr-only" role="status" aria-live="polite"></div>
-    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><button id="office-settings" class="ghost" type="button" title="Settings for all bots">⚙ Settings</button><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
+    <div class="sidebar-foot"><span class="muted" id="engine-note"></span><span class="muted" id="remote-note" hidden>Signed in through Cloudflare Access</span><button id="office-settings" class="ghost" type="button" title="Settings for all bots">⚙ Settings</button><button id="lock-btn" class="ghost" title="Forget the token in this tab">Lock</button></div>
     <div id="sidebar-resize" class="sidebar-resize" role="separator" aria-orientation="vertical" aria-label="Resize the sidebar" aria-valuemin="200" aria-valuemax="520" aria-valuenow="272" tabindex="0" title="Drag to resize; double-click to reset"></div>
   </aside>
 
@@ -786,7 +786,12 @@ const FALLBACK_EFFORTS = {
 function modelCarriesEffort(engine, model) { return engine === "antigravity" && /-(?:low|medium|high|xhigh|max)$/i.test(model || ""); }
 const FALLBACK_DEFAULT_EFFORT = { codex: "high", claude: "medium", antigravity: "medium" };
 
+// 0.12.23: set once at startup when /v1/remote/whoami says this page came through Cloudflare Access as the
+// owner. The tunnel's edge adds the Access JWT from the cookie; Bot-Office checks it, so no bearer token is sent.
+let REMOTE_OWNER = false;
+function haveAuth() { return REMOTE_OWNER || !!getToken(); }
 function getToken() {
+  if (REMOTE_OWNER) return "";
   let token = sessionStorage.getItem(TOKEN_KEY);
   if (!token) {
     for (const key of LEGACY_TOKEN_KEYS) {
@@ -812,14 +817,15 @@ const API_TIMEOUT_MS = 30000;
 const API_VOICE_TIMEOUT_MS = 120000;
 async function api(path, options = {}) {
   const { timeoutMs, ...fetchOptions } = options;
-  const headers = { "Authorization": "Bearer " + getToken() };
+  const headers = {};
+  if (getToken()) headers["Authorization"] = "Bearer " + getToken();
   if (fetchOptions.body !== undefined && !(fetchOptions.body instanceof Blob)) headers["Content-Type"] = "application/json";
   if (fetchOptions.body instanceof Blob) headers["Content-Type"] = fetchOptions.body.type || "application/octet-stream";
   const limit = timeoutMs !== undefined ? timeoutMs : (path.startsWith("/v1/voice/") ? API_VOICE_TIMEOUT_MS : API_TIMEOUT_MS);
   const ctrl = new AbortController();
   const timer = limit > 0 ? setTimeout(() => ctrl.abort(), limit) : null;
   try {
-    const response = await fetch(path, { ...fetchOptions, headers, cache: "no-store", credentials: "omit", signal: ctrl.signal });
+    const response = await fetch(path, { ...fetchOptions, headers, cache: "no-store", credentials: REMOTE_OWNER ? "same-origin" : "omit", signal: ctrl.signal });
     if (response.status === 401) throw new AuthError("Token rejected");
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -2148,8 +2154,8 @@ async function runStream(view) {
   view.ctrl = new AbortController();
   try {
     const response = await fetch("/v1/jobs/" + view.jobId + "/events?after=" + view.after, {
-      headers: { "Authorization": "Bearer " + getToken(), "Accept": "text/event-stream" },
-      cache: "no-store", credentials: "omit", signal: view.ctrl.signal,
+      headers: getToken() ? { "Authorization": "Bearer " + getToken(), "Accept": "text/event-stream" } : { "Accept": "text/event-stream" },
+      cache: "no-store", credentials: REMOTE_OWNER ? "same-origin" : "omit", signal: view.ctrl.signal,
     });
     if (response.status === 401) throw new AuthError("Token rejected");
     if (!response.ok || !response.body) throw new Error("stream HTTP " + response.status);
@@ -2453,7 +2459,7 @@ function clipboardHtmlImages(html, hasText) {
 async function fetchPastedImage(url) {
   const attachment = /^\/v1\/bots\/[^/]+\/attachments\/[^/]+\/?$/.test(url.pathname);
   const options = attachment
-    ? {headers: {Authorization: "Bearer " + getToken()}, cache: "no-store", credentials: "omit"}
+    ? {headers: getToken() ? {Authorization: "Bearer " + getToken()} : {}, cache: "no-store", credentials: REMOTE_OWNER ? "same-origin" : "omit"}
     : {credentials: "same-origin"};
   const response = await fetch(attachment ? url.pathname + url.search : url.href, options);
   if (!response.ok) throw new Error("Could not fetch pasted image.");
@@ -4937,7 +4943,7 @@ $("desktop-hand-back").onclick = async () => {
 function poll() {
   clearInterval(state.timer);
   state.timer = setInterval(async () => {
-    if (!getToken()) return;
+    if (!haveAuth()) return;
     state.tick += 1;
     try {
       if (state.tick % 2 === 0) { await loadBots(); }
@@ -4986,7 +4992,19 @@ $("lock-form").onsubmit = (event) => {
 };
 $("lock-btn").onclick = () => lock("");
 
-if (getToken()) start(); else lock("");
+(async function boot() {
+  // 0.12.23: through Cloudflare Access as the owner there is no token to ask for
+  try {
+    const response = await fetch("/v1/remote/whoami", { credentials: "same-origin", cache: "no-store" });
+    const who = response.ok ? await response.json() : null;
+    if (who && who.remote === true && who.role === "owner") {
+      REMOTE_OWNER = true;
+      $("remote-note").hidden = false;
+      $("lock-btn").hidden = true;
+    }
+  } catch (_) { /* local use, or no network: the token prompt below still works */ }
+  if (haveAuth()) start(); else lock("");
+})();
 /* ---- 0.12.5: message search (Ctrl/Cmd+Shift+F) ---- */
 const search = { scope: "bot", seq: 0, timer: null, count: 0, ids: new Set(), shown: null };
 function snippetNodes(text) {
