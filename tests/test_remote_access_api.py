@@ -41,7 +41,8 @@ def _u():
 
 
 def _s():
-    return service_claims(exp=time.time() + 600)
+    t = time.time()
+    return service_claims(exp=t + 600, iat=t - 5)
 
 
 def _remote(token, **extra):
