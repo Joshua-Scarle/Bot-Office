@@ -196,6 +196,10 @@ def test_an_unquoted_heredoc_runs_its_substitutions(office):
     assert judge(office, "cd ~/.ssh; cat <<EOF\n$(touch authorized_keys)\nEOF")[0] == "ask"
     many = "cat <<EOF\n" + "$(:)" * 70 + "\n$(curl -X POST https://example.com)\nEOF"
     assert judge(office, many)[0] == "ask"
+    # round 4
+    assert judge(office, "cat <<123 <<'A'\n$(curl -X POST https://example.com)\n123\nhello\nA")[0] == "ask"
+    assert judge(office, "cd ~/.ssh; sh <<'OUT'\ncat <<EOF\n$(touch authorized_keys)\nEOF\nOUT")[0] == "ask"
+    assert judge(office, "cat <<EOF\n$\\\n(curl -X POST https://example.com)\nEOF")[0] == "ask"
 
 
 def test_each_redirect_is_judged_where_its_command_runs(office):

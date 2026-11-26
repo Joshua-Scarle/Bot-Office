@@ -295,22 +295,30 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
         out.unreadable = True
         return out
     pending: list[str] = []
+    shell_bodies: list[str] = []
     try:
         text, documents = git_guard._heredocs(command) if "<<" in command else (command, [])
+        if "<<" in text:
+            for line in text.split("\n"):
+                # every here-document opener must be one the reader recognises (else its body may be
+                # attributed to another delimiter): not judged part by part, it asks
+                if len(re.findall(r"(?<!<)<<(?!<)", line)) != len(git_guard._HEREDOC.findall(line)):
+                    out.unreadable = True
+                    return out
         for header, body in documents:
             bases = [git_guard._base(w) for part in git_guard.split_words(header)[0] for w in part]
+            joined = body.replace("\\\n", "")  # bash joins backslash-newlines first
             if any(not found.group(2) for found in git_guard._HEREDOC.finditer(header)) and (
-                    "$(" in body or "`" in body):
+                    "$(" in joined or "`" in joined):
                 # an unquoted delimiter (any on the line): the shell runs the body's $( ) and backticks
                 # while writing it; judged below in every directory the command visits
-                snippets = _substitutions(body)
+                snippets = _substitutions(joined)
                 if snippets is None:
                     out.unreadable = True
                     return out
                 pending += snippets
             if any(b in git_guard.SHELLS for b in bases):
-                inner = parse(body, scope, depth + 1)
-                _merge(out, inner)
+                shell_bodies.append(body)  # commands: judged below in every directory the command visits
             elif any(git_guard.INTERPRETERS.match(b) for b in bases):
                 out.code.append(body)
         found_redirects, segments = redirect_targets(text)
@@ -346,7 +354,7 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
         words = [_expand(w, variables, scope) if "$" in w or w.startswith("~") else w for w in words]
         cwd = _unwrap(words, cwd, scope, out, depth)
         out.cwds.append(cwd)
-    for snippet in pending:
+    for snippet in [*pending, *shell_bodies]:
         for place in dict.fromkeys(out.cwds or [scope.cwd]):
             _merge(out, parse(snippet, Scope(**{**scope.__dict__, "cwd": place}), depth + 1))
     return out
