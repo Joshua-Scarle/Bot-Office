@@ -191,6 +191,11 @@ def test_a_saved_allow_cannot_open_a_locked_part_and_sudo_does_not_reroute_it(of
 def test_an_unquoted_heredoc_runs_its_substitutions(office):
     assert judge(office, "cat >> WORKING.md <<EOF\nit's $(gh issue comment 1 -R acme/app --body x)\nEOF")[:2] == ("ask", "post")
     assert judge(office, "cat >> WORKING.md <<'EOF'\nit's $(gh issue comment 1 -R acme/app --body x)\nEOF")[0] == "allow"
+    # Codex review round 3
+    assert judge(office, "cat <<'A' <<B\ntext\nA\n$(curl -X POST https://example.com)\nB")[0] == "ask"
+    assert judge(office, "cd ~/.ssh; cat <<EOF\n$(touch authorized_keys)\nEOF")[0] == "ask"
+    many = "cat <<EOF\n" + "$(:)" * 70 + "\n$(curl -X POST https://example.com)\nEOF"
+    assert judge(office, many)[0] == "ask"
 
 
 def test_each_redirect_is_judged_where_its_command_runs(office):

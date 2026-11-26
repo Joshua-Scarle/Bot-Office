@@ -294,15 +294,20 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
     if depth > 4 or len(command) > git_guard.SCAN_LIMIT:
         out.unreadable = True
         return out
+    pending: list[str] = []
     try:
         text, documents = git_guard._heredocs(command) if "<<" in command else (command, [])
         for header, body in documents:
             bases = [git_guard._base(w) for part in git_guard.split_words(header)[0] for w in part]
-            opened = git_guard._HEREDOC.search(header)
-            if opened and not opened.group(2) and ("$(" in body or "`" in body):
-                # an unquoted delimiter: the shell runs the body's $( ) and backticks while writing it
-                for snippet in _substitutions(body):
-                    _merge(out, parse(snippet, scope, depth + 1))
+            if any(not found.group(2) for found in git_guard._HEREDOC.finditer(header)) and (
+                    "$(" in body or "`" in body):
+                # an unquoted delimiter (any on the line): the shell runs the body's $( ) and backticks
+                # while writing it; judged below in every directory the command visits
+                snippets = _substitutions(body)
+                if snippets is None:
+                    out.unreadable = True
+                    return out
+                pending += snippets
             if any(b in git_guard.SHELLS for b in bases):
                 inner = parse(body, scope, depth + 1)
                 _merge(out, inner)
@@ -341,10 +346,16 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
         words = [_expand(w, variables, scope) if "$" in w or w.startswith("~") else w for w in words]
         cwd = _unwrap(words, cwd, scope, out, depth)
         out.cwds.append(cwd)
+    for snippet in pending:
+        for place in dict.fromkeys(out.cwds or [scope.cwd]):
+            _merge(out, parse(snippet, Scope(**{**scope.__dict__, "cwd": place}), depth + 1))
     return out
 
 
-def _substitutions(body: str) -> list[str]:
+SUBSTITUTION_LIMIT = 64  # more $( ) in one here-document than this: not judged part by part (it asks)
+
+
+def _substitutions(body: str) -> list[str] | None:
     """The $( ) and `...` commands in an unquoted here-document body (quotes mean nothing there)."""
     found, i = [], 0
     while i < len(body):
@@ -361,7 +372,7 @@ def _substitutions(body: str) -> list[str]:
             i += 2
         else:
             i += 1
-    return found[:50]
+    return found if len(found) <= SUBSTITUTION_LIMIT else None
 
 
 def _merge(out: Parsed, inner: Parsed) -> None:
