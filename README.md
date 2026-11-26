@@ -153,6 +153,7 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 - **Configuration** is `<control dir>/remote_access.json` (or `BOT_OFFICE_REMOTE_ACCESS_FILE`), re-read when it changes, so a client can be revoked without a restart. The signing keys are cached for an hour.
 - **GUI.** The page asks `GET /v1/remote/whoami` first and, for a remote owner, skips the token prompt.
 - **Unchanged.** The API still binds to loopback only, the bearer token still works locally, and job-scoped agent routes still need a job token.
+- **Review hardening (Codex, 9 rounds, before the first deploy).** Any config parse error fails closed and never keeps the old config; service tokens can only be `remote-client`; the Access JWT, the shared key, `Cf-Access-Client-*` and the `CF_Authorization` cookie never reach the app (local requests too); no remote websockets for any role (so no remote VNC); every remote request is re-checked before its headers and on every body frame and ends at the credential's expiry or after 5 minutes (SSE resumes with `Last-Event-ID`); signing keys are refreshed outside the lock, one refresh at a time, and never used more than 24 h stale; at most 16 JWT checks wait at once (503 beyond); `shared_key.py` writes the key file atomically (0600) under a lock.
 - **Rollback.** No schema change. Check out the previous tag and restart; without `remote_access.json` remote requests are refused.
 
 ## What changed in 0.12.34
