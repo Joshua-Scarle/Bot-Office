@@ -74,6 +74,7 @@ COMMAND_LIMIT = 32 * 1024
 APPROVAL_LIMIT = 4000
 # Sec 10: a bot cannot flood Needs-you or the gate log from one job
 APPROVALS_PER_JOB = 20
+CHAT_KINDS = ("chat", "api", "wakeup")   # 0.12.47: unassigned runs that are one task for card reuse
 
 # 0.12.47 (owner, Nov 26): a refused or waiting step never ends the work. The bot keeps going, Bot-Office
 # re-runs the step once it is approved (the resume turn holds a one-time grant for exactly that command),
@@ -1367,7 +1368,7 @@ class Rules:
                     "(a.resume_job_id IS NULL OR (a.resume_job_id<>? AND j.status IN ('queued','running'))) "
                     "ORDER BY a.id DESC LIMIT 1",
                     # the same task: this job, the same assignment, or the bot's chat turns (never a routine,
-                    # wake-up or other unassigned run, which are separate tasks)
+                    # wake-up or other unassigned run: a scheduled run gets a fresh card, 0.12.18)
                     (str(job.bot_id), action.fingerprint, str(job.id), str(job.assignment_id or ""),
                      str(job.assignment_id) if job.assignment_id else None, job.source or "api",
                      str(job.id))).fetchone()
@@ -1378,10 +1379,18 @@ class Rules:
                 plan_json = json.dumps(plan) if plan else None
                 # 0.12.47: only within the same task (the same assignment, or chat turns with none): a card
                 # never moves to another assignment, whose approval would resume the wrong task
+                # unassigned runs: only of the same kind (chat/API turns and the bot's own wake-ups together, a
+                # routine's runs together...), so a card never moves from a routine to a chat turn or back
+                # (0.12.45 de-duplication kept)
+                same_task = ("(job_id=? OR (assignment_id IS NOT NULL AND assignment_id=?) OR (assignment_id IS NULL "
+                             "AND ? IS NULL AND (CASE WHEN source IN ('chat','api','wakeup') THEN 'chat' ELSE source END)"
+                             "=?))")
+                kind = "chat" if (job.source or "api") in CHAT_KINDS else job.source
+                task_args = (str(job.id), str(job.assignment_id or ""),
+                             str(job.assignment_id) if job.assignment_id else None, kind)
                 row = db.execute("SELECT id, job_id FROM approvals WHERE bot_id=? AND input_hash=? AND status='pending' "
-                                 "AND assignment_id IS ? ORDER BY job_id=? DESC, id DESC LIMIT 1",
-                                 (str(job.bot_id), action.fingerprint,
-                                  str(job.assignment_id) if job.assignment_id else None, str(job.id))).fetchone()
+                                 f"AND {same_task} ORDER BY job_id=? DESC, id DESC LIMIT 1",
+                                 (str(job.bot_id), action.fingerprint, *task_args, str(job.id))).fetchone()
                 if row:
                     if row["job_id"] != str(job.id):
                         db.execute("UPDATE approvals SET job_id=?, assignment_id=?, source=?, scope=?, push_plan=? "
@@ -1391,8 +1400,8 @@ class Rules:
                     db.commit()
                     return int(row["id"])
                 old = db.execute("SELECT id, summary FROM approvals WHERE bot_id=? AND input_hash=? AND status='expired' "
-                                 "AND resume_job_id IS NULL AND assignment_id IS ? AND created_at>=? ORDER BY id DESC LIMIT 1",
-                                 (str(job.bot_id), action.fingerprint, str(job.assignment_id) if job.assignment_id else None,
+                                 f"AND resume_job_id IS NULL AND {same_task} AND created_at>=? ORDER BY id DESC LIMIT 1",
+                                 (str(job.bot_id), action.fingerprint, *task_args,
                                   (stamp - timedelta(hours=REUSE_HOURS)).isoformat())).fetchone()
                 if old and db.execute("UPDATE approvals SET status='pending', decided_at=NULL, expires_at=?, job_id=?, "
                                       "assignment_id=?, source=?, scope=?, push_plan=? "

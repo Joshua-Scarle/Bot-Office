@@ -655,16 +655,18 @@ def secret_like(text: str) -> bool:
     if re.search(r"\$[{(A-Za-z_0-9@*#?!-]|`|<\(|@/|@~", text) or _SECRET_WORDS.search(text):
         return True
     words = text.split()
-    plain = re.compile(r"(?i)https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+|[\w-]+\.[a-z]{2,5}|[\w./~-]*/[\w./-]*|\d[\d.,:/ -]*")
+    plain = re.compile(r"(?i)https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+|[a-z][a-z-]*\.[a-z]{2,5}|(?:~|\.{1,2})?/[\w.-]+(?:/[\w.-]+)+/?|"
+                       r"\d[\d.,:/ -]*")
     if len(words) == 1 and len(words[0]) >= 6 and not plain.fullmatch(words[0]) and re.search(r"[A-Za-z]", words[0]) \
             and re.search(r"[\d\W_]", words[0]):
         return True   # one word mixing letters with digits or symbols, typed alone: what a password looks like
     for word in words:
         if _SECRET_PREFIX.match(word):
             return True
-        bare = word.strip("'\".,;:!?()[]")
-        if len(bare) >= 7 and not plain.fullmatch(bare) and re.search(r"[A-Za-z]", bare) \
-                and re.search(r"[\d\W_]", bare):
+        bare = word.strip("'\"()[]")
+        trimmed = bare.rstrip(".,;:")
+        if len(trimmed) >= 6 and not plain.fullmatch(trimmed) and re.search(r"[A-Za-z]", trimmed) \
+                and re.search(r"[\d\W_]", trimmed):
             return True   # a password-like word inside longer text ("hello hunter2!")
         if len(word) >= 12 and not re.fullmatch(r"(?i)[a-z]+|\d+|https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+|[\w./-]+\.\w{1,5}",
                                                 word):

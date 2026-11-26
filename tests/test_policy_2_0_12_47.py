@@ -203,6 +203,10 @@ def test_public_pr_review_line_still_asks(office):
     ("desk type $PASSWORD", "ask"),
     ("desk type my password is x", "ask"),
     ("desk type 'hello hunter2'", "ask"),
+    ("desk type 'hello abc123'", "ask"),
+    ("desk type 'hello abc123!'", "ask"),
+    ("desk type 'my login hunter/2'", "ask"),
+    ("desk type 'see /home/user/report.pdf and example.com'", "allow"),
     ("desk type ghp_abcdefghijklmnopqrstu", "ask"),
     ("cat pw | xargs desk type", "ask"),
     ("cat pw | xargs -I{} desk type {}", "ask"),
@@ -577,3 +581,14 @@ def test_unassigned_routine_approval_does_not_cover_a_chat_turn(tmp_path):
     rules.approve(approval)
     chat = running(store, bot)
     assert "already granted" not in rules.decide(chat, bash(ASKS)).reason
+
+
+def test_a_routine_card_does_not_move_to_a_chat_turn(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    routine = running(store, bot, source="routine")
+    first = rules.decide(routine, bash(ASKS)).approval_id
+    chat = running(store, bot)
+    second = rules.decide(chat, bash(ASKS)).approval_id
+    assert first != second and rules.get(first)["job_id"] == str(routine.id)
+    later = running(store, bot, source="routine")       # the routine's next run reuses its own card
+    assert rules.decide(later, bash(ASKS)).approval_id == first
