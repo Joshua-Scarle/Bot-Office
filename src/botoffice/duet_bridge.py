@@ -434,6 +434,7 @@ class DuetBridge:
         self._identities: dict[str, tuple[int, str]] = {}  # sha256(token)[:16] -> (id, login) of the token
         self._author_ids: dict[str, int] = {}  # allowed login -> resolved numeric id
         self._repo_ok: tuple[str, datetime] | None = None
+        self._repo_seen = 0.0  # time.monotonic() of the GitHub answer behind _repo_ok
         self._ignored: set[int] = set()  # comment ids already logged as ignored
         self._cooldown_until = 0.0  # time.monotonic() before which no GitHub request is made
         self._recovered = False  # inbound rows left "delivering" by an earlier process were settled
@@ -530,15 +531,16 @@ class DuetBridge:
 
     # -- mailbox repository --
 
-    def verify_repo(self, config: DuetConfig, token: str, fresh: bool = False) -> None:
+    def verify_repo(self, config: DuetConfig, token: str, fresh: bool = False) -> float:
+        """time.monotonic() of the GitHub answer that showed the repository private (see _check_repo)."""
         try:
-            self._check_repo(config, token, fresh)
+            return self._check_repo(config, token, fresh)
         except BaseException:
             with self._gate:
                 self._repo_failures += 1  # any failure (network, cooldown, stop too): a running batch stops
             raise
 
-    def _check_repo(self, config: DuetConfig, token: str, fresh: bool = False) -> None:
+    def _check_repo(self, config: DuetConfig, token: str, fresh: bool = False) -> float:
         """Fail closed (DuetError 503) unless the mailbox repository is private and has the numeric id it had
         when first seen. For polling and delivery a pass is cached for REPO_CHECK_SECONDS; *fresh* (every
         outbound write) always asks GitHub. A failure is never cached."""
@@ -546,10 +548,11 @@ class DuetBridge:
         now = self.clock()
         if not fresh and self._repo_ok and self._repo_ok[0] == key \
                 and now - self._repo_ok[1] < timedelta(seconds=REPO_CHECK_SECONDS):
-            return
+            return self._repo_seen
         self._repo_ok = None
         try:
             data = self._get_json(f"{self._api}/repos/{config.repo}", token, "repo")
+            answered = time.monotonic()  # before pinning, which may wait for the database
         except DuetError as exc:
             raise DuetError("mailbox repository check failed; nothing is sent or delivered", 503,
                             "repo_check_failed") from exc
@@ -567,6 +570,8 @@ class DuetBridge:
             raise DuetError("the mailbox repository id changed; nothing is sent or delivered", 503,
                             "repo_id_changed")
         self._repo_ok = (key, now)
+        self._repo_seen = answered
+        return answered
 
     def _pin_repo(self, key: str, repo_id: int) -> int:
         """The repository id pinned for *key*: set on first use, in one write transaction, so concurrent
@@ -1139,9 +1144,6 @@ class DuetBridge:
                 """Asked again once the request slot is held, right before the review is posted: the mailbox
                 config, the sender's authorization and the sending job (a slot wait may be long), and the
                 private-repository check is still recent (REPO_FRESH_SECONDS), so a wait cannot widen it."""
-                if time.monotonic() - repo_checked[0] > REPO_FRESH_SECONDS:
-                    raise DuetError("the repository check is too old by the time a request slot was free; "
-                                    "send it again", 503, "repo_check_stale")
                 now = self.config()
                 if now is None or not now.enabled:
                     raise DuetError("the Duet bridge is not configured or is disabled", 503, "not_configured")
@@ -1152,11 +1154,14 @@ class DuetBridge:
                     raise DuetError("this bot may not send to Duet (the mailbox config's default_bot and senders "
                                     "may)", 403, "sender_not_allowed")
                 self._check_job(job_alive)
+                # last, after the checks above (they read files and the database and may wait)
+                if time.monotonic() - repo_checked[0] > REPO_FRESH_SECONDS:
+                    raise DuetError("the repository check is too old by the time a request slot was free; "
+                                    "send it again", 503, "repo_check_stale")
 
             try:
                 self.check_text(body, token)  # the final serialized review, header fields included
-                self.verify_repo(config, token, fresh=True)  # asked again right before the write
-                repo_checked[0] = time.monotonic()
+                repo_checked[0] = self.verify_repo(config, token, fresh=True)  # asked again right before the write
                 still_allowed()
             except BaseException:
                 self._settle(key, state="failed", error="refused_before_send")

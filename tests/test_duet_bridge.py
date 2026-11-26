@@ -1104,9 +1104,10 @@ def test_no_post_starts_after_stop_and_the_reservation_is_released(env):
     real = b.verify_repo
 
     def verify_then_stop(config, token, fresh=False):
-        real(config, token, fresh)
+        seen = real(config, token, fresh)
         if fresh:
             b.signal_stop()
+        return seen
 
     b.verify_repo = verify_then_stop
     with pytest.raises(DuetError) as exc:
@@ -1286,9 +1287,10 @@ def test_a_queued_job_send_is_refused_once_the_job_ended(env):
     real = b.verify_repo
 
     def verify_then_end(config, token, fresh=False):
-        real(config, token, fresh)
+        seen = real(config, token, fresh)
         if fresh:
             alive["ok"] = False
+        return seen
 
     b.verify_repo = verify_then_end
     with pytest.raises(DuetError) as exc:
@@ -1421,10 +1423,11 @@ def test_a_send_waiting_for_a_request_slot_is_checked_again_when_it_gets_one(env
     real_verify = b.verify_repo
 
     def verify(config, token, fresh=False):
-        real_verify(config, token, fresh)
+        seen = real_verify(config, token, fresh)
         if fresh:
             assert duet_bridge.wait_for_requests(2)
             duet_bridge._INFLIGHT.acquire()
+        return seen
 
     b.verify_repo = verify
     worker = threading.Thread(target=run)
@@ -1536,11 +1539,12 @@ def test_a_review_post_never_starts_long_after_its_private_check(env, monkeypatc
     real_verify = b.verify_repo
 
     def verify(config, token, fresh=False):
-        real_verify(config, token, fresh)
+        seen = real_verify(config, token, fresh)
         if fresh:
             assert duet_bridge.wait_for_requests(2)
             duet_bridge._INFLIGHT.acquire()  # the POST now waits for the slot
             threading.Timer(0.6, duet_bridge._INFLIGHT.release).start()
+        return seen
 
     b.verify_repo = verify
     with pytest.raises(DuetError) as exc:
@@ -1583,10 +1587,11 @@ def test_a_send_that_never_got_a_slot_is_failed_not_unknown(env, monkeypatch):
     real_verify = b.verify_repo
 
     def verify(config, token, fresh=False):
-        real_verify(config, token, fresh)
+        seen = real_verify(config, token, fresh)
         if fresh:
             assert duet_bridge.wait_for_requests(2)
             duet_bridge._INFLIGHT.acquire()  # held past the POST's deadline
+        return seen
 
     b.verify_repo = verify
     with pytest.raises(DuetError) as exc:
@@ -1594,3 +1599,16 @@ def test_a_send_that_never_got_a_slot_is_failed_not_unknown(env, monkeypatch):
     duet_bridge._INFLIGHT.release()
     assert exc.value.code == "github_busy" and fake.posted == []
     assert [(r["state"], r["error"]) for r in rows(b, "out")] == [("failed", "not_started")]
+
+
+def test_the_repository_check_age_counts_from_githubs_answer_not_after_pinning(env, monkeypatch):
+    import time
+    write_config(env)
+    fake = Fake()
+    b, _ = bridge(env, fake)
+    monkeypatch.setattr(duet_bridge, "REPO_FRESH_SECONDS", 0.2)
+    real_pin = b._pin_repo
+    b._pin_repo = lambda key, repo_id: (time.sleep(0.4), real_pin(key, repo_id))[1]  # pinning waits for the DB
+    with pytest.raises(DuetError) as exc:
+        b.send(text="work content", bot=env.lead)
+    assert exc.value.code == "repo_check_stale" and fake.posted == []
