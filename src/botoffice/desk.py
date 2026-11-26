@@ -59,7 +59,7 @@ def resolve_slot(explicit: str | None, environ: dict[str, str] | None = None) ->
 
 OWNER_CONTROLLING = ("the owner is controlling this desktop right now; wait for the hand-back "
                      "(desk screenshot and desk open still work)")
-OPEN_WAIT = 15.0
+OPEN_WAIT = 30.0
 
 
 def own_desktop(environ: dict[str, str], transport=None) -> tuple[str, bool] | None:
@@ -121,20 +121,36 @@ def build_commands(slot: str, command: str, args: list[str]) -> list[list[str]]:
     raise DeskError(f"unknown command {command!r}")
 
 
-def wait_for_browser(slot: str, timeout: float = OPEN_WAIT, run=subprocess.run, sleep=None) -> bool:
-    """After ``desk open``: wait until a browser window is visible (a following screenshot shows it)."""
+BLANK_TITLES = {"", "Blank page", "Web", "Epiphany"}
+
+
+def browser_title(slot: str, run=subprocess.run) -> str | None:
+    """The visible browser window's title (None: no window yet)."""
+    probe = _exec(slot, "xdotool", "search", "--onlyvisible", "--class", "epiphany", "getwindowname", "%@")
+    try:
+        done = run(probe, capture_output=True, timeout=TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    out = done.stdout.decode(errors="replace") if isinstance(done.stdout, bytes) else (done.stdout or "")
+    titles = [line.strip() for line in out.splitlines() if line.strip()]
+    return titles[-1] if titles else ""
+
+
+def wait_for_browser(slot: str, before: str | None = None, timeout: float = OPEN_WAIT, run=subprocess.run,
+                     sleep=None) -> bool:
+    """After ``desk open``: wait until the browser shows a page title that is not blank and differs from the
+    one before the open (the new page loaded), so a following screenshot shows it."""
     import time
 
     sleep = sleep or time.sleep
     deadline = time.monotonic() + timeout
-    probe = _exec(slot, "xdotool", "search", "--onlyvisible", "--class", "epiphany")
     while True:
-        try:
-            if run(probe, capture_output=True, timeout=TIMEOUT, check=False).returncode == 0:
-                sleep(2.0)   # the window is up; give the first paint a moment
-                return True
-        except (OSError, subprocess.SubprocessError):
-            return False
+        title = browser_title(slot, run)
+        if title is not None and title not in BLANK_TITLES and title != before:
+            sleep(1.0)   # the title arrives with the document; give the first paint a moment
+            return True
         if time.monotonic() >= deadline:
             return False
         sleep(0.5)
@@ -286,11 +302,12 @@ def main(argv: list[str] | None = None) -> int:
                 subprocess.run(commands[2], capture_output=True, timeout=TIMEOUT, check=False)
             print(f"Screenshot of {slot} saved to {dest}")
         else:
+            before = browser_title(slot) if command == "open" else None
             for argv_ in build_commands(slot, command, rest):
                 _run(argv_)
             if command == "open":
-                print(f"Opened on {slot}." if wait_for_browser(slot) else
-                      f"Asked {slot} to open the page; the browser window is not up yet.")
+                print(f"Opened on {slot}: the page has loaded." if wait_for_browser(slot, before) else
+                      f"Asked {slot} to open the page; it is still loading (take a screenshot in a few seconds).")
     except (DeskError, subprocess.SubprocessError, OSError) as exc:
         print(f"desk: {exc}", file=sys.stderr)
         return 1

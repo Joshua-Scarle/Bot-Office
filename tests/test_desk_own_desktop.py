@@ -78,28 +78,32 @@ def test_owner_control_blocks_input_but_not_screenshot(monkeypatch, tmp_path, ca
     assert ran and ran[0][:3] == ["podman", "exec", "desktop-12"]
 
 
-def test_desk_open_on_own_desktop_waits_for_the_window(monkeypatch, capsys):
+def test_desk_open_on_own_desktop_waits_for_the_page(monkeypatch, capsys):
     monkeypatch.setattr(desk, "pick_desktop", lambda slot, env: ("desktop-12", False))
     ran = []
     monkeypatch.setattr(desk, "_run", lambda argv: ran.append(argv))
-    monkeypatch.setattr(desk, "wait_for_browser", lambda slot: True)
+    monkeypatch.setattr(desk, "browser_title", lambda slot: "Old page")
+    waited = []
+    monkeypatch.setattr(desk, "wait_for_browser", lambda slot, before: waited.append(before) or True)
     assert desk.main(["open", "https://example.com"]) == 0
     assert ran == [["podman", "exec", "-d", "desktop-12", "env", "DISPLAY=:1", "epiphany", "https://example.com"]]
-    assert "Opened on desktop-12" in capsys.readouterr().out
+    assert waited == ["Old page"]
+    assert "the page has loaded" in capsys.readouterr().out
     assert desk.main(["open", "file:///etc/passwd"]) == 1
 
 
-def test_wait_for_browser_polls_then_gives_up():
-    codes = iter([1, 1, 0])
+def test_wait_for_browser_needs_a_new_non_blank_title():
+    titles = iter([None, "", "Blank page", "Old page", "Example Domain"])
     seen = []
 
     def run(argv, **kw):
         seen.append(argv)
-        return subprocess.CompletedProcess(argv, next(codes))
-    assert desk.wait_for_browser("desktop-12", timeout=5, run=run, sleep=lambda s: None)
-    assert seen[0][-4:] == ["--onlyvisible", "--class", "epiphany"][-4:] or "epiphany" in seen[0]
-    assert not desk.wait_for_browser("desktop-12", timeout=0, run=lambda a, **k: subprocess.CompletedProcess(a, 1),
-                                     sleep=lambda s: None)
+        title = next(titles)
+        return subprocess.CompletedProcess(argv, 1 if title is None else 0, stdout=(title or "") + "\n")
+    assert desk.wait_for_browser("desktop-12", "Old page", timeout=5, run=run, sleep=lambda s: None)
+    assert len(seen) == 5 and "getwindowname" in seen[0]
+    never = lambda a, **k: subprocess.CompletedProcess(a, 0, stdout="Blank page\n")  # noqa: E731
+    assert not desk.wait_for_browser("desktop-12", None, timeout=0, run=never, sleep=lambda s: None)
 
 
 # ---------------------------------------------------------------- API
