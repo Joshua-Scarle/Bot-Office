@@ -45,7 +45,13 @@ on how many run at once.** The old lease pool stays as it is (jobs still get `BO
 - Restart policy `no` (an idle-stopped desktop must stay stopped); "survives restarts" is by lazy
   start: the next `desk` call or the owner's "Open" starts it again with its state.
 - Rollback: `BOT_OFFICE_DESKTOP_MODE=pool` makes `desk` inside a job use the leased pool desktop again
-  (the old behaviour); the per-bot containers are left alone.
+  (the old behaviour); the per-bot containers are left alone (not even idle-stopped).
+- Safety details (from review): container labels win over the registry file (a lost or damaged file is
+  rebuilt from them; a mapping onto a container that is not labelled for that bot is dropped); stop and
+  start act on the container id from the latest verified listing, never on a name that may have been
+  reused; configured pool names are never per-bot desktops; a desktop just started for someone is
+  reserved for 2 minutes; a desktop chosen for stopping admits no new viewer; a failed stop fails the
+  request instead of exceeding the cap; a cancelled podman command is ended before any guard is released.
 
 Resources per per-bot desktop: `--memory 1536m --cpus 1.5 --pids-limit 1024 --shm-size 256m`
 (configurable). Worst case with the cap: 6 GiB, inside the 9 GiB available, leaving the app and the
@@ -62,8 +68,9 @@ comes from the token, never from an argument). `--slot <leased pool desktop>` st
 `desk open URL` (http/https only) opens the URL in Epiphany on the bot's desktop. New:
 `desk open` waits briefly for the window so a following `desk screenshot` shows the page.
 
-If the owner is controlling that desktop at that moment, the answer says so and `desk click/type/key`
-refuse with "the owner is controlling this desktop; wait for the hand-back" (screenshot and open still
+`desk --slot <leased pool desktop>` asks the same endpoint with `{"slot": ...}` (403 for any slot this
+turn did not lease) only for the control state. If the owner is controlling that desktop at that moment,
+the answer says so and `desk click/type/key` refuse with "the owner is controlling this desktop; wait for the hand-back" (screenshot and open still
 work), so the bot and the owner do not fight over the mouse.
 
 Approvals: `desk click/type/key` stay classed as they are in `approval_classes.py` (unchanged here).
@@ -75,6 +82,12 @@ Approvals: `desk click/type/key` stay classed as they are in `approval_classes.p
 - Connect is **view only** by default. "Take control" reconnects with a control ticket; a red banner
   "You are controlling <bot>'s desktop" stays visible while in control; "Release" goes back to view.
   "Hand back" (as before) tells the bot that you are done; for a per-bot desktop it goes to that bot.
+  The page first releases control and waits until the server confirms nobody controls the desktop; the
+  server also refuses a hand-back (409) while a control connection is open, or when `?bot=` no longer
+  matches the desktop's bot.
+- For a bot's desktop the page asks for the ticket with `?bot=<id>`; the server checks it against a live
+  container listing when issuing and again when the websocket is admitted (fails closed if podman cannot
+  be listed), so the viewer never opens a desktop that has become something else.
 - A stopped per-bot desktop is started by "Connect" (owner API `POST /v1/desktops/{name}/start`).
 - Each bot's own desktop can also be opened from the bot's chat ("Desktop" opens with that bot's
   desktop preselected).
