@@ -143,6 +143,17 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.42
+
+**Remote desktops: every bot has its own desktop and browser; the owner can watch and take control, also through remote access.** See [docs/REMOTE-DESKTOPS.md](docs/REMOTE-DESKTOPS.md).
+
+- **Per-bot desktops.** Inside a turn, `desk` (no `--slot`) uses the bot's own `desktop-N` (N 10-99), created on first use from `localhost/light-desktop:v1`, with its browser profile on a named volume, so logins and tabs stay with that bot and no other bot sees them. Started on demand, stopped after `BOT_OFFICE_DESKTOP_IDLE_MINUTES` (20) without use, viewer or running turn, at most `BOT_OFFICE_DESKTOP_MAX_RUNNING` (4) at once (the least recently used idle one makes room). Containers: `--cap-drop ALL`, `no-new-privileges`, 1.5 GiB / 1.5 CPU / 1024 pids, published on 127.0.0.1 only. Existing containers (`desktop-1`..`desktop-9`, anything not labelled as ours) are never touched; the shared pool still works with `desk --slot <leased>`.
+- **`desk open URL` waits for the page** (its title), so the next `desk screenshot` shows it. While the owner controls a desktop, `desk click/type/key` are refused with a note.
+- **Viewer.** The Desktop panel lists each bot's desktop by name, starts a stopped one on Connect, opens view-only, has an explicit Take control with a red "you are controlling" banner, and Hand back releases control before telling the bot. Phone width works.
+- **Remote viewer.** Through Cloudflare Access only the desktop websocket is allowed, only for an owner person (verified JWT, exact Origin, ticket bound to that person), and it is closed at the JWT's expiry, on revocation (re-checked every 15 s and on every frame) or after 1 hour. Service tokens and shared keys still get no websocket and no desktop route. Remote access stays off unless configured.
+- **New:** `src/botoffice/bot_desktops.py`, `POST /v1/agent/desktop`, `POST /v1/bots/{id}/desktop`, `POST /v1/desktops/{name}/start`; `<private dir>/desktops.json` (bot -> desktop number; rebuilt from container labels if lost).
+- **Rollback.** `BOT_OFFICE_DESKTOP_MODE=pool` restores the old leased-desktop behaviour without a deploy; or check out the `backup/pre-0.12.42-*` tag and restart. Per-bot containers and volumes stay until removed by hand.
+
 ## What changed in 0.12.41
 
 **Claude Duet bridge: a two-way channel with Claude Duet over a private pull request.**
