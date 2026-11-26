@@ -25,7 +25,7 @@ KEY = "approval_classes"
 CUSTOM_LIMIT = 30
 LABEL_LIMIT = 80
 PATTERN_LIMIT = 500
-# 0.12.42: a card for a risky action waits a day (it used to die after an hour while the owner slept)
+# 0.12.45: a card for a risky action waits a day (it used to die after an hour while the owner slept)
 TIMEOUT_DEFAULT = 24 * 60
 TIMEOUT_MAX = 7 * 24 * 60
 CUSTOM_KINDS = ("shell", "tool")
@@ -74,7 +74,7 @@ def _git_push_risky(command: str) -> bool:
 
 
 def _delete_outside(command: str) -> bool:
-    # 0.12.42: judged as the commands that run (policy.delete_outside), not words in their text
+    # 0.12.45: judged as the commands that run (policy.delete_outside), not words in their text
     # (`desk help 2>&1` or a grep for "sudo" were carded before)
     from . import policy
     return policy.delete_outside(command)

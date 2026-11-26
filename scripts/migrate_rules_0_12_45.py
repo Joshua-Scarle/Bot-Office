@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""0.12.42 rules migration: the per-bot "E8 safety gate" ask rules (and the Nov 26 interim deploy rule)
+"""0.12.45 rules migration: the per-bot "E8 safety gate" ask rules (and the Nov 26 interim deploy rule)
 are replaced by the approval policy in code (src/botoffice/policy.py, docs/permissions.md).
 
 Through the running app's API only (GET/DELETE /v1/rules), idempotent, with a JSON backup of every rule
@@ -9,7 +9,7 @@ the owner's own rules, never rules, other bots' settings. General Worker is the 
 their rules from (bo-runs/bo-intel/ops.py), so it gets the same treatment: new bots start with the policy
 alone.
 
-  python3 scripts/migrate_rules_0_12_42.py [--dry-run] [--backup-dir DIR] [--skip NAME ...]
+  python3 scripts/migrate_rules_0_12_45.py [--dry-run] [--backup-dir DIR] [--skip NAME ...]
 
 The token is read from BOT_OFFICE_TOKEN_FILE (or data/token) and never printed.
 """
@@ -66,7 +66,7 @@ def main(argv: list[str]) -> int:
         return 2
     rules = listing["rules"]
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup = Path(args.backup_dir) / f"rules-before-0.12.42-{stamp}.json"
+    backup = Path(args.backup_dir) / f"rules-before-0.12.45-{stamp}.json"
     backup.parent.mkdir(parents=True, exist_ok=True)
     backup.write_text(json.dumps(listing, indent=1), encoding="utf-8")
     backup.chmod(0o600)

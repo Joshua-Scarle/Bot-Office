@@ -124,7 +124,7 @@ class Ctx:
     sends: list = None  # fix3 #4: why a part of the command sends something out (the "send" class)
     # 0.12.24: a redirect next to an agent name (`<<<claude`): the word list may not be what runs
     no_subscription: bool = False
-    # 0.12.42: the bot's scope (policy.Scope.roots): deleting inside these is the bot's own work; inside
+    # 0.12.45: the bot's scope (policy.Scope.roots): deleting inside these is the bot's own work; inside
     # *excluded* (another bot's dirs) it asks. Only the controller sets them (hooks and shims: none, stricter)
     roots: tuple = ()
     excluded: tuple = ()
@@ -356,7 +356,7 @@ def _record_vars(words: list[str], ctx: Ctx) -> None:
             ctx.vars.pop(name, None)
 
 
-# 0.12.42: a test run with the office's environment stripped (`env -u BOT_OFFICE_AGENT_TOKEN ... PYTHONPATH=src
+# 0.12.45: a test run with the office's environment stripped (`env -u BOT_OFFICE_AGENT_TOKEN ... PYTHONPATH=src
 # timeout 900 python -m pytest ...`) takes capabilities away from the child; it is not switching off the push
 # check for a push. Only this exact shape: -u of BOT_OFFICE_* (or the API key / GitHub token) names, plain
 # VAR=value words that are not hook or credential settings, an optional timeout, then pytest.
@@ -421,7 +421,7 @@ def _scan_command(words: list[str], ctx: Ctx, depth: int) -> None:
         if program in ("echo", "printf"):
             return  # prints its words; a substitution in them was scanned as a nested command
         if program == "env" and _test_run(rest):
-            continue  # 0.12.42: a test run with the office's variables taken away (see _test_run)
+            continue  # 0.12.45: a test run with the office's variables taken away (see _test_run)
         if program in ("export", "unset", "declare", "typeset", "local", "readonly", "env", "setenv", "unsetenv"):
             for item in rest:
                 _hook_env(item.split("=", 1)[0].lstrip("-"))
@@ -753,7 +753,7 @@ def _known_vars(path: str, ctx: Ctx) -> str:
 
 
 def _scoped(path: str, ctx: Ctx, root_counts: bool, follow: bool) -> bool | None:
-    """0.12.42: with the bot's scope known: True inside another bot's dir (or a root itself, with
+    """0.12.45: with the bot's scope known: True inside another bot's dir (or a root itself, with
     *root_counts*), False inside a root, None when the scope does not decide (the checks below do)."""
     if path == "~" or path.startswith("~/"):
         path = os.path.expanduser("~") + path[1:]
@@ -781,7 +781,7 @@ def _scoped(path: str, ctx: Ctx, root_counts: bool, follow: bool) -> bool | None
     return None
 
 
-# 0.12.42: caches a tool rebuilds on its own; deleting one is never data loss
+# 0.12.45: caches a tool rebuilds on its own; deleting one is never data loss
 CACHE_ARTEFACTS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis"})
 
 
@@ -854,7 +854,7 @@ def _delete(program: str, args: list[str], ctx: Ctx) -> None:
     follow = program in ("rsync", "shred", "srm", "wipe")
     for target in _positionals(args):
         if program in ("rm", "rmdir", "unlink", "trash", "trash-put", "gio") and _cache_artefact(target, ctx):
-            continue  # 0.12.42: build caches (__pycache__, .pytest_cache ...) are rebuilt by their tools
+            continue  # 0.12.45: build caches (__pycache__, .pytest_cache ...) are rebuilt by their tools
         if _outside(target, ctx, root_counts=True, follow=follow) or (program == "rsync" and re.match(r"^[^/]*:", target)):
             _hit(f"deleting files outside the workspace ({program})")
 
@@ -1517,7 +1517,7 @@ def mcp_repo(data: dict) -> tuple[str, str] | None:
     return None
 
 
-# 0.12.42 (The owner, Nov 26): any push to a public repo waits for his card; feature pushes to private repos
+# 0.12.45 (The owner, Nov 26): any push to a public repo waits for his card; feature pushes to private repos
 # do not. The controller sets visibility_lookup (github_access.Visibility, cached GitHub API answers);
 # hooks and shims leave it None, so there a GitHub push is "not verified" and goes to the controller.
 visibility_lookup = None
@@ -2186,7 +2186,7 @@ def readable_event(event) -> bool:
 def classify(tool: str, command: str = "", tool_input: dict | None = None, cwd: str | None = None,
              roots: tuple = (), excluded: tuple = ()) -> str | None:
     """Why this tool call must wait for the owner (a short phrase), or None. Never raises: a call
-    it cannot read is a hit. *roots* / *excluded*: the bot's scope (0.12.42, the controller only)."""
+    it cannot read is a hit. *roots* / *excluded*: the bot's scope (0.12.45, the controller only)."""
     ctx = Ctx(root=cwd or None, cwd=cwd or None, roots=tuple(roots), excluded=tuple(excluded))
     if tool == PUSH_TOOL:
         try:

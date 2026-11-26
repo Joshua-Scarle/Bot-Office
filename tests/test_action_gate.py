@@ -209,7 +209,7 @@ def test_grant_is_one_shot_bound_to_the_resume_turn_and_expires(tmp_path):
                    ((now() - timedelta(seconds=1)).isoformat(), late["id"]))
         db.execute("UPDATE jobs SET status='running' WHERE id=?", (late["resume_job_id"],))
     assert rules.decide(store.get(late["resume_job_id"]), bash("git push origin main")).decision == "deny"
-    # attended requests wait for the owner's approval timeout (0.12.42: a day by default; 0 = until answered)
+    # attended requests wait for the owner's approval timeout (0.12.45: a day by default; 0 = until answered)
     chat = running(store, bot, "chat")
     rules.add_rule(bot_id=bot.id, effect="ask", kind="shell", pattern="deploy", scope="attended")
     attended = rules.get(rules.decide(chat, bash("make deploy")).approval_id)

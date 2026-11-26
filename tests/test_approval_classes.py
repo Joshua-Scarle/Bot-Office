@@ -64,14 +64,14 @@ def running(store, bot, source="chat"):
     (bash("git push origin feature"), None),
     (bash("git push origin maintenance"), None),
     (bash("sudo apt-get install x"), "system"),
-    (bash("crontab -l"), None),  # 0.12.42: a read (classes judge the commands that run)
+    (bash("crontab -l"), None),  # 0.12.45: a read (classes judge the commands that run)
     (bash("crontab -r"), "system"),
     (bash("rm -rf /srv/shared/project"), "git-guard"),
     (bash("rm -rf build"), None),
     (tool("mcp__drive__trash_file", id="1"), "delete"),
     (tool("mcp__gmail__delete_draft", id="1"), "delete"),
     (tool("delete_file", path="a.txt"), None),  # Cursor's own tool, inside the workspace
-    (bash("ssh host uptime"), "remote"),  # 0.12.42: the policy's "remote" class (the Settings class is off)
+    (bash("ssh host uptime"), "remote"),  # 0.12.45: the policy's "remote" class (the Settings class is off)
     (bash("pytest -q"), None),
     (tool("Edit", file_path="a.py", old_string="x", new_string="sudo rm -rf /"), None),
 ])
@@ -95,7 +95,7 @@ def test_settings_lists_defaults_and_switches_classes(tmp_path):
     job = running(store, bot)
     # the release class is off, but the git guard is not a class: it cannot be switched off
     assert rules.decide(job, bash("git push origin main")).preset == "git-guard"
-    # 0.12.42: switching a Settings class off does not open the policy (publishing still asks)
+    # 0.12.45: switching a Settings class off does not open the policy (publishing still asks)
     assert rules.decide(job, bash("npm publish")).preset == "publish"
     assert rules.decide(job, bash("ssh host uptime")).preset == "remote"
     with pytest.raises(approval_classes.ApprovalClassError):
@@ -115,8 +115,8 @@ def test_custom_classes(tmp_path):
     assert rules.decide(job, bash("make deploy")).preset == "custom-1"
     assert rules.decide(job, tool("mcp__gcal__create_event", title="x")).preset == "custom-2"
     approval_classes.update(store, enabled={"custom-2": False}, remove=["custom-1"])
-    assert rules.decide(job, bash("make deploy")).preset == "deploy"  # 0.12.42: the policy still asks
-    # 0.12.42: a connector write (an invite goes to people) still asks under the policy
+    assert rules.decide(job, bash("make deploy")).preset == "deploy"  # 0.12.45: the policy still asks
+    # 0.12.45: a connector write (an invite goes to people) still asks under the policy
     assert rules.decide(job, tool("mcp__gcal__create_event", title="y")).preset == "connector"
     for bad in ({"label": "", "kind": "shell", "pattern": "x"}, {"label": "x", "kind": "web", "pattern": "x"},
                 {"label": "x", "kind": "shell", "pattern": "("}):

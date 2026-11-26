@@ -128,7 +128,7 @@ class DefaultBranches:
 
 
 def _fetch_visibility(api: str, owner: str, repo: str, token: str) -> str | None:
-    """0.12.42: "public", "private" or "internal" from GET /repos/<owner>/<repo>, or None."""
+    """0.12.45: "public", "private" or "internal" from GET /repos/<owner>/<repo>, or None."""
     url = f"{api.rstrip('/')}/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
                                                    "Accept": "application/vnd.github+json",
@@ -148,7 +148,7 @@ def _fetch_visibility(api: str, owner: str, repo: str, token: str) -> str | None
 
 
 class Visibility(DefaultBranches):
-    """0.12.42: cached repo visibility for git_guard.visibility_lookup (pushes to public repos ask)."""
+    """0.12.45: cached repo visibility for git_guard.visibility_lookup (pushes to public repos ask)."""
 
     def __init__(self, token: Callable[[], str | None], fetch: Callable[[str, str, str, str], str | None] | None = None,
                  api: str | None = None):
@@ -156,7 +156,7 @@ class Visibility(DefaultBranches):
 
 
 class Login:
-    """0.12.42: the GitHub login of the controller's token (GET /user), cached: the owner whose private
+    """0.12.45: the GitHub login of the controller's token (GET /user), cached: the owner whose private
     repos count as the owner's own in the approval policy (policy.owner_lookup)."""
 
     def __init__(self, token: Callable[[], str | None], api: str | None = None):

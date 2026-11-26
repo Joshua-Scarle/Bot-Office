@@ -247,7 +247,7 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
         )"""
     )
     db.execute("CREATE INDEX IF NOT EXISTS gate_log_time ON gate_log(created_at)")
-    # 0.12.42: actions the approval policy let run that the old standard rules would have carded
+    # 0.12.45: actions the approval policy let run that the old standard rules would have carded
     # (rules.Rules._audit); append-only: no row is changed or removed
     db.execute(
         """CREATE TABLE IF NOT EXISTS policy_audit (

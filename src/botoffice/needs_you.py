@@ -344,7 +344,7 @@ DIGEST_AFTER = timedelta(hours=6)
 
 
 def _approval_digest(db, bots: dict, items: list[dict]) -> None:
-    """0.12.42: once a day, one line for the cards still waiting after DIGEST_AFTER (cards now wait a
+    """0.12.45: once a day, one line for the cards still waiting after DIGEST_AFTER (cards now wait a
     day, so they do not die unseen overnight); clearing it hides it until the next day."""
     stamp = now()
     rows = db.execute("SELECT id, bot_id, preset, created_at FROM approvals WHERE status='pending' AND created_at<=? "

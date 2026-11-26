@@ -143,7 +143,7 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
-## What changed in 0.12.42
+## What changed in 0.12.45
 
 **Approvals follow the Grok Bot rule: only risky outbound, costly or irreversible actions wait for the owner.** One policy in code (`src/botoffice/policy.py`, documented in [docs/permissions.md](docs/permissions.md)) replaces the per-bot "E8 safety gate" ask rules, which matched words anywhere in a command (a `ready-to-deploy` label, "git push" in a grep or a report, `sudo` in a here-document).
 
@@ -152,8 +152,8 @@ In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS u
 - **Audit:** every allowed action the old rules would have carded is written to the append-only `policy_audit` table: `GET /v1/policy/audit` (and `GET /v1/policy`).
 - **Cards wait 24 h** (attended and unattended, configurable), a repeated action reuses its card (a timed-out one is raised again, not duplicated), and Needs-you shows a daily "Cards still waiting" line.
 - **Approval classes judge commands, not text** (`grep sudo` or `desk help 2>&1` no longer ask).
-- **Rules data:** `scripts/migrate_rules_0_12_42.py` (API only, idempotent, JSON backup) removes the E8 and Nov 26 interim ask rules from every bot except MPG DevOps (BO).
-- **Rollback:** check out the `backup/pre-0.12.42-*` tag and restart, then re-add the rules from the backup JSON; the new table is ignored by older code.
+- **Rules data:** `scripts/migrate_rules_0_12_45.py` (API only, idempotent, JSON backup) removes the E8 and Nov 26 interim ask rules from every bot except MPG DevOps (BO).
+- **Rollback:** check out the `backup/pre-0.12.45-*` tag and restart, then re-add the rules from the backup JSON; the new table is ignored by older code.
 
 ## What changed in 0.12.44
 

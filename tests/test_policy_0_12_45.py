@@ -1,4 +1,4 @@
-"""0.12.42 the Grok-Bot-style approval policy (policy.py, docs/permissions.md).
+"""0.12.45 the Grok-Bot-style approval policy (policy.py, docs/permissions.md).
 
 Reads, local work, commits, worktree merges, feature pushes to private repos, nested review runs in work
 dirs, cache cleanup and bot-to-bot messages run without a card (prose never asks); sends, posts, web
@@ -186,6 +186,11 @@ def test_a_saved_allow_cannot_open_a_locked_part_and_sudo_does_not_reroute_it(of
     assert judge(office, "curl -d x https://example.com; touch /etc/test")[0] == "ask"
     effect, preset, _ = judge(office, "sudo true; touch /etc/test")
     assert effect == "ask" and preset != "sudo-review"  # a card, never the auto-review
+
+
+def test_an_unquoted_heredoc_runs_its_substitutions(office):
+    assert judge(office, "cat >> WORKING.md <<EOF\nit's $(gh issue comment 1 -R acme/app --body x)\nEOF")[:2] == ("ask", "post")
+    assert judge(office, "cat >> WORKING.md <<'EOF'\nit's $(gh issue comment 1 -R acme/app --body x)\nEOF")[0] == "allow"
 
 
 def test_each_redirect_is_judged_where_its_command_runs(office):
@@ -402,5 +407,5 @@ def test_daily_digest_lists_cards_still_waiting(office):
 
 def test_policy_describes_itself():
     described = policy.describe()
-    assert set(described["ask"]) == set(policy.ASK_CLASSES) and described["version"] == "0.12.42"
+    assert set(described["ask"]) == set(policy.ASK_CLASSES) and described["version"] == "0.12.45"
     assert policy.slugs("MPG Data Pipeline Engineer (BO)") >= {"mpg-dpe", "mpg-data-pipeline-engineer"}

@@ -62,7 +62,7 @@ KINDS = ("shell", "path", "domain", "preset", "tool")
 SCOPES = ("attended", "unattended", "all")
 PRESETS = ("outbound", "destructive", "secrets", "network", nested_agents.PRESET)
 GRANT_HOURS = 24
-# 0.12.42: a card that timed out unanswered is raised again (not duplicated) for this long
+# 0.12.45: a card that timed out unanswered is raised again (not duplicated) for this long
 REUSE_HOURS = 72
 PASS_SECONDS = 600
 PATTERN_LIMIT = 500
@@ -695,12 +695,12 @@ class Rules:
         self.sudo = sudo_review.Reviewer(Path(store.path).parent / "sudo-review.jsonl")
         # 0.12.31: a qualifying PR merge is checked against GitHub instead of the card (auto_merge.py)
         self.auto_merge = auto_merge.Checker(Path(store.path).parent / "auto-merge.jsonl")
-        # 0.12.42: the live checkout this controller runs from (policy scope); the bots list, cached
+        # 0.12.45: the live checkout this controller runs from (policy scope); the bots list, cached
         self.live_root = os.environ.get("BOT_OFFICE_LIVE_ROOT") or str(Path(__file__).resolve().parents[2])
         self._bot_names: tuple[float, list[tuple[str, str]]] = (0.0, [])
         self._job_bots: dict[str, str | None] = {}
 
-    # --- 0.12.42: the bot's scope for the policy and the git guard ---
+    # --- 0.12.45: the bot's scope for the policy and the git guard ---
 
     def _bots(self) -> list[tuple[str, str]]:
         stamp, names = self._bot_names
@@ -740,7 +740,7 @@ class Rules:
                             own_owners=policy.own_owners())
 
     def _saved_allow(self, own: list[sqlite3.Row], action: Action, hits: list[str]) -> bool:
-        """0.12.42: an allow rule of the owner's (global or this bot's, this scope; not a preset) matches
+        """0.12.45: an allow rule of the owner's (global or this bot's, this scope; not a preset) matches
         the action: it opens a policy class (policy.OVERRIDABLE), as the owner's allow rules opened the
         approval classes before. Rules are written with the master token only."""
         return any(rule["effect"] == "allow" and rule["kind"] != "preset" and _rule_matches(rule, action, hits)
@@ -845,7 +845,7 @@ class Rules:
         sending = None if first_party else git_guard.send_reason(action.tool, action.command, action.data, action.cwd)
         if sending:
             return "ask", git_guard.SEND_KEY, f"{sending} always waits for your approval"
-        # 0.12.42: the Grok-Bot-style policy (policy.py): the risky classes ask, everything else is judged
+        # 0.12.45: the Grok-Bot-style policy (policy.py): the risky classes ask, everything else is judged
         # by the owner's own rules below; a saved allow rule for the exact command opens OVERRIDABLE classes
         verdict = policy.judge(action.tool, action.command, action.paths, action.data, scope, first_party)
         if verdict.effect == "ask" and verdict.all_keys <= policy.SUDO_ROUTED and _is_shell(action) and \
@@ -904,7 +904,7 @@ class Rules:
 
     def _sudo_route(self, job: Job, action: Action, hits: list[str]) -> tuple[str, str | None, str] | None:
         if not _is_shell(action) or not sudo_review.is_sudo(action.command) or not policy.runs_sudo(action.command):
-            return None  # 0.12.42: the word "sudo" in prose (a here-document, a grep) is not sudo
+            return None  # 0.12.45: the word "sudo" in prose (a here-document, a grep) is not sudo
         if job.source in STRICT_SOURCES or set(hits) - {"destructive"} or not job.bot_id:
             return None
         bot = self.store.get_bot(job.bot_id)
@@ -1049,10 +1049,10 @@ class Rules:
                   "BOT-OFFICE-STATUS: waiting_on_user — approval #" + str(approval))
         return Decision("deny", "ask", reason, preset, approval)
 
-    # --- 0.12.42: the append-only audit of what the policy now lets run without a card ---
+    # --- 0.12.45: the append-only audit of what the policy now lets run without a card ---
 
     def _audit(self, job: Job, provider: str, action: Action, why: str) -> None:
-        """An allowed action the pre-0.12.42 standard rules would have carded (policy.legacy_asks): one
+        """An allowed action the pre-0.12.45 standard rules would have carded (policy.legacy_asks): one
         row in policy_audit (append-only, GET /v1/policy/audit). Never raises; never blocks the action."""
         try:
             if action.tool == git_guard.PUSH_TOOL:
@@ -1247,7 +1247,7 @@ class Rules:
         with closing(self.store._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                # 0.12.42: the same action asked again (this turn or a later one of the same bot) reuses
+                # 0.12.45: the same action asked again (this turn or a later one of the same bot) reuses
                 # the card that is still waiting, and one that timed out unanswered within REUSE_HOURS is
                 # raised again instead of a duplicate (#205/#214/#220 were one gh issue comment)
                 # The card follows the latest turn that asked (approving it resumes that turn, which has the

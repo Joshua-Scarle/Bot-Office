@@ -1,4 +1,4 @@
-"""0.12.42 the approval policy (Grok-Bot style): one place that says what waits for the owner's card.
+"""0.12.45 the approval policy (Grok-Bot style): one place that says what waits for the owner's card.
 
 The owner, Nov 26 2026: "I only ask for approval for things like send emails or irreversible outbound
 actions that are risky ... or other costly or highly risky actions ... commit should never be
@@ -8,7 +8,7 @@ patterns, commit messages, report text and bot-to-bot messages are data).
 
 Order in rules.Rules.evaluate (strictest first): the secrets tripwire (never) > never rules > the git
 guard (git_guard.py: default-branch pushes, merges, force-push, deletes outside the bot's scope, repo
-settings, and since 0.12.42 any push to a public or unverified GitHub repo) > the send class (email,
+settings, and since 0.12.45 any push to a public or unverified GitHub repo) > the send class (email,
 texts, DMs) > THIS POLICY (``judge``) > the owner's own ask rules > the sudo auto-review > allow rules
 > approval classes > the strict profile (watcher runs).
 
@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 
 from . import git_guard
 
-VERSION = "0.12.42"
+VERSION = "0.12.45"
 
 # key -> (label, what it covers); every key is also the card's preset
 ASK_CLASSES: dict[str, tuple[str, str]] = {
@@ -91,7 +91,7 @@ BOT_DIR_ROOTS = ("~/bot-office-work", "~/bot-office-reports")
 _GUARDED_HOME = (".ssh", ".gnupg", ".aws", ".bashrc", ".bash_profile", ".profile", ".zshrc", ".zprofile",
                  ".bash_logout", ".gitconfig", ".config/systemd", ".config/bot-office", ".config/gh",
                  ".config/git", ".local/bin", ".grok/bin")
-_GUARDED_SYSTEM = ("/etc", "/usr", "/boot", "/opt", "/var/lib", "/var/spool", "/root", "/srv")
+_GUARDED_SYSTEM = ("/etc", "/usr", "/boot", "/opt", "/var/lib", "/var/spool", "/root")
 
 LOOPBACK = ("localhost", "127.0.0.1", "[::1]", "::1", "0.0.0.0")
 HTTP_PROGRAMS = git_guard.HTTP_PROGRAMS | {"httpie"}
@@ -298,6 +298,11 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
         text, documents = git_guard._heredocs(command) if "<<" in command else (command, [])
         for header, body in documents:
             bases = [git_guard._base(w) for part in git_guard.split_words(header)[0] for w in part]
+            opened = git_guard._HEREDOC.search(header)
+            if opened and not opened.group(2) and ("$(" in body or "`" in body):
+                # an unquoted delimiter: the shell runs the body's $( ) and backticks while writing it
+                for snippet in _substitutions(body):
+                    _merge(out, parse(snippet, scope, depth + 1))
             if any(b in git_guard.SHELLS for b in bases):
                 inner = parse(body, scope, depth + 1)
                 _merge(out, inner)
@@ -337,6 +342,26 @@ def parse(command: str, scope: Scope, depth: int = 0) -> Parsed:
         cwd = _unwrap(words, cwd, scope, out, depth)
         out.cwds.append(cwd)
     return out
+
+
+def _substitutions(body: str) -> list[str]:
+    """The $( ) and `...` commands in an unquoted here-document body (quotes mean nothing there)."""
+    found, i = [], 0
+    while i < len(body):
+        if body.startswith("$(", i):
+            stop = git_guard._balanced(body, i + 2, "(", ")")
+            found.append(body[i + 2:stop - 1])
+            i = stop
+        elif body[i] == "`":
+            stop = body.find("`", i + 1)
+            stop = len(body) if stop < 0 else stop
+            found.append(body[i + 1:stop])
+            i = stop + 1
+        elif body[i] == "\\":
+            i += 2
+        else:
+            i += 1
+    return found[:50]
 
 
 def _merge(out: Parsed, inner: Parsed) -> None:
@@ -1273,7 +1298,7 @@ E8_NOTE_PREFIXES = ("E8 safety gate", "Nov 26 interim")
 
 
 def legacy_asks(command: str, hits: list[str]) -> list[str]:
-    """Why the pre-0.12.42 standard rules (E8 per-bot ask rules, the outbound preset ask, the regex
+    """Why the pre-0.12.45 standard rules (E8 per-bot ask rules, the outbound preset ask, the regex
     approval classes) would have carded this action."""
     found = [f"preset {hit}" for hit in hits if hit in ("outbound", "nested-agent")]
     if command:

@@ -3110,7 +3110,7 @@ def create_app(
         return await asyncio.to_thread(rules_sync.run, store, scheduler.memory, settings.rules_sync_dir,
                                        only_changed=not all_files, log_dir=settings.data_dir / "logs")
 
-    # ---- 0.12.42: the approval policy and its append-only audit (master token only) ----
+    # ---- 0.12.45: the approval policy and its append-only audit (master token only) ----
     @app.get("/v1/policy", dependencies=[Depends(auth)])
     async def get_policy() -> dict:
         return {**policy_mod.describe(), "card_timeout_min": {

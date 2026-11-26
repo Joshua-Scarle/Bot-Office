@@ -1,4 +1,4 @@
-# Bot-Office permissions (0.12.42): the Grok-Bot-style approval policy
+# Bot-Office permissions (0.12.45): the Grok-Bot-style approval policy
 
 The owner, Nov 26 2026: "I only ask for approval for things like send emails or irreversible outbound
 actions that are risky ... or other costly or highly risky actions ... commit should never be blocked."
@@ -82,7 +82,7 @@ pytest`); bot-to-bot messages (`bot-msg`, `desk message`, `desk grok send --kind
 
 ## Rules data
 
-`scripts/migrate_rules_0_12_42.py` (through the API, idempotent, JSON backup in `~/backups/`) removes
+`scripts/migrate_rules_0_12_45.py` (through the API, idempotent, JSON backup in `~/backups/`) removes
 the per-bot "E8 safety gate" and "Nov 26 interim" ask rules: the policy replaces them. MPG DevOps (BO)
 is skipped on purpose (its rules are left as they were). General Worker is the template new bots copy
 rules from, so new bots start with the policy alone.
