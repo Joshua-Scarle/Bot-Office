@@ -621,3 +621,32 @@ def test_an_assignment_wake_up_gets_a_fresh_card(tmp_path):
     rules.approve(approval)
     again = rules.decide(wake, bash(ASKS))
     assert again.effect == "ask" and again.approval_id != approval
+
+
+def test_a_cancelled_resume_turn_leaves_the_card_approvable(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    resume_id = rules.approve(approval)["resume_job_id"]
+    with closing(store._connect()) as db:     # e.g. the assignment gate cancels it at claim time
+        db.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (resume_id,))
+    rules.expire()
+    item = rules.get(approval)
+    assert item["status"] == "expired" and item["resume_job_id"] is None
+    assert any("resume turn cancelled before running" in m.text for m in store.list_messages(bot.id))
+    assert rules.approve(approval)["status"] == "approved"
+
+
+def test_a_cancelled_deny_follow_up_is_reported(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    follow = rules.deny(approval)["followup_job_id"]
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (follow,))
+    rules.expire()
+    rules.expire()
+    notes = [m.text for m in store.list_messages(bot.id) if "would carry the task on" in m.text]
+    assert len(notes) == 1

@@ -1514,7 +1514,40 @@ class Rules:
             self.store.add_message(row["bot_id"], "system", (
                 f"Approval #{row['id']} timed out with no answer, so the task is stopped: {_short(row['summary'])}. "
                 "Approve the card to run it now."), source="chat")
+        count += self._reconcile_ended()
         return count
+
+    def _reconcile_ended(self) -> int:
+        """0.12.47 backstop: a resume turn that ended without using its grant by any route (cancelled before it
+        started, e.g. an assignment out of budget; failed; or finished without resume_ended) leaves the card
+        approvable again with a chat line, and a deny follow-up turn that was cancelled is reported once."""
+        stranded: list[sqlite3.Row] = []
+        lost: list[sqlite3.Row] = []
+        with closing(self.store._connect()) as db:
+            for row in db.execute("SELECT a.id, a.bot_id, a.summary, a.resume_job_id, j.status js FROM approvals a "
+                                  "JOIN jobs j ON j.id=a.resume_job_id WHERE a.status='approved' AND j.status IN "
+                                  "('cancelled','failed','succeeded','incomplete')").fetchall():
+                if db.execute("UPDATE approvals SET status='expired', decided_at=?, grant_expires_at=NULL, "
+                              "resume_job_id=NULL WHERE id=? AND status='approved' AND resume_job_id=?",
+                              (now().isoformat(), row["id"], row["resume_job_id"])).rowcount:
+                    stranded.append(row)
+            for row in db.execute("SELECT a.id, a.bot_id, a.summary, a.followup_job_id FROM approvals a JOIN jobs j "
+                                  "ON j.id=a.followup_job_id WHERE a.status='denied' AND j.status='cancelled'").fetchall():
+                if db.execute("UPDATE approvals SET followup_job_id=NULL WHERE id=? AND followup_job_id=?",
+                              (row["id"], row["followup_job_id"])).rowcount:
+                    lost.append(row)
+        for row in stranded:
+            self.store.add_message(row["bot_id"], "system", (
+                f"Approval #{row['id']}: its resume turn {row['js']} before running the approved step "
+                f"({_short(row['summary'])}). Not run; approve the card again to run it."), source="chat")
+            self.store.policy_audit_event(bot_id=row["bot_id"], job_id=row["resume_job_id"], source="resume",
+                                          tool="approval unused", summary=f"#{row['id']} {row['summary']}",
+                                          policy=f"approved, but the resume turn was {row['js']}")
+        for row in lost:
+            self.store.add_message(row["bot_id"], "system", (
+                f"Approval #{row['id']} was denied, but the turn that would carry the task on without it was "
+                "cancelled. Reply in the chat (or give the task more budget) to continue."), source="chat")
+        return len(stranded)
 
     def get(self, approval_id: int) -> dict | None:
         with closing(self.store._connect()) as db:
