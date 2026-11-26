@@ -367,8 +367,13 @@ def test_the_pre_push_hook_fails_closed(tmp_path):
     gate_file.write_text(json.dumps({"mode": "local"}))
     assert run({"BOT_OFFICE_GATE_FILE": str(gate_file)}, "garbage\n").returncode == 1
     # local mode: the default branch is not known here (no remote): a feature push goes on (fix4 #1),
-    # a push to production is refused
-    assert run({"BOT_OFFICE_GATE_FILE": str(gate_file)}).returncode == 0
+    # a push to production is refused. 0.12.45: only to a remote whose visibility is known here (a local
+    # path); a host that is not GitHub, or GitHub without the controller's lookup, is refused
+    assert run({"BOT_OFFICE_GATE_FILE": str(gate_file)}).returncode == 1
+    local = subprocess.run([sys.executable, "-I", str(hook), "origin", str(tmp_path / "remote.git")], input=line.encode(),
+                           env={**base, "BOT_OFFICE_GATE_FILE": str(gate_file)}, cwd=tmp_path, capture_output=True,
+                           timeout=90, check=False)
+    assert local.returncode == 0, local.stderr
     production = f"refs/heads/production {SHA_A} refs/heads/production {ZERO}\n"
     assert run({"BOT_OFFICE_GATE_FILE": str(gate_file)}, production).returncode == 1
     # not a Bot-Office run: only the repo's own hook (none here)

@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from . import approval_classes, attachments, auto_merge, avatars, baseline, continuation, duet_bridge, git_guard, github_access, grok_bridge, health
 from . import bot_desktops, failures, grouping, isolation, needs_you, notify, recall, safefs, team, vnc
+from . import policy as policy_mod
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -2992,6 +2993,8 @@ def create_app(
 
     # 0.12.4 fix3 #5: the git guard asks GitHub (cached) for a repo's real default branch
     git_guard.default_lookup = github_access.DefaultBranches(lambda: action_rules.github_token(settings))
+    git_guard.visibility_lookup = github_access.Visibility(lambda: action_rules.github_token(settings))
+    policy_mod.owner_lookup = github_access.Login(lambda: action_rules.github_token(settings))
     auto_merge.token_source = lambda: action_rules.github_token(settings)  # 0.12.31
 
     @app.post("/v1/agent/github-ticket")
@@ -3106,6 +3109,17 @@ def create_app(
         """Import the drop folder now (only new or changed files unless all_files; dedup applies either way)."""
         return await asyncio.to_thread(rules_sync.run, store, scheduler.memory, settings.rules_sync_dir,
                                        only_changed=not all_files, log_dir=settings.data_dir / "logs")
+
+    # ---- 0.12.45: the approval policy and its append-only audit (master token only) ----
+    @app.get("/v1/policy", dependencies=[Depends(auth)])
+    async def get_policy() -> dict:
+        return {**policy_mod.describe(), "card_timeout_min": {
+            "attended": approval_classes.timeout_min(store), "unattended": settings.approval_ttl_min},
+            "reuse_hours": action_rules.REUSE_HOURS}
+
+    @app.get("/v1/policy/audit", dependencies=[Depends(auth)])
+    async def get_policy_audit(limit: int = 200, bot_id: UUID | None = None, since: str | None = None) -> dict:
+        return {"audit": await asyncio.to_thread(rules.audit, limit, str(bot_id) if bot_id else None, since)}
 
     @app.get("/v1/approvals", dependencies=[Depends(auth)])
     async def list_approvals(status: str | None = None) -> list[dict]:

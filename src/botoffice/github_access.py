@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -123,4 +124,64 @@ class DefaultBranches:
             if len(self._cache) > 5000:
                 self._cache.clear()
             self._cache[key] = (stamp + (DEFAULT_TTL if value else UNKNOWN_TTL), value)
+        return value
+
+
+def _fetch_visibility(api: str, owner: str, repo: str, token: str) -> str | None:
+    """0.12.45: "public", "private" or "internal" from GET /repos/<owner>/<repo>, or None."""
+    url = f"{api.rstrip('/')}/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
+                                                   "Accept": "application/vnd.github+json",
+                                                   "User-Agent": "bot-office"})
+    try:
+        with urllib.request.urlopen(request, timeout=API_TIMEOUT) as response:
+            data = json.loads(response.read(1024 * 1024).decode())
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("visibility")
+    if value in ("public", "private", "internal"):
+        return value
+    private = data.get("private")
+    return "private" if private is True else "public" if private is False else None
+
+
+class Visibility(DefaultBranches):
+    """0.12.45: cached repo visibility for git_guard.visibility_lookup (pushes to public repos ask)."""
+
+    def __init__(self, token: Callable[[], str | None], fetch: Callable[[str, str, str, str], str | None] | None = None,
+                 api: str | None = None):
+        super().__init__(token, fetch or _fetch_visibility, api)
+
+
+class Login:
+    """0.12.45: the GitHub login of the controller's token (GET /user), cached: the owner whose private
+    repos count as the owner's own in the approval policy (policy.owner_lookup)."""
+
+    def __init__(self, token: Callable[[], str | None], api: str | None = None):
+        self._token = token
+        self._api = api or os.environ.get("BOT_OFFICE_GITHUB_API", "https://api.github.com")
+        self._cached: tuple[float, str | None] = (0.0, None)
+        self._lock = threading.Lock()
+
+    def __call__(self) -> str | None:
+        stamp = time.monotonic()
+        with self._lock:
+            if self._cached[0] > stamp:
+                return self._cached[1]
+        token = self._token()
+        value = None
+        if token:
+            request = urllib.request.Request(f"{self._api.rstrip('/')}/user", headers={
+                "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": "bot-office"})
+            try:
+                with urllib.request.urlopen(request, timeout=API_TIMEOUT) as response:
+                    data = json.loads(response.read(256 * 1024).decode())
+                login = data.get("login") if isinstance(data, dict) else None
+                value = login if isinstance(login, str) and re.fullmatch(r"[A-Za-z0-9-]{1,39}", login) else None
+            except (urllib.error.URLError, OSError, ValueError):
+                value = None
+        with self._lock:
+            self._cached = (stamp + (DEFAULT_TTL if value else UNKNOWN_TTL), value)
         return value
