@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import attachments, baseline as baseline_mod, context, continuation, failures, freshness, isolation, safefs
+from . import attachments, baseline as baseline_mod, context, continuation, failures, freshness, house_style, isolation, safefs
 from .assignments import BOT_ASSIGNMENTS_PER_DAY, BOT_BUDGET_MINUTES, BOT_BUDGET_TURNS, Assignments, _limit, drop_rule
 from .cron import _matches, parse_cron, to_cron_time
 from .catalog import ENGINE_LABELS
@@ -349,9 +349,9 @@ def _reply_rule(job: Job) -> str:
 
 def _base_reply_rule(job: Job) -> str:
     if job.provider in REPLY_FILE_PROVIDERS:
-        return ("Write the reply the user will see, as plain text, only to reply.txt in the current directory. "
+        return ("Write the reply the user will see, in the house style, only to reply.txt in the current directory. "
                 "Nothing else you write reaches the chat: it stays in the job log, so do not narrate your steps.")
-    return ("Your final message is the only reply the user sees; give it directly as plain text. Do not write "
+    return ("Your final message is the only reply the user sees; give it directly, in the house style. Do not write "
             "reply.txt unless the shown reply must differ from your final message. Text you write between tool "
             "calls is not shown (it stays in the job log), so do not narrate your steps.")
 
@@ -435,6 +435,8 @@ the messages above.
 
 {RULES.format(reply_rule=_reply_rule(job))}
 
+{house_style.HOUSE_STYLE}
+
 Current message:
 {job.prompt}
 """
@@ -445,7 +447,8 @@ def build_resume_prompt(job: Job) -> str:
     return f"""New turn ({_source_label(job)}). This turn runs in a new job directory \
 (the current directory). {_reply_rule(job)} Update WORKING.md there only if your tasks changed \
 (it is pre-filled with your saved copy), and memory.md only for durable facts. Rules from the start of this \
-session still apply (unfinished: end with BOT-OFFICE-STATUS: not_done|blocked|waiting_on_user — <reason>).
+session still apply (unfinished: end with BOT-OFFICE-STATUS: not_done|blocked|waiting_on_user — <reason>).\
+{house_style.resume_reminder(job.provider)}
 
 Current message:
 {job.prompt}

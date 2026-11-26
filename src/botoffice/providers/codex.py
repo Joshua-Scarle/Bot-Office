@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from .. import isolation, safefs
+from .. import house_style, isolation, safefs
 from ..catalog import DEFAULT_MODELS
 from ..compaction import COMPACT_POLICY, compact_token_limit
 from .cli import CliAdapter, Segment
@@ -89,6 +89,9 @@ class CodexAdapter(CliAdapter):
             "-c", f"model_auto_compact_token_limit={compact_token_limit()}",
             "-c", f"compact_prompt={json.dumps(COMPACT_POLICY)}",
         ]
+        # 0.12.37: the chat house style as developer instructions, so it outranks Codex's own formatting habits
+        style = (["-c", f"developer_instructions={json.dumps(house_style.HOUSE_STYLE, ensure_ascii=False)}"]
+                 if job is not None and job.bot_id is not None else [])
         if session:
             # official `codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]`; cwd is the job workspace
             return [
@@ -96,6 +99,7 @@ class CodexAdapter(CliAdapter):
                 "-m", self._job_model(job) or DEFAULT_MODELS["codex"],
                 "-c", f"model_reasoning_effort={self._job_effort(job)}",
                 *compaction,
+                *style,
                 *self._access_args(job),
                 "--skip-git-repo-check",
                 "--json",
@@ -110,6 +114,7 @@ class CodexAdapter(CliAdapter):
             "-c",
             f"model_reasoning_effort={self._job_effort(job)}",
             *(compaction if self._full_access(job) else []),
+            *style,
             *self._access_args(job),
             "--skip-git-repo-check",
             "--json",

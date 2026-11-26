@@ -189,15 +189,18 @@ def test_overlay_markdown_is_built_from_dom_nodes():
     html = HTML.read_text()
     stub = """
 class Node { constructor(tag) { this.tag = tag; this.kids = []; this.className = ""; }
-  append(...xs) { this.kids.push(...xs); } get textContent() { return this.kids.map((k) => typeof k === "string" ? k : k.textContent).join(""); }
+  append(...xs) { this.kids.push(...xs); } setAttribute() {} get lastElementChild() { return this.kids.filter((k) => typeof k !== "string").pop() || null; } get textContent() { return this.kids.map((k) => typeof k === "string" ? k : k.textContent).join(""); }
   set textContent(t) { this.kids = [t]; } }
 const document = { createElement: (t) => new Node(t) };
 function el(tag, cls, text) { const n = new Node(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; }
 const shape = (n) => typeof n === "string" ? n : [n.tag, ...n.kids.map(shape)];
 """
-    script = "\n".join([stub, _js_function(html, "mdInline"), _js_function(html, "renderMarkdown"),
+    consts = html[html.index("const MD_INLINE"):html.index("function mdSafeUrl(")] + "\n" + \
+        html[html.index("const MD_FENCE"):html.index("function mdCells(")]
+    script = "\n".join([stub, consts, *(_js_function(html, f) for f in ("mdSafeUrl", "mdLink", "mdTrimUrl", "mdText", "mdHeadingText", "mdCells", "mdTableRule")),
+                        _js_function(html, "mdInline"), _js_function(html, "renderMarkdown"),
                         'console.log(JSON.stringify(shape(renderMarkdown("**Hatch range:** <b>x</b> `a`\\n- one\\n- two\\n\\n```\\ncode\\n```"))))'])
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
     tree = json.loads(result.stdout)
     assert tree == ["div", ["p", ["strong", "Hatch range:"], " <b>x</b> ", ["code", "a"]],
-                    ["ul", ["li", "one"], ["li", "two"]], ["pre", "code"]]
+                    ["ul", ["li", "one"], ["li", "two"]], ["pre", ["code", "code"]]]
