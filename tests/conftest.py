@@ -70,3 +70,19 @@ def _github_repos_are_private(monkeypatch):
     monkeypatch.setattr(git_guard, "visibility_lookup", lambda owner, repo: "private")
     monkeypatch.setattr(github_access.Login, "__call__", lambda self: None)  # no GET /user from tests
     monkeypatch.setattr(github_access, "gh_cli_get", lambda endpoint, jq: None)  # nor the host's gh login
+
+
+@pytest.fixture
+def github_private(monkeypatch):
+    """GitHub reports every named repository private, so a named GitHub merge reaches its card (the
+    noreply-merge refusal is tested on its own in test_auto_merge.py)."""
+    from botoffice import auto_merge
+    monkeypatch.setattr(auto_merge.Checker, "private", lambda self, owner, repo: True)
+
+
+@pytest.fixture(autouse=True)
+def _sudo_secure_path(monkeypatch):
+    """The sudo review trusts bare program names only under a root-only secure_path; tests assume one
+    (test_sudo_review covers the check itself)."""
+    from botoffice import sudo_review
+    monkeypatch.setattr(sudo_review, "secure_path_ok", lambda: True)

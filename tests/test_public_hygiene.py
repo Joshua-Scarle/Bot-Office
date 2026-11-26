@@ -5,12 +5,20 @@ import importlib.util
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = "d1d2192"  # 0.11.9
+# The diff base: what was public before this release line. d1d2192 (0.11.9) no longer exists after the
+# Nov 22 history rewrite; 81161d0 (origin/master before Nov 26) is in public history and in every full
+# clone. BOT_OFFICE_HYGIENE_BASE overrides it (and must resolve). A tree that has neither (a shallow
+# clone) fails with a clear message, never a silent empty diff; BOT_OFFICE_HYGIENE_WITHOUT_GIT=1 skips.
+BASE_COMMIT = "81161d0"
+BASE_ENV = "BOT_OFFICE_HYGIENE_BASE"
+
+
 # owner-specific names (the owner, the deploy path, the owner's own bots) and internal plan references
 INTERNAL = re.compile(r"Joshua|printpilot-agentdesk|/home/\w|Printer Writing Bot|Bot-Office Lead|"
                       r"Engineer \d|\bG\d{1,2}\b|\bplan (?:\d|G\d|P\d)|\bP\d Q\d|review fix \d|\bfix \d+\b")
@@ -18,16 +26,50 @@ INTERNAL = re.compile(r"Joshua|printpilot-agentdesk|/home/\w|Printer Writing Bot
 NO_GIT_OPT_OUT = "BOT_OFFICE_HYGIENE_WITHOUT_GIT"
 
 
+class NoBase(LookupError):
+    pass
+
+
+def _git(*args: str) -> str:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _resolve(rev: str) -> str | None:
+    try:
+        return _git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}") or None
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def _base() -> str:
+    override = os.environ.get(BASE_ENV)
+    if override:
+        found = _resolve(override)
+        if not found:
+            raise NoBase(f"{BASE_ENV}={override} is not a commit in this tree")
+        return found
+    found = _resolve(BASE_COMMIT)
+    if not found:
+        raise NoBase(f"the base {BASE_COMMIT} is not in this tree (a shallow clone? fetch more history or set {BASE_ENV})")
+    return found
+
+
 def _added_lines() -> list[str]:
     try:
-        diff = subprocess.run(["git", "diff", "-U0", BASE, "--", "src", "bin", "scripts", "README.md", "docs", "tests",
+        base = _base()
+    except NoBase as exc:
+        if os.environ.get(NO_GIT_OPT_OUT) == "1":
+            pytest.skip(f"no git base ({NO_GIT_OPT_OUT}=1)")
+        pytest.fail(str(exc))
+    try:
+        diff = subprocess.run(["git", "diff", "-U0", base, "--", "src", "bin", "scripts", "README.md", "docs", "tests",
                                ":(exclude)docs/archive", ":(exclude)docs/plans",
                                ":(exclude)tests/test_public_hygiene.py"],  # this file names what it looks for
                               cwd=ROOT, capture_output=True, text=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         if os.environ.get(NO_GIT_OPT_OUT) == "1":
-            pytest.skip(f"no git history for the 0.11.9 base ({NO_GIT_OPT_OUT}=1)")
-        pytest.fail(f"cannot diff against the 0.11.9 base ({exc}); set {NO_GIT_OPT_OUT}=1 only for a build without git")
+            pytest.skip(f"no git history for the base ({NO_GIT_OPT_OUT}=1)")
+        pytest.fail(f"cannot diff against the base ({exc}); set {NO_GIT_OPT_OUT}=1 only for a build without git")
     lines, name = [], ""
     for line in diff.splitlines():
         if line.startswith("+++ "):
@@ -35,6 +77,25 @@ def _added_lines() -> list[str]:
         elif line.startswith("+"):
             lines.append(f"{name}: {line[1:]}")
     return lines
+
+
+def test_an_override_is_used_and_a_bad_one_is_an_error(monkeypatch):
+    if _resolve("HEAD") is None:
+        pytest.skip("no git history")
+    monkeypatch.setenv(BASE_ENV, "HEAD")
+    assert _base() == _resolve("HEAD")
+    monkeypatch.setenv(BASE_ENV, "0" * 40)
+    with pytest.raises(NoBase):
+        _base()
+
+
+def test_without_an_override_the_constant_is_used_and_never_a_silent_fallback(monkeypatch):
+    monkeypatch.delenv(BASE_ENV, raising=False)
+    if _resolve(BASE_COMMIT) is not None:
+        assert _base() == _resolve(BASE_COMMIT)
+    monkeypatch.setattr(sys.modules[__name__], "BASE_COMMIT", "f" * 40)  # a shallow tree without it
+    with pytest.raises(NoBase):
+        _base()
 
 
 def test_added_lines_name_no_owner_and_no_internal_plan_references():

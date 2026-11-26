@@ -7,6 +7,8 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("github_private")  # named GitHub merges reach their card
 from fastapi.testclient import TestClient
 from guard_repo import clone_workspace
 
@@ -57,7 +59,7 @@ def running(store, bot, source="chat"):
     (tool("mcp__shop__checkout", cart="1"), "purchase"),
     (tool("mcp__stripe__create_payment", amount=5), "purchase"),
     (tool("mcp__stripe__get_payment_details"), None),
-    (bash("gh pr merge 12 --squash"), "git-guard"),  # 0.12.4: the guard asks first
+    (bash("gh pr merge 12 --squash -R o/r"), "git-guard"),  # 0.12.4: the guard asks first
     (bash("npm publish"), "release"),
     (bash("git push origin main"), "git-guard"),
     (bash("git push --force origin feature"), "git-guard"),
@@ -133,7 +135,7 @@ def test_an_owner_allow_rule_beats_a_class(tmp_path):
     rules.add_rule(bot_id=bot.id, effect="allow", kind="shell", pattern=r"\bgh\s+pr\s+merge\b")
     assert rules.decide(running(store, bot), bash("npm publish")).decision == "allow"
     # 0.12.4: but no allow rule opens the git guard
-    assert rules.decide(running(store, bot), bash("gh pr merge 3")).effect == "ask"
+    assert rules.decide(running(store, bot), bash("gh pr merge 3 -R o/r")).effect == "ask"
 
 
 def test_chat_card_approve_hides_the_resume_prompt(tmp_path):

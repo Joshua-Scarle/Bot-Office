@@ -1,7 +1,10 @@
 #!/bin/sh
 # Bot Office pre-push: (1) CLI runs must never push; a human/Lead-approved push sets BO_ALLOW_PUSH=1 for that
 # one command. (2) Every commit being pushed that is not already on origin must pass the denylist check and
-# gitleaks (repo .gitleaks.toml from the main checkout). Installed by scripts/install_git_hooks.sh.
+# gitleaks (repo .gitleaks.toml from the main checkout), and (3) every author and committer email in them must
+# be a noreply address on the allowlist (check_denylist.sh --identities): never a personal address in public
+# history. This applies to every push (a hook cannot reliably know a remote's visibility; Bot Office's own
+# remote is public). Installed by scripts/install_git_hooks.sh.
 if [ "$BO_ALLOW_PUSH" != "1" ]; then
   echo "pre-push: pushing is disabled for Bot Office automation (set BO_ALLOW_PUSH=1 only with Lead approval)." >&2
   exit 1
@@ -13,6 +16,9 @@ Z=0000000000000000000000000000000000000000
 rc=0
 while read -r lref lsha rref rsha; do
   [ "$lsha" = "$Z" ] && continue   # branch delete: nothing new is published
+  # identities: the whole history being pushed, not only what the local origin/* refs lack (they can be stale,
+  # deleted on the remote, or belong to another remote); cheap, and the published history is all noreply
+  "$HOOKS/bo-check-denylist" --identities "$lsha" || { echo "pre-push: $lref blocked: a commit identity is not a noreply address" >&2; rc=1; continue; }
   "$HOOKS/bo-check-denylist" --commits "$lsha" --not --remotes=origin || { echo "pre-push: $lref blocked by the denylist check" >&2; rc=1; continue; }
   if [ ! -x "$GL" ]; then echo "pre-push: gitleaks not found; refusing (fail closed)" >&2; rc=1; continue; fi
   set -- git "$MAIN" --log-opts="$lsha --not --remotes=origin" --redact --no-banner -l error

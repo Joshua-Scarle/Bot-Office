@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("github_private")  # named GitHub merges reach their card
+
 from botoffice import slash as slash_mod
 from botoffice.domain import JobStatus
 from botoffice.providers.base import RunResult
@@ -20,7 +22,7 @@ WORK = "/srv/bots/ada/work"
 
 # chat, routine, wake-up / auto-continue, assignment, slash, plus the other sources that start a turn
 KINDS = ["chat", "routine", "wakeup", "assignment", "slash", "inbox", "trigger"]
-GIT_GUARD = ("gh pr merge 3", "git push origin main")
+GIT_GUARD = ("gh pr merge 3 -R o/r", "git push origin main")
 OUTBOUND = (("Bash", {"command": "sendmail -t < outbox/note.eml"}),
             ("mcp__gmail__send_message", {"to": "a@example.com", "body": "hi"}),
             ("Bash", {"command": "mail -s hi someone@example.com < outbox/note.txt"}))
