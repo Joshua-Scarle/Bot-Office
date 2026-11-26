@@ -42,8 +42,11 @@ on how many run at once.** The old lease pool stays as it is (jobs still get `BO
 - Idle stop: a background task (every 60 s) stops a per-bot desktop that has had no `desk` use for
   `BOT_OFFICE_DESKTOP_IDLE_MINUTES` (default 20), no running turn of its bot, and no viewer connected.
   `0` disables idle stop. After a Bot-Office restart, running desktops count as used "now" (grace).
-- Restart policy `no` (an idle-stopped desktop must stay stopped); "survives restarts" is by lazy
-  start: the next `desk` call or the owner's "Open" starts it again with its state.
+- Restart policy `no` (an idle-stopped desktop must stay stopped). A running desktop survives a
+  Bot-Office restart: `podman run`/`start` run in their own transient systemd scope
+  (`systemd-run --user --scope`), not in bot-office.service's cgroup (which systemd kills on restart;
+  found in the live test). After a reboot desktops are stopped; the next `desk` call or the owner's
+  Connect starts them again with their state.
 - Rollback: `BOT_OFFICE_DESKTOP_MODE=pool` makes `desk` inside a job use the leased pool desktop again
   (the old behaviour); the per-bot containers are left alone (not even idle-stopped).
 - Safety details (from review): container labels win over the registry file (a lost or damaged file is

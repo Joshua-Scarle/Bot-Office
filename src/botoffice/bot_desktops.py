@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
@@ -51,11 +52,25 @@ class DesktopError(Exception):
     """A desktop could not be provided. The message is shown to the bot or the owner."""
 
 
+def scope_prefix(argv: list[str], environ: dict[str, str] | None = None) -> list[str]:
+    """``podman run``/``start`` from inside bot-office.service would leave the container's conmon in the
+    service's cgroup, so every service restart would kill the desktop. In the single-user layout they run
+    in a transient systemd scope of their own instead (found in the live test). The isolated layout runs
+    podman as the bots user through the launcher, outside the controller's user manager: unchanged."""
+    env = os.environ if environ is None else environ
+    if argv[:1] not in (["run"], ["start"]) or isolation.active() or not env.get("XDG_RUNTIME_DIR"):
+        return []
+    tool = shutil.which("systemd-run")
+    return [tool, "--user", "--scope", "--quiet", "--collect", "--"] if tool else []
+
+
 async def podman(argv: list[str], timeout: float = 60.0) -> tuple[int, bytes, bytes]:
     """Run one podman command as the bots user (isolated layout) or directly."""
     options, header = isolation.exec_options()
+    scope = scope_prefix(argv)
     proc = await asyncio.create_subprocess_exec(
-        *isolation.wrap(["podman", *argv], env_stdin=True, runtime_dir=True),
+        *([*scope, shutil.which("podman") or "podman", *argv] if scope else
+          isolation.wrap(["podman", *argv], env_stdin=True, runtime_dir=True)),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         **({"stdin": asyncio.subprocess.DEVNULL} | options),
     )

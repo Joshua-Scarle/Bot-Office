@@ -409,3 +409,18 @@ def test_configured_pool_names_are_never_per_bot(tmp_path):
     run(manager.refresh())
     assert manager.bot_of("desktop-10") is None
     assert bd.Registry(tmp_path / "x.json", ("desktop-12",)).allocate(BOT_C, {}) == 10
+
+
+# ---------------------------------------------------------------- live test finding: service restarts
+def test_run_and_start_get_their_own_scope(monkeypatch):
+    monkeypatch.setattr(bd.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    env = {"XDG_RUNTIME_DIR": "/run/user/1"}
+    for verb in ("run", "start"):
+        assert bd.scope_prefix([verb, "x"], env) == ["/usr/bin/systemd-run", "--user", "--scope", "--quiet",
+                                                     "--collect", "--"]
+    for verb in ("stop", "ps", "exec"):
+        assert bd.scope_prefix([verb, "x"], env) == []
+    assert bd.scope_prefix(["start", "x"], {}) == []                     # no user manager: as before
+    monkeypatch.setattr(bd.isolation, "active", lambda: object())
+    assert bd.scope_prefix(["start", "x"], env) == []                    # isolated layout: unchanged
