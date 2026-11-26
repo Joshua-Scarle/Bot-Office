@@ -19,7 +19,7 @@ from pathlib import Path
 from uuid import UUID
 
 from . import attachments, autocontinue, baseline, continuation, failures, git_guard, isolation, needs_you, procs
-from . import freshness, house_style, safefs
+from . import freshness, house_style, rules_sync, safefs, stall_sweep
 from . import slash as slash_mod
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
@@ -50,6 +50,7 @@ PAUSE_FILE = "PAUSE"
 PAUSE_ACK_FRESH_SECONDS = 5.0  # a loop that has not passed for this long cannot vouch for the pause
 TICK_SECONDS = 1.0
 WATCHDOG_SECONDS = 60.0
+SWEEP_SECONDS = 300.0
 # a running turn this long past its timeout did not stop by itself (wait_for) and is cancelled
 HUNG_GRACE_SECONDS = 60
 MAX_INBOX_BYTES = 200_000
@@ -110,6 +111,7 @@ class Scheduler:
         self._steer_deferrals: dict[str, int] = {}
         self._last_tick = 0.0
         self._last_watchdog = 0.0
+        self._last_sweep = 0.0  # 0.12.39 stall sweep and the daily rules sync (every SWEEP_SECONDS)
         self._pause_seen = False
         self._pause_seen_at = 0.0
         self._cancel_reasons: dict[str, str] = {}
@@ -222,9 +224,33 @@ class Scheduler:
             self._read_inboxes()
             self.assignments.fire_due()
             self.watchers.tick(lambda fn: threading.Thread(target=fn, name="botoffice-poll", daemon=True).start())
+            if time.monotonic() - self._last_sweep >= SWEEP_SECONDS:
+                self._last_sweep = time.monotonic()
+                self.sweep()
         if time.monotonic() - self._last_watchdog >= WATCHDOG_SECONDS:
             self._last_watchdog = time.monotonic()
             self.watchdog()
+
+    def sweep(self) -> None:
+        """0.12.39, every SWEEP_SECONDS while not paused: the stall sweep (stall_sweep.py) and, once a day,
+        the rules sync from the drop folder (rules_sync.py). Each is model-free; a failure is logged only."""
+        try:
+            stall_sweep.sweep(self.store, self.assignments, self.settings.stall_sweep_hours,
+                              per_hour=self.settings.stall_sweep_per_hour, blocking=False, paused=self.paused)
+        except Exception:
+            log.exception("stall sweep failed")
+        try:
+            if self.settings.rules_sync_dir is not None and rules_sync.due(self.store) and not rules_sync.busy():
+                # off the loop: a large drop folder must not hold up claims or the watchdog
+                threading.Thread(target=self._rules_sync, name="botoffice-rules-sync", daemon=True).start()
+        except Exception:
+            log.exception("rules sync failed")
+
+    def _rules_sync(self) -> None:
+        try:
+            rules_sync.run(self.store, self.memory, self.settings.rules_sync_dir, log_dir=self.settings.data_dir / "logs")
+        except Exception:
+            log.exception("rules sync failed")
 
     def watchdog(self) -> None:
         """Once a minute, model-free: settle turns the loop missed, flag stalled assignments and
@@ -517,6 +543,9 @@ class Scheduler:
                 self.turns.post_agent_message(sender, target, text, data["job_id"])
             except InboxLimitError as exc:
                 log.warning("inbox file from bot %s dropped: %s", sender.id, exc)
+                # 0.12.39: a refused send is visible to its sender (a flood only fills the sender's own chat)
+                self.store.add_message(sender.id, "system", f"Message to {target.name} not sent: {exc}.",
+                                       source="inbox")
             except TurnError as exc:
                 self.store.add_message(sender.id, "system", f"Could not send message: {exc}", source="inbox")
         # Claimed bot senders require a valid bot and job binding.

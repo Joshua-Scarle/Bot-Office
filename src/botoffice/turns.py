@@ -10,7 +10,7 @@ from .catalog import default_effort, effective_effort, valid_effort
 from .config import Settings
 from .domain import Bot, Job, Message, Routine
 from .providers.base import ProviderAdapter
-from .store import InboxLimit, JobStore, now
+from .store import URGENT_PRIORITY, InboxLimit, JobStore, now
 
 
 class TurnError(Exception):
@@ -125,16 +125,20 @@ class Turns:
         bridge_hop: tuple[str, int] | None = None,
         prompt: str | None = None,
         hook: Callable[[sqlite3.Connection, Job], None] | None = None,
+        urgent: bool = False,
     ) -> tuple[Message, Job]:
         """*prompt* (default: *text*) is what the bot gets when it differs from the chat line;
-        *hook* runs inside the enqueue transaction (JobStore.enqueue_message)."""
+        *hook* runs inside the enqueue transaction (JobStore.enqueue_message). *urgent* (0.12.39, a
+        priority inbox message): claimed before every other queued turn, past the hourly inbox caps and
+        the daily-budget hold (store.URGENT_PRIORITY)."""
         provider, reason = self._validate(bot.default_provider, reason, bot)
         prompt = prompt or (f"(from {sender}) {text}" if sender else text)
         try:
             message, job = self.store.enqueue_message(
                 bot, prompt, text, reason, source, sender, routine_id, attachments,
                 routine_scan=routine_scan, notice=notice, bridge_hop=bridge_hop, hook=hook,
-                inbox_caps=self._inbox_caps() if source == "inbox" else None)
+                inbox_caps=self._inbox_caps() if source == "inbox" and not urgent else None,
+                priority=URGENT_PRIORITY if urgent else None)
         except InboxLimit as exc:
             raise InboxLimitError(str(exc)) from exc
         if provider == "claude":

@@ -110,6 +110,11 @@ AGENT_STATUS = {"succeeded": "done", "failed": "failed", "cancelled": "failed", 
 # lower runs first; chat, edit and API turns (Joshua) are 0
 STORED_ERROR_LIMIT = 2000
 SOURCE_PRIORITY = {"inbox": 2, "assignment": 2, "wakeup": 2, "routine": 3, "trigger": 3}
+# 0.12.39: a priority inbox message (desk inbox post --priority) is claimed with the owner's own chat (0),
+# ahead of every other kind of turn, oldest first. usage.budget_gate does not hold it.
+URGENT_PRIORITY = -1
+# priority messages per rolling hour, all senders together: they skip the inbox caps, so they have their own
+URGENT_HOURLY = 10
 
 
 class InboxLimit(ValueError):
@@ -1657,7 +1662,9 @@ class JobStore:
                     "WHERE active.bot_id=queued.bot_id AND active.status='running')) "
                     "AND (not_before IS NULL OR not_before <= ?) "
                     # among equal job priorities, the turn of the more urgent task goes first
-                    "ORDER BY priority, COALESCE((SELECT " + PRIORITY_RANK.format("a.") + " FROM assignments AS a "
+                    # 0.12.39: a priority message (-1) ties with the owner's own chat (0), oldest first: it jumps
+                    # all other work, but a stream of them can never starve the owner
+                    "ORDER BY MAX(priority, 0), COALESCE((SELECT " + PRIORITY_RANK.format("a.") + " FROM assignments AS a "
                     "WHERE a.id=queued.assignment_id), 2), created_at, id LIMIT 1",
                     (JobStatus.QUEUED.value, *sorted(enabled_providers), now().isoformat()),
                 ).fetchone()
@@ -2531,6 +2538,10 @@ class JobStore:
                                (cursor.isoformat(), fired.isoformat(), str(routine_id)))
                 if inbox_caps:
                     _inbox_limit(db, inbox_caps, sender=sender)
+                if priority is not None and priority < 0 and db.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE priority<0 AND created_at>=?",
+                        ((now() - timedelta(hours=1)).isoformat(),)).fetchone()[0] >= URGENT_HOURLY:
+                    raise InboxLimit(f"priority limit of {URGENT_HOURLY} messages per hour reached")
                 if bridge_hop:
                     thread_id, hop = bridge_hop
                     row = db.execute("SELECT hop FROM bridge_threads WHERE thread_id=?", (thread_id,)).fetchone()

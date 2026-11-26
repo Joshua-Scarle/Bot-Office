@@ -55,7 +55,7 @@ def messages(client, bot_id):
 
 
 def test_version_is_0_7_0():
-    assert botoffice.__version__ == "0.12.38"
+    assert botoffice.__version__ == "0.12.39"
 
 
 def test_model_choices_lists_only_signed_in_engines(settings):

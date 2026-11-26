@@ -42,7 +42,7 @@ USAGE_GROK = (
     " [--thread ID] [--from NAME]\n"
     "       desk grok install-config   # reads url and key from stdin"
 )
-USAGE_INBOX = "usage: desk inbox post --to BOT --from NAME --text TEXT [--thread ID] [--hop N]"
+USAGE_INBOX = "usage: desk inbox post --to BOT --from NAME --text TEXT [--thread ID] [--hop N] [--priority]"
 
 
 def _data_dir() -> Path:
@@ -360,8 +360,11 @@ def post_inbox(
     data_dir: Path | None = None,
     providers: dict | None = None,
     turns: Turns | None = None,
+    priority: bool = False,
 ) -> tuple[str, str]:
-    """Queue an inbound bridge message as a turn (the controller passes its own *turns*)."""
+    """Queue an inbound bridge message as a turn (the controller passes its own *turns*). A *priority*
+    one (0.12.39) always wakes the recipient: it is claimed before any other queued turn (the bot's
+    running turn still finishes first), and no hourly inbox cap or daily-budget hold stops it."""
     text = text.strip()
     sender = sender.strip()
     to = to.strip()
@@ -390,7 +393,8 @@ def post_inbox(
         try:
             # the hop is stored in the same transaction as the turn: no hop without delivery
             _message, job = turns.post_message(bot, prompt, source="inbox", sender=sender,
-                                               bridge_hop=(thread_id, incoming_hop) if thread_id else None)
+                                               bridge_hop=(thread_id, incoming_hop) if thread_id else None,
+                                               urgent=priority)
         except BridgeHopConflict:
             continue  # another message of this thread moved its hop meanwhile: recompute
         except TurnError as exc:
@@ -502,8 +506,10 @@ def desk_inbox(argv: list[str], *, data_dir: Path | None = None, environ: dict[s
     parser.add_argument("--text", required=True)
     parser.add_argument("--thread")
     parser.add_argument("--hop", type=int)
+    parser.add_argument("--priority", action="store_true")
     args = parser.parse_args(argv[1:])
-    body = {"to": args.to, "from": args.sender, "text": args.text, "thread_id": args.thread, "hop": args.hop}
+    body = {"to": args.to, "from": args.sender, "text": args.text, "thread_id": args.thread, "hop": args.hop,
+            "priority": bool(args.priority)}
     data = call_api("/v1/bridge/inbox", body, environ=environ, data_dir=data_dir)
     status, detail = str(data.get("status")), str(data.get("detail"))
     print(detail if status == "dropped" else f"{status} {detail}")
