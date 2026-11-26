@@ -198,3 +198,9 @@ def test_review_r4_edge_cases():
     assert inner(outs[2]) == "<p>Release archive (ftp://example.org/releases)</p>"
     assert 'href="https://example.org/a"' in outs[3] and "</a>)))" in outs[3]
     assert inner(outs[4]) == "<p><strong>bold</strong> still works</p>"
+
+
+def test_review_r5_bold_never_spans_another_marker():
+    outs = render("**path/** and **next**", "**a *b* c** and **d**")
+    assert inner(outs[0]).endswith("and <strong>next</strong></p>") and "<strong>path" not in outs[0]
+    assert inner(outs[1]) == "<p><strong>a <em>b</em> c</strong> and <strong>d</strong></p>"
