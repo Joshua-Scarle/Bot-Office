@@ -164,7 +164,7 @@ def _task_item(row: sqlite3.Row) -> dict:
             "assignment": row["id"], "kind": "task",
             "what": f"your task {_quoted(row)} (id {row['id'][:8]})",
             "lead_what": f"its task {_quoted(row)} (id {row['id'][:8]})",
-            "state": f"It is {state}{said}", "check": f"bot-task show {row['id'][:8]}; bot-task approvals"}
+            "state": f"It is {state}{said}", "check": f"bot-task show {row['id']}; bot-task approvals"}
 
 
 def _job_item(db: sqlite3.Connection, bot_id: str, cutoff: datetime, stamp: datetime) -> dict | None:

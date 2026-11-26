@@ -743,3 +743,18 @@ def test_round10_comments_hide_lines_and_the_retry_is_used_once(tmp_path):
     for _ in range(3):
         stall_sweep.sweep(store, asg, 3)
     assert len(_system_lines(store, owner)) == lines  # no repeated lines after the one retry
+
+
+def test_agent_routes_take_the_short_ids_bot_task_prints(settings):
+    client = TestClient(create_app(settings, {"codex": FakeAdapter(enabled=False)}))
+    with client:
+        store = client.app.state.store
+        ada = store.create_bot("Ada", "", "codex", None)
+        task = Assignments(store).create(ada.id, {"title": "t", "goal": "g"})
+        store.create("work", "codex", bot_id=ada.id, source="chat")
+        job = store.claim(["desktop-1"], {"codex"})
+        token = {"Authorization": "Bearer " + store.issue_agent_token(job)}
+        got = client.get(f"/v1/agent/assignments/{str(task.id)[:8]}", headers=token)
+        assert got.status_code == 200 and got.json()["id"] == str(task.id)
+        assert client.get("/v1/agent/assignments/abc", headers=token).status_code == 404
+        assert client.get("/v1/agent/assignments/ffffffff", headers=token).status_code == 404
