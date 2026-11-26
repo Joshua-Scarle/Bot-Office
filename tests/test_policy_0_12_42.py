@@ -150,6 +150,14 @@ ASKED = [
     ("echo hi > ~/.bashrc", "scope"),
     ("cat >> ~/bot-office-reports/mpg-lead/notes.md <<'E'\nnote\nE", "scope"),
     ("shutdown -r now", "system"),
+    # fused options, aliases and other doors (review round)
+    ("curl -sXPOST https://x.example.com/a", "http-write"),
+    ("curl -sd x=1 https://x.example.com/a", "http-write"),
+    ("gh api -XPATCH repos/Joshua-Scarle/PrintPilot/issues/comments/1 --input c.json", "post"),
+    ("git send-email --to a@b.c 0001.patch", "message"),
+    ("nc smtp.example.com 25", "remote"),
+    ("timeout 30 nohup xargs -n1 gh issue comment 5 -R Joshua-Scarle/PrintPilot --body", "post"),
+    ("sh -c \"eval 'gh issue comment 5 -R Joshua-Scarle/PrintPilot --body hi'\"", "post"),
 ]
 
 

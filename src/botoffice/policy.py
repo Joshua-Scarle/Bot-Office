@@ -419,6 +419,10 @@ def _command(cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | None:
         return _http(program, args, notes)
     if program in ("ssh", "scp", "sftp", "mosh", "sshpass", "telnet"):
         return _ask("remote", f"{program} to another machine")
+    if program in ("nc", "ncat", "netcat", "socat"):
+        hosts = [a for a in args if not a.startswith("-") and not a.isdigit()]
+        if any(h.split(":")[0].lower() not in LOOPBACK and not h.startswith(("STDIO", "STDIN", "-")) for h in hosts):
+            return _ask("remote", f"{program} to another machine")
     if program == "rsync":
         if any(re.match(r"^[^/\s]*[^/\s:]:", a) or a.startswith("rsync://") for a in args if not a.startswith("-")):
             return _ask("remote", "rsync to another machine")
@@ -476,6 +480,8 @@ def _git(args: list[str], cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict |
             continue
         i += 2 if args[i] in ("-c", "--git-dir", "--work-tree", "--namespace") else 1
     sub = args[i] if i < len(args) else ""
+    if sub in ("send-email", "imap-send", "request-pull"):
+        return _ask("message", f"git {sub} (email to people)")
     if sub in _GIT_STATE and scope.live_root:
         top = git_guard._git_out(directory, "rev-parse", "--show-toplevel") if directory else None
         live = _real(scope.live_root)
@@ -559,6 +565,17 @@ def _gh(args: list[str], cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | 
         return _ask("deploy", f"gh workflow {action}")
     if group == "api":
         return _gh_api(args, positional[1:], cmd, scope, notes, repo)
+    if group and group not in git_guard.GH_GROUPS:
+        value = git_guard._gh_alias(group)  # a gh alias: judged as what it expands to
+        if value:
+            rest = args[args.index(positional[0]) + 1:]
+            if value.startswith("!"):
+                for inner in parse(value[1:] + " " + " ".join(rest), scope, depth=3).commands:
+                    found = _command(inner, scope, notes)
+                    if found:
+                        return found
+                return None
+            return _gh([*value.split(), *rest], cmd, scope, notes)
     notes.append("network read (gh)" if group in ("pr", "issue", "run", "repo", "release", "search", "status",
                                                    "workflow", "label", "browse", "cache") else f"gh {group}")
     return None
@@ -570,7 +587,8 @@ _API_PR_FLOW = re.compile(r"^/?repos/([^/]+)/([^/]+)/(?:pulls(?:/\d+(?:/(?:revie
 
 def _gh_api(args: list[str], positional: list[str], cmd: Cmd, scope: Scope, notes: list[str],
             repo: tuple[str, str] | None) -> Verdict | None:
-    method = (_option(args, "-X") or _option(args, "--method") or "").upper()
+    method = (_option(args, "-X") or _option(args, "--method") or next(
+        (a[2:].lstrip("=") for a in args if a.startswith("-X") and len(a) > 2), "")).upper()
     fields = any(a in ("-f", "-F", "--field", "--raw-field", "--input") or a.startswith(("--field=", "--raw-field=",
                                                                                          "--input=")) for a in args)
     endpoint = positional[0] if positional else ""
@@ -639,6 +657,21 @@ def _http(program: str, args: list[str], notes: list[str]) -> Verdict | None:
                 i += 1
         elif arg.startswith("-d") and len(arg) > 2 and not arg.startswith("--"):
             body = True
+        elif program != "wget" and len(arg) > 2 and arg[0] == "-" and arg[1] != "-" and re.fullmatch(r"-[A-Za-z0-9#:]+", arg):
+            cluster = arg[1:]  # fused short options (-sXPOST, -sd, -sT): curl reads each letter
+            if "X" in cluster:
+                rest = cluster[cluster.index("X") + 1:]
+                if rest:
+                    method = rest.upper()
+                elif i + 1 < len(args):
+                    method = args[i + 1].upper()
+                    i += 1
+            elif any(letter in cluster for letter in "dFT"):
+                body = True
+                if cluster[-1] in "dFT" and i + 1 < len(args):
+                    i += 1  # its value
+            elif cluster[-1] in "HAoubcemwxrKE" and i + 1 < len(args):
+                i += 1  # the last letter takes the next word
         elif program in ("http", "https", "xh", "xhs", "httpie") and re.fullmatch(
                 r"GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS", arg, re.IGNORECASE) and not urls:
             method = arg.upper()
