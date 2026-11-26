@@ -333,6 +333,8 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
     retry = not fresh and record["strike"] >= 2 and _lead_turn_dropped(db, record)
     if not fresh and not retry and (record["strike"] >= 2 or record["last_at"] >= cutoff.isoformat()):
         return "skipped"  # this stall had both strikes (or was resolved), or its first is less than N h old
+    if retry:  # the one retry is used up now, whatever happens to it
+        db.execute("UPDATE stall_sweeps SET lead_retried=1 WHERE subject=?", (item["subject"],))
     if db.execute("SELECT COUNT(*) FROM stall_wakes WHERE at>=?",
                   ((stamp - timedelta(hours=1)).isoformat(),)).fetchone()[0] >= per_hour:
         return "cap"
@@ -385,8 +387,7 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
             db.execute("UPDATE stall_sweeps SET strike=2, last_at=? WHERE subject=?", (stamp.isoformat(), item["subject"]))
             return "skipped"
         _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h, so Bot-Office told {lead['name']}.")
-        db.execute("UPDATE stall_sweeps SET lead_job=?, lead_retried=lead_retried+? WHERE subject=?",
-                   (told, int(retry), item["subject"]))
+        db.execute("UPDATE stall_sweeps SET lead_job=? WHERE subject=?", (told, item["subject"]))
     db.execute("UPDATE stall_sweeps SET strike=2, last_at=?, lead_id=? WHERE subject=?",
                (stamp.isoformat(), lead["id"] if lead else None, item["subject"]))
     return "escalated" if told else "skipped"

@@ -109,8 +109,13 @@ _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 def _live_lines(lines: list[str]) -> list[int]:
     """Indexes of the lines outside fenced code blocks (CommonMark: a fence of 3+ backticks or tildes is
     closed only by the same character, at least as many, and nothing else on the line)."""
-    out, fence = [], None
+    out, fence, comment = [], None, False
     for index, line in enumerate(lines):
+        if fence is None and (comment or "<!--" in line):
+            # an HTML comment (hidden when the memory renders) is never live, nor is a line it touches
+            start = 0 if comment else line.index("<!--")
+            comment = "-->" not in line[start + (0 if comment else 4):]
+            continue
         found = _FENCE.match(line)
         if found and found.group(1)[0] == "`" and "`" in line.strip()[len(found.group(1)):]:
             found = None  # a backtick fence's info string has no backticks: this line is text (CommonMark)
@@ -122,8 +127,8 @@ def _live_lines(lines: list[str]) -> list[int]:
         elif found and found.group(1)[0] == fence[0] and len(found.group(1)) >= len(fence) \
                 and not line.strip()[len(found.group(1)):].strip():
             fence = None
-    if fence is not None:
-        raise ValueError("memory.md ends inside an unclosed code block; close it, then the rules sync again")
+    if fence is not None or comment:
+        raise ValueError("memory.md ends inside an unclosed code block or comment; close it, then the rules sync again")
     return out
 
 

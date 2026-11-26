@@ -718,3 +718,28 @@ def test_round9_dropped_lead_turn_retried_once_and_backtick_text(tmp_path):
     after, _ = rules_sync.merge("", keep)
     after, what = rules_sync.merge(after, dict(keep, id="retention"))
     assert what == "added" and after.count("Keep logs") == 2
+
+
+def test_round10_comments_hide_lines_and_the_retry_is_used_once(tmp_path):
+    rule = {"id": "c", "when": "2026-11-21", "source": "s", "text": "New", "moment": None}
+    memory = "<!--\n" + rules_sync.SECTION + "\n-->\n"
+    after, what = rules_sync.merge(memory, rule)
+    assert what == "added" and after.startswith(memory) and after.rstrip().endswith("[rule:c] New")
+    with pytest.raises(ValueError, match="comment"):
+        rules_sync.merge("<!-- open\n- x\n", rule)
+    store, asg = _store(tmp_path)
+    owner = store.create_bot("QA Tester (BO)", "", "claude", None)
+    lead = store.create_bot("QA Lead (BO)", "", "claude", None)
+    _started_task(store, asg, owner, 9)
+    stall_sweep.sweep(store, asg, 3)
+    _finish_all(store, owner)
+    _age_sweeps(store, 4)
+    assert stall_sweep.sweep(store, asg, 3)["escalated"] == 1
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET status='cancelled' WHERE bot_id=? AND status='queued'", (str(lead.id),))
+        db.execute("UPDATE bots SET chat_only=1 WHERE id=?", (str(lead.id),))
+    stall_sweep.sweep(store, asg, 3)
+    lines = len(_system_lines(store, owner))
+    for _ in range(3):
+        stall_sweep.sweep(store, asg, 3)
+    assert len(_system_lines(store, owner)) == lines  # no repeated lines after the one retry
