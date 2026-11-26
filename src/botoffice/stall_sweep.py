@@ -360,9 +360,15 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
     else:
         told = _wake(assignments, db, lead["id"], f"stall escalation: {bot['name']}",
                      _lead_prompt(item, bot["name"], hours, age, bool(record["woke"])), item["subject"])
-        _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h, so Bot-Office told {lead['name']}."
-              if told else f"Stall check: still no progress after {age:.0f} h; Bot-Office tried to tell "
-              f"{lead['name']}, but its wake-up did not run ({lead['name']}'s chat says why).")
+        if not told:
+            # the lead's wake-up did not run (a cap, chat-only, auto-continue off): strike 2 is tried again
+            # after another N hours, not given up
+            _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h; Bot-Office tried to tell "
+                                 f"{lead['name']}, but its wake-up did not run ({lead['name']}'s chat says why). "
+                                 f"It tries again in {hours:g} h.")
+            db.execute("UPDATE stall_sweeps SET last_at=? WHERE subject=?", (stamp.isoformat(), item["subject"]))
+            return "skipped"
+        _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h, so Bot-Office told {lead['name']}.")
     db.execute("UPDATE stall_sweeps SET strike=2, last_at=?, lead_id=? WHERE subject=?",
                (stamp.isoformat(), lead["id"] if lead else None, item["subject"]))
     return "escalated" if told else "skipped"

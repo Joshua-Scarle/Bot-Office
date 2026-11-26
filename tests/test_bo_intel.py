@@ -649,3 +649,10 @@ def test_round5_case_fences_and_same_text_ids():
     after, _ = rules_sync.merge(after, rule("Same words", "a"))
     after, what = rules_sync.merge(after, rule("Same words", "b"))
     assert what == "added" and "[rule:a] Same words" in after and "[rule:b] Same words" in after
+
+
+def test_round6_long_fences_and_retried_lead():
+    rule = {"id": "x", "when": "2026-11-21", "source": "s", "text": "New", "moment": None}
+    memory = ("````\n```\n- RULE (2026-11-20; source: s) [rule:x] Old example\n" + rules_sync.SECTION + "\n````\n")
+    after, what = rules_sync.merge(memory, rule)
+    assert what == "added" and "Old example" in after and after.rstrip().endswith("[rule:x] New")

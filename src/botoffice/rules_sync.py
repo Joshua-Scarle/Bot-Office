@@ -103,19 +103,23 @@ def note(rule: dict) -> str:
     return f"- RULE ({rule['when']}; source: {rule['source']}){mark} {rule['text']}"
 
 
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
 def _live_lines(lines: list[str]) -> list[int]:
-    """Indexes of the lines outside fenced code blocks (``` or ~~~)."""
+    """Indexes of the lines outside fenced code blocks (CommonMark: a fence of 3+ backticks or tildes is
+    closed only by the same character, at least as many, and nothing else on the line)."""
     out, fence = [], None
     for index, line in enumerate(lines):
-        mark = line.lstrip()[:3]
-        if fence is None and mark in ("```", "~~~"):
-            fence = mark
-            continue
-        if fence is not None:
-            if mark == fence:
-                fence = None
-            continue
-        out.append(index)
+        found = _FENCE.match(line)
+        if fence is None:
+            if found:
+                fence = found.group(1)
+                continue
+            out.append(index)
+        elif found and found.group(1)[0] == fence[0] and len(found.group(1)) >= len(fence) \
+                and not line.strip()[len(found.group(1)):].strip():
+            fence = None
     return out
 
 
@@ -148,10 +152,11 @@ def merge(memory: str, rule: dict) -> tuple[str, str]:
             # so a later change of the rule replaces it instead of leaving the old text behind
             lines[index] = line
             return "\n".join(lines), "changed"
-    if SECTION not in lines:
+    heading = next((index for index in live if lines[index] == SECTION), None)
+    if heading is None:  # (a copy of the heading inside a code block does not count)
         body = "\n".join(lines).rstrip("\n")
         return (body + ("\n\n" if body else "") + SECTION + "\n" + line + "\n"), "added"
-    at = lines.index(SECTION) + 1
+    at = heading + 1
     while at < len(lines) and lines[at].startswith("- RULE ("):
         at += 1
     lines.insert(at, line)

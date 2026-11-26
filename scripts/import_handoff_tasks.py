@@ -69,9 +69,9 @@ def main(argv: list[str] | None = None) -> int:
     present: set[str] = set()
     for bot_id in bots.values():
         for item in call(args.api, token, "GET", f"/v1/bots/{bot_id}/assignments?include_closed=true"):
-            goal = item.get("goal") or ""
-            if MARK in goal:
-                key = goal.rsplit(MARK, 1)[1].split()
+            last = (item.get("goal") or "").rstrip().rsplit("\n", 1)[-1]
+            if last.startswith(MARK):  # only the marker this script writes: the goal's own last line
+                key = last[len(MARK):].split()
                 if key:
                     present.add(key[0])
     created = skipped = 0
