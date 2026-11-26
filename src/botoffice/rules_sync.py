@@ -64,7 +64,18 @@ def norm(text: str) -> str:
 _PREFIX = re.compile(r"^\s*(?:[-*+]\s+)?(?:RULE\s*\([^)]{0,200}\)\s*(?:\[rule:[\w.-]{1,64}\])?\s*:?\s*)?")
 
 
+_SYNCED_TEXT = re.compile(r"^- RULE \(.*?\) \[rule:(?:-|[A-Za-z0-9][\w.-]{0,63})\] (?P<text>.*)$")
+_NOTE_LINE = re.compile(r"^\s*[-*+]\s+\S")  # a bullet note: the only kind of line a rule is compared with
+
+
 def _text_of(line: str) -> str:
+    """The note's own words: a synced note's text after its mark (its source may hold parentheses),
+    else the line without the bullet and a hand-written "RULE (...):" prefix; "" for a non-note line."""
+    synced = _SYNCED_TEXT.match(line)
+    if synced:
+        return norm(synced["text"])
+    if not _NOTE_LINE.match(line):
+        return ""
     return norm(_PREFIX.sub("", line, count=1))
 
 

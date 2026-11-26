@@ -266,7 +266,7 @@ def _wake(assignments, db: sqlite3.Connection, bot_id: str, note: str, custom: t
 
 
 def sweep(store: JobStore, assignments, hours: float, *, per_hour: int = 6, stamp: datetime | None = None,
-          blocking: bool = True) -> dict:
+          blocking: bool = True, paused=None) -> dict:
     """One pass. Returns {"woken": n, "escalated": n, "skipped": n} ("busy": True when *blocking* is False and
     another pass is running: the scheduler never waits for a manual one). One bad item never stops the pass."""
     counts = {"woken": 0, "escalated": 0, "skipped": 0}
@@ -275,18 +275,23 @@ def sweep(store: JobStore, assignments, hours: float, *, per_hour: int = 6, stam
     if not _LOCK.acquire(blocking=blocking):
         return {**counts, "busy": True}
     try:
-        return _sweep(store, assignments, hours, per_hour, stamp or now(), counts)
+        if paused is not None and paused():
+            return {**counts, "paused": True}  # checked again once the lock is held (a manual pass may wait)
+        return _sweep(store, assignments, hours, per_hour, stamp or now(), counts, paused)
     finally:
         _LOCK.release()
 
 
-def _sweep(store: JobStore, assignments, hours: float, per_hour: int, stamp: datetime, counts: dict) -> dict:
+def _sweep(store: JobStore, assignments, hours: float, per_hour: int, stamp: datetime, counts: dict,
+           paused=None) -> dict:
     cutoff = stamp - timedelta(hours=hours)
     with closing(store._connect()) as db:
         _table(db)
         db.commit()
         items = _stalls(db, cutoff, stamp)
     for item in sorted(items, key=lambda item: item["since"]):
+        if paused is not None and paused():
+            break  # PAUSE appeared during the pass: nothing more is woken
         with closing(assignments._tx()) as db:
             try:
                 cfg = _config_db(db)  # the leads map and exclude list as they are now, in this transaction

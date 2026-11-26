@@ -186,8 +186,9 @@ def test_priority_inbox_post_wakes_first_past_caps(settings):
         grok_bridge.post_inbox(to="Idle", text="again", sender="Grok", turns=turns)
     status, job_id = grok_bridge.post_inbox(to="Idle", text="wake now", sender="Grok", turns=turns, priority=True)
     assert status == "queued" and _priority(store, job_id) == URGENT_PRIORITY
-    first = store.claim(["desktop-1"], {"codex"})
-    assert str(first.id) == job_id  # ahead of the earlier inbox turn and another bot's owner chat
+    first, second = store.claim(["desktop-1"], {"codex"}), store.claim(["desktop-2"], {"codex"})
+    assert first.bot_id == other.id  # the owner's older chat first (a tie, oldest first)
+    assert str(second.id) == job_id  # then the priority message, ahead of the earlier inbox turn
 
 
 def test_priority_turn_skips_the_budget_hold(settings, monkeypatch):
@@ -602,3 +603,35 @@ def test_escalation_without_a_lead_counts_as_skipped(tmp_path):
     assert stall_sweep.sweep(store, asg, 3) == {"woken": 0, "escalated": 0, "skipped": 1}
     assert any("no section lead" in line for line in _system_lines(store, bot))
     assert stall_sweep.sweep(store, asg, 3, blocking=False)["skipped"] == 1
+
+
+def test_round4_sources_with_parentheses_headings_and_owner_chat_ties(tmp_path, settings):
+    store = JobStore(tmp_path / "db.sqlite3")
+    bot = store.create_bot("Web Lead (BO)", "", "claude", None)
+    memory = Memory(tmp_path / "data")
+    memory.write_bot(bot.id, "## Deploy\nparagraph\n")
+    folder = tmp_path / "drop"
+    folder.mkdir()
+    rules = folder / "web-lead-bo.md"
+    rules.write_text("- [2026-11-21 | Ops (EMEA)] Keep logs.\n- [2026-11-21 | x | id=dep] ## Deploy\n")
+    rules_sync.run(store, memory, folder)
+    rules.write_text("- [2026-11-22 | Ops (EMEA)] Keep logs.\n- [2026-11-21 | x | id=dep] ## Deploy\n")
+    rules_sync.run(store, memory, folder)
+    text = memory.read_bot(bot.id)
+    assert text.count("Keep logs.") == 1 and text.startswith("## Deploy\nparagraph\n")
+    # a priority message ties with the owner's chat (oldest first) instead of starving it
+    store2 = JobStore(settings.data_dir / "jobs.sqlite3")
+    turns = Turns(store2, settings, {"codex": FakeAdapter()})
+    a, b = store2.create_bot("A", "", "codex", None), store2.create_bot("B", "", "codex", None)
+    chat = store2.create("owner first", "codex", bot_id=a.id, source="chat")
+    turns.post_message(b, "urgent later", source="inbox", sender="G", urgent=True)
+    assert store2.claim(["desktop-1"], {"codex"}).id == chat.id
+
+
+def test_manual_sweep_stops_when_paused(tmp_path):
+    store, asg = _store(tmp_path)
+    bot = store.create_bot("Ada", "", "claude", None)
+    _started_task(store, asg, bot, 9)
+    assert stall_sweep.sweep(store, asg, 3, paused=lambda: True) == {"woken": 0, "escalated": 0, "skipped": 0,
+                                                                     "paused": True}
+    assert not _wake_jobs(store, bot)

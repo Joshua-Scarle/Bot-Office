@@ -2927,7 +2927,7 @@ def create_app(
         if scheduler.paused():
             raise HTTPException(status_code=409, detail="paused (data/PAUSE): nothing is woken")
         return await asyncio.to_thread(stall_sweep.sweep, store, scheduler.assignments, settings.stall_sweep_hours,
-                                       per_hour=settings.stall_sweep_per_hour)
+                                       per_hour=settings.stall_sweep_per_hour, paused=scheduler.paused)
 
     @app.post("/v1/rules-sync/run", dependencies=[Depends(auth)])
     async def run_rules_sync(all_files: bool = False) -> dict:
