@@ -433,7 +433,7 @@ def test_daily_digest_lists_cards_still_waiting(office):
 
 def test_policy_describes_itself():
     described = policy.describe()
-    assert set(described["ask"]) == set(policy.ASK_CLASSES) and described["version"] == "0.12.45"
+    assert set(described["ask"]) == set(policy.ASK_CLASSES) and described["version"] == "0.12.47"
     assert policy.slugs("MPG Data Pipeline Engineer (BO)") >= {"mpg-dpe", "mpg-data-pipeline-engineer"}
 
 
