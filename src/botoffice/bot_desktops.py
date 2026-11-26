@@ -52,22 +52,61 @@ class DesktopError(Exception):
     """A desktop could not be provided. The message is shown to the bot or the owner."""
 
 
-def scope_prefix(argv: list[str], environ: dict[str, str] | None = None) -> list[str]:
+_scope_ok: bool | None = None   # can this controller create transient scopes? (probed once)
+
+
+async def _scopes_available(environ: dict[str, str] | None = None) -> bool:
+    """Probed once with ``systemd-run --user --scope -- true``. Without scopes, desktops still work but stop
+    when Bot-Office restarts (their state is kept): said once in the log."""
+    global _scope_ok
+    if _scope_ok is None:
+        env = os.environ if environ is None else environ
+        tool = shutil.which("systemd-run")
+        ok = False
+        if tool and env.get("XDG_RUNTIME_DIR") and not isolation.active():
+            try:
+                probe = await asyncio.create_subprocess_exec(
+                    tool, "--user", "--scope", "--quiet", "--collect", "--", "true",
+                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL)
+                ok = await asyncio.wait_for(probe.wait(), 15) == 0
+            except (OSError, TimeoutError):
+                ok = False
+        if not ok and not isolation.active():
+            log.warning("desktops start without their own systemd scope: a Bot-Office restart stops them "
+                        "(state is kept; the next use starts them again)")
+        _scope_ok = ok
+    return _scope_ok
+
+
+def scope_prefix(argv: list[str], unit: str, available: bool) -> list[str]:
     """``podman run``/``start`` from inside bot-office.service would leave the container's conmon in the
     service's cgroup, so every service restart would kill the desktop. In the single-user layout they run
     in a transient systemd scope of their own instead (found in the live test). The isolated layout runs
     podman as the bots user through the launcher, outside the controller's user manager: unchanged."""
-    env = os.environ if environ is None else environ
-    if argv[:1] not in (["run"], ["start"]) or isolation.active() or not env.get("XDG_RUNTIME_DIR"):
+    if argv[:1] not in (["run"], ["start"]) or isolation.active() or not available:
         return []
     tool = shutil.which("systemd-run")
-    return [tool, "--user", "--scope", "--quiet", "--collect", "--"] if tool else []
+    return [tool, "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", "--"] if tool else []
+
+
+async def _stop_scope(unit: str) -> None:
+    """End an aborted run/start: stopping its scope ends podman (and a half-started container) with it."""
+    tool = shutil.which("systemctl")
+    if not tool:
+        return
+    with contextlib.suppress(OSError, TimeoutError):
+        proc = await asyncio.create_subprocess_exec(tool, "--user", "stop", f"{unit}.scope",
+                                                    stdin=asyncio.subprocess.DEVNULL,
+                                                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(proc.wait(), 30)
 
 
 async def podman(argv: list[str], timeout: float = 60.0) -> tuple[int, bytes, bytes]:
     """Run one podman command as the bots user (isolated layout) or directly."""
     options, header = isolation.exec_options()
-    scope = scope_prefix(argv)
+    unit = f"bo-desktop-{argv[0]}-{uuid.uuid4().hex[:12]}"
+    scope = scope_prefix(argv, unit, await _scopes_available()) if argv[:1] in (["run"], ["start"]) else []
     proc = await asyncio.create_subprocess_exec(
         *([*scope, shutil.which("podman") or "podman", *argv] if scope else
           isolation.wrap(["podman", *argv], env_stdin=True, runtime_dir=True)),
@@ -77,16 +116,22 @@ async def podman(argv: list[str], timeout: float = 60.0) -> tuple[int, bytes, by
     try:
         out, err = await asyncio.wait_for(proc.communicate(header) if header else proc.communicate(), timeout)
     except TimeoutError:
+        if scope:
+            await _stop_scope(unit)
         proc.terminate() if isolation.active() else proc.kill()
         await proc.wait()
         return 124, b"", b"timed out"
     except asyncio.CancelledError:
         # never leave a podman command running past its caller (a stop guard or the lock would be released
-        # while it still acts): end it and wait for it, then let the cancellation through
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate() if isolation.active() else proc.kill()
+        # while it still acts): end it (its scope too) and wait for it, then let the cancellation through
+        async def end() -> None:
+            if scope:
+                await _stop_scope(unit)
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate() if isolation.active() else proc.kill()
+            await proc.wait()
         with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.shield(proc.wait())
+            await asyncio.shield(end())
         raise
     return proc.returncode or 0, out, err
 

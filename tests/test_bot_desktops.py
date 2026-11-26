@@ -412,15 +412,39 @@ def test_configured_pool_names_are_never_per_bot(tmp_path):
 
 
 # ---------------------------------------------------------------- live test finding: service restarts
-def test_run_and_start_get_their_own_scope(monkeypatch):
+def test_run_and_start_get_their_own_named_scope(monkeypatch):
     monkeypatch.setattr(bd.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(bd.isolation, "active", lambda: None)
-    env = {"XDG_RUNTIME_DIR": "/run/user/1"}
     for verb in ("run", "start"):
-        assert bd.scope_prefix([verb, "x"], env) == ["/usr/bin/systemd-run", "--user", "--scope", "--quiet",
-                                                     "--collect", "--"]
+        assert bd.scope_prefix([verb, "x"], "bo-desktop-u1", True) == [
+            "/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect", "--unit=bo-desktop-u1", "--"]
+        assert bd.scope_prefix([verb, "x"], "u", False) == []          # probe said no: direct, as before
     for verb in ("stop", "ps", "exec"):
-        assert bd.scope_prefix([verb, "x"], env) == []
-    assert bd.scope_prefix(["start", "x"], {}) == []                     # no user manager: as before
+        assert bd.scope_prefix([verb, "x"], "u", True) == []
     monkeypatch.setattr(bd.isolation, "active", lambda: object())
-    assert bd.scope_prefix(["start", "x"], env) == []                    # isolated layout: unchanged
+    assert bd.scope_prefix(["start", "x"], "u", True) == []             # isolated layout: unchanged
+
+
+def test_scope_probe_once_and_warns(monkeypatch, caplog):
+    monkeypatch.setattr(bd, "_scope_ok", None)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    monkeypatch.setattr(bd.shutil, "which", lambda name: None)
+    assert run(bd._scopes_available({"XDG_RUNTIME_DIR": "/run/user/1"})) is False
+    assert "without their own systemd scope" in caplog.text
+    monkeypatch.setattr(bd.shutil, "which", lambda name: "/bin/true")   # would succeed now, but probed once
+    assert run(bd._scopes_available({"XDG_RUNTIME_DIR": "/run/user/1"})) is False
+
+
+def test_aborted_scoped_start_stops_its_scope(monkeypatch):
+    import sys
+    stopped = []
+    monkeypatch.setattr(bd, "_scope_ok", True)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    monkeypatch.setattr(bd, "scope_prefix", lambda argv, unit, ok: [sys.executable, "-c",
+                                                                    "import time; time.sleep(30)", "--"])
+
+    async def fake_stop(unit):
+        stopped.append(unit)
+    monkeypatch.setattr(bd, "_stop_scope", fake_stop)
+    code, _, _ = run(bd.podman(["start", "x"], 0.5))
+    assert code == 124 and stopped and stopped[0].startswith("bo-desktop-start-")
