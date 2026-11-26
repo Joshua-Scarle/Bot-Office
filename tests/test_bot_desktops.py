@@ -519,3 +519,18 @@ def test_double_cancel_waits_for_cleanup(monkeypatch):
             state["cancelled_after_stop"] = state.get("stopped", False)
     run(main())
     assert state["cancelled_after_stop"] is True
+
+
+def test_aborted_start_by_id_is_found_and_stopped(monkeypatch):
+    calls = []
+
+    async def once(argv, timeout, scoped):
+        calls.append(argv)
+        if argv[0] == "ps":
+            assert argv[3] == "id=abc123def"
+            return 0, json.dumps([{"Names": ["desktop-12"], "Id": "abc123def456", "State": "running", "Ports": [],
+                                   "Labels": {bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_A}}]).encode(), b""
+        return 0, b"", b""
+    monkeypatch.setattr(bd, "_podman_once", once)
+    run(bd._stop_if_ours("abc123def"))
+    assert calls[-1] == ["stop", "--time", "5", "abc123def456"]

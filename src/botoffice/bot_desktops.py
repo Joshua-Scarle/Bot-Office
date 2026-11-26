@@ -122,20 +122,24 @@ def scope_prefix(argv: list[str], unit: str, available: bool) -> list[str]:
     return [tool, "--user", "--scope", "--quiet", "--collect", f"--unit={unit}", "--"] if tool else []
 
 
-async def _stop_if_ours(name: str) -> None:
-    """After an aborted run/start: stop that container by id, and only if it is labelled as a per-bot desktop
-    (never a container someone else created under the same name meanwhile)."""
-    code, out, _ = await podman(["ps", "-a", "--filter", f"name=^{name}$", "--format", "json"], 15)
+async def _stop_if_ours(target: str) -> None:
+    """After an aborted run (target = name) or start (target = container id): stop that container by id, and
+    only if it is labelled as a per-bot desktop (never one someone else created under the same name)."""
+    by_id = number_of(target) is None and target.isalnum()
+    code, out, _ = await podman(["ps", "-a", "--filter", f"id={target}" if by_id else f"name=^{target}$",
+                                 "--format", "json"], 15)
     try:
-        found = parse_ps(out).get(name) if not code else None
+        listed = parse_ps(out).values() if not code else ()
     except ValueError:
-        found = None
+        listed = ()
+    found = next((c for c in listed if (c.id.startswith(target) if by_id else c.name == target)), None)
     if found is None or not found.bot_id or not found.id:
         return
     if found.running:
         code, _, _ = await podman(["stop", "--time", "5", found.id], 30)
         if code:
-            log.warning("could not stop %s after an aborted command; it counts toward the cap until stopped", name)
+            log.warning("could not stop %s after an aborted command; it counts toward the cap until stopped",
+                        found.name)
 
 
 def _target(argv: list[str]) -> str | None:
