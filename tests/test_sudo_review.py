@@ -459,3 +459,19 @@ def test_secure_path_ok_reads_sudo_and_checks_every_directory(monkeypatch, tmp_p
         raise OSError("no sudo")
     monkeypatch.setattr(sudo_review.subprocess, "run", boom)
     assert sudo_review.REAL_SECURE_PATH_OK() is False
+
+
+
+@pytest.mark.parametrize("command", ["sudo /usr/bin/wc --files0-from=/etc/x -c", "sudo du --files0-from=/etc/x",
+                                     "sudo dmesg -F /etc/x", "sudo findmnt --tab-file /etc/x",
+                                     "sudo journalctl --file=/etc/x", "sudo journalctl -D /etc", "sudo ls --file x"])
+def test_tools_that_read_a_named_file_keep_the_card(command):
+    assert sudo_review.hard_stop(command)
+
+
+def test_secure_path_needs_every_ancestor_root_only(tmp_path):
+    assert sudo_review._root_only("/usr/bin")
+    assert not sudo_review._root_only(str(tmp_path / "bin"))  # under a directory the bot owns
+    link = tmp_path / "link"
+    link.symlink_to("/usr/bin")
+    assert not sudo_review._root_only(str(link))  # the symlink itself sits in a bot-owned directory

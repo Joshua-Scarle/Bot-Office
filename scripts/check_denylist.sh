@@ -34,7 +34,11 @@ NOREPLY_RE='^([0-9]+\+)?[a-z0-9]([a-z0-9-]{0,38})(\[bot\])?@users\.noreply\.gith
 if [ "${1:-}" = "--identities" ]; then
   shift; [ $# -gt 0 ] || die "--identities needs a revision range" 2
   XA="${BO_PUSH_IDENTITY_ALLOWLIST:-$HOME/.config/bot-office/push-identity-allowlist.txt}"
-  extra=""; [ -r "$XA" ] && extra=$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$XA" | tr 'A-Z' 'a-z' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  extra=""; [ -r "$XA" ] && extra=$({ grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$XA" || true; } | tr 'A-Z' 'a-z' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  # a graft or a shallow boundary would hide ancestors from the walk below: refuse (fail closed)
+  gf=$(git rev-parse --git-path info/grafts 2>/dev/null || echo "")
+  [ -n "$gf" ] && [ -s "$gf" ] && die "this repository has grafts ($gf); refusing (they can hide commits)" 3
+  [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ] && die "a shallow repository cannot show every commit; refusing" 3
   for rev in "$@"; do  # every annotated tag in a chain (a tag of a tag ...) carries its own tagger email
     case "$rev" in -*) continue;; esac
     obj="$rev"; depth=0
@@ -49,7 +53,9 @@ if [ "${1:-}" = "--identities" ]; then
       te=$(printf '%s\n' "$tline" | sed -n 's/^tagger [^<>]* <\([^<>]*\)>.*/\1/p' | tr 'A-Z' 'a-z')
       printf '%s\n' "$te" | grep -qxE "$NOREPLY_RE" || { [ -n "$extra" ] && printf '%s\n' "$extra" | grep -qxF -- "$te"; } \
         || die "BLOCKED: tag $rev: a tagger email is not a noreply address on the allowlist" 1
+      [ "$(printf '%s\n' "$header" | grep -c '^object ')" = 1 ] || die "BLOCKED: tag $rev: not exactly one object line" 1
       obj=$(printf '%s\n' "$header" | sed -n 's/^object //p')
+      printf '%s\n' "$obj" | grep -qxE '[0-9a-f]{40}|[0-9a-f]{64}' || die "BLOCKED: tag $rev: a malformed object line" 1
     done
   done
   out=$(git log --no-color --format='%H%x09%ae%x09%ce' "$@") || die "cannot list the commits ($*); refusing (fail closed)" 3

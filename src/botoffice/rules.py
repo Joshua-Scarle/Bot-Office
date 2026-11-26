@@ -940,9 +940,13 @@ class Rules:
         confirms is private; a public one, an unknown one or one the command does not name is refused
         (merge locally with a noreply identity and push fast-forward instead)."""
         if action.command:
+            guarded = ""
             if not auto_merge.github_merge(action.command):
-                return None
-            targets = auto_merge.merge_targets(action.command)
+                # the git guard reads bodies, files and escapes: its own GitHub-merge and GraphQL findings count
+                guarded = git_guard.classify(action.tool, action.command, action.data, action.cwd) or ""
+                if not re.search(r"GitHub merge|merging a pull request|GraphQL", guarded):
+                    return None
+            targets = auto_merge.merge_targets(action.command) if not guarded else None
         else:
             name = (action.tool or "").lower()
             if "merge" not in name or not any(word in name for word in ("pull", "pr_", "_pr", "request")):

@@ -504,7 +504,9 @@ def test_an_unwritable_log_keeps_the_card(tmp_path):
 
 
 def test_no_credential_refuses_the_merge(tmp_path, monkeypatch):
+    from botoffice import git_guard
     monkeypatch.setattr(auto_merge, "token_source", None)
+    monkeypatch.setattr(git_guard, "visibility_lookup", None)  # nor the host's gh login
     store, job = make(tmp_path)
     assert Rules(store).decide(job, bash(f"{MERGE} 7 --repo acme/widgets {PIN}")).effect == "never"
 
@@ -538,3 +540,53 @@ def test_owner_ask_rule_keeps_the_card(tmp_path):
     rules.add_rule(bot_id=None, effect="ask", kind="shell", pattern="gh pr merge*")
     decision = rules.decide(job, bash(f"{MERGE} 7 --repo acme/widgets {PIN}"))
     assert (decision.decision, decision.effect) == ("deny", "ask")
+
+
+def test_the_shared_visibility_lookup_answers_first(monkeypatch):
+    from botoffice import git_guard
+    checker_ = auto_merge.Checker(None)
+    monkeypatch.setattr(git_guard, "visibility_lookup", lambda owner, repo: "public")
+    assert checker_.private("acme", "widgets") is False
+    monkeypatch.setattr(git_guard, "visibility_lookup", lambda owner, repo: "internal")
+    assert checker_.private("acme", "widgets") is True
+    monkeypatch.setattr(git_guard, "visibility_lookup", lambda owner, repo: None)
+    monkeypatch.setattr(auto_merge, "token_source", None)
+    assert checker_.private("acme", "widgets") is None  # nobody knows: a GitHub merge is refused
+
+
+
+@pytest.mark.parametrize("command", [
+    "curl -X POST https://api.github.com/graphql -d '{\"query\":\"mutation{merge" + chr(92) + "u0050ullRequest(input:{})}\"}'",
+    "curl -X POST https://api.github.com/graphql --data @/srv/q.json",
+    "gh api -X PUT repos/acme/widgets/pulls/7/m%65rge",
+])
+def test_encoded_or_hidden_github_merges_are_refused(tmp_path, command):
+    store, job = make(tmp_path)
+    rules = checker(Rules(store), fake_github(ready_pr()))
+    decision = rules.decide(job, bash(command))
+    assert (decision.decision, decision.effect) == ("deny", "never"), command
+
+
+def test_a_local_merge_is_not_a_github_merge(tmp_path):
+    store, job = make(tmp_path)
+    rules = checker(Rules(store), fake_github(ready_pr()))
+    assert rules._github_merge_refused(rules_parse(bash("git merge --ff-only feature"))) is None
+    assert rules._github_merge_refused(rules_parse(bash("gh api graphql -f query='query { viewer { login } }'"))) is None
+
+
+def rules_parse(event):
+    from botoffice.rules import parse_event
+    return parse_event(event)
+
+
+@pytest.mark.parametrize("line", ["Tested: untested", "Tested: unverified", "Tested: not yet", "Tested: will run later",
+                                  "Tested: wasn't run", "Tested: CI red"])
+def test_negative_test_claims_do_not_count(tmp_path, line):
+    comments = [note("writer-bot", f"Written-by: claude {SHA12}\n{line} {SHA12}"),
+                note("review-bot", f"Reviewed-by: codex {SHA12}")]
+    _card(tmp_path, fake_github(ready_pr(), comments=comments), "Tested")
+
+
+@pytest.mark.parametrize("base", ["release_2026", "production_hotfix", "release-1.2", "prod"])
+def test_release_like_bases_keep_the_card(tmp_path, base):
+    _card(tmp_path, fake_github(ready_pr(base={"ref": base})), "it merges into")

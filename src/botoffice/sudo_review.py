@@ -157,14 +157,14 @@ def is_sudo(command: str) -> bool:
 # sec-fixes rounds 2-3: only these programs, run under sudo, ever reach the model; anything else (an
 # unknown binary such as /tmp/helper, an interpreter, an editor, env, find, sed ...) keeps the card.
 SUDO_PROGRAMS = frozenset({
-    "true", "test", "id", "whoami", "ls", "wc", "stat", "du", "df", "free",
-    "uptime", "dmesg", "ps", "ss", "lsof", "lsblk", "findmnt", "journalctl",
+    "true", "test", "id", "whoami", "ls", "stat", "df", "free", "uptime", "ps", "ss", "lsof", "lsblk", "journalctl",
     "apt", "apt-get", "apt-cache", "systemctl", "service", "nginx",
 })
 # Root file writes (tee, cp, mv, ln, install, chmod, chown, chgrp, mkdir, touch) and root file *reads* of content
 # (cat, head, tail, grep, file, less ...) are NOT on the list: a path check cannot see a symlink made a moment
 # earlier (/srv/link -> /etc, /tmp/report -> /etc/shadow), so they always get the owner's card. Metadata tools
-# (ls, stat, du, wc) and logs (journalctl, the owner's "reading logs or system state") stay.
+# (ls, stat, df) and logs (journalctl, the owner's "reading logs or system state") stay; wc and du (--files0-from),
+# dmesg (-F) and findmnt (--tab-file) read a named file's content, so they are off the list too.
 _WRITERS = frozenset({"chown", "chgrp", "chmod", "mkdir", "touch", "tee", "cp", "mv", "ln", "install"})
 _BIN_DIRS = ("/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/")
 _SUDO_OK_OPTIONS = frozenset({"-n", "--non-interactive", "-k", "--reset-timestamp", "--"})
@@ -187,14 +187,25 @@ _SECURE_PATH: list[bool] = []  # cached answer of secure_path_ok (one sudo -n -l
 
 
 def _root_only(directory: str) -> bool:
-    try:
-        info = os.stat(directory)
-    except FileNotFoundError:
-        parent = os.path.dirname(directory.rstrip("/")) or "/"
-        return parent != directory and _root_only(parent)  # creating it needs a root-only parent
-    except OSError:
-        return False
-    return info.st_uid == 0 and not info.st_mode & 0o022
+    """True when *directory* (as written and as resolved) and every ancestor of it are owned by root and
+    not group or world writable, so no other user can replace any part of the path; a missing part
+    only needs its existing ancestors to be root-only."""
+    for path in {os.path.abspath(directory), os.path.realpath(directory)}:
+        current = path
+        while True:
+            try:
+                info = os.lstat(current)
+            except FileNotFoundError:
+                info = None
+            except OSError:
+                return False
+            if info is not None and (info.st_uid != 0 or info.st_mode & 0o022 and not os.path.islink(current)):
+                return False
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    return True
 
 
 def secure_path_ok() -> bool:
@@ -277,6 +288,9 @@ def _argument_stop(name: str, words: list[str], unsafe_cwd: bool, bare: str) -> 
             return "a systemctl action outside the review list"
         if any(word.startswith("-") and word not in ("--no-pager", "-l", "--full", "--now", "-q", "--quiet") for word in words):
             return "a systemctl option outside the review list"
+    if any(re.match(r"--?(?:files0-from|file|tab-file|from|directory|root|image|merge|output|cursor-file)\b", word)
+           or (name in ("journalctl", "lsof") and re.fullmatch(r"-[A-Za-z]*[DiT]\w*", word)) for word in words):
+        return f"a {name} option that names a file or directory to read"
     if name == "nginx" and any(word not in ("-t", "-v", "-V", "-q", "-s", "reload", "reopen", "stop", "quit")
                                for word in words):
         return "an nginx option outside the review list"

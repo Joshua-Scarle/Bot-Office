@@ -105,7 +105,8 @@ COMMENTS_QUERY = ("query($owner: String!, $name: String!, $number: Int!, $after:
                   "name: $name) { pullRequest(number: $number) { comments(first: 100, after: $after) { pageInfo { "
                   "hasNextPage endCursor } nodes { author { login } createdAt lastEditedAt includesCreatedEdit body } } } } }")
 _NEGATIVE = re.compile(r"\b(no|not|none|n/?a|never|todo|tbd|fail\w*|skip\w*|pending|didn'?t|won'?t|unknown|"
-                       r"partial\w*|broken|errors?)\b|\?")
+                       r"partial\w*|broken|errors?|un(?:tested|reviewed|verified|checked|run|approved)|without|"
+                       r"missing|incomplete|wip|draft|later|soon|disabled|flaky|nope|\w+n't|blocked|red)\b|\?")
 
 # set by the API at start-up (like git_guard.default_lookup): () -> the controller's GitHub token
 token_source: Callable[[], str | None] | None = None
@@ -186,12 +187,19 @@ def _unexpanded(command: str) -> str:
     return text
 
 
+def _decoded(command: str) -> str:
+    """*command* with JSON/Python \\uXXXX / \\xXX escapes and URL %XX escapes decoded (merge\\u0050ullRequest)."""
+    text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), command or "")
+    text = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), text)
+    return urllib.parse.unquote(text)
+
+
 def github_merge(command: str) -> bool:
     """True when *command* (or a tool name) may ask GitHub itself to merge a pull request: as written,
     with quoting removed, or with any shell expansion taken as empty."""
     if not isinstance(command, str):
         return False
-    texts = (command, _bare(command), _unexpanded(command))
+    texts = (command, _bare(command), _unexpanded(command), _decoded(command), _decoded(_bare(command)))
     if any(_GITHUB_MERGE.search(text) for text in texts):
         return True
     # an expansion could supply the missing word: "$G pr merge", "gh p$X merge"
@@ -468,7 +476,7 @@ def _judge(pr: dict, checks: list, statuses: dict, comments: list, owner: str, r
     if not isinstance(pr.get("base"), dict) or not isinstance(pr.get("head"), dict):
         return "GitHub gave no base or head branch"
     base = str(pr["base"].get("ref") or "")
-    if not base or re.match(r"^(release|releases|prod|production)\b", base.lower()):
+    if not base or re.match(r"^(release|releases|prod|production)(?![a-z0-9])", base.lower()):
         return f"it merges into {base or 'an unknown branch'}"
     head = str(pr["head"].get("sha") or "")
     if not _SHA.fullmatch(head) or not sha or head != sha.lower():
@@ -588,7 +596,16 @@ class Checker:
         raise ValueError("too many pages")
 
     def private(self, owner: str, repo: str) -> bool | None:
-        """True only when GitHub says the repository is private; False public; None unknown."""
+        """True only when GitHub says the repository is private (or internal); False public; None unknown.
+        The controller's shared, cached lookup (git_guard.repo_visibility: the token, else the host's gh
+        login, and BOT_OFFICE_PUBLIC_REPOS) answers first; a swapped-in ``fetch`` (tests) is asked itself."""
+        if self._fetch is None:
+            from . import git_guard
+            known = git_guard.repo_visibility(owner, repo)
+            if known in ("private", "internal"):
+                return True
+            if known == "public":
+                return False
         try:
             info = self._read(f"/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}")
         except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError):

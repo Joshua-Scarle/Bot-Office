@@ -92,6 +92,35 @@ def test_an_annotated_tag_with_a_personal_tagger_is_refused(repo):
     assert check(repo, "v2").returncode == 0
 
 
+def test_an_empty_extra_allowlist_is_fine(repo, tmp_path):
+    extra = tmp_path / "allow.txt"
+    extra.write_text("# nothing yet\n\n")
+    assert check(repo, "HEAD", extra=extra).returncode == 0
+
+
+def test_grafts_and_shallow_repositories_are_refused(repo, tmp_path):
+    first = git(repo, "rev-parse", "HEAD").stdout.strip()
+    second = commit(repo, "y", "noreply@anthropic.com")
+    grafts = repo / ".git" / "info" / "grafts"
+    grafts.parent.mkdir(exist_ok=True)
+    grafts.write_text(second + "\n")
+    assert check(repo, "HEAD").returncode == 3
+    grafts.unlink()
+    shallow = tmp_path / "shallow"
+    git(tmp_path, "clone", "-q", "--depth", "1", f"file://{repo}", str(shallow))
+    assert check(shallow, "HEAD").returncode == 3
+    assert first
+
+
+def test_a_tag_with_two_object_lines_is_refused(repo):
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    raw = (f"object {head}\ntype commit\ntag v8\ntagger N <noreply@github.com> 1 +0000\nobject {head}\n\nm\n")
+    obj = subprocess.run(["git", "-C", str(repo), "hash-object", "-t", "tag", "-w", "--literally", "--stdin"],
+                         input=raw, capture_output=True, text=True, check=True).stdout.strip()
+    done = check(repo, obj)
+    assert done.returncode == 1 and "object line" in done.stderr
+
+
 def test_a_bad_range_fails_closed(repo):
     assert check(repo, "no-such-ref").returncode == 3
 
