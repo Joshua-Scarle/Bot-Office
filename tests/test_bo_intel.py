@@ -450,9 +450,11 @@ def test_sweep_rechecks_cancelled_wakes_busy_leads_and_resolved_turns(tmp_path, 
     with closing(store._connect()) as db:
         db.execute("UPDATE assignments SET status='active' WHERE id=?", (str(task.id),))
         db.execute("UPDATE bots SET chat_only=1 WHERE id=?", (str(owner.id),))
-    assert stall_sweep.sweep(store, asg, 3, per_hour=1)["woken"] == 1
+    assert stall_sweep.sweep(store, asg, 3, per_hour=1)["woken"] == 0  # struck, but no turn was queued
     with closing(store._connect()) as db:
         assert db.execute("SELECT COUNT(*) FROM stall_wakes").fetchone()[0] == 0
+        assert tuple(db.execute("SELECT strike, woke FROM stall_sweeps").fetchone()) == (1, 0)
+    assert any("wake-up did not run" in line for line in _system_lines(store, owner))
     _age_sweeps(store, 4)
     store.create("busy", "claude", bot_id=lead.id, source="chat")  # a busy lead is asked later
     assert stall_sweep.sweep(store, asg, 3)["escalated"] == 0
@@ -508,3 +510,59 @@ def test_rules_sync_dedup_is_exact_and_only_replaces_its_own_notes(tmp_path):
     text = memory.read_bot(bot.id)
     assert "- my note about [rule:deploy] ids" in text and "Never use staging." in text
     assert "] Use staging." in text or "Use staging.\n" in text
+
+
+def test_round2_hard_link_ids_in_text_ambiguous_names_and_lookback(tmp_path):
+    # a hard-linked memory.md is not a plain note write
+    gate, job = _gate(tmp_path)
+    ws = tmp_path / "ws2"
+    ws.mkdir()
+    (tmp_path / "outside").write_text("x")
+    import os
+    os.link(tmp_path / "outside", ws / "memory.md")
+    command = f"cat >> memory.md <<'EOF'\n{NOTE}EOF"
+    assert memory_note_command(Action(tool="Bash", command=command, cwd=str(ws), workspace=str(ws))) is None
+    # a [rule:x] inside a rule's text is not its id
+    store = JobStore(tmp_path / "rs.sqlite3")
+    bot = store.create_bot("Engineering Lead (BO)", "", "claude", None)
+    store.create_bot("Engineering Lead", "", "claude", None)
+    memory = Memory(tmp_path / "data")
+    folder = tmp_path / "drop"
+    folder.mkdir()
+    (folder / "x.md").write_text("bot: Engineering Lead (BO)\n- [2026-11-21 | Lead (BO) cards | id=a] See [rule:b] too.\n"
+                                 "- [2026-11-21 | Lead (BO) cards | id=b] Second.\n")
+    assert rules_sync.run(store, memory, folder)["files"][0]["added"] == 2
+    again = rules_sync.run(store, memory, folder, only_changed=False)["files"][0]
+    assert again["present"] == 2 and memory.read_bot(bot.id).count("- RULE (") == 2
+    (folder / "engineering-lead.md").write_text("- [2026-11-21 | x] y\n")
+    entries = {e["file"]: e for e in rules_sync.run(store, memory, folder)["files"]}
+    assert "several bots" in entries["engineering-lead.md"]["error"]
+    # a stall already struck is followed past the 72 h lookback
+    store2, asg = _store(tmp_path / "s")
+    owner = store2.create_bot("MPG Site Tester (BO)", "", "claude", None)
+    store2.create_bot("MPG Lead (BO)", "", "claude", None)
+    old = store2.create("work", "claude", bot_id=owner.id, source="chat")
+    with closing(store2._connect()) as db:
+        db.execute("UPDATE jobs SET status='failed', finished_at=? WHERE id=?",
+                   ((now() - timedelta(hours=60)).isoformat(), str(old.id)))
+    assert stall_sweep.sweep(store2, asg, 48)["woken"] == 1
+    _finish_all(store2, owner)
+    with closing(store2._connect()) as db:
+        db.execute("UPDATE jobs SET finished_at=? WHERE id=?", ((now() - timedelta(hours=100)).isoformat(), str(old.id)))
+    _age_sweeps(store2, 49)
+    assert stall_sweep.sweep(store2, asg, 48)["escalated"] == 1
+
+
+def test_a_user_wakeup_named_stall_is_still_a_turn(tmp_path):
+    store, asg = _store(tmp_path)
+    bot = store.create_bot("Ada", "", "claude", None)
+    failed = store.create("work", "claude", bot_id=bot.id, source="chat")
+    later = store.create("stall review", "claude", bot_id=bot.id, source="wakeup")
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET status='failed', finished_at=?, created_at=? WHERE id=?",
+                   ((now() - timedelta(hours=6)).isoformat(), (now() - timedelta(hours=7)).isoformat(), str(failed.id)))
+        db.execute("UPDATE jobs SET status='succeeded', finished_at=? WHERE id=?",
+                   ((now() - timedelta(hours=5)).isoformat(), str(later.id)))
+        db.execute("INSERT INTO wakeups (id,bot_id,note,status,created_at,job_id) VALUES ('w1',?,'stall review','fired',?,?)",
+                   (str(bot.id), now().isoformat(), str(later.id)))
+    assert stall_sweep.sweep(store, asg, 3)["woken"] == 0

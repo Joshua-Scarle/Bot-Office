@@ -470,7 +470,10 @@ def _note_target_ok(target: str, action: Action) -> bool:
         return True
     except OSError:
         return False
-    return stat.S_ISREG(info.st_mode)
+    # a regular file with no other name (a hard link would carry the note elsewhere). A bot that swaps the
+    # file for a link between this check and the write gains nothing it lacks: plain writes inside its own
+    # workspace never ask, so the link itself and an echo through it would not either.
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
 
 
 def memory_note_command(action: Action) -> str | None:

@@ -236,7 +236,7 @@ class Scheduler:
         the rules sync from the drop folder (rules_sync.py). Each is model-free; a failure is logged only."""
         try:
             stall_sweep.sweep(self.store, self.assignments, self.settings.stall_sweep_hours,
-                              per_hour=self.settings.stall_sweep_per_hour)
+                              per_hour=self.settings.stall_sweep_per_hour, blocking=False)
         except Exception:
             log.exception("stall sweep failed")
         try:

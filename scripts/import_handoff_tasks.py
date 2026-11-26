@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -56,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     spec = json.loads(Path(args.spec).read_text())
     keys = [task["key"] for task in spec["tasks"]]
+    bad = [key for key in keys if not re.fullmatch(r"[A-Za-z0-9][\w.-]{0,79}", str(key))]
+    if bad:
+        print(f"ERROR: keys must be letters, digits, '_', '.' or '-': {bad}", file=sys.stderr)
+        return 2
     if len(keys) != len(set(keys)):
         print(f"ERROR: duplicate keys in the spec: {sorted({k for k in keys if keys.count(k) > 1})}", file=sys.stderr)
         return 2
@@ -66,7 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         for item in call(args.api, token, "GET", f"/v1/bots/{bot_id}/assignments?include_closed=true"):
             goal = item.get("goal") or ""
             if MARK in goal:
-                present.add(goal.rsplit(MARK, 1)[1].split()[0])
+                key = goal.rsplit(MARK, 1)[1].split()
+                if key:
+                    present.add(key[0])
     created = skipped = 0
     for task in spec["tasks"]:
         if task["bot"] not in bots:

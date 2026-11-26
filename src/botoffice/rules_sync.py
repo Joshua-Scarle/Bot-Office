@@ -46,7 +46,9 @@ _RULE = re.compile(
     r"^\s*[-*]\s*\[\s*(?P<date>\d{4}-\d{2}-\d{2})(?:[ T](?P<time>\d{1,2}:\d{2})(?:\s*ET)?)?\s*\|\s*(?P<source>[^|\]]{1,200}?)"
     r"\s*(?:\|\s*id\s*=\s*(?P<id>[A-Za-z0-9][\w.-]{0,63})\s*)?\]\s*(?P<text>\S.*?)\s*$")
 _BOT = re.compile(r"^\s*bot\s*:\s*(?P<name>.+?)\s*$", re.IGNORECASE)
-_ID_MARK = re.compile(r"\[rule:([A-Za-z0-9][\w.-]{0,63})\]")
+# the id of a note this sync wrote: the first "[rule:key]" right after its "RULE (...)" metadata (a source never
+# holds "]", and the rule text comes after the mark, so a "[rule:x]" inside the text is never taken for its id)
+_SYNCED_ID = re.compile(r"^- RULE \(.*?\) \[rule:([A-Za-z0-9][\w.-]{0,63})\] ")
 
 
 def slug(text: str) -> str:
@@ -95,13 +97,14 @@ def merge(memory: str, rule: dict) -> tuple[str, str]:
     if rule["id"]:
         for index, existing in enumerate(lines):
             # only a note this sync wrote ("- RULE (" ... "[rule:key]") is ever replaced
-            if existing.startswith("- RULE (") and rule["id"] in _ID_MARK.findall(existing):
+            found = _SYNCED_ID.match(existing)
+            if found and found.group(1) == rule["id"]:
                 if norm(existing) == norm(line):
                     return memory, "present"
                 lines[index] = line
                 return "\n".join(lines), "changed"
-    wanted = norm(rule["text"])
-    if any(wanted and wanted == _text_of(existing) for existing in lines):
+    wanted, whole = norm(rule["text"]), norm(line)
+    if any(norm(existing) == whole or (wanted and wanted == _text_of(existing)) for existing in lines):
         return memory, "present"
     if SECTION not in lines:
         body = "\n".join(lines).rstrip("\n")
@@ -122,12 +125,16 @@ def _state(store: JobStore) -> dict:
 
 
 def _find_bot(store: JobStore, name: str | None, stem: str):
+    """The bot a file names: its ``bot:`` line, else the one bot whose name slug is the file name (or the
+    file name + "-bo"); two candidates is an error, never a guess."""
     if name:
         return store.find_bot(name)
-    for bot in store.list_bots():
-        if slug(bot.name) in (stem, slug(stem)) or slug(bot.name) == slug(stem) + "-bo":
-            return bot
-    return None
+    exact = [bot for bot in store.list_bots() if slug(bot.name) == slug(stem)]
+    twins = [bot for bot in store.list_bots() if slug(bot.name) == slug(stem) + "-bo"]
+    found = exact or twins
+    if len(found) > 1 or (exact and twins):
+        raise ValueError(f"the file name {stem!r} matches several bots; add a 'bot: <name>' line")
+    return found[0] if found else None
 
 
 def run(store: JobStore, memory, folder: Path | None, *, only_changed: bool = True, log_dir: Path | None = None) -> dict:

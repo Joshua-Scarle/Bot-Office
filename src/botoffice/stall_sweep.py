@@ -59,7 +59,8 @@ def _table(db: sqlite3.Connection) -> None:
     db.execute("CREATE TABLE IF NOT EXISTS stall_sweeps (subject TEXT PRIMARY KEY, bot_id TEXT NOT NULL, "
                "marker TEXT NOT NULL, strike INTEGER NOT NULL, last_at TEXT NOT NULL, lead_id TEXT, "
                "woke INTEGER NOT NULL DEFAULT 0, wake_job TEXT)")
-    db.execute("CREATE TABLE IF NOT EXISTS stall_wakes (at TEXT NOT NULL, subject TEXT NOT NULL, bot_id TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS stall_wakes (at TEXT NOT NULL, subject TEXT NOT NULL, bot_id TEXT NOT NULL, "
+               "job_id TEXT)")
 
 
 def config(store: JobStore) -> dict:
@@ -141,7 +142,7 @@ def _when(stamp: str) -> str:
     return to_cron_time(datetime.fromisoformat(stamp)).strftime("%-d %b %-I:%M %p ET")
 
 
-_OWN_TURN = "id NOT IN (SELECT job_id FROM wakeups WHERE note LIKE 'stall %' AND job_id IS NOT NULL)"
+_OWN_TURN = "id NOT IN (SELECT job_id FROM stall_wakes WHERE job_id IS NOT NULL)"  # the sweep's own turns, by id
 
 
 def _task_item(row: sqlite3.Row) -> dict:
@@ -165,8 +166,10 @@ def _job_item(db: sqlite3.Connection, bot_id: str, cutoff: datetime, stamp: date
         return None
     ended = job["finished_at"] or job["created_at"]
     oldest = (stamp - timedelta(hours=LOOKBACK_HOURS)).isoformat()
-    if not ended or ended >= cutoff.isoformat() or ended < oldest:
+    if not ended or ended >= cutoff.isoformat():
         return None
+    if ended < oldest and not db.execute("SELECT 1 FROM stall_sweeps WHERE subject=?", (f"job:{job['id']}",)).fetchone():
+        return None  # the lookback only limits new stalls; one already struck is followed to its end
     if job["assignment_id"]:
         task = db.execute("SELECT status FROM assignments WHERE id=?", (job["assignment_id"],)).fetchone()
         if task is not None and task["status"] not in CLOSED_STATUSES:
@@ -248,36 +251,45 @@ def _wake(assignments, db: sqlite3.Connection, bot_id: str, note: str, custom: t
     if not assignments._fire(db, row, custom=custom):
         return None
     job_id = db.execute("SELECT job_id FROM wakeups WHERE id=?", (wakeup_id,)).fetchone()[0]
-    db.execute("INSERT INTO stall_wakes (at,subject,bot_id) VALUES (?,?,?)", (now().isoformat(), subject, bot_id))
+    db.execute("INSERT INTO stall_wakes (at,subject,bot_id,job_id) VALUES (?,?,?,?)",
+               (now().isoformat(), subject, bot_id, job_id))
     return job_id
 
 
-def sweep(store: JobStore, assignments, hours: float, *, per_hour: int = 6, stamp: datetime | None = None) -> dict:
-    """One pass. Returns {"woken": n, "escalated": n, "skipped": n}. One bad item never stops the pass."""
+def sweep(store: JobStore, assignments, hours: float, *, per_hour: int = 6, stamp: datetime | None = None,
+          blocking: bool = True) -> dict:
+    """One pass. Returns {"woken": n, "escalated": n, "skipped": n} ("busy": True when *blocking* is False and
+    another pass is running: the scheduler never waits for a manual one). One bad item never stops the pass."""
     counts = {"woken": 0, "escalated": 0, "skipped": 0}
     if hours <= 0:
         return counts
-    stamp = stamp or now()
+    if not _LOCK.acquire(blocking=blocking):
+        return {**counts, "busy": True}
+    try:
+        return _sweep(store, assignments, hours, per_hour, stamp or now(), counts)
+    finally:
+        _LOCK.release()
+
+
+def _sweep(store: JobStore, assignments, hours: float, per_hour: int, stamp: datetime, counts: dict) -> dict:
     cutoff = stamp - timedelta(hours=hours)
     cfg = config(store)
-    with _LOCK:  # a manual run and the scheduler's never interleave
-        with closing(store._connect()) as db:
-            _table(db)
-            db.commit()
-            skipped = _skipped_bots(db, cfg)
-            items = _stalls(db, cutoff, stamp)
-        for item in sorted(items, key=lambda item: item["since"]):
-            with closing(assignments._tx()) as db:
-                try:
-                    done = _step(assignments, db, item, cfg, skipped, hours, per_hour, stamp, cutoff)
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                    log.exception("stall sweep failed for %s", item["subject"])
-                    done = "skipped"
-            if done == "cap":
-                break
-            counts[done] += 1
+    with closing(store._connect()) as db:
+        _table(db)
+        db.commit()
+        items = _stalls(db, cutoff, stamp)
+    for item in sorted(items, key=lambda item: item["since"]):
+        with closing(assignments._tx()) as db:
+            try:
+                done = _step(assignments, db, item, cfg, _skipped_bots(db, cfg), hours, per_hour, stamp, cutoff)
+                db.commit()
+            except Exception:
+                db.rollback()
+                log.exception("stall sweep failed for %s", item["subject"])
+                done = "skipped"
+        if done == "cap":
+            break
+        counts[done] += 1
     return counts
 
 
@@ -303,14 +315,16 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
             db.execute("UPDATE assignments SET stalled_at=COALESCE(stalled_at, ?), dismissed_at=NULL WHERE id=?",
                        (stamp.isoformat(), item["assignment"]))
             assignment_event(db, item["assignment"], "stalled", f"no progress for {age:.0f} h; owner woken")
-        _line(db, bot["id"], f"Stall check: {what} has had no progress for {age:.0f} h, so Bot-Office woke "
-                             f"{bot['name']} to look at it.")
         job_id = _wake(assignments, db, bot["id"], "stall check", _owner_prompt(item, hours, age), item["subject"])
+        _line(db, bot["id"], f"Stall check: {what} has had no progress for {age:.0f} h, so Bot-Office woke "
+                             f"{bot['name']} to look at it." if job_id else
+                             f"Stall check: {what} has had no progress for {age:.0f} h; the wake-up did not run "
+                             "(the line above says why). The section lead hears about it next.")
         db.execute("INSERT INTO stall_sweeps (subject,bot_id,marker,strike,last_at,woke,wake_job) VALUES (?,?,?,1,?,?,?) "
                    "ON CONFLICT(subject) DO UPDATE SET marker=excluded.marker, strike=1, last_at=excluded.last_at, "
                    "lead_id=NULL, woke=excluded.woke, wake_job=excluded.wake_job",
                    (item["subject"], bot["id"], item["marker"], stamp.isoformat(), int(job_id is not None), job_id))
-        return "woken"
+        return "woken" if job_id else "skipped"
     if item["kind"] == "job" and record["wake_job"]:
         woke = db.execute("SELECT status, outcome FROM jobs WHERE id=?", (record["wake_job"],)).fetchone()
         if woke is not None and woke["status"] == "succeeded" and (woke["outcome"] or "").startswith("done"):
@@ -325,9 +339,11 @@ def _step(assignments, db: sqlite3.Connection, item: dict, cfg: dict, skipped: s
         _line(db, bot["id"], f"Stall check: still no progress on {what} after {age:.0f} h, and no section lead "
                              "is set to tell (PUT /v1/stall-sweep leads).")
     else:
-        _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h, so Bot-Office told {lead['name']}.")
-        _wake(assignments, db, lead["id"], f"stall escalation: {bot['name']}",
-              _lead_prompt(item, bot["name"], hours, age, bool(record["woke"])), item["subject"])
+        told = _wake(assignments, db, lead["id"], f"stall escalation: {bot['name']}",
+                     _lead_prompt(item, bot["name"], hours, age, bool(record["woke"])), item["subject"])
+        _line(db, bot["id"], f"Stall check: still no progress after {age:.0f} h, so Bot-Office told {lead['name']}."
+              if told else f"Stall check: still no progress after {age:.0f} h; Bot-Office tried to tell "
+              f"{lead['name']}, but its wake-up did not run ({lead['name']}'s chat says why).")
     db.execute("UPDATE stall_sweeps SET strike=2, last_at=?, lead_id=? WHERE subject=?",
                (stamp.isoformat(), lead["id"] if lead else None, item["subject"]))
     return "escalated"
