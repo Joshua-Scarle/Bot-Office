@@ -46,6 +46,16 @@ HOUSE_STYLE_REMINDER = ("Reply in the house style: warm, plain conversational pr
                         "1-2 sentences, no headers, no bold labels or \"Label: value\" lines, lists only for "
                         "parallel items, no filler closing.")
 
+# engines that get HOUSE_STYLE as a system instruction on every turn, resumed ones included (Claude's
+# --append-system-prompt, Codex's developer_instructions); the others get the reminder in each resumed turn
+SYSTEM_STYLE_PROVIDERS = frozenset({"claude", "codex"})
+
+
+def resume_reminder(provider: str) -> str:
+    """The resumed-turn reminder (with its leading space), empty where the system prompt already has it."""
+    return "" if provider in SYSTEM_STYLE_PROVIDERS else " " + HOUSE_STYLE_REMINDER
+
+
 # a reply up to this size counts as "short" for the leading-header rule
 SHORT_REPLY_CHARS = 1500
 
