@@ -6,7 +6,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from .. import team
+from .. import house_style, team
 from ..compaction import COMPACT_POLICY, compact_token_limit
 from .cli import CliAdapter
 
@@ -103,6 +103,9 @@ class ClaudeAdapter(CliAdapter):
         mcp = team.mcp_config(job, sys.executable, str(TEAM_MCP))
         if mcp:
             args += ["--mcp-config", json.dumps(mcp), "--allowedTools", *team.allowed_tools(job)]
+        if job is not None and job.bot_id is not None:
+            # 0.12.36: the chat house style outranks Claude Code's own formatting habits (headers, bold labels)
+            args += ["--append-system-prompt", house_style.HOUSE_STYLE]
         if session:
             args += ["--resume", session]
         model = self._job_model(job)

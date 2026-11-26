@@ -19,7 +19,7 @@ from pathlib import Path
 from uuid import UUID
 
 from . import attachments, autocontinue, baseline, continuation, failures, git_guard, isolation, needs_you, procs
-from . import freshness, safefs
+from . import freshness, house_style, safefs
 from . import slash as slash_mod
 from . import usage as budgets
 from .assignments import BOT_ROUTINE_MIN_GAP, Assignments
@@ -1082,6 +1082,7 @@ class Scheduler:
         # chat shows a truncated copy and says so (cut_chars); the job keeps it all (GET /v1/jobs/{id})
         cut = max(0, len(audit) - REPLY_LIMIT)
         text = audit[:REPLY_LIMIT].strip()
+        from_reply = bool(text)  # the bot's own words (not a status-only line or the log tail)
         if not text and stated[0]:
             # a reply that was only a status line: say that, never the raw log tail
             state, reason = stated
@@ -1109,6 +1110,10 @@ class Scheduler:
             log.exception("Could not collect outgoing images for job %s", job.id)
         from . import questions
         text, cards = questions.extract(text)
+        if from_reply:
+            # 0.12.36: the chat copy loses a leading header, bold labels and a filler closing (house_style);
+            # the job keeps the reply as written
+            text = house_style.tidy_reply(text)
         # The chat message and the memory write are published together under the chat
         # lock, so an edit either archived this turn first (both are skipped; the job
         # keeps the reply) or commits after both.
