@@ -1955,11 +1955,11 @@ const MD_INLINE = new RegExp([
   "<(?<auto>(?:https?:\\/\\/|mailto:)[^\\s<>]+)>",
   "(?<bare>(?<![\\w@/])(?:https?:\\/\\/|www\\.)[^\\s<>\"'`]+)",
   "\\*\\*\\*(?=\\S)(?<bi>[\\s\\S]*?\\S)\\*\\*\\*",
-  "\\*\\*(?=\\S)(?<b>[\\s\\S]*?\\S)\\*\\*",
+  "\\*\\*(?=[^\\s/])(?<b>[\\s\\S]*?[^\\s/])\\*\\*",
   "~~(?=\\S)(?<s>[\\s\\S]*?\\S)~~",
-  "(?<![*\\w/])\\*(?=[^\\s*/])(?<i>[^*\\n]*?[^\\s*/])\\*(?![*\\w])",
+  "(?<![*\\p{L}\\p{N}_/])\\*(?=[^\\s*/])(?<i>[^*\\n]*?[^\\s*/])\\*(?![*\\p{L}\\p{N}_])",
   "(?<![A-Za-z0-9_])_(?=[^\\s_])(?<u>[^_\\n]*?[^\\s_])_(?![A-Za-z0-9_])",
-].join("|"), "g");
+].join("|"), "gu");
 function mdSafeUrl(url) {
   const u = String(url || "").trim();
   if (/^www\./i.test(u)) return "https://" + u;
@@ -1967,7 +1967,11 @@ function mdSafeUrl(url) {
 }
 function mdLink(parent, label, url, plainLabel) {
   const href = mdSafeUrl(url);
-  if (!href) { mdInline(parent, label, true); return; }
+  if (!href) {  // not a web or mail link: the label and the address stay as text, never clickable
+    mdInline(parent, label, true);
+    if (label !== url) parent.append(" (" + url + ")");
+    return;
+  }
   const a = el("a", "md-link");
   a.setAttribute("href", href);
   a.setAttribute("target", "_blank");
@@ -1977,12 +1981,13 @@ function mdLink(parent, label, url, plainLabel) {
 }
 /* a bare URL's trailing punctuation belongs to the sentence; a ")" stays when the URL opened one (Foo_(bar)) */
 function mdTrimUrl(url) {
-  let u = url;
+  let end = url.length, open = 0, close = 0;
+  for (const c of url) { if (c === "(") open++; else if (c === ")") close++; }
   for (;;) {
-    const last = u.slice(-1);
-    if (/[.,;:!?\]'"]/.test(last)) u = u.slice(0, -1);
-    else if (last === ")" && (u.match(/\(/g) || []).length < (u.match(/\)/g) || []).length) u = u.slice(0, -1);
-    else return u;
+    const last = url[end - 1];
+    if (/[.,;:!?\]'"]/.test(last)) end--;
+    else if (last === ")" && open < close) { end--; close--; }
+    else return url.slice(0, end);
   }
 }
 function mdText(parent, text) {
@@ -1996,7 +2001,7 @@ function mdText(parent, text) {
 /* noLink: inside a link's label (a link never holds another link) */
 function mdInline(parent, text, noLink) {
   if (text.length > MD_INLINE_MAX) { parent.append(text); return; }  // bounds the regex work on a huge line
-  const re = new RegExp(MD_INLINE.source, "g");
+  const re = new RegExp(MD_INLINE.source, "gu");
   let last = 0, hit;
   while ((hit = re.exec(text))) {
     const g = hit.groups;

@@ -49,6 +49,7 @@ HOUSE_STYLE_REMINDER = ("Reply in the house style: warm, plain conversational pr
 # a reply up to this size counts as "short" for the leading-header rule
 SHORT_REPLY_CHARS = 1500
 
+_TICKS = re.compile(r"`+")
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 _HEADER = re.compile(r"^\s{0,3}#{1,6}\s+(\S.*)$")
 # a leading header with one of these titles says nothing on its own and is dropped; any other keeps its words
@@ -91,16 +92,21 @@ def _fenced(lines: list[str]) -> list[bool]:
 
 def _code_like(lines: list[str], fenced: list[bool]) -> list[bool]:
     """Per line: fenced code, an indented code block (4+ spaces or a tab after a blank line), or a line that
-    starts inside an inline code span opened on an earlier line of the same paragraph."""
-    out, ticks, indented, prev_blank = [], 0, False, True
+    starts inside an inline code span opened on an earlier line of the same paragraph (a span closes on a
+    backtick run of the same length)."""
+    out, span, indented, prev_blank = [], 0, False, True
     for line, fence in zip(lines, fenced):
         if fence or not line.strip():
             out.append(fence)
-            ticks, indented, prev_blank = 0, False, not line.strip()
+            span, indented, prev_blank = 0, False, not line.strip()
             continue
         indented = (indented or prev_blank) and line.startswith(("    ", "\t"))
-        out.append(indented or ticks % 2 == 1)
-        ticks += line.count("`")
+        out.append(indented or span > 0)
+        for run in _TICKS.findall(line):
+            if not span:
+                span = len(run)
+            elif len(run) == span:
+                span = 0
         prev_blank = False
     return out
 
@@ -161,9 +167,12 @@ def tidy_reply(text: str) -> str:
             lines = lines[:last]
     elif last is not None and not code[last]:
         # "It's live now. Let me know if anything looks off." loses only its last sentence
-        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", lines[last].rstrip())
-        if len(sentences) > 1 and _is_filler(sentences[-1]) and "`" not in sentences[-1]:
-            lines[last] = " ".join(sentences[:-1])
+        line = lines[last].rstrip()
+        cut = None
+        for cut in re.finditer(r"(?<=[.!?])\s+(?=[A-Z])", line):
+            pass
+        if cut is not None and _is_filler(line[cut.end():]) and "`" not in line[cut.end():]:
+            lines[last] = line[:cut.start()]  # only the closing goes; the rest stays byte for byte
 
     out = "\n".join(lines).strip("\n")
     return out if out.strip() else text

@@ -188,3 +188,13 @@ def test_review_r3_edge_cases():
     assert time.monotonic() - started < 10
     assert "<table>" not in outs[0]
     assert inner(outs[1]) == "<p>Include **/*.py</p>" and inner(outs[2]) == "<p>and src/**</p>"
+
+
+def test_review_r4_edge_cases():
+    outs = render("Copy **/*.py and **/*.js", "é*x*é and *ok*", "[Release archive](ftp://example.org/releases)",
+                  "See https://example.org/a)))", "**bold** still works")
+    assert inner(outs[0]) == "<p>Copy **/*.py and **/*.js</p>"
+    assert inner(outs[1]) == "<p>é*x*é and <em>ok</em></p>"
+    assert inner(outs[2]) == "<p>Release archive (ftp://example.org/releases)</p>"
+    assert 'href="https://example.org/a"' in outs[3] and "</a>)))" in outs[3]
+    assert inner(outs[4]) == "<p><strong>bold</strong> still works</p>"

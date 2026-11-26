@@ -111,6 +111,13 @@ def test_review_r3_cases():
     assert time.monotonic() - started < 1
 
 
+def test_review_r4_cases():
+    text = "Example: ``first line\n**Mode:** fast\n``"
+    assert tidy_reply(text) == text
+    text = "Run `printf A.  B`. Hope this helps!"
+    assert tidy_reply(text) == "Run `printf A.  B`."
+
+
 def test_huge_header_is_fast():
     import time
     started = time.monotonic()
