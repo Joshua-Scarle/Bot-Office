@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import concurrent.futures
 import contextvars
 import hashlib
 import hmac
@@ -39,6 +40,10 @@ from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("botoffice.remote")
+
+# 0.12.35 review: JWT checks (which may wait on one JWKS refresh) run on their own small pool, so a burst of
+# remote requests can never take the default executor's threads away from the rest of the app.
+_VERIFY_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="botoffice-remote-verify")
 
 CONFIG_ENV = "BOT_OFFICE_REMOTE_ACCESS_FILE"
 CONFIG_NAME = "remote_access.json"
@@ -132,7 +137,6 @@ class RemoteIdentity:
     identity: str      # lowercased email, or the service token's common name
     display_name: str
     role: str          # "owner" or "remote-client"
-    expires_at: float | None = field(default=None, compare=False)   # the JWT's exp (owner websockets close then)
 
 
 @dataclass(frozen=True)
@@ -485,7 +489,7 @@ class AccessVerifier:
                 raise AccessDenied("bad email claim")
             who = email.strip().lower()
             if who in config.owners:
-                return RemoteIdentity("user", who, who, ROLE_OWNER, float(claims["exp"]))
+                return RemoteIdentity("user", who, who, ROLE_OWNER)
             raise AccessDenied("email is not an owner")
         common = claims.get("common_name")
         if isinstance(common, str) and common:
@@ -552,7 +556,6 @@ class RemoteAccessMiddleware:
             self.loader = ConfigLoader(lambda: config_path(settings), clock)
         self.verifier = AccessVerifier(fetcher, clock)
         self.clock = clock
-        self.socket_check_seconds = CONFIG_RECHECK_SECONDS   # idle owner websockets are re-checked this often
 
     async def __call__(self, scope, receive, send):
         kind = scope["type"]
@@ -594,8 +597,8 @@ class RemoteAccessMiddleware:
             if tokens:
                 if config.team_domain is None:
                     raise AccessDenied("Cloudflare Access is not set up")
-                identity = await asyncio.to_thread(
-                    self.verifier.verify, tokens[0].decode("latin-1"), config)
+                identity = await asyncio.get_running_loop().run_in_executor(
+                    _VERIFY_POOL, self.verifier.verify, tokens[0].decode("latin-1"), config)
             else:
                 identity = check_shared_key(keys[0], config, self.clock())
         except AccessDenied as exc:
@@ -609,103 +612,30 @@ class RemoteAccessMiddleware:
 
         origin = (headers.get(b"origin") or [b""])[0].decode("latin-1")
         expected_origin = "https://" + (headers.get(b"host") or [b""])[0].decode("latin-1").strip().lower()
+        if kind == "websocket":
+            # 0.12.35 review: no remote websockets for any role (the only one is VNC). The JWT is checked at
+            # the handshake only, so a long-lived socket would outlive expiry or revocation. Fail closed.
+            log.warning("remote websocket refused (%s)", identity.display_name)
+            await self._deny(kind, send, 403, "not allowed over remote access")
+            return
         if identity.role == ROLE_CLIENT:
-            if kind == "websocket":
-                log.warning("remote client websocket refused (%s)", identity.display_name)
-                await self._deny(kind, send, 403, "not allowed for this client")
-                return
             if not route_allowed(method, scope.get("path", "")):
                 log.warning("remote client route refused: %s %s %s", identity.display_name, method, path)
                 await self._deny(kind, send, 403, "not allowed for this client")
                 return
         elif identity.role == ROLE_OWNER:
-            if (kind == "websocket" or method not in SAFE_METHODS) and origin != expected_origin:
+            if method not in SAFE_METHODS and origin != expected_origin:
                 log.warning("cross-site request refused: %s %s %s", identity.identity, method, path)
                 await self._deny(kind, send, 403, "cross-site request refused")
                 return
 
         log.info("remote %s (%s) %s %s", identity.display_name, identity.role, method, path)
         scope = _without_credentials(scope)   # the app never sees the key, the Access JWT or a token secret
-        stop = None
-        if kind == "websocket":
-            receive, send, stop = self._guard_socket(identity, receive, send)
         token = current_remote_identity.set(identity)
         try:
             await self.app(scope, receive, send)
         finally:
             current_remote_identity.reset(token)
-            if stop:
-                stop()
-
-    def _still_allowed(self, identity: RemoteIdentity) -> bool:
-        if identity.expires_at is not None and identity.expires_at <= self.clock() - CLOCK_SKEW_SECONDS:
-            return False
-        result = self.loader.get()
-        if result.state != "ok" or result.config is None:
-            return False
-        if identity.kind == "user":
-            return identity.identity in result.config.owners
-        return identity.identity in result.config.clients
-
-    def _guard_socket(self, identity: RemoteIdentity, receive, send):
-        """0.12.35 review: an owner websocket is checked before the accept, on every message, and by a
-        watchdog while idle; it is closed (1008) once the JWT expired, the owner was removed or remote
-        access was turned off or broken. App close and peer disconnect are terminal; sends are serialized."""
-        state = {"closed": False, "watch": None}
-        lock = asyncio.Lock()
-
-        async def close() -> None:
-            async with lock:
-                if state["closed"]:
-                    return
-                state["closed"] = True
-                log.warning("remote websocket closed: access no longer valid (%s)", identity.display_name)
-                await send({"type": "websocket.close", "code": 1008})
-
-        async def watch() -> None:
-            while not state["closed"]:
-                wait = self.socket_check_seconds
-                if identity.expires_at is not None:
-                    left = identity.expires_at + CLOCK_SKEW_SECONDS - self.clock()
-                    wait = max(0.0, min(wait, left + 0.01))
-                await asyncio.sleep(wait)
-                if not state["closed"] and not self._still_allowed(identity):
-                    await close()
-                    return
-
-        async def guarded_receive():
-            if state["closed"]:
-                return {"type": "websocket.disconnect", "code": 1008}
-            message = await receive()
-            if message.get("type") == "websocket.disconnect":
-                state["closed"] = True
-                return message
-            if state["closed"]:
-                return {"type": "websocket.disconnect", "code": 1008}
-            if not self._still_allowed(identity):
-                await close()
-                return {"type": "websocket.disconnect", "code": 1008}
-            return message
-
-        async def guarded_send(message):
-            kind = message.get("type")
-            if kind != "websocket.close" and not self._still_allowed(identity):
-                await close()
-                return
-            async with lock:
-                if state["closed"]:
-                    return
-                await send(message)
-                if kind == "websocket.close":
-                    state["closed"] = True
-                elif kind == "websocket.accept" and state["watch"] is None:
-                    state["watch"] = asyncio.ensure_future(watch())
-
-        def stop() -> None:
-            if state["watch"] is not None:
-                state["watch"].cancel()
-
-        return guarded_receive, guarded_send, stop
 
     @staticmethod
     async def _deny(kind: str, send, status: int, detail: str) -> None:

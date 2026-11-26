@@ -414,13 +414,16 @@ def test_owner_post_requires_exact_origin(tmp_path):
     assert status(ok) == 200
 
 
-def test_owner_websocket_needs_origin(tmp_path):
+def test_owner_websocket_refused_over_remote(tmp_path):
+    # 0.12.35 review: no remote websockets for any role, even an owner with the right Origin
     mw, probe, *_ = build(tmp_path)
     token = sign(user_claims())
-    bad = run(mw, path="/v1/desktops/desktop-1/vnc", headers=remote(token), kind="websocket")
-    assert bad == [{"type": "websocket.close", "code": 1008}]
-    good = run(mw, path="/v1/desktops/desktop-1/vnc", headers=remote(token, origin=f"https://{HOST}"), kind="websocket")
-    assert probe.seen and good == []
+    for headers in (remote(token), remote(token, origin=f"https://{HOST}")):
+        sent = run(mw, path="/v1/desktops/desktop-1/vnc", headers=headers, kind="websocket")
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+    assert not probe.seen
+    # a local websocket is untouched
+    assert run(mw, path="/v1/desktops/desktop-1/vnc", headers={"host": "127.0.0.1:8787"}, kind="websocket") == []
 
 
 def test_remote_client_allowlist(tmp_path):
@@ -721,63 +724,6 @@ def test_access_cookie_is_stripped_others_kept():
     assert ra._without_credentials(only)["headers"] == []
 
 
-def _ws(mw, headers, messages):
-    """Run a websocket through the middleware; the app echoes each client message back."""
-    sent = []
-    inbox = list(messages)
-
-    async def app(scope, receive, send):
-        await send({"type": "websocket.accept"})
-        while True:
-            msg = await receive()
-            if msg["type"] != "websocket.receive":
-                return
-            await send({"type": "websocket.send", "text": msg.get("text", "")})
-
-    mw.app = app
-    scope = {"type": "websocket", "path": "/v1/desktops/x/vnc",
-             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
-
-    async def receive():
-        if inbox:
-            item = inbox.pop(0)
-            if callable(item):
-                item()
-                return {"type": "websocket.receive", "text": "late"}
-            return item
-        return {"type": "websocket.disconnect", "code": 1000}
-
-    async def send(message):
-        sent.append(message)
-
-    asyncio.run(mw(scope, receive, send))
-    return sent
-
-
-def _owner_ws_headers(exp):
-    return remote(sign(user_claims(exp=exp)), origin=f"https://{HOST}")
-
-
-def test_owner_websocket_closes_when_jwt_expires(tmp_path):
-    mw, probe, path, clock = build(tmp_path)
-    def expire():
-        clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1
-    sent = _ws(mw, _owner_ws_headers(NOW + 600), [{"type": "websocket.receive", "text": "hi"}, expire])
-    texts = [m.get("text") for m in sent if m["type"] == "websocket.send"]
-    assert texts == ["hi"] and sent[-1] == {"type": "websocket.close", "code": 1008}
-
-
-def test_owner_websocket_closes_when_owner_removed(tmp_path):
-    mw, probe, path, clock = build(tmp_path)
-    def remove_owner():
-        path.write_text(json.dumps({**CONFIG, "owners": []}))
-        os.utime(path, ns=(1, 1_700_000_000_000_000_000))
-        clock.t += 6
-    sent = _ws(mw, _owner_ws_headers(NOW + 6000), [{"type": "websocket.receive", "text": "hi"}, remove_owner])
-    assert [m.get("text") for m in sent if m["type"] == "websocket.send"] == ["hi"]
-    assert sent[-1] == {"type": "websocket.close", "code": 1008}
-
-
 def test_jwks_fetch_runs_outside_the_lock(tmp_path):
     import threading as _t
     seen = []
@@ -789,55 +735,6 @@ def test_jwks_fetch_runs_outside_the_lock(tmp_path):
         return {"keys": [jwk("k1")]}
     cache = ra.KeyCache(TEAM, fetcher, Clock())
     assert cache.get("k1") is not None and seen == [True]
-
-
-def test_idle_owner_websocket_closed_by_watchdog(tmp_path):
-    mw, probe, path, clock = build(tmp_path)
-    mw.socket_check_seconds = 0.01
-    sent = []
-
-    async def app(scope, receive, send):
-        await send({"type": "websocket.accept"})
-        clock.t = NOW + 600 + ra.CLOCK_SKEW_SECONDS + 1     # the JWT expires while the socket is idle
-        await asyncio.sleep(0.2)
-
-    mw.app = app
-    scope = {"type": "websocket", "path": "/v1/desktops/x/vnc",
-             "headers": [(k.lower().encode(), v.encode()) for k, v in _owner_ws_headers(NOW + 600).items()]}
-
-    async def receive():
-        await asyncio.sleep(10)
-
-    async def send(message):
-        sent.append(message)
-
-    asyncio.run(mw(scope, receive, send))
-    assert sent == [{"type": "websocket.accept"}, {"type": "websocket.close", "code": 1008}]
-
-
-def test_no_second_close_after_app_closed(tmp_path):
-    mw, probe, path, clock = build(tmp_path)
-    sent = []
-
-    async def app(scope, receive, send):
-        await send({"type": "websocket.accept"})
-        await send({"type": "websocket.close", "code": 1000})
-        clock.t = NOW + 10_000
-        await receive()
-        await send({"type": "websocket.send", "text": "x"})
-
-    mw.app = app
-    scope = {"type": "websocket", "path": "/v1/desktops/x/vnc",
-             "headers": [(k.lower().encode(), v.encode()) for k, v in _owner_ws_headers(NOW + 600).items()]}
-
-    async def receive():
-        return {"type": "websocket.receive", "text": "late"}
-
-    async def send(message):
-        sent.append(message)
-
-    asyncio.run(mw(scope, receive, send))
-    assert sent == [{"type": "websocket.accept"}, {"type": "websocket.close", "code": 1000}]
 
 
 def test_jwks_cache_miss_waits_for_the_refresh_in_flight():
