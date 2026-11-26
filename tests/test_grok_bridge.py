@@ -243,8 +243,9 @@ def controller(settings, monkeypatch):
 
 def _agent_env(monkeypatch, store, bot_name):
     bot = store.find_bot(bot_name) or store.create_bot(bot_name, "", "codex", None)
-    job = store.create("turn", "codex", bot_id=bot.id)
-    store.claim(("desktop-1",), {"codex"})
+    # an engine the app has no adapter for: its scheduler cannot claim (and end) this job before the test uses it
+    job = store.create("turn", "claude", bot_id=bot.id)
+    assert store.claim(("desktop-1",), {"claude"}).id == job.id
     monkeypatch.setenv("BOT_OFFICE_AGENT_TOKEN", store.issue_agent_token(store.get(job.id)))
     monkeypatch.setenv("BOT_OFFICE_JOB_ID", str(job.id))
     monkeypatch.setenv("BOT_OFFICE_BOT_ID", str(bot.id))
