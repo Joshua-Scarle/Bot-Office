@@ -190,7 +190,9 @@ class Registry:
             owner_of[number] = bot
             if bot not in labelled or number < labelled[bot]:
                 labelled[bot] = number
-        fixed = {bot: n for bot, n in self._map.items() if owner_of.get(n, bot) == bot}
+        existing = {number_of(c.name) for c in containers.values()} - {None}
+        # keep a mapping only if its number has no container yet, or a container labelled for that same bot
+        fixed = {bot: n for bot, n in self._map.items() if n not in existing or owner_of.get(n) == bot}
         for bot, number in labelled.items():
             fixed = {b: n for b, n in fixed.items() if n != number or b == bot}
             fixed[bot] = number
@@ -362,6 +364,12 @@ class DesktopManager:
             await asyncio.sleep(0.5)
         return name
 
+    async def refresh(self) -> None:
+        """Reconcile the registry with container labels (listing and Start right after a lost registry)."""
+        async with self._lock:
+            with contextlib.suppress(DesktopError):
+                self.registry.reconcile(await self.containers())
+
     async def start(self, name: str) -> str:
         """Owner "Connect" on a stopped per-bot desktop."""
         bot = self.bot_of(name)
@@ -371,10 +379,12 @@ class DesktopManager:
 
     async def _make_room(self, name: str, containers: dict[str, Container]) -> None:
         """Called with the lock held. Stops LRU idle desktops until one more fits; fails closed."""
-        running = [n for n in self._running_ours(containers) if not self._protected(n)]
+        running = self._running_ours(containers)
         count = self._running_labelled(containers)
         while count >= self.settings.desktop_max_running:
-            victim = evict_candidate(running, name, self.last_used, self.viewers, self.busy_bots(), self.bot_of)
+            # recomputed before every stop: a reservation, viewer or turn may have appeared during the last one
+            candidates = [n for n in running if not self._protected(n)]
+            victim = evict_candidate(candidates, name, self.last_used, self.viewers, self.busy_bots(), self.bot_of)
             if victim is None:
                 raise DesktopError(f"all {self.settings.desktop_max_running} desktops are in use; try again later")
             if not await self.stop(victim, "making room"):

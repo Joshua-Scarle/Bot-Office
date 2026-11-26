@@ -318,3 +318,21 @@ def test_reaper_rechecks_busy_bots_before_each_stop(tmp_path):
     manager.runner = runner
     assert run(manager.reap_idle()) == ["desktop-10"]
     assert podman.containers["desktop-11"]["running"]
+
+
+# ---------------------------------------------------------------- review round 3
+def test_mapping_to_a_foreign_container_is_dropped(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    manager.registry._map = {BOT_A: 10}       # mapped earlier, then creation failed ...
+    podman.add("desktop-10", running=False)   # ... and someone made a desktop-10 by hand
+    assert run(manager.ensure(BOT_A)) == "desktop-11"
+    assert not any(a[0] in ("start", "stop") and a[-1] == "desktop-10" for a in podman.calls)
+
+
+def test_refresh_reconciles_for_listing(tmp_path):
+    manager, podman, *_ = make(tmp_path)
+    podman.add("desktop-14", running=False, labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_C})
+    assert manager.bot_of("desktop-14") is None
+    run(manager.refresh())
+    assert manager.bot_of("desktop-14") == BOT_C
+    assert run(manager.start("desktop-14")) == "desktop-14"

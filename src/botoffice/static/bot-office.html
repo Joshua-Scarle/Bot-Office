@@ -4635,10 +4635,12 @@ $("delete-go").onclick = async () => {
 let desktopRfb = null;
 let desktopList = [];
 let desktopGeneration = 0;   // bumped by every connect/disconnect: an older pending connect gives up
+let desktopConnected = "";   // the desktop the current connection shows (the select may have changed since)
 function disconnectDesktop() {
   desktopGeneration += 1;
   const old = desktopRfb;
   desktopRfb = null;   // first, so the old connection's own disconnect event is ignored
+  desktopConnected = "";
   if (old) old.disconnect();
   $("desktop-take").disabled = true;
   $("desktop-take").textContent = "Take control";
@@ -4710,6 +4712,7 @@ async function connectDesktop() {
     const rfb = new RFB($("desktop-screen"), url, {wsProtocols: ["binary", "bo-ticket." + grant.ticket]});
     const control = desktopMode === "control";
     desktopRfb = rfb;
+    desktopConnected = name;
     rfb.viewOnly = !control;
     rfb.scaleViewport = true;
     const who = (desktopList.find((d) => d.name === name) || {}).bot;
@@ -4730,6 +4733,8 @@ async function connectDesktop() {
   } catch (e) { if (!stale()) $("desktop-status").textContent = e.message; }
 };
 $("desktop-connect").onclick = () => { desktopMode = "view"; connectDesktop(); };
+// another desktop chosen: the current connection (and any control of it) ends, so buttons always mean the selection
+$("desktop-select").onchange = () => { desktopMode = "view"; disconnectDesktop(); $("desktop-status").textContent = "Press Connect to view this desktop."; };
 $("desktop-take").onclick = () => {
   if (!desktopRfb) return;
   desktopMode = desktopMode === "view" ? "control" : "view";
@@ -5262,17 +5267,19 @@ $("desktop-hand-back").onclick = async () => {
   const name = $("desktop-select").value;
   if (!name || name.startsWith("bot:")) return;
   try {
-    const wasControlling = desktopMode === "control";
+    const wasControlling = desktopMode === "control" && desktopConnected === name;
     if (wasControlling) {
-      // release control first, so the bot's first click after the hand-back is not refused
       desktopMode = "view";
       disconnectDesktop();
-      for (let i = 0; i < 20; i++) {
-        const d = (await api("/v1/desktops")).find((x) => x.name === name);
-        if (!d || !d.owner_controlling) break;
-        await new Promise((r) => setTimeout(r, 250));
-      }
     }
+    // the bot is told only once nobody controls the desktop, so its first click is not refused
+    let released = false;
+    for (let i = 0; i < 40 && !released; i++) {
+      const d = (await api("/v1/desktops")).find((x) => x.name === name);
+      released = !d || !d.owner_controlling;
+      if (!released) await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!released) { $("desktop-status").textContent = "Control of " + name + " is still open (another window?). Release it there, then hand back again."; return; }
     await api("/v1/desktops/" + encodeURIComponent(name) + "/hand-back", {method: "POST"});
     if (wasControlling) connectDesktop();
     $("desktop-status").textContent = "Handed back; the bot continues.";

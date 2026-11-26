@@ -1616,6 +1616,7 @@ def create_app(
 
     @app.get("/v1/desktops", dependencies=[Depends(auth)])
     async def list_desktops() -> list[dict]:
+        await bot_desks.refresh()
         result = await vnc.desktops()
         slots = {item["slot"]: item for item in scheduler.slots()}
         for desktop in result:
@@ -1645,6 +1646,8 @@ def create_app(
     @app.post("/v1/desktops/{name}/start", dependencies=[Depends(auth)])
     async def start_desktop(name: str) -> dict:
         """Start a stopped per-bot desktop (the owner pressed Connect)."""
+        if bot_desks.bot_of(name) is None:
+            await bot_desks.refresh()
         if bot_desks.bot_of(name) is None:
             raise HTTPException(status_code=404, detail="not a per-bot desktop")
         try:

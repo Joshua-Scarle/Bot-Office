@@ -100,6 +100,10 @@ middleware allows exactly one kind of remote websocket:
    socket (code 1008) at the JWT's `exp`, on revocation, or at a hard maximum of 1 hour, whichever
    comes first. Closing means: the client gets a close frame, the app's receive side gets a
    disconnect, and the app task is cancelled; nothing more is forwarded in either direction.
+   Residual: ASGI has no way to abort a websocket transport, so a frame the app had already handed to
+   the server before the cut may still be flushed to the client. Such a frame was produced while the
+   credential was valid (every frame is checked before it is sent), so this equals it arriving a few
+   milliseconds earlier; no frame produced after the cut is forwarded, and no input is accepted after it.
 6. The viewer reconnects with a fresh ticket (and so a fresh JWT from Cloudflare) when the owner
    presses Connect again.
 
