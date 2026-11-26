@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from . import approval_classes, attachments, auto_merge, avatars, baseline, continuation, git_guard, github_access, grok_bridge, health
+from . import approval_classes, attachments, auto_merge, avatars, baseline, continuation, duet_bridge, git_guard, github_access, grok_bridge, health
 from . import failures, grouping, isolation, needs_you, notify, recall, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
@@ -414,6 +414,18 @@ class BridgeSend(BaseModel):
     from_bot: str | None = Field(default=None, alias="from", max_length=200)
 
 
+class DuetSend(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    text: str = Field(min_length=1, max_length=60000)
+    to: str = Field(default="main", max_length=200)
+    kind: str = Field(default="fyi", max_length=20)
+    thread: str | None = Field(default=None, max_length=200)
+    reply_to: str | None = Field(default=None, max_length=200)
+    from_bot: str | None = Field(default=None, alias="from", max_length=200)
+    msg_id: str | None = Field(default=None, alias="id", max_length=64)
+
+
 class BridgeInbox(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -544,6 +556,16 @@ def create_app(
 
     notifier = notify.Notifier(store)
 
+    def _duet_steer(bot: Bot, text: str, hook) -> bool:  # noqa: ANN001
+        # the chat endpoint's rule for a message that reaches a busy bot (see _post_owner_message_ex);
+        # *hook* writes the bridge's receipt in the steer's own transaction
+        _, steer_reason = scheduler.turns._validate(bot.default_provider, None, bot)
+        result, _note = store.post_steer_explained(bot.id, text, [], steer_reason, unsteerable=_steer_blocked(bot),
+                                                   hook=hook)
+        return bool(result)  # attached to the turn, or (engine cannot take input mid-run) queued as its own turn
+
+    duet = duet_bridge.DuetBridge(store, settings, turns=scheduler.turns, steer=_duet_steer)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store.initialize()
@@ -552,8 +574,16 @@ def create_app(
         pusher = asyncio.create_task(notifier.run(), name="botoffice-notify")
         warm = asyncio.create_task(provider_status.warm(), name="botoffice-provider-warm")
         on_terminate(scheduler.begin_shutdown)
+        on_terminate(duet.signal_stop)  # no new GitHub request or delivery once shutdown starts
+        duet.start()
         reaper = asyncio.create_task(reap_voice(), name="botoffice-voice-reaper")
-        yield
+        try:
+            yield
+        finally:
+            # before the scheduler goes: the join covers one in-flight HTTP request (its timeout)
+            if not await asyncio.to_thread(duet.stop):
+                # still inside one request past its deadline; the stop flag keeps it from delivering anything
+                duet_bridge.log.warning("duet bridge worker did not exit in time")
         pusher.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await pusher
@@ -2125,6 +2155,44 @@ def create_app(
             not_sent(str(result)[:160])  # an ack is never sent, by design: no line for it
         return {"result": result}
 
+    @app.post("/v1/bridge/duet/send")
+    async def bridge_duet_send(body: DuetSend, binding: Job | None = Depends(agent_auth),  # noqa: B008
+                               credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> dict:  # noqa: B008
+        """Post a message to Claude Duet (a review on the mailbox pull request). A job's token always sends as
+        its own bot, and only when the mailbox config allows that bot (default_bot, senders); ``from`` (any bot)
+        is for the master token only."""
+        if binding:
+            bot = store.get_bot(binding.bot_id) if binding.bot_id else None
+            if not bot:
+                raise HTTPException(status_code=403, detail="token is not bound to a bot")
+            if body.from_bot and body.from_bot.strip() not in (bot.name, str(bot.id)):
+                raise HTTPException(status_code=403, detail="--from is only allowed with the master token")
+        elif body.from_bot and body.from_bot.strip():
+            bot = store.find_bot(body.from_bot.strip())
+            if not bot:
+                raise HTTPException(status_code=404, detail="--from names no registered bot")
+        else:
+            bot = None
+        job_alive = None
+        if binding is not None and credentials is not None:
+            token, job_id = credentials.credentials, str(binding.id)
+
+            def job_alive() -> bool:  # asked again under the send lock and right before the POST
+                current = store.agent_token_job(token)
+                return current is not None and str(current.id) == job_id
+        try:
+            return await asyncio.to_thread(duet.send, text=body.text, bot=bot, via_job=binding is not None,
+                                           to=body.to, kind=body.kind, thread=body.thread, reply_to=body.reply_to,
+                                           msg_id=body.msg_id, job_alive=job_alive)
+        except duet_bridge.DuetError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=502, detail="GitHub is unreachable") from exc
+
+    @app.get("/v1/bridge/duet/status", dependencies=[Depends(auth)])
+    async def bridge_duet_status() -> dict:
+        return await asyncio.to_thread(duet.report)
+
     @app.post("/v1/bridge/inbox", dependencies=[Depends(auth)])
     async def bridge_inbox(body: BridgeInbox) -> dict:
         """An inbound bridge message (``desk inbox post``, master token only)."""
@@ -2622,6 +2690,11 @@ def create_app(
             if isinstance(value, list | tuple):
                 return [finite(item) for item in value]
             return value
+        if request.url.path.startswith("/v1/bridge/duet/"):
+            # outbound Duet text is checked for secrets only after validation: never echo it
+            errors = [{key: value for key, value in error.items() if key not in ("input", "ctx")}
+                      for error in exc.errors()]
+            return JSONResponse({"detail": jsonable_encoder(errors)}, status_code=422)
         errors = [{**error, "input": finite(error.get("input"))} for error in exc.errors()]
         return JSONResponse({"detail": jsonable_encoder(errors)}, status_code=422)
 

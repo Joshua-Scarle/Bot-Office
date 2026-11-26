@@ -987,6 +987,32 @@ class JobStore:
                 "CREATE TABLE IF NOT EXISTS bridge_threads (thread_id TEXT PRIMARY KEY, hop INTEGER NOT NULL, "
                 "updated_at TEXT NOT NULL)"
             )
+            # Claude Duet bridge (duet_bridge.py): one row per inbound or outbound mailbox message,
+            # keyed by the GitHub comment id (inbound, state pending/delivered/failed/refused) or a negative key per outbound
+            # message id (state reserved/sent/unknown/failed): dedupe, retries, rate limits, thread cap, latency.
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS duet_messages (comment_id INTEGER PRIMARY KEY, direction TEXT NOT NULL, "
+                "msg_id TEXT, thread TEXT, kind TEXT, bot_id TEXT, job_id TEXT, gh_created_at TEXT, "
+                "seen_at TEXT, delivered_at TEXT, mode TEXT, error TEXT, review_id INTEGER, state TEXT, target TEXT, "
+                "prompt TEXT, attempts INTEGER NOT NULL DEFAULT 0, mailbox TEXT, author_id INTEGER, author_login TEXT, url TEXT)"
+            )
+            add_columns(db, "duet_messages", (("state", "TEXT"), ("target", "TEXT"), ("prompt", "TEXT"),
+                                              ("attempts", "INTEGER NOT NULL DEFAULT 0"), ("mailbox", "TEXT"),
+                                              ("author_id", "INTEGER"), ("author_login", "TEXT"), ("url", "TEXT")))
+            db.execute("CREATE INDEX IF NOT EXISTS duet_messages_dir_seen ON duet_messages(direction, seen_at)")
+            db.execute("CREATE INDEX IF NOT EXISTS duet_messages_thread ON duet_messages(thread)")
+            db.execute("CREATE INDEX IF NOT EXISTS duet_messages_state ON duet_messages(direction, state)")
+            add_columns(db, "duet_messages", (("node_id", "TEXT"), ("hand_key", "TEXT")))
+            # one row per outbound GitHub attempt (the attempt budget): kept also when GitHub refuses the send
+            db.execute("CREATE TABLE IF NOT EXISTS duet_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, "
+                       "bot_id TEXT)")
+            db.execute("CREATE INDEX IF NOT EXISTS duet_attempts_ts ON duet_attempts(ts)")
+            # the receipt of an inbound hand-over, written in the steer's or the turn's own transaction
+            db.execute("CREATE TABLE IF NOT EXISTS duet_receipts (mailbox TEXT NOT NULL, comment_id INTEGER NOT NULL, "
+                       "bot_id TEXT, mode TEXT, job_id TEXT, created_at TEXT NOT NULL, PRIMARY KEY (mailbox, comment_id))")
+            # outbound ids are unique per (mailbox, sender), never globally
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS duet_messages_out_scope ON duet_messages(mailbox, bot_id, msg_id) "
+                       "WHERE direction='out'")
             self._import_bridge_json(db)
             _init_assignment_tables(db)
             db.execute("CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, "
@@ -1321,6 +1347,7 @@ class JobStore:
     def post_steer_explained(
         self, bot_id: UUID | str, text: str, attachments: list[str], reason: str | None = None,
         job_id: UUID | str | None = None, *, unsteerable: Callable[[Job], str | None] | None = None,
+        hook: Callable[[sqlite3.Connection], None] | None = None,
     ) -> tuple[tuple[Message, Job] | None, str | None]:
         """Attach an owner message to the bot's current turn atomically with checking its state.
 
@@ -1380,6 +1407,8 @@ class JobStore:
             message = db.execute("SELECT * FROM messages WHERE id=?", (cur.lastrowid,)).fetchone()
             queued_job = (db.execute("SELECT * FROM jobs WHERE id=?", (message['job_id'],)).fetchone()
                           if note and message['job_id'] else None)
+            if hook is not None:
+                hook(db)  # the caller's receipt, committed with the steer message (Duet bridge)
             db.commit()
             result_job = self._job(queued_job) if queued_job is not None else self._job(row)
             return (_model(Message, message, ("created_at",)), result_job), note
