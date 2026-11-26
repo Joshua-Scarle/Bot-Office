@@ -15,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("github_private")  # named GitHub merges reach their card
 from fastapi.testclient import TestClient
 from guard_repo import clone_workspace
 

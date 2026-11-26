@@ -694,7 +694,8 @@ class Rules:
         # 0.12.28: the sudo auto-review (sudo_review.py); its log sits next to the DB
         self.sudo = sudo_review.Reviewer(Path(store.path).parent / "sudo-review.jsonl")
         # 0.12.31: a qualifying PR merge is checked against GitHub instead of the card (auto_merge.py)
-        self.auto_merge = auto_merge.Checker(Path(store.path).parent / "auto-merge.jsonl")
+        self.auto_merge = auto_merge.Checker(Path(store.path).parent / "auto-merge.jsonl",
+                                             identities=lambda: auto_merge.authorized_identities(store))
         # 0.12.45: the live checkout this controller runs from (policy scope); the bots list, cached
         self.live_root = os.environ.get("BOT_OFFICE_LIVE_ROOT") or str(Path(__file__).resolve().parents[2])
         self._bot_names: tuple[float, list[tuple[str, str]]] = (0.0, [])
@@ -910,7 +911,7 @@ class Rules:
         bot = self.store.get_bot(job.bot_id)
         if bot is None or not getattr(bot, "sudo_review", True):
             return None
-        stop = sudo_review.hard_stop(action.command)
+        stop = sudo_review.hard_stop(action.command, action.cwd)
         if stop:
             return "ask", "system", f"sudo for {stop} waits for your approval"
         from . import approval_classes
@@ -933,6 +934,35 @@ class Rules:
                        "command": action.command[:APPROVAL_LIMIT], "cwd": action.cwd,
                        "outcome": outcome, "why": why, "verdict": verdict or None, "reason": reason or None})
 
+    def _github_merge_refused(self, action: Action) -> str | None:
+        """Why a GitHub-side merge is refused outright, or None. GitHub writes merge and squash commits
+        with the token account's own email, so a bot may only merge on GitHub in a repository GitHub
+        confirms is private; a public one, an unknown one or one the command does not name is refused
+        (merge locally with a noreply identity and push fast-forward instead)."""
+        if action.command:
+            if not auto_merge.github_merge(action.command):
+                return None
+            targets = auto_merge.merge_targets(action.command)
+        else:
+            name = (action.tool or "").lower()
+            if "merge" not in name or not any(word in name for word in ("pull", "pr_", "_pr", "request")):
+                return None
+            data = action.data if isinstance(action.data, dict) else {}
+            owner, repo = str(data.get("owner") or ""), str(data.get("repo") or "")
+            targets = {(owner.lower(), repo.lower())} if owner and repo else None
+        if not targets:
+            return ("a GitHub merge must be one plain command that names its one repository (--repo owner/repo, no "
+                    "other commands, comments or variables); anything else is refused, and a public repository is "
+                    "never merged on GitHub")
+        for owner, repo in sorted(targets):
+            private = self.auto_merge.private(owner, repo)
+            if private is not True:
+                what = "a public repository" if private is False else "a repository GitHub did not confirm is private"
+                return (f"merging {owner}/{repo} on GitHub is refused: it is {what}, and GitHub would write the merge "
+                        "commit with the account's own email; merge locally with a noreply identity and push "
+                        "fast-forward instead")
+        return None
+
     def _auto_merge(self, job: Job, provider: str, action: Action, preset: str | None) -> tuple[str, str]:
         """("allow", why) when GitHub shows the PR ready and the decision was logged, else the card."""
         parsed = auto_merge.parse(action.command)
@@ -945,7 +975,8 @@ class Rules:
             "at": now().isoformat(), "bot_id": str(job.bot_id) if job.bot_id else None,
             "bot": getattr(bot, "name", None), "job_id": str(job.id), "source": job.source,
             "repo": f"{owner}/{repo}", "pr": number, "command": action.command[:APPROVAL_LIMIT],
-            "outcome": "allowed" if blocker is None else "card", "why": blocker})
+            "outcome": "allowed" if blocker is None else (
+                "refused" if blocker == auto_merge.PUBLIC_REPO_REASON else "card"), "why": blocker})
         if blocker is None and logged:
             self._log(job, provider, "allow", "auto-merge", preset, action, None,
                       note=f"auto-merge: {owner}/{repo}#{number} ready")
@@ -953,6 +984,9 @@ class Rules:
                 self._approved.setdefault(str(job.id), []).append(
                     (time.monotonic() + PASS_SECONDS, action.command, action.cwd))
             return "allow", f"auto-merge: {owner}/{repo}#{number} is labeled ready, reviewed and green"
+        if blocker == auto_merge.PUBLIC_REPO_REASON:
+            # sec-fixes: never a GitHub-made commit (the account's email) in a public repository
+            return "never", f"merging {owner}/{repo}#{number} on GitHub is refused: {blocker}"
         reason = blocker or "the auto-merge log could not be written"
         return "ask", f"merging {owner}/{repo}#{number} waits for your approval ({reason})"
 
@@ -981,6 +1015,10 @@ class Rules:
         if self.workspaces is not None:
             action.workspace = str(self.workspaces / str(job.id))
         effect, preset, why = self.evaluate(job, action)
+        if effect != "never":
+            refused = self._github_merge_refused(action)
+            if refused:  # sec-fixes: above every card, grant and auto-merge (noreply-merge safeguard)
+                effect, why = "never", refused
         if action.tool == git_guard.PUSH_TOOL and isinstance(action.data, dict) and \
                 action.data.get("default_source") == "remote":
             git_guard.learn_default(action.cwd, str(action.data.get("remote") or ""),
@@ -998,9 +1036,12 @@ class Rules:
                 return Decision("deny", "never", (
                     f"Blocked by Bot-Office's sudo auto-review: {reason}. Do not retry it or work around it; if "
                     "the task really needs it, say why in your reply so the user can decide."), preset)
-            # no readable verdict in time: the owner's card, as before 0.12.28
-            self._sudo_log(job, action, "review-failed", "auto-review", verdict, reason)
-            effect, preset, why = "ask", "system", "sudo (the auto-review could not answer) waits for your approval"
+            if verdict == "stop":  # sec-fixes: the reviewer's own deterministic re-check (hard stop, injected text)
+                self._sudo_log(job, action, "card", "auto-review", verdict, reason)
+                effect, preset, why = "ask", "system", f"sudo ({reason}) waits for your approval"
+            else:  # no answer in time: the owner's card, as before 0.12.28
+                self._sudo_log(job, action, "review-failed", "auto-review", verdict, reason)
+                effect, preset, why = "ask", "system", "sudo (the auto-review could not answer) waits for your approval"
         if effect == "auto-merge":
             effect, why = self._auto_merge(job, provider, action, preset)
         if effect == "allow":

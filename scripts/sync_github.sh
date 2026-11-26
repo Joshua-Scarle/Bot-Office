@@ -5,7 +5,8 @@
 # A branch whose new commits (those not on origin) contain a gitleaks finding or a denylisted value
 # (scripts/check_denylist.sh: personal values and private-file text from the out-of-repo list
 # ~/.config/bot-office/push-denylist.txt, plus forbidden paths) is NOT pushed; the script exits 2 and logs
-# the branch, never the value. A missing denylist blocks everything (fail closed).
+# the branch, never the value. A missing denylist blocks everything (fail closed). So does any commit whose
+# author or committer email is not a noreply address on the allowlist (check_denylist.sh --identities).
 # Needs gitleaks (~/.local/bin/gitleaks or PATH). The pre-push hook repeats both checks.
 set -u
 REPO="${BOT_OFFICE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -24,6 +25,9 @@ for b in master "$@"; do
   base=origin/master; git rev-parse -q --verify "origin/$b" >/dev/null && base="origin/$b"
   if [ "$(git rev-list --count "$base..$b")" = 0 ] && git rev-parse -q --verify "origin/$b" >/dev/null; then
     [ "$QUIET" = 1 ] || echo "$b: in sync"; continue
+  fi
+  if ! "$REPO/scripts/check_denylist.sh" --identities "refs/heads/$b" 2>>"$LOG"; then
+    log "BLOCKED $b: a commit in its history has a non-noreply author or committer email (not pushed; run scripts/check_denylist.sh --identities $b)"; rc=2; continue
   fi
   if ! "$REPO/scripts/check_denylist.sh" --commits "refs/heads/$b" --not --remotes=origin 2>>"$LOG"; then
     log "BLOCKED $b: denylisted value or forbidden path in commits not on origin (not pushed; run scripts/check_denylist.sh --commits $b --not --remotes=origin)"; rc=2; continue

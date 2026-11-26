@@ -9,6 +9,8 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("github_private")  # named GitHub merges reach their card
 from guard_repo import clone_workspace
 
 from botoffice import approval_classes, git_guard
@@ -326,7 +328,7 @@ def test_a_command_it_cannot_read_is_a_hit_never_a_crash(monkeypatch):
 # --- the decision: above every rule, class, setting and run kind ---
 
 SOURCES = ("chat", "routine", "wakeup", "assignment", "inbox", "trigger", "api")
-COMMANDS = ["git push origin main", "git push --force origin feature", "gh pr merge 7", "gh repo delete o/r --yes",
+COMMANDS = ["git push origin main", "git push --force origin feature", "gh pr merge 7 -R o/r", "gh repo delete o/r --yes",
             "curl -X DELETE https://api.github.com/repos/o/r", "git push origin --delete feature", "rm -rf /srv/shared"]
 
 
@@ -425,9 +427,9 @@ def test_a_guarded_command_over_the_card_limit_is_refused_not_run(tmp_path):
 def test_ask_cards_wait_in_needs_you_with_the_guard_label(tmp_path):
     from botoffice.needs_you import needs_you
     store, bot = make_store(tmp_path)
-    Rules(store).decide(running(store, bot, "routine"), bash("gh pr merge 3", WORK))
+    Rules(store).decide(running(store, bot, "routine"), bash("gh pr merge 3 -R o/r", WORK))
     items = [item for item in needs_you(store) if item["kind"] == "approval"]
-    assert items and items[0]["class"] == git_guard.LABEL and "gh pr merge 3" in items[0]["ask"]
+    assert items and items[0]["class"] == git_guard.LABEL and "gh pr merge 3 -R o/r" in items[0]["ask"]
 
 
 def test_codex_unattended_and_attended_both_wire_the_hook_and_restricted_codex_gets_the_shims(tmp_path):
@@ -462,7 +464,7 @@ def test_the_hook_refuses_a_guarded_command_when_the_controller_cannot_be_asked(
     for provider in ("claude", "codex", "cursor", "antigravity"):
         code, _, err = run_script("bot-office-gate", [provider, "--mode", "attended"], bash("git push origin main", WORK), dead)
         assert code == 2, provider
-    code, _, err = run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("gh pr merge 5", WORK), dead)
+    code, _, err = run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("gh pr merge 5 -R o/r", WORK), dead)
     assert code == 2 and "unreachable" in err
     # with no token at all in an attended run: same
     assert run_script("bot-office-gate", ["claude", "--mode", "attended"], bash("git push --force", WORK), {})[0] == 2
@@ -526,7 +528,7 @@ def test_the_shim_stops_a_guarded_command_until_the_card_is_approved(live, tmp_p
     assert ran.read_text().splitlines() == ["git push origin feature", "gh pr view 5"]
     ran.write_text("")
     # the guarded ones stop on a card and the program never runs
-    for name, args in (("git", ["push", "origin", "main"]), ("gh", ["pr", "merge", "7"]),
+    for name, args in (("git", ["push", "origin", "main"]), ("gh", ["pr", "merge", "7", "-R", "o/r"]),
                        ("git", ["push", "--force", "origin", "feature"]),
                        ("curl", ["-X", "DELETE", "https://api.github.com/repos/o/r"])):
         stopped = shim(name, args, origin)
@@ -541,7 +543,7 @@ def test_the_shim_stops_a_guarded_command_until_the_card_is_approved(live, tmp_p
     with closing(store._connect()) as db:
         db.execute("UPDATE jobs SET status='running' WHERE id=?", (resume_id,))
     resume = store.get(resume_id)
-    assert shim("gh", ["pr", "merge", "7"], resume).returncode == 126  # not what was approved
+    assert shim("gh", ["pr", "merge", "7", "-R", "o/r"], resume).returncode == 126  # not what was approved
     assert shim("git", ["push", "origin", "main"], resume).returncode == 0
     assert ran.read_text().splitlines() == ["git push origin main"]
     assert shim("git", ["push", "origin", "main"], resume).returncode == 126  # once

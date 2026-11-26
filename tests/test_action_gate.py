@@ -11,6 +11,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("github_private")  # named GitHub merges reach their card
 from fastapi.testclient import TestClient
 from guard_repo import clone_workspace
 
@@ -252,14 +254,14 @@ def test_gate_endpoint_needs_you_cards_and_approve(settings):
         bot = store.create_bot("Ada", "", "codex", None)
         job = running(store, bot, "trigger")
         token = {"Authorization": "Bearer " + store.issue_agent_token(job)}
-        body = {"provider": "claude", "event": bash("gh pr merge 5")}
+        body = {"provider": "claude", "event": bash("gh pr merge 5 -R o/r")}
         assert client.post("/v1/agent/gate", headers=H, json=body).status_code == 401  # master token refused
         answer = client.post("/v1/agent/gate", headers=token, json=body).json()
         assert answer["decision"] == "deny" and answer["effect"] == "ask"
         client.post("/v1/agent/gate", headers=token, json={"provider": "claude", "event": bash("cat /srv/bo/data/token")})
         items = {item["kind"]: item for item in client.get("/v1/needs-you", headers=H).json()}
         card = items["approval"]
-        assert card["actions"] == ["approve", "deny"] and "gh pr merge 5" in card["ask"]
+        assert card["actions"] == ["approve", "deny"] and "gh pr merge 5 -R o/r" in card["ask"]
         assert items["alert"]["state"] == "tripwire"
         assert client.post(f"/v1/gate-alerts/{items['alert']['alert_id']}/dismiss", headers=H).status_code == 204
         store.finish(job.id, JobStatus.INCOMPLETE)

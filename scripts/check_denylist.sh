@@ -6,6 +6,15 @@
 #   scripts/check_denylist.sh --commits REV...    every commit in `git rev-list REV...` (e.g. "main..topic"
 #                                                 or "topic --not --remotes=origin"): added lines, file
 #                                                 names, messages, author and committer
+#   scripts/check_denylist.sh --identities REV... every author AND committer email in `git rev-list REV...`
+#                                                 must be on the noreply allowlist below (no denylist needed)
+#
+# The identity allowlist (sec-fixes, after a GitHub merge commit carried a personal address into the
+# public repo): GitHub noreply addresses (<login>@ or <id>+<login>@users.noreply.github.com, and
+# noreply@github.com), noreply@anthropic.com, and the bot @local identities already in history. Any
+# other email is refused, so no personal address has to be named here. Extra allowed addresses
+# (exact, one per line, '#' comments) may be added in ${BO_PUSH_IDENTITY_ALLOWLIST:-
+# ~/.config/bot-office/push-identity-allowlist.txt}. Only the commit and which field are printed.
 #
 # Denied values live OUTSIDE the repo, so the list itself is never published:
 #   ${BO_PUSH_DENYLIST:-~/.config/bot-office/push-denylist.txt}
@@ -13,11 +22,50 @@
 # A missing or empty denylist fails closed (exit 3). A match exits 1 and names only the commit and
 # file, never the matched value. Clean exits 0.
 set -euo pipefail
+# inspect the objects that are really pushed: local refs/replace/* must not change what git log or cat-file show
+export GIT_NO_REPLACE_OBJECTS=1
 DL="${BO_PUSH_DENYLIST:-$HOME/.config/bot-office/push-denylist.txt}"
 # Paths that must never be committed, whatever their content (extended regexes on the path).
 FORBIDDEN_PATHS='^(policy-pack/RULES\.md|tests/fixtures/installed-RULES-[^/]*|data/shared/.*)$'
 
 die() { echo "check_denylist: $*" >&2; exit "${2:-1}"; }
+
+NOREPLY_RE='^([0-9]+\+)?[a-z0-9]([a-z0-9-]{0,38})(\[bot\])?@users\.noreply\.github\.com$|^noreply@github\.com$|^noreply@anthropic\.com$|^bot-office(-[a-z0-9-]+)?@local$|^(e7|dev)@localhost$|^e7@botoffice\.local$'
+if [ "${1:-}" = "--identities" ]; then
+  shift; [ $# -gt 0 ] || die "--identities needs a revision range" 2
+  XA="${BO_PUSH_IDENTITY_ALLOWLIST:-$HOME/.config/bot-office/push-identity-allowlist.txt}"
+  extra=""; [ -r "$XA" ] && extra=$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$XA" | tr 'A-Z' 'a-z' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  for rev in "$@"; do  # every annotated tag in a chain (a tag of a tag ...) carries its own tagger email
+    case "$rev" in -*) continue;; esac
+    obj="$rev"; depth=0
+    while [ "$(git cat-file -t "$obj" 2>/dev/null)" = tag ]; do
+      depth=$((depth + 1)); [ "$depth" -le 20 ] || die "BLOCKED: tag $rev: too many nested tags" 1
+      header=$(git cat-file tag "$obj" | sed '/^$/q')   # the header only, never the message
+      [ "$(printf '%s\n' "$header" | grep -c '^tagger ')" = 1 ] || die "BLOCKED: tag $rev: not exactly one tagger" 1
+      tline=$(printf '%s\n' "$header" | grep '^tagger ')
+      # git's form exactly: "tagger NAME <EMAIL> SECONDS +ZZZZ", one < and one >; anything else is refused
+      printf '%s\n' "$tline" | grep -qE '^tagger [^<>]* <[^<>]*> [0-9]+ [+-][0-9]{4}$' \
+        || die "BLOCKED: tag $rev: a malformed or ambiguous tagger line" 1
+      te=$(printf '%s\n' "$tline" | sed -n 's/^tagger [^<>]* <\([^<>]*\)>.*/\1/p' | tr 'A-Z' 'a-z')
+      printf '%s\n' "$te" | grep -qxE "$NOREPLY_RE" || { [ -n "$extra" ] && printf '%s\n' "$extra" | grep -qxF -- "$te"; } \
+        || die "BLOCKED: tag $rev: a tagger email is not a noreply address on the allowlist" 1
+      obj=$(printf '%s\n' "$header" | sed -n 's/^object //p')
+    done
+  done
+  out=$(git log --no-color --format='%H%x09%ae%x09%ce' "$@") || die "cannot list the commits ($*); refusing (fail closed)" 3
+  bad=0
+  while IFS=$'\t' read -r c ae ce; do
+    [ -n "$c" ] || continue
+    for pair in "author:$ae" "committer:$ce"; do
+      who="${pair%%:*}"; email=$(printf '%s' "${pair#*:}" | tr 'A-Z' 'a-z')
+      if printf '%s\n' "$email" | grep -qE "$NOREPLY_RE"; then continue; fi
+      if [ -n "$extra" ] && printf '%s\n' "$extra" | grep -qxF -- "$email"; then continue; fi
+      echo "check_denylist: BLOCKED: commit ${c:0:10}: the $who email is not a noreply address on the allowlist" >&2; bad=1
+    done
+  done <<< "$out"
+  [ "$bad" = 0 ] || die "non-noreply commit identity found (values are not shown). Re-author with a noreply identity." 1
+  exit 0
+fi
 [ -r "$DL" ] || die "denylist $DL is missing or unreadable; refusing (fail closed)" 3
 PAT=$(mktemp); trap 'rm -f "$PAT" "$PAT.names" "$PAT.hits"' EXIT
 grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$DL" > "$PAT" || true
@@ -75,7 +123,7 @@ case "${1:-}" in
       | awk '/^@@C /{c=substr($2,1,10); next} /^\+\+\+ /{f=substr($0,7); next} /^\+/{print c"\t"f"\t"$0}' | flag > "$PAT.hits"
     while IFS=$'\t' read -r c f; do report "commit $c: $f adds a denylisted value"; done < "$PAT.hits"
     ;;
-  *) die "usage: $0 --staged | --message FILE | --commits REV..." 2 ;;
+  *) die "usage: $0 --staged | --message FILE | --commits REV... | --identities REV..." 2 ;;
 esac
 [ "$bad" = 0 ] || die "denylisted content found (see above; values are not shown). Nothing was committed/pushed." 1
 exit 0
