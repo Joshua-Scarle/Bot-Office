@@ -80,7 +80,7 @@ def test_operator_shell_keeps_the_old_rules():
 
 
 def test_owner_control_blocks_input_but_not_screenshot(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(desk, "pick_desktop", lambda slot, env: ("desktop-12", True))
+    monkeypatch.setattr(desk, "pick_desktop", lambda slot, env, **kw: ("desktop-12", True))
     ran = []
     monkeypatch.setattr(desk, "_run", lambda argv: ran.append(argv))
     for command in (["click", "1", "2"], ["type", "x"], ["key", "a"]):
@@ -94,7 +94,7 @@ def test_owner_control_blocks_input_but_not_screenshot(monkeypatch, tmp_path, ca
 
 
 def test_desk_open_on_own_desktop_waits_for_the_page(monkeypatch, capsys):
-    monkeypatch.setattr(desk, "pick_desktop", lambda slot, env: ("desktop-12", False))
+    monkeypatch.setattr(desk, "pick_desktop", lambda slot, env, **kw: ("desktop-12", False))
     ran = []
     monkeypatch.setattr(desk, "_run", lambda argv: ran.append(argv))
     monkeypatch.setattr(desk, "browser_title", lambda slot: "Old page")
@@ -136,7 +136,7 @@ def test_agent_desktop_is_the_tokens_own_bot(settings, tmp_path):
         a, b = d.bot("A"), d.bot("B")
         _, ha = run_job(d.store, a)
         first = d.client.post("/v1/agent/desktop", headers=ha)
-        assert first.status_code == 200 and first.json() == {"name": "desktop-10", "owner_controlling": False}
+        assert first.status_code == 200 and {k: first.json()[k] for k in ("name", "owner_controlling")} == {"name": "desktop-10", "owner_controlling": False}
         assert manager.registry.bot("desktop-10") == str(a.id)
         # the master token is not an agent token; the endpoint takes no bot argument at all
         assert d.client.post("/v1/agent/desktop", headers=MASTER).status_code == 401

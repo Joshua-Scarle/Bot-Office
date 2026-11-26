@@ -62,6 +62,12 @@ class Settings:
     desktop_memory: str = "1536m"
     desktop_cpus: float = 1.5
     desktop_geometry: str = "1280x800"
+    # 0.12.47: a bot's desktop session (continuous desk use, reset by idle_minutes without any) lasts
+    # session_minutes; the bot may extend it in steps of extend_minutes, with a reason and while its turn runs,
+    # up to max_session_minutes in total. The owner's remote viewing session: the same step and cap.
+    desktop_session_minutes: int = 60
+    desktop_extend_minutes: int = 60
+    desktop_max_session_minutes: int = 240
     # 0.10.0: an active assignment without progress this long is flagged stalled (no model call)
     stall_hours: float = 6
     # 0.12.39 stall sweeper (stall_sweep.py): N hours without progress wakes the owner, N more its lead
@@ -117,6 +123,10 @@ class Settings:
             raise ValueError("BOT_OFFICE_DESKTOP_MEMORY must look like 1536m or 2g")
         if not 0.1 <= self.desktop_cpus <= 64:
             raise ValueError("BOT_OFFICE_DESKTOP_CPUS must be between 0.1 and 64")
+        if not (1 <= self.desktop_session_minutes <= self.desktop_max_session_minutes <= 24 * 60
+                and 1 <= self.desktop_extend_minutes <= 24 * 60):
+            raise ValueError("BOT_OFFICE_DESKTOP_SESSION_MINUTES, _EXTEND_MINUTES and _MAX_SESSION_MINUTES must be "
+                             "positive, with session <= max session <= 1440")
         geometry = DESKTOP_GEOMETRY.fullmatch(self.desktop_geometry)
         if not geometry or not (320 <= int(geometry[1]) <= 3840 and 240 <= int(geometry[2]) <= 2160):
             raise ValueError("BOT_OFFICE_DESKTOP_GEOMETRY must look like 1280x800")
@@ -208,6 +218,9 @@ class Settings:
             desktop_memory=(os.environ.get("BOT_OFFICE_DESKTOP_MEMORY") or "1536m").strip().lower(),
             desktop_cpus=float(os.environ.get("BOT_OFFICE_DESKTOP_CPUS") or "1.5"),
             desktop_geometry=(os.environ.get("BOT_OFFICE_DESKTOP_GEOMETRY") or "1280x800").strip().lower(),
+            desktop_session_minutes=int(os.environ.get("BOT_OFFICE_DESKTOP_SESSION_MINUTES") or "60"),
+            desktop_extend_minutes=int(os.environ.get("BOT_OFFICE_DESKTOP_EXTEND_MINUTES") or "60"),
+            desktop_max_session_minutes=int(os.environ.get("BOT_OFFICE_DESKTOP_MAX_SESSION_MINUTES") or "240"),
         )
 
     @property

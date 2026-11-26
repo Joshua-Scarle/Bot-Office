@@ -555,7 +555,7 @@ dialog textarea { min-height: 90px; resize: vertical; }
   <div class="tools-content">
     <div class="tools-bar"><h2 id="tools-title">Desktop</h2><button id="tools-close">Close</button></div>
     <div id="desktop-panel">
-      <div class="tools-bar"><label for="desktop-select">Desktop</label><select id="desktop-select"></select><button id="desktop-connect">Connect / Reconnect</button><button id="desktop-take" disabled>Take control</button><button id="desktop-hand-back" title="Tell the bot that used this desktop last that you are done">Hand back</button></div>
+      <div class="tools-bar"><label for="desktop-select">Desktop</label><select id="desktop-select"></select><button id="desktop-connect">Connect / Reconnect</button><button id="desktop-take" disabled>Take control</button><button id="desktop-hand-back" title="Tell the bot that used this desktop last that you are done">Hand back</button><button id="desktop-extend" hidden title="A remote viewing session ends after 1 hour; extend it by one step (up to the hard limit)">Extend session</button></div>
       <p id="desktop-control-banner" role="alert" hidden></p>
       <p id="desktop-status" role="status"></p><div id="desktop-screen" tabindex="0" aria-label="Remote desktop"></div>
     </div>
@@ -5282,6 +5282,19 @@ $("notify-enable").onclick = async () => {
   try { await Notification.requestPermission(); } catch (err) { /* ignored: stays off */ }
   $("notify-enable").hidden = Notification.permission !== "default";
 };
+// 0.12.47: a remote viewing session ends after 1 h unless the owner extends it (+1 h per click, capped)
+$("desktop-extend").onclick = async () => {
+  const name = desktopConnected || $("desktop-select").value;
+  if (!name || name.startsWith("bot:")) return;
+  const reason = window.prompt("Why do you need more time on " + name + "?", "Long task still in progress");
+  if (!reason || !reason.trim()) return;
+  try {
+    const result = await api("/v1/desktops/" + encodeURIComponent(name) + "/extend-view", { method: "POST", body: JSON.stringify({ reason: reason.trim() }) });
+    window.alert(result.detail || "Done");
+  } catch (err) {
+    window.alert("Could not extend: " + err.message);
+  }
+};
 $("desktop-hand-back").onclick = async () => {
   const name = $("desktop-select").value;
   if (!name || name.startsWith("bot:")) return;
@@ -5374,6 +5387,7 @@ $("lock-btn").onclick = () => lock("");
     const who = response.ok ? await response.json() : null;
     if (who && who.remote === true && who.role === "owner") {
       REMOTE_OWNER = true;
+      $("desktop-extend").hidden = false;
       $("remote-note").hidden = false;
       $("lock-btn").hidden = true;
     }

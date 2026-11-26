@@ -73,6 +73,40 @@ COMMAND_LIMIT = 32 * 1024
 APPROVAL_LIMIT = 4000
 # Sec 10: a bot cannot flood Needs-you or the gate log from one job
 APPROVALS_PER_JOB = 20
+
+# 0.12.47 (owner, Nov 26): a refused or waiting step never ends the work. The bot keeps going, Bot-Office
+# re-runs the step once it is approved (the resume turn holds a one-time grant for exactly that command),
+# and the bot says it is waiting only when nothing allowed is left. Every refusal carries this.
+KEEP_GOING = ("Keep working: do the rest of the task, and if a different action that your permissions allow "
+              "reaches the same goal (a local step instead of an outbound one, a draft, another allowed command), "
+              "use it. Never repackage the refused action itself (another tool, a script, a path, an encoding).")
+WAIT_LINE = ("Only when nothing allowed is left, end the turn saying plainly which command waits, why it needs "
+             "the owner's approval, and that it runs once approved: BOT-OFFICE-STATUS: waiting_on_user — approval #{n}")
+STOP_LINE = ("If nothing allowed is left, say plainly what was not done and why; never say you can't while an "
+             "allowed way remains.")
+
+
+def ask_reason(approval: int, summary: str) -> str:
+    """What the gate tells a bot whose step now waits on approval card #approval (0.12.47)."""
+    return (f"Approval #{approval} requested from the owner for: {summary}. Bot-Office runs this exact step for you "
+            f"once it is approved (you are resumed with a one-time grant), so don't give up on the task. {KEEP_GOING} "
+            + WAIT_LINE.format(n=approval))
+
+
+def resume_prompt(approval: int, summary: str) -> str:
+    """The (hidden) prompt of the turn an approval wakes: re-run the approved step, idempotently, then go on."""
+    return (f"Approval #{approval} granted by the owner. Bot-Office resumed your task so the approved step runs now: "
+            f"{summary}. First check it is still needed (it may have been done another way since, or the state "
+            "may have changed); if it is, run exactly that command now, once (the grant covers only that command, "
+            "in the same directory, within 24 hours). Then carry the task forward to the end.")
+
+
+def deny_prompt(approval: int, summary: str, note: str | None) -> str:
+    """The (hidden) prompt of the follow-up turn after the owner denied card #approval."""
+    said = f" The owner's note: {note.strip()}" if note and note.strip() else ""
+    return (f"Approval #{approval} was denied by the owner: {summary}.{said} Do not ask for that exact command again "
+            "in this turn (it is refused without a card). If the current policy now runs it without a card, it "
+            f"simply runs. {KEEP_GOING} {STOP_LINE}")
 GATE_LOG_PER_JOB = 500
 ALERT_WINDOW = timedelta(hours=72)
 
@@ -1039,7 +1073,7 @@ class Rules:
                 self._sudo_log(job, action, "blocked", "auto-review", verdict, reason)
                 return Decision("deny", "never", (
                     f"Blocked by Bot-Office's sudo auto-review: {reason}. Do not retry it or work around it; if "
-                    "the task really needs it, say why in your reply so the user can decide."), preset)
+                    f"the task really needs it, say why in your reply so the user can decide. {KEEP_GOING}"), preset)
             if verdict == "stop":  # sec-fixes: the reviewer's own deterministic re-check (hard stop, injected text)
                 self._sudo_log(job, action, "card", "auto-review", verdict, reason)
                 effect, preset, why = "ask", "system", f"sudo ({reason}) waits for your approval"
@@ -1052,7 +1086,7 @@ class Rules:
             self._audit(job, provider, action, why)
             return Decision("allow", "allow", why, preset)
         if effect == "never":
-            reason = f"Blocked by Bot-Office: {why}. Do not retry this or work around it."
+            reason = f"Blocked by Bot-Office: {why}. Do not retry this or work around it. {KEEP_GOING} {STOP_LINE}"
             self._log(job, provider, "deny", "never", preset, action, None)
             return Decision("deny", "never", reason, preset)
         if not job.bot_id:
@@ -1082,17 +1116,30 @@ class Rules:
                 f"Blocked by Bot-Office: this {preset or 'gated'} action is {len(action.detail)} characters, over the "
                 f"{APPROVAL_LIMIT} the user can review in an approval. Split it into smaller steps (e.g. write a "
                 "script file first, then run it) or leave a draft for the user."), preset)
+        granted = self._grant_queued(job, action)
+        if granted is not None:
+            # 0.12.47: approved while this (or another) turn was still working: the resume turn runs it; no
+            # second card for the same step
+            self._log(job, provider, "deny", "ask", preset, action, granted, note="approved; runs in the resume turn")
+            return Decision("deny", "ask", (
+                f"Approval #{granted} for this exact command was already granted: Bot-Office runs it in the resume "
+                f"turn that follows this one. Don't repeat it now. {KEEP_GOING} Ending this turn starts the resume "
+                "turn sooner."), preset, granted)
+        denied = self._denied_here(job, action)
+        if denied is not None:
+            self._log(job, provider, "deny", "never", preset, action, denied, note="denied by the owner")
+            return Decision("deny", "never", (
+                f"Blocked by Bot-Office: the owner denied this exact command (approval #{denied}); it is not asked "
+                f"again in this turn. {KEEP_GOING} {STOP_LINE}"), preset, denied)
         approval = self.request(job, action, preset)
         if approval is None:
             self._log(job, provider, "deny", "never", preset, action, None)
             return Decision("deny", "never", (
-                f"Blocked by Bot-Office: this turn already has {APPROVALS_PER_JOB} approvals waiting. End the turn "
-                "with BOT-OFFICE-STATUS: waiting_on_user and let the user decide."), preset)
+                f"Blocked by Bot-Office: this turn already has {APPROVALS_PER_JOB} approvals waiting. {KEEP_GOING} "
+                "When nothing allowed is left, end the turn with BOT-OFFICE-STATUS: waiting_on_user naming the "
+                "approvals that wait."), preset)
         self._log(job, provider, "deny", "ask", preset, action, approval)
-        reason = (f"Approval #{approval} requested from the user for: {action.summary}. Do not run it another way. "
-                  "Write any draft you need (e.g. to outbox/ in this workspace), then end the turn with "
-                  "BOT-OFFICE-STATUS: waiting_on_user — approval #" + str(approval))
-        return Decision("deny", "ask", reason, preset, approval)
+        return Decision("deny", "ask", ask_reason(approval, action.summary), preset, approval)
 
     # --- 0.12.45: the append-only audit of what the policy now lets run without a card ---
 
@@ -1163,6 +1210,30 @@ class Rules:
                     del passes[index]
                     return True
         return False
+
+    def _grant_queued(self, job: Job, action: Action) -> int | None:
+        """An approved, unused grant for this bot and exact action whose resume turn has not run yet (and is
+        not this job): the step is already on its way."""
+        if not job.bot_id:
+            return None
+        with closing(self.store._connect()) as db:
+            row = db.execute(
+                "SELECT a.id FROM approvals a JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
+                "a.input_hash=? AND a.status='approved' AND a.resume_job_id<>? AND a.grant_expires_at>? "
+                "AND j.status IN ('queued','running') ORDER BY a.id DESC LIMIT 1",
+                (str(job.bot_id), action.fingerprint, str(job.id), now().isoformat())).fetchone()
+        return int(row["id"]) if row else None
+
+    def _denied_here(self, job: Job, action: Action) -> int | None:
+        """The owner denied exactly this action of this bot, and this job is the turn that asked or the
+        follow-up turn the deny woke: refused there without a new card."""
+        if not job.bot_id:
+            return None
+        with closing(self.store._connect()) as db:
+            row = db.execute("SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='denied' AND "
+                             "(followup_job_id=? OR job_id=?) ORDER BY id DESC LIMIT 1",
+                             (str(job.bot_id), action.fingerprint, str(job.id), str(job.id))).fetchone()
+        return int(row["id"]) if row else None
 
     def _push_grant_waiting(self, job: Job, action: Action) -> bool:
         """This resume turn holds an approved pre-push card (an exact update), and *action* is only
@@ -1432,19 +1503,80 @@ class Rules:
                 rows = db.execute("SELECT * FROM approvals ORDER BY id DESC LIMIT ?", (limit,))
             return [dict(row) for row in rows.fetchall()]
 
-    def deny(self, approval_id: int) -> dict:
+    def deny(self, approval_id: int, assignments=None, note: str | None = None, follow_up: bool = True) -> dict:
+        """Deny a pending (or timed-out) card. 0.12.47: recorded in policy_audit, and the bot is woken for a
+        follow-up turn when the task is still open (the asking turn ended unfinished, or its assignment is
+        open): it carries on without that action (refused there without a card) and reports plainly."""
+        note = (note or "").strip()[:500] or None
         with closing(self.store._connect()) as db:
-            changed = db.execute("UPDATE approvals SET status='denied', decided_at=? WHERE id=? "
-                                 "AND status IN ('pending','expired')", (now().isoformat(), approval_id)).rowcount
+            changed = db.execute("UPDATE approvals SET status='denied', decided_at=?, owner_note=? WHERE id=? "
+                                 "AND status IN ('pending','expired')",
+                                 (now().isoformat(), note, approval_id)).rowcount
         item = self.get(approval_id)
         if item is None:
             raise LookupError("approval not found")
         if not changed:
             raise RuleError(f"approval is {item['status']}")
-        self.store.add_message(item["bot_id"], "system",
-                               f"Approval #{approval_id} denied, so the task is stopped: {_short(item['summary'])}",
-                               source="chat")
-        return item
+        self.store.policy_audit_event(bot_id=item["bot_id"], job_id=item["job_id"], source="owner",
+                                      tool="approval deny", summary=f"#{approval_id} {item['summary']}",
+                                      policy=f"denied by the owner{': ' + note if note else ''}",
+                                      legacy=item.get("preset") or "")
+        woken = None
+        if follow_up:
+            try:
+                woken = self._deny_follow_up(item, note, assignments)
+            except Exception:  # noqa: BLE001 — the deny stands; the bot just is not woken
+                woken = None
+        self.store.add_message(item["bot_id"], "system", (
+            f"Approval #{approval_id} denied: {_short(item['summary'])}. "
+            + ("The bot carries on without it." if woken else "Not run.")), source="chat")
+        return self.get(approval_id) or item
+
+    def resume_ended(self, job: Job) -> list[int]:
+        """0.12.47: the resume turn of an approval ended without running the approved step (its grant is
+        bound to that turn, so it can no longer be used): one chat line and an audit row, so an approval
+        never silently goes nowhere. Returns the approval ids."""
+        with closing(self.store._connect()) as db:
+            rows = db.execute("SELECT id, bot_id, job_id, summary FROM approvals WHERE resume_job_id=? AND "
+                              "status='approved'", (str(job.id),)).fetchall()
+            for row in rows:
+                db.execute("UPDATE approvals SET grant_expires_at=? WHERE id=? AND status='approved'",
+                           (now().isoformat(), row["id"]))
+        for row in rows:
+            self.store.add_message(row["bot_id"], "system", (
+                f"Approval #{row['id']}: the resume turn ended without running the approved step "
+                f"({_short(row['summary'])}); the bot's reply says why. Not run."), source="chat")
+            self.store.policy_audit_event(bot_id=row["bot_id"], job_id=str(job.id), source="resume",
+                                          tool="approval unused", summary=f"#{row['id']} {row['summary']}",
+                                          policy="approved, but the resume turn did not run it")
+        return [int(row["id"]) for row in rows]
+
+    def _deny_follow_up(self, item: dict, note: str | None, assignments) -> str | None:
+        """Queue the follow-up turn of a denied card when its task is still open; returns its job id."""
+        bot = self.store.get_bot(item["bot_id"])
+        origin = self.store.get(item["job_id"])
+        if bot is None or origin is None:
+            return None
+        open_task = False
+        if item["assignment_id"] and assignments is not None:
+            current = assignments.get(item["assignment_id"])
+            open_task = current is not None and current.status not in ("done", "dropped")
+        state = (origin.outcome or "").split(":", 1)[0].strip()
+        status = getattr(origin.status, "value", origin.status)
+        unfinished = status in ("queued", "running") or state in ("waiting_on_user", "not_done", "blocked", "continue")
+        if not (open_task or unfinished):
+            return None
+        text = deny_prompt(int(item["id"]), item["summary"], note)
+
+        def bind(db: sqlite3.Connection, job_id: str) -> None:
+            db.execute("UPDATE approvals SET followup_job_id=? WHERE id=?", (job_id, item["id"]))
+            db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='user'", (job_id,))
+
+        if open_task:
+            return assignments.reply(item["assignment_id"], text, hook=bind)
+        _, job = self.store.enqueue_message(bot, text, text, origin.reason, origin.source or "chat", None, None, None,
+                                            priority=1, hook=lambda db, queued: bind(db, str(queued.id)))
+        return str(job.id)
 
     def mark_approved(self, approval_id: int) -> dict:
         """Pending (or expired: Re-run) → approved with a 24 h grant; the caller queues the resume turn."""
@@ -1466,8 +1598,11 @@ class Rules:
         originating job (only that turn can consume the grant). An open assignment resumes as
         a reply in that assignment."""
         item = self.mark_approved(approval_id)
-        text = (f"Approval #{approval_id} granted by the user: you may now run exactly this, once: {item['summary']}. "
-                "Continue the task.")
+        self.store.policy_audit_event(bot_id=item["bot_id"], job_id=item["job_id"], source="owner",
+                                      tool="approval approve", summary=f"#{approval_id} {item['summary']}",
+                                      policy="approved by the owner: one-time grant, resume turn queued",
+                                      legacy=item.get("preset") or "")
+        text = resume_prompt(approval_id, item["summary"])
         try:
             bot = self.store.get_bot(item["bot_id"])
             origin = self.store.get(item["job_id"])

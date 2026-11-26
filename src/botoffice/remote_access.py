@@ -87,6 +87,53 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 current_remote_identity: contextvars.ContextVar[RemoteIdentity | None] = contextvars.ContextVar(
     "botoffice_remote_identity", default=None)
 
+
+class ViewSessions:
+    """0.12.47: the owner's remote websocket sessions (the desktop viewer) end MAX_REMOTE_WEBSOCKET_SECONDS
+    after they open unless the owner extends them from the UI: one step (default +60 min) per request, with
+    a reason, up to a hard cap in total (default 240 min). The Access login's expiry and revocation still
+    end a session at once. Kept in memory: a restart closes the sockets anyway."""
+
+    def __init__(self, step: float = 3600.0, cap: float = 4 * 3600.0):
+        self.step, self.cap = step, cap
+        self._open: dict[int, dict] = {}
+        self._next = 0
+
+    def configure(self, step: float, cap: float) -> None:
+        self.step, self.cap = step, max(cap, MAX_REMOTE_WEBSOCKET_SECONDS)
+
+    def open(self, who: str, path: str, started: float) -> int:
+        self._next += 1
+        self._open[self._next] = {"who": who, "path": path, "started": started,
+                                  "budget": MAX_REMOTE_WEBSOCKET_SECONDS, "extensions": 0}
+        return self._next
+
+    def close(self, key: int) -> None:
+        self._open.pop(key, None)
+
+    def ends_at(self, key: int) -> float:
+        item = self._open.get(key)
+        return item["started"] + item["budget"] if item else 0.0
+
+    def extend(self, who: str, path: str, now: float) -> list[dict]:
+        """One step more for every open session of *who* on *path*; the sessions after the change."""
+        changed = []
+        for item in self._open.values():
+            if item["who"] != who or item["path"] != path:
+                continue
+            if item["budget"] + self.step <= self.cap + 1e-6:
+                item["budget"] += self.step
+                item["extensions"] += 1
+                changed.append({"extended": True, "minutes_left": round((item["started"] + item["budget"] - now) / 60),
+                                "extensions": item["extensions"], "cap_minutes": round(self.cap / 60)})
+            else:
+                changed.append({"extended": False, "minutes_left": round((item["started"] + item["budget"] - now) / 60),
+                                "extensions": item["extensions"], "cap_minutes": round(self.cap / 60)})
+        return changed
+
+
+VIEW_SESSIONS = ViewSessions()
+
 # ---------------------------------------------------------------------------------------------
 # Route allowlist for role "remote-client" (a Claude cloud session holding a service token).
 # Every entry is (method, fully anchored path regex). Anything not listed is refused with 403.
@@ -719,14 +766,26 @@ class RemoteAccessMiddleware:
             current_remote_identity.reset(token)
 
     async def _serve_websocket(self, identity: RemoteIdentity, scope, receive, send) -> None:
+        session = VIEW_SESSIONS.open(identity.identity, scope.get("path", ""), self.clock())
+        try:
+            await self._watch_websocket(identity, scope, receive, send, session)
+        finally:
+            VIEW_SESSIONS.close(session)
+
+    async def _watch_websocket(self, identity: RemoteIdentity, scope, receive, send, session: int) -> None:
         """Run the app's websocket under a watchdog: it is cut (close 1008 to the client, the app task
-        cancelled, nothing more forwarded either way) at min(JWT exp, now + MAX_REMOTE_WEBSOCKET_SECONDS),
-        or as soon as a re-check finds the identity revoked (owner removed, config off or changed)."""
-        deadline = min(identity.expires_at, self.clock() + MAX_REMOTE_WEBSOCKET_SECONDS)
+        cancelled, nothing more forwarded either way) at min(JWT exp, the session's end: opened +
+        MAX_REMOTE_WEBSOCKET_SECONDS plus the owner's capped extensions, 0.12.47), or as soon as a re-check
+        finds the identity revoked (owner removed, config off or changed)."""
         state = {"cut": False, "accepted": False, "closed": False}
 
+        def deadline() -> float:
+            # the owner may extend the session (ViewSessions.extend, capped); the login's expiry always ends it
+            ends = VIEW_SESSIONS.ends_at(session)
+            return ends if identity.expires_at is None else min(identity.expires_at, ends)
+
         def valid() -> bool:
-            return self.clock() < deadline and self._still_allowed(identity)
+            return self.clock() < deadline() and self._still_allowed(identity)
 
         cut_event = asyncio.Event()
 
@@ -800,7 +859,7 @@ class RemoteAccessMiddleware:
             current_remote_identity.reset(token)
         try:
             while not task.done():
-                wait = max(0.0, min(self.ws_recheck, deadline - self.clock()))
+                wait = max(0.0, min(self.ws_recheck, deadline() - self.clock()))
                 done, _ = await asyncio.wait({task}, timeout=wait)
                 if task in done:
                     break

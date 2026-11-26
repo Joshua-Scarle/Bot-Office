@@ -239,6 +239,9 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS approvals_grant ON approvals(bot_id, input_hash, status)")
     # 0.12.4 fix3: the exact updates (repo, ref, operation, old/new sha) a push approval covers
     add_columns(db, "approvals", (("push_plan", "TEXT"),))
+    # 0.12.47: the owner's note on a decision, and the follow-up turn a deny wakes (the bot carries on
+    # without the action; the same action is not carded again in that turn)
+    add_columns(db, "approvals", (("owner_note", "TEXT"), ("followup_job_id", "TEXT")))
     db.execute(
         """CREATE TABLE IF NOT EXISTS gate_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, job_id TEXT, provider TEXT, decision TEXT NOT NULL,
@@ -1496,6 +1499,21 @@ class JobStore:
                               "AND status NOT IN ('queued','running') ORDER BY created_at, continue_count",
                               (str(root), str(root), until.isoformat())).fetchall()
         return [(row["reply_text"] or "", (row["outcome"] or "").partition(": ")[2]) for row in rows]
+
+    def policy_audit_event(self, *, bot_id: str | None, job_id: str | None, source: str, tool: str, summary: str,
+                           policy: str, legacy: str = "") -> bool:
+        """0.12.47: one row in the append-only policy_audit table for an owner decision or a desktop
+        session event (approval approved/denied, desk extend, a loop stop). Never raises."""
+        try:
+            bot = self.get_bot(bot_id) if bot_id else None
+            with closing(self._connect()) as db:
+                db.execute("INSERT INTO policy_audit (at,bot_id,bot,job_id,source,provider,tool,summary,policy,legacy) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (now().isoformat(), bot_id, getattr(bot, "name", None), job_id, source[:32], "",
+                            tool[:80], summary[:2000], policy[:300], legacy[:300]))
+            return True
+        except Exception:  # noqa: BLE001 — the audit never decides anything
+            return False
 
     def pending_approval(self, job_id: UUID | str) -> bool:
         with closing(self._connect()) as db:
