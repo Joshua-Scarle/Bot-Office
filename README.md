@@ -114,6 +114,10 @@ curl -X POST http://127.0.0.1:8787/v1/jobs \
 
 Other routes include `POST/GET /v1/jobs`, `GET /v1/jobs/{id}`, `POST /v1/jobs/{id}/cancel`, `GET /v1/slots`, `GET /v1/providers`, and `POST /v1/slots/{slot}/exec`.
 
+## Remote access (Cloudflare Tunnel + Cloudflare Access)
+
+To reach Bot-Office from a phone, or to let a Claude Code cloud session call its API, put Cloudflare Access in front of a Cloudflare Tunnel. The controller still binds to loopback only; `cloudflared` connects outbound, and Bot-Office verifies the Access token itself on every tunnelled request and maps it to a role (owner or least-privilege remote client). See [docs/REMOTE-ACCESS.md](docs/REMOTE-ACCESS.md) and `deploy/remote-access/`.
+
 ## Providers
 
 OpenCode uses the official `opencode` executable on the service PATH. On the server, run `opencode auth login` or configure a provider API key in the service environment. Choose a `provider/model` ID; effort is passed as an OpenCode variant and availability depends on the model. OpenCode 1.19.5 `run -s` resume hangs (and a session stays bound to its first directory), so Bot-Office starts every OpenCode turn fresh with the compact handoff context (WORKING.md and the last 12 messages); a message sent while an OpenCode turn runs steers that turn by a restart (0.11.7, see [Real-time steering](#real-time-steering-091)): the run is interrupted and started again as the same job with the same prompt, a note of the steps it had taken and your message. A run that prints nothing at all (stdout or stderr) in its first 60 s is killed and fails as a provider error (retried by the normal rules); after its first output the guard is off and only the turn timeout applies, so a long silent tool call is never killed; a job with an open `desk ask` question is not killed either. Provider credentials remain under the CLI’s control.
@@ -138,6 +142,18 @@ Restricted-mode command lines:
 **Claude use log:** Claude needs no reason (0.11.8). Every Claude turn appends one line (timestamp, job id, reason) to `data/claude-use-log.tsv` (mode 0600); the reason column holds the optional `reason` from the request or the bot's stored one, and is empty when there is none. Prompts and tokens are never written there.
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
+
+## What changed in 0.12.35
+
+**Remote access through Cloudflare Tunnel and Cloudflare Access, with the token checked again inside Bot-Office.**
+
+- **New `botoffice.remote_access` middleware (outermost).** A request is remote when its Host is a configured public hostname or it carries a Cloudflare header. Remote requests need a valid Access JWT (RS256 only, keys from the team's JWKS, issuer, audience and expiry checked) and fail closed: a missing or disabled configuration gives 403, an invalid one 503. Loopback requests without Cloudflare headers pass through unchanged.
+- **Two roles.** `owner` (an email in `owners`) gets the whole API without a bearer token; state-changing requests must send a matching `Origin`. `remote-client` (a service token in `clients`) is limited to a fixed route allowlist and gets no websockets.
+- **Stopgap shared key.** Without Access, a caller may send `X-Bot-Office-Key`; only its SHA-256 and an expiry are stored, it always gets the `remote-client` role, and `deploy/remote-access/shared_key.py` makes, lists and revokes keys without printing them.
+- **Configuration** is `<control dir>/remote_access.json` (or `BOT_OFFICE_REMOTE_ACCESS_FILE`), re-read when it changes, so a client can be revoked without a restart. The signing keys are cached for an hour.
+- **GUI.** The page asks `GET /v1/remote/whoami` first and, for a remote owner, skips the token prompt.
+- **Unchanged.** The API still binds to loopback only, the bearer token still works locally, and job-scoped agent routes still need a job token.
+- **Rollback.** No schema change. Check out the previous tag and restart; without `remote_access.json` remote requests are refused.
 
 ## What changed in 0.12.34
 

@@ -33,6 +33,7 @@ from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
 from . import usage as budgets
+from . import remote_access
 from .auth import auth_dependency, bearer
 from .catalog import (
     ENGINE_LABELS,
@@ -567,6 +568,9 @@ def create_app(
     # 0.12.1: the page (217 kB) and long chats (hundreds of kB) shrink a lot over a tunnel;
     # Starlette leaves text/event-stream (the live reply) uncompressed
     app.add_middleware(TextGZipMiddleware, minimum_size=1024, compresslevel=5)
+    # 0.12.23: added last, so it is the OUTERMOST middleware (it runs before gzip). It checks the Cloudflare
+    # Access JWT on requests that came through the tunnel and leaves loopback requests untouched.
+    app.add_middleware(remote_access.RemoteAccessMiddleware, settings_or_loader=settings)
     app.state.settings = settings
     app.state.store = store
     app.state.providers = providers
@@ -663,6 +667,15 @@ def create_app(
         if not bot:
             raise HTTPException(status_code=404, detail="bot not found")
         return bot
+
+    @app.get("/v1/remote/whoami")
+    async def remote_whoami() -> dict:
+        # no auth dependency: the page asks this before it has any credential. The middleware already
+        # refused every remote request without a verified identity, so this only reports it.
+        who = remote_access.current_remote_identity.get()
+        if who is None:
+            return {"remote": False}
+        return {"remote": True, "kind": who.kind, "role": who.role, "name": who.display_name}
 
     @app.get("/", response_class=HTMLResponse)
     async def chat_page() -> HTMLResponse:
