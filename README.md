@@ -143,6 +143,11 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.44
+
+- **Bot desktops survive a Bot-Office restart.** A desktop started by Bot-Office ran inside the service's cgroup, so `systemctl --user restart bot-office` stopped it (its state was kept; the next use started it again). `podman run`/`start` now run in a transient systemd scope of their own (`systemd-run --user --scope`) in the single-user layout. Found in the 0.12.43 live test.
+- **Rollback.** Check out the `backup/pre-0.12.44-*` tag and restart.
+
 ## What changed in 0.12.43
 
 - **Desktop panel on a phone.** The live desktop no longer widens the dialog past the screen at phone width (found in the 0.12.42 live test); the toolbar and the "you are controlling" banner stay inside the screen. CSS only.

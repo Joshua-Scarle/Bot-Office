@@ -409,3 +409,128 @@ def test_configured_pool_names_are_never_per_bot(tmp_path):
     run(manager.refresh())
     assert manager.bot_of("desktop-10") is None
     assert bd.Registry(tmp_path / "x.json", ("desktop-12",)).allocate(BOT_C, {}) == 10
+
+
+# ---------------------------------------------------------------- live test finding: service restarts
+def test_run_and_start_get_their_own_named_scope(monkeypatch):
+    monkeypatch.setattr(bd.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    for verb in ("run", "start"):
+        assert bd.scope_prefix([verb, "x"], "bo-desktop-u1", True) == [
+            "/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect", "--unit=bo-desktop-u1", "--"]
+        assert bd.scope_prefix([verb, "x"], "u", False) == []          # probe said no: direct, as before
+    for verb in ("stop", "ps", "exec"):
+        assert bd.scope_prefix([verb, "x"], "u", True) == []
+    monkeypatch.setattr(bd.isolation, "active", lambda: object())
+    assert bd.scope_prefix(["start", "x"], "u", True) == []             # isolated layout: unchanged
+
+
+def test_scope_probe_once_and_warns(monkeypatch, caplog):
+    monkeypatch.setattr(bd, "_scope_ok", None)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    monkeypatch.setattr(bd.shutil, "which", lambda name: None)
+    assert run(bd._scopes_available({"XDG_RUNTIME_DIR": "/run/user/1"})) is False
+    assert "without their own systemd scope" in caplog.text
+    monkeypatch.setattr(bd.shutil, "which", lambda name: "/bin/true")   # would succeed now, but probed once
+    assert run(bd._scopes_available({"XDG_RUNTIME_DIR": "/run/user/1"})) is False
+
+
+def test_aborted_scoped_start_ends_podman_and_stops_the_container(monkeypatch):
+    import sys
+    calls = []
+    monkeypatch.setattr(bd, "_scope_ok", True)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    monkeypatch.setattr(bd, "scope_prefix", lambda argv, unit, ok: [sys.executable, "-c",
+                                                                    "import time; time.sleep(30)", "--"] if ok else [])
+    real_once = bd._podman_once
+
+    async def once(argv, timeout, scoped):
+        if argv[0] == "ps":
+            return 0, json.dumps([{"Names": ["desktop-12"], "Id": "abc123", "State": "running", "Ports": [],
+                                   "Labels": {bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_A}}]).encode(), b""
+        if argv[0] == "stop":
+            calls.append(argv)
+            return 0, b"", b""
+        return await real_once(argv, timeout, scoped)
+    monkeypatch.setattr(bd, "_podman_once", once)
+    code, _, _ = run(bd.podman(["start", "desktop-12"], 0.5))
+    assert code == 124 and calls == [["stop", "--time", "5", "abc123"]]     # by id, only because it is ours
+
+
+def test_abort_never_stops_a_foreign_container(monkeypatch):
+    calls = []
+
+    async def once(argv, timeout, scoped):
+        calls.append(argv)
+        if argv[0] == "ps":
+            return 0, json.dumps([{"Names": ["desktop-12"], "Id": "f00", "State": "running", "Ports": [],
+                                   "Labels": {}}]).encode(), b""
+        return 0, b"", b""
+    monkeypatch.setattr(bd, "_podman_once", once)
+    run(bd._stop_if_ours("desktop-12"))
+    assert not any(a[0] == "stop" for a in calls)
+
+
+def test_scope_launch_oserror_falls_back(monkeypatch):
+    monkeypatch.setattr(bd, "_scope_ok", True)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    monkeypatch.setattr(bd, "scope_prefix", lambda argv, unit, ok: ["/nonexistent/systemd-run", "--"] if ok else [])
+    monkeypatch.setattr(bd.isolation, "wrap", lambda argv, **kw: ["true"])
+    assert run(bd.podman(["start", "desktop-12"]))[0] == 0 and bd._scope_ok is False
+
+
+def test_scope_failure_falls_back_once(monkeypatch):
+    seen = []
+    monkeypatch.setattr(bd, "_scope_ok", True)
+
+    async def once(argv, timeout, scoped):
+        seen.append(scoped)
+        return (1, b"", b"Failed to start transient scope unit: x") if scoped else (0, b"id\n", b"")
+    monkeypatch.setattr(bd, "_podman_once", once)
+    assert run(bd.podman(["start", "desktop-12"]))[0] == 0
+    assert seen == [True, False] and bd._scope_ok is False
+
+
+def test_double_cancel_waits_for_cleanup(monkeypatch):
+    import sys
+    monkeypatch.setattr(bd, "_scope_ok", False)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    monkeypatch.setattr(bd.isolation, "wrap", lambda argv, **kw: [sys.executable, "-c", "import time; time.sleep(30)"])
+    state = {}
+    real_once = bd._podman_once
+
+    async def once(argv, timeout, scoped):
+        if argv[0] == "ps":
+            await asyncio.sleep(0.3)
+            state["stopped"] = True
+            return 0, b"[]", b""
+        return await real_once(argv, timeout, scoped)
+    monkeypatch.setattr(bd, "_podman_once", once)
+
+    async def main():
+        task = asyncio.ensure_future(bd.podman(["start", "desktop-12"], 60))
+        await asyncio.sleep(0.5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            state["cancelled_after_stop"] = state.get("stopped", False)
+    run(main())
+    assert state["cancelled_after_stop"] is True
+
+
+def test_aborted_start_by_id_is_found_and_stopped(monkeypatch):
+    calls = []
+
+    async def once(argv, timeout, scoped):
+        calls.append(argv)
+        if argv[0] == "ps":
+            assert argv[3] == "id=abc123def"
+            return 0, json.dumps([{"Names": ["desktop-12"], "Id": "abc123def456", "State": "running", "Ports": [],
+                                   "Labels": {bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_A}}]).encode(), b""
+        return 0, b"", b""
+    monkeypatch.setattr(bd, "_podman_once", once)
+    run(bd._stop_if_ours("abc123def"))
+    assert calls[-1] == ["stop", "--time", "5", "abc123def456"]
