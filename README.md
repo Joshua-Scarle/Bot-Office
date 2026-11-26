@@ -143,6 +143,12 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.40
+
+- **Short task ids work in `bot-task show`, `status`, `checkpoint` and `note`.** `bot-task` prints the first 8 characters of a task id, but the agent routes (`/v1/agent/assignments/{ref}`) only took a full id and answered 404 to the short form. They now accept a unique prefix of 8 or more hex characters too, like the owner's routes. A prefix that matches two tasks gets 400. Found in the 0.12.39 live test: a woken bot couldn't open the stalled task named in its stall-check prompt.
+- **The stall-check prompt names the full task id.**
+- **Rollback.** No schema change. Check out the previous tag and restart.
+
 ## What changed in 0.12.39
 
 **Stalled work is picked up again, priority messages always wake, and the Grok handoff's rules live in memory.** (Engineering Lead diagnosis, Nov 25: about 60 of 74 recent incomplete jobs sat on expired approval cards, nothing restarted them, and the twins' memory was empty.)

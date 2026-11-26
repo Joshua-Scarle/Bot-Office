@@ -1806,8 +1806,13 @@ def create_app(
             return str(job.assignment_id)
         try:
             return str(UUID(ref))
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail="assignment not found") from exc
+        except ValueError:
+            pass
+        # 0.12.40: the 8-character ids bot-task prints work too (a unique prefix of 8+ hex characters)
+        try:
+            return assignments.find(ref)
+        except AssignmentError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
     @app.get("/v1/agent/approvals")
     async def agent_approvals(ids: str = "", job: Job = Depends(agent_scope)) -> list[dict]:  # noqa: B008
