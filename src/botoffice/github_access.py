@@ -156,6 +156,12 @@ def _real_gh() -> str | None:
     return shutil.which("gh", path=path)
 
 
+_CLI_SLOTS = threading.BoundedSemaphore(2)  # at most two gh lookups at once; more wait 0.5 s, then None
+_CLI_PER_MINUTE = 30
+_cli_times: list[float] = []
+_cli_lock = threading.Lock()
+
+
 def gh_cli_get(endpoint: str, jq: str) -> str | None:
     """0.12.45: a read-only GET through the host's own gh login, for a controller without a token file
     (data/github-token). Never for a bot, never a write; the answer only, never the credential."""
@@ -164,11 +170,21 @@ def gh_cli_get(endpoint: str, jq: str) -> str | None:
     if program is None or not re.fullmatch(r"[A-Za-z0-9_./-]{1,200}", endpoint):
         return None
     env = {key: value for key, value in os.environ.items() if not key.startswith(("BOT_OFFICE_", "GH_", "GITHUB_"))}
+    stamp = time.monotonic()
+    with _cli_lock:  # a budget of uncached lookups a minute: beyond it, not verified (the push asks)
+        _cli_times[:] = [t for t in _cli_times if stamp - t < 60]
+        if len(_cli_times) >= _CLI_PER_MINUTE:
+            return None
+        _cli_times.append(stamp)
+    if not _CLI_SLOTS.acquire(timeout=0.5):
+        return None
     try:
         done = subprocess.run([program, "api", "--method", "GET", endpoint, "--jq", jq], capture_output=True, text=True,
-                              timeout=API_TIMEOUT + 2, env=env, stdin=subprocess.DEVNULL)
+                              timeout=API_TIMEOUT, env=env, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return None
+    finally:
+        _CLI_SLOTS.release()
     value = done.stdout.strip()
     return value if done.returncode == 0 and value and len(value) < 200 else None
 
