@@ -103,6 +103,14 @@ def test_review_r2_cases():
     assert tidy_reply("- a\n\n**Note:** x") == "- a\n\nNote: x"
 
 
+def test_review_r3_cases():
+    assert tidy_reply("Run this:\n\n    Hope this helps!") == "Run this:\n\n    Hope this helps!"
+    import time
+    started = time.monotonic()
+    tidy_reply("Done.\nHope this helps" + " " * 19970 + "X")
+    assert time.monotonic() - started < 1
+
+
 def test_huge_header_is_fast():
     import time
     started = time.monotonic()

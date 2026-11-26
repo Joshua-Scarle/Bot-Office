@@ -60,7 +60,7 @@ _BOLD_LABEL = re.compile(
     r"^(?P<lead>\s*(?:[-*+]\s+|\d+[.)]\s+)?)"
     r"\*\*(?P<label>[^*`\n]{1,60}?)(?P<colon_in>:?)\*\*(?P<colon_out>:?)(?=\s|$)")
 _FILLER = re.compile(
-    r"^\s*(?:"
+    r"(?:"
     r"(?:just )?let me know if (?:you )?(?:have any (?:other |more |further )?questions|need anything(?: else)?|"
     r"(?:would|'d) like (?:anything else|more(?: detail| details| info)?|any changes)|"
     r"want (?:anything else|more(?: detail| details)?|any changes)|there'?s anything else(?: I can do)?|"
@@ -68,8 +68,8 @@ _FILLER = re.compile(
     r"|feel free to (?:ask|reach out|let me know)"
     r"|(?:I )?hope (?:this|that) helps"
     r"|(?:I'?m )?(?:always )?happy to help(?: further| with anything else)?"
-    r")\s*[.!]?\s*$",
-    re.IGNORECASE)
+    r")[.!]?",
+    re.IGNORECASE)  # fullmatch on the stripped line: no whitespace quantifiers at the ends to backtrack over
 
 
 def _fenced(lines: list[str]) -> list[bool]:
@@ -103,6 +103,11 @@ def _code_like(lines: list[str], fenced: list[bool]) -> list[bool]:
         ticks += line.count("`")
         prev_blank = False
     return out
+
+
+def _is_filler(text: str) -> bool:
+    text = text.strip()
+    return len(text) <= 200 and _FILLER.fullmatch(text) is not None
 
 
 def _unbold_label(line: str) -> str:
@@ -145,18 +150,19 @@ def tidy_reply(text: str) -> str:
                 lines[first] = title  # its words stay, as a plain line
 
     # 2. bold labels at the start of a line (never inside inline code that spans lines, or indented code)
-    lines = [line if skip else _unbold_label(line) for line, skip in zip(lines, _code_like(lines, code))]
+    code = _code_like(lines, code)
+    lines = [line if skip else _unbold_label(line) for line, skip in zip(lines, code)]
 
     # 3. a trailing filler line, when something else remains
     last = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].strip()), None)
-    if last is not None and not code[last] and _FILLER.match(lines[last]):
+    if last is not None and not code[last] and _is_filler(lines[last]):
         remaining = "\n".join(lines[:last]).strip()
         if remaining:
             lines = lines[:last]
     elif last is not None and not code[last]:
         # "It's live now. Let me know if anything looks off." loses only its last sentence
         sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", lines[last].rstrip())
-        if len(sentences) > 1 and _FILLER.match(sentences[-1]) and "`" not in sentences[-1]:
+        if len(sentences) > 1 and _is_filler(sentences[-1]) and "`" not in sentences[-1]:
             lines[last] = " ".join(sentences[:-1])
 
     out = "\n".join(lines).strip("\n")

@@ -1948,7 +1948,7 @@ function fillBody(body, m, text) {
    code, fenced code, links (http, https and mailto only), bare URLs, headings (as a bold line), lists
    (nested, ordered), quotes, rules and short tables. Asterisk runs that open nothing are dropped, so a
    raw "**" never shows. */
-const MD_INLINE_MAX = 4000;
+const MD_INLINE_MAX = 4000, MD_TABLE_MAX_COLUMNS = 20;
 const MD_INLINE = new RegExp([
   "(?<tick>`+)(?<code>[^`]|[^`][\\s\\S]*?[^`])\\k<tick>(?!`)",
   "\\[(?<label>[^\\]\\n]+)\\]\\(\\s*<?(?<href>[^\\s()<>]+(?:\\([^\\s()<>]*\\)[^\\s()<>]*)*)>?(?:\\s+\"[^\"\\n]*\")?\\s*\\)",
@@ -1987,9 +1987,10 @@ function mdTrimUrl(url) {
 }
 function mdText(parent, text) {
   // an unmatched run of two or more asterisks at a word's edge (a half-written bold) never shows as raw
-  // symbols; one inside a token (src/**/x, 2**3) is part of it
-  const clean = text.replace(/\*{2,}/g, (run, at, all) => (at > 0 && /\S/.test(all[at - 1]) &&
-    at + run.length < all.length && /\S/.test(all[at + run.length])) ? run : "");
+  // symbols; one inside a token (src/**/x, 2**3) or a path glob (**/*.py) is part of it
+  const clean = text.replace(/\*{2,}/g, (run, at, all) => ((at > 0 && /\S/.test(all[at - 1]) &&
+    at + run.length < all.length && /\S/.test(all[at + run.length])) || all[at - 1] === "/" ||
+    all[at + run.length] === "/") ? run : "");
   if (clean) parent.append(clean);
 }
 /* noLink: inside a link's label (a link never holds another link) */
@@ -2029,7 +2030,8 @@ function mdHeadingText(text) {
 function mdTableRule(line, columns) {
   if (!line.includes("-")) return false;
   const cells = mdCells(line);
-  return cells.length === columns && cells.every((c) => /^:?-{2,}:?$/.test(c));
+  // a chat table is short: more than MD_TABLE_MAX_COLUMNS columns stays text (no cell explosion)
+  return cells.length === columns && columns <= MD_TABLE_MAX_COLUMNS && cells.every((c) => /^:?-{2,}:?$/.test(c));
 }
 function mdCells(line) {
   let s = line.trim();

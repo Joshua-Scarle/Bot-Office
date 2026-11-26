@@ -179,3 +179,12 @@ def test_review_r2_edge_cases():
     assert '<code class="lang-sh">echo hi</code>' in outs[0] and outs[0].endswith("<p>After</p></div>")
     assert "<pre" not in outs[1] and "Important prose" in outs[1]
     assert outs[2].count("<blockquote>") == 3 and "deep" in outs[2]
+
+
+def test_review_r3_edge_cases():
+    import time
+    started = time.monotonic()
+    outs = render("|h" * 2000 + "\n" + "|--" * 2000 + "\n" + "|\n" * 7999, "Include **/*.py", "and src/**")
+    assert time.monotonic() - started < 10
+    assert "<table>" not in outs[0]
+    assert inner(outs[1]) == "<p>Include **/*.py</p>" and inner(outs[2]) == "<p>and src/**</p>"
