@@ -519,9 +519,11 @@ class SessionLimits:
         if left > window:
             return False, (f"{round(left / 60)} minutes are still left; extend in the last "
                            f"{max(1, round(window / 60))} minutes of the session")
-        if session.budget + self.step > self.cap + 1e-6:
+        if max(session.budget, now - session.started) + self.step > self.cap + 1e-6:
             return False, f"the hard limit is {round(self.cap / 60)} minutes in total; no more extensions"
-        session.budget += self.step
+        # overdue: the step counts from now (and stays within the cap), so a second request finds a full step
+        # left and is refused; extensions can never be stacked
+        session.budget = min(self.cap, max(session.budget, now - session.started) + self.step)
         session.extensions.append((now, reason[:300]))
         return True, (f"extended by {round(self.step / 60)} minutes (extension {len(session.extensions)}; "
                       f"{round((session.started + session.budget - now) / 60)} minutes left, hard limit "

@@ -662,6 +662,10 @@ def secret_like(text: str) -> bool:
     for word in words:
         if _SECRET_PREFIX.match(word):
             return True
+        bare = word.strip("'\".,;:!?()[]")
+        if len(bare) >= 7 and not plain.fullmatch(bare) and re.search(r"[A-Za-z]", bare) \
+                and re.search(r"[\d\W_]", bare):
+            return True   # a password-like word inside longer text ("hello hunter2!")
         if len(word) >= 12 and not re.fullmatch(r"(?i)[a-z]+|\d+|https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+|[\w./-]+\.\w{1,5}",
                                                 word):
             kinds = sum(bool(re.search(pattern, word)) for pattern in (r"[a-z]", r"[A-Z]", r"\d", r"[^\w]"))

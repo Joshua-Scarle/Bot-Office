@@ -202,6 +202,7 @@ def test_public_pr_review_line_still_asks(office):
     ("desk type \"$(cat ~/.pw)\"", "ask"),
     ("desk type $PASSWORD", "ask"),
     ("desk type my password is x", "ask"),
+    ("desk type 'hello hunter2'", "ask"),
     ("desk type ghp_abcdefghijklmnopqrstu", "ask"),
     ("cat pw | xargs desk type", "ask"),
     ("cat pw | xargs -I{} desk type {}", "ask"),
@@ -557,3 +558,22 @@ def test_short_steps_cannot_be_stacked():
     lim = limits(clock, base=1, step=1, cap=240)
     lim.check("desktop-18", "click", "a")
     assert lim.extend("desktop-18", "long task still going", True)[0] is False
+
+
+def test_overdue_short_steps_cannot_be_stacked():
+    clock = Clock()
+    lim = limits(clock, base=1, step=1, cap=6, idle=20)
+    lim.check("desktop-19", "click", "a")
+    clock.t += 210                                # 3.5 minutes in, 2.5 overdue
+    assert lim.extend("desktop-19", "long task still going", True)[0] is True
+    assert lim.extend("desktop-19", "long task still going", True)[0] is False
+
+
+def test_unassigned_routine_approval_does_not_cover_a_chat_turn(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    routine = running(store, bot, source="routine")
+    approval = rules.decide(routine, bash(ASKS)).approval_id
+    store.finish(routine.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    rules.approve(approval)
+    chat = running(store, bot)
+    assert "already granted" not in rules.decide(chat, bash(ASKS)).reason

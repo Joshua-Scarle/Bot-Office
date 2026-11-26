@@ -1361,11 +1361,16 @@ class Rules:
                     return ("denied", int(denied["id"]))
                 granted = db.execute(
                     "SELECT a.id FROM approvals a LEFT JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
-                    "a.input_hash=? AND a.status='approved' AND (a.job_id=? OR a.assignment_id IS ?) AND "
+                    "a.input_hash=? AND a.status='approved' AND (a.job_id=? OR (a.assignment_id IS NOT NULL AND "
+                    "a.assignment_id=?) OR (a.assignment_id IS NULL AND ? IS NULL AND a.source IN ('chat','api') "
+                    "AND ? IN ('chat','api'))) AND "
                     "(a.resume_job_id IS NULL OR (a.resume_job_id<>? AND j.status IN ('queued','running'))) "
                     "ORDER BY a.id DESC LIMIT 1",
-                    (str(job.bot_id), action.fingerprint, str(job.id),
-                     str(job.assignment_id) if job.assignment_id else None, str(job.id))).fetchone()
+                    # the same task: this job, the same assignment, or the bot's chat turns (never a routine,
+                    # wake-up or other unassigned run, which are separate tasks)
+                    (str(job.bot_id), action.fingerprint, str(job.id), str(job.assignment_id or ""),
+                     str(job.assignment_id) if job.assignment_id else None, job.source or "api",
+                     str(job.id))).fetchone()
                 if granted:
                     db.commit()
                     return ("granted", int(granted["id"]))
@@ -1611,11 +1616,16 @@ class Rules:
         with closing(self.store._connect()) as db:
             rows = db.execute("SELECT id, bot_id, job_id, summary FROM approvals WHERE resume_job_id=? AND "
                               "status='approved'", (str(job.id),)).fetchall()
+            changed = []
             for row in rows:
                 # the grant lapses with its turn; the card reads expired and can be approved again ("Approve and
-                # run": a fresh grant and a new resume turn), never reused by the old one
-                db.execute("UPDATE approvals SET status='expired', decided_at=?, grant_expires_at=NULL, "
-                           "resume_job_id=NULL WHERE id=? AND status='approved'", (now().isoformat(), row["id"]))
+                # run": a fresh grant and a new resume turn), never reused by the old one. Only while it is still
+                # bound to this turn (a fresh approval meanwhile is left alone).
+                if db.execute("UPDATE approvals SET status='expired', decided_at=?, grant_expires_at=NULL, "
+                              "resume_job_id=NULL WHERE id=? AND status='approved' AND resume_job_id=?",
+                              (now().isoformat(), row["id"], str(job.id))).rowcount:
+                    changed.append(row)
+            rows = changed
         for row in rows:
             self.store.add_message(row["bot_id"], "system", (
                 f"Approval #{row['id']}: the resume turn ended without running the approved step "
