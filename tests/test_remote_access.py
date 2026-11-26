@@ -414,16 +414,195 @@ def test_owner_post_requires_exact_origin(tmp_path):
     assert status(ok) == 200
 
 
-def test_owner_websocket_refused_over_remote(tmp_path):
-    # 0.12.35 review: no remote websockets for any role, even an owner with the right Origin
-    mw, probe, *_ = build(tmp_path)
+class WsApp:
+    """A downstream websocket app: accepts, then echoes frames until the client goes away."""
+    def __init__(self):
+        self.seen = []
+        self.events = []
+        self.cancelled = False
+
+    async def __call__(self, scope, receive, send):
+        self.seen.append((scope["path"], ra.current_remote_identity.get(),
+                          [n for n, _ in scope["headers"]]))
+        assert (await receive())["type"] == "websocket.connect"
+        await send({"type": "websocket.accept", "subprotocol": "binary"})
+        try:
+            while True:
+                message = await receive()
+                self.events.append(message["type"])
+                if message["type"] == "websocket.disconnect":
+                    return
+                await send({"type": "websocket.send", "bytes": message.get("bytes", b"")})
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+VNC_PATH = "/v1/desktops/desktop-12/vnc"
+
+
+def build_ws(tmp_path, cfg=CONFIG, clock=None):
+    path = write_config(tmp_path, cfg)
+    clock = clock or Clock()
+    app = WsApp()
+    mw = ra.RemoteAccessMiddleware(app, ra.ConfigLoader(lambda: path, clock), fetcher=Fetcher(), clock=clock)
+    mw.ws_recheck = 0.01
+    return mw, app, path, clock
+
+
+def run_ws(mw, headers, frames=(), path=VNC_PATH, on_frame=None, hold=0.0):
+    """Drive one websocket: connect, then *frames* (on_frame(i) runs before frame i), then wait *hold*
+    seconds for the middleware to act, then disconnect. Returns what was sent to the client."""
+    scope = {"type": "websocket", "path": path,
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+    sent = []
+    queue = [{"type": "websocket.connect"}] + [{"type": "websocket.receive", "bytes": f} for f in frames]
+
+    async def receive():
+        if queue:
+            message = queue.pop(0)
+            if message["type"] == "websocket.receive" and on_frame:
+                on_frame(len(frames) - len(queue) - 1)
+            return message
+        await asyncio.sleep(hold)
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(asyncio.wait_for(mw(scope, receive, send), 10))
+    return sent
+
+
+def owner_ws(token, **extra):
+    return remote(token, origin=f"https://{HOST}", **extra)
+
+
+def test_owner_desktop_websocket_allowed_over_remote(tmp_path):
+    mw, app, *_ = build_ws(tmp_path)
+    sent = run_ws(mw, owner_ws(sign(user_claims())), frames=[b"hi"])
+    assert sent[0]["type"] == "websocket.accept"
+    assert {"type": "websocket.send", "bytes": b"hi"} in sent
+    path, who, header_names = app.seen[0]
+    assert path == VNC_PATH and who.role == "owner" and who.kind == "user" and who.host == HOST
+    assert b"cf-access-jwt-assertion" not in header_names   # the JWT never reaches the app
+    assert ra.current_remote_identity.get() is None
+
+
+def test_owner_websocket_needs_exact_origin(tmp_path):
+    mw, app, *_ = build_ws(tmp_path)
     token = sign(user_claims())
-    for headers in (remote(token), remote(token, origin=f"https://{HOST}")):
-        sent = run(mw, path="/v1/desktops/desktop-1/vnc", headers=headers, kind="websocket")
-        assert sent == [{"type": "websocket.close", "code": 1008}]
-    assert not probe.seen
-    # a local websocket is untouched
-    assert run(mw, path="/v1/desktops/desktop-1/vnc", headers={"host": "127.0.0.1:8787"}, kind="websocket") == []
+    for headers in (remote(token), remote(token, origin="https://evil.example.test"),
+                    remote(token, origin=f"http://{HOST}")):
+        assert run_ws(mw, headers) == [{"type": "websocket.close", "code": 1008}]
+    assert not app.seen
+
+
+@pytest.mark.parametrize("path", ["/v1/ws", "/v1/desktops/desktop-1/vnc/x", "/v1/desktops/desktop-0/vnc",
+                                  "/v1/desktops/desktop-100/vnc", "/v1/desktops/evil/vnc", "/v1/jobs/1/events"])
+def test_other_remote_websockets_refused_for_owner(tmp_path, path):
+    mw, app, *_ = build_ws(tmp_path)
+    assert run_ws(mw, owner_ws(sign(user_claims())), path=path) == [{"type": "websocket.close", "code": 1008}]
+    assert not app.seen
+
+
+def test_remote_client_and_shared_key_websockets_still_refused(tmp_path):
+    mw, app, *_ = build_ws(tmp_path)
+    sent = run_ws(mw, owner_ws(sign(service_claims())))
+    assert sent == [{"type": "websocket.close", "code": 1008}]
+    cfg = dict(CONFIG, shared_keys=KEY_CONFIG["shared_keys"])
+    mw, app2, *_ = build_ws(tmp_path, cfg)
+    sent = run_ws(mw, {"host": HOST, "x-bot-office-key": KEY, "origin": f"https://{HOST}"})
+    assert sent == [{"type": "websocket.close", "code": 1008}]
+    assert not app.seen and not app2.seen
+
+
+def test_expired_or_unsigned_jwt_websocket_refused(tmp_path):
+    mw, app, *_ = build_ws(tmp_path)
+    expired = sign(user_claims(exp=NOW - 3600))
+    assert run_ws(mw, owner_ws(expired)) == [{"type": "websocket.close", "code": 1008}]
+    assert run_ws(mw, owner_ws(sign(user_claims(), d=D + 2))) == [{"type": "websocket.close", "code": 1008}]
+    assert run_ws(mw, owner_ws(sign(user_claims(email="other@example.test")))) == [
+        {"type": "websocket.close", "code": 1008}]
+    assert not app.seen
+
+
+def test_owner_websocket_closed_when_jwt_expires(tmp_path):
+    clock = Clock()
+    mw, app, *_ = build_ws(tmp_path, clock=clock)
+    token = sign(user_claims(exp=NOW + 100))
+
+    def tick(i):
+        if i == 1:
+            clock.t = NOW + 101   # the JWT expired between two frames
+    sent = run_ws(mw, owner_ws(token), frames=[b"a", b"b", b"c"], on_frame=tick)
+    assert sent[0]["type"] == "websocket.accept"
+    assert {"type": "websocket.send", "bytes": b"a"} in sent
+    assert {"type": "websocket.send", "bytes": b"b"} not in sent and {"type": "websocket.send", "bytes": b"c"} not in sent
+    assert sent[-1] == {"type": "websocket.close", "code": 1008}
+
+
+def test_idle_owner_websocket_closed_at_expiry_by_the_watchdog(tmp_path):
+    clock = Clock()
+    mw, app, *_ = build_ws(tmp_path, clock=clock)
+    token = sign(user_claims(exp=NOW + 100))
+
+    def tick(i):
+        clock.t = NOW + 200    # time passes while no frame flows; the periodic re-check must cut it
+
+    async def drive():
+        scope = {"type": "websocket", "path": VNC_PATH,
+                 "headers": [(k.lower().encode(), v.encode()) for k, v in owner_ws(token).items()]}
+        out = []
+        first = [True]
+
+        async def receive():
+            if first[0]:
+                first[0] = False
+                return {"type": "websocket.connect"}
+            tick(0)
+            await asyncio.sleep(30)    # a silent viewer: only the watchdog can end this
+            return {"type": "websocket.disconnect", "code": 1000}
+
+        async def send(message):
+            out.append(message)
+        await asyncio.wait_for(mw(scope, receive, send), 5)
+        return out
+    sent = asyncio.run(drive())
+    assert sent[0]["type"] == "websocket.accept" and sent[-1] == {"type": "websocket.close", "code": 1008}
+    assert app.cancelled
+
+
+def test_owner_websocket_hard_maximum_age(tmp_path):
+    clock = Clock()
+    mw, app, *_ = build_ws(tmp_path, clock=clock)
+    token = sign(user_claims(exp=NOW + 10 * 3600))
+
+    def tick(i):
+        if i == 1:
+            clock.t = NOW + ra.MAX_REMOTE_WEBSOCKET_SECONDS + 1
+    sent = run_ws(mw, owner_ws(token), frames=[b"a", b"b"], on_frame=tick)
+    assert {"type": "websocket.send", "bytes": b"b"} not in sent and sent[-1] == {"type": "websocket.close", "code": 1008}
+
+
+def test_owner_websocket_closed_when_owner_removed(tmp_path):
+    clock = Clock()
+    mw, app, path, _ = build_ws(tmp_path, clock=clock)
+    token = sign(user_claims())
+
+    def revoke(i):
+        if i == 1:
+            write_config(tmp_path, dict(CONFIG, owners=["someone@example.test"]))
+            clock.t += ra.CONFIG_RECHECK_SECONDS + 1
+    sent = run_ws(mw, owner_ws(token), frames=[b"a", b"b"], on_frame=revoke)
+    assert {"type": "websocket.send", "bytes": b"a"} in sent
+    assert {"type": "websocket.send", "bytes": b"b"} not in sent and sent[-1] == {"type": "websocket.close", "code": 1008}
+
+
+def test_local_websocket_untouched(tmp_path):
+    mw, app, *_ = build_ws(tmp_path)
+    sent = run_ws(mw, {"host": "127.0.0.1:8787"}, frames=[b"x"])
+    assert sent[0]["type"] == "websocket.accept" and app.seen[0][1] is None
 
 
 def test_remote_client_allowlist(tmp_path):

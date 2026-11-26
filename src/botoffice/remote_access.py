@@ -23,6 +23,7 @@ import asyncio
 import base64
 import binascii
 import concurrent.futures
+import contextlib
 import contextvars
 import hashlib
 import hmac
@@ -53,6 +54,11 @@ KEY_MAX_STALE_SECONDS = 24 * 3600.0   # cached signing keys are never used longe
 MAX_PENDING_VERIFY = 16               # JWT checks waiting at once; more get 503 at once
 MAX_REMOTE_REQUEST_SECONDS = 300.0    # hard cap on one remote request; an SSE client resumes with Last-Event-ID
 KEY_REFETCH_MIN_SECONDS = 60.0
+# remote-desktop: the one remote websocket (the desktop viewer, owner only) is re-checked this often and
+# never lives longer than this, nor past the Access JWT's exp (docs/REMOTE-DESKTOPS.md)
+MAX_REMOTE_WEBSOCKET_SECONDS = 3600.0
+WEBSOCKET_RECHECK_SECONDS = 15.0
+REMOTE_WEBSOCKET_PATH = re.compile(r"^/v1/desktops/desktop-[1-9][0-9]?/vnc$")
 CLOCK_SKEW_SECONDS = 60
 MIN_RSA_BITS = 2048
 FETCH_TIMEOUT_SECONDS = 5.0
@@ -580,6 +586,7 @@ class RemoteAccessMiddleware:
             self.loader = ConfigLoader(lambda: config_path(settings), clock)
         self.verifier = AccessVerifier(fetcher, clock)
         self.clock = clock
+        self.ws_recheck = WEBSOCKET_RECHECK_SECONDS
         self._pending_verify = 0   # touched only on the event loop thread
 
     async def __call__(self, scope, receive, send):
@@ -646,10 +653,25 @@ class RemoteAccessMiddleware:
         origin = (headers.get(b"origin") or [b""])[0].decode("latin-1")
         expected_origin = "https://" + (headers.get(b"host") or [b""])[0].decode("latin-1").strip().lower()
         if kind == "websocket":
-            # 0.12.35 review: no remote websockets for any role (the only one is VNC). The JWT is checked at
-            # the handshake only, so a long-lived socket would outlive expiry or revocation. Fail closed.
-            log.warning("remote websocket refused (%s)", identity.display_name)
-            await self._deny(kind, send, 403, "not allowed over remote access")
+            # remote-desktop: only the desktop viewer, only for a person who is an owner (verified Access
+            # JWT, never a service token or shared key), only same-origin. The socket is closed at the
+            # JWT's exp, on revocation (re-checked while it is open) or at a hard maximum age.
+            if not (identity.role == ROLE_OWNER and identity.kind == "user" and identity.via == "jwt"
+                    and identity.expires_at is not None):
+                log.warning("remote websocket refused: not an owner (%s)", identity.display_name)
+                await self._deny(kind, send, 403, "not allowed over remote access")
+                return
+            if not REMOTE_WEBSOCKET_PATH.fullmatch(scope.get("path", "")):
+                log.warning("remote websocket refused: path not allowed (%s %s)", identity.display_name, path)
+                await self._deny(kind, send, 403, "not allowed over remote access")
+                return
+            if origin != expected_origin:
+                log.warning("cross-site websocket refused: %s %s", identity.identity, path)
+                await self._deny(kind, send, 403, "cross-site request refused")
+                return
+            identity = replace(identity, host=host)
+            log.info("remote websocket %s (%s) %s", identity.display_name, identity.role, path)
+            await self._serve_websocket(identity, _without_credentials(scope), receive, send)
             return
         if identity.role == ROLE_CLIENT:
             if not route_allowed(method, scope.get("path", "")):
@@ -694,6 +716,78 @@ class RemoteAccessMiddleware:
                 log.warning("remote request cleanup raised %s", type(task.exception()).__name__)
         finally:
             current_remote_identity.reset(token)
+
+    async def _serve_websocket(self, identity: RemoteIdentity, scope, receive, send) -> None:
+        """Run the app's websocket under a watchdog: it is cut (close 1008 to the client, the app task
+        cancelled, nothing more forwarded either way) at min(JWT exp, now + MAX_REMOTE_WEBSOCKET_SECONDS),
+        or as soon as a re-check finds the identity revoked (owner removed, config off or changed)."""
+        deadline = min(identity.expires_at, self.clock() + MAX_REMOTE_WEBSOCKET_SECONDS)
+        state = {"cut": False, "accepted": False, "closed": False}
+
+        def valid() -> bool:
+            return self.clock() < deadline and self._still_allowed(identity)
+
+        async def bounded_send(message):
+            if state["cut"] or state["closed"]:
+                return
+            kind = message.get("type")
+            if kind in ("websocket.accept", "websocket.send") and not valid():
+                await cut("expired or revoked before a frame")
+                return
+            await send(message)
+            if kind == "websocket.accept":
+                state["accepted"] = True
+            elif kind == "websocket.close":
+                state["closed"] = True
+
+        async def bounded_receive():
+            if state["cut"]:
+                return {"type": "websocket.disconnect", "code": 1008}
+            message = await receive()
+            if state["cut"]:
+                return {"type": "websocket.disconnect", "code": 1008}
+            if message.get("type") == "websocket.receive" and not valid():
+                await cut("expired or revoked on input")
+                return {"type": "websocket.disconnect", "code": 1008}
+            return message
+
+        async def cut(why: str) -> None:
+            if state["cut"]:
+                return
+            state["cut"] = True
+            log.warning("remote websocket closed: %s (%s)", why, identity.display_name)
+            if not state["closed"]:
+                state["closed"] = True
+                with contextlib.suppress(OSError, RuntimeError):
+                    await send({"type": "websocket.close", "code": 1008})
+
+        token = current_remote_identity.set(identity)
+        try:
+            task = asyncio.ensure_future(self.app(scope, bounded_receive, bounded_send))
+        finally:
+            current_remote_identity.reset(token)
+        try:
+            while not task.done():
+                wait = max(0.0, min(self.ws_recheck, deadline - self.clock()))
+                done, _ = await asyncio.wait({task}, timeout=wait)
+                if task in done:
+                    break
+                if not valid():
+                    await cut("credential expired, revoked, or the session reached its maximum age")
+                    break
+        except asyncio.CancelledError:
+            state["cut"] = True
+            task.cancel()
+            task.add_done_callback(_observe)
+            raise
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=1.0)
+        if task.done() and not task.cancelled() and task.exception() is not None:
+            if state["cut"]:
+                log.info("remote websocket app ended with %s after the cut", type(task.exception()).__name__)
+            else:
+                task.result()
 
     def _release_verify(self) -> None:
         self._pending_verify -= 1

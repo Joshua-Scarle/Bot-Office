@@ -28,7 +28,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import approval_classes, attachments, auto_merge, avatars, baseline, continuation, duet_bridge, git_guard, github_access, grok_bridge, health
-from . import failures, grouping, isolation, needs_you, notify, recall, safefs, team, vnc
+from . import bot_desktops, failures, grouping, isolation, needs_you, notify, recall, safefs, team, vnc
 from . import sections as sections_mod
 from . import slash as slash_mod
 from . import rules as action_rules
@@ -577,6 +577,7 @@ def create_app(
         on_terminate(duet.signal_stop)  # no new GitHub request or delivery once shutdown starts
         duet.start()
         reaper = asyncio.create_task(reap_voice(), name="botoffice-voice-reaper")
+        desk_reaper = asyncio.create_task(bot_desks.run_reaper(), name="botoffice-desktop-reaper")
         try:
             yield
         finally:
@@ -594,6 +595,9 @@ def create_app(
         reaper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await reaper
+        desk_reaper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await desk_reaper
         await voice.close()
         await scheduler.stop()
 
@@ -617,6 +621,9 @@ def create_app(
     app.state.voice = voice
     app.mount("/static/vendor/novnc", StaticFiles(directory=CHAT_PAGE.parent / "vendor" / "novnc"), name="novnc")
     tickets = vnc.Tickets()
+    # remote-desktop: each bot's own desktop, started on demand and stopped when idle
+    bot_desks = bot_desktops.DesktopManager(settings, busy_bots=store.running_bot_ids)
+    app.state.bot_desktops = bot_desks
     proxy_counts: dict[str, int] = {}
     attachment_uploads: dict[UUID, list[float]] = {}
     attachment_locks: dict[UUID, asyncio.Lock] = {}
@@ -1612,12 +1619,47 @@ def create_app(
         result = await vnc.desktops()
         slots = {item["slot"]: item for item in scheduler.slots()}
         for desktop in result:
-            slot = slots.get(desktop["name"], {})
-            job = slot.get("current_job")
-            bot = store.get_bot(job.bot_id) if job and job.bot_id else None
-            desktop["bot"] = bot.name if bot else None
-            desktop["job_id"] = str(job.id) if job else None
+            name = desktop["name"]
+            owner_bot = bot_desks.bot_of(name)
+            if owner_bot:
+                bot = store.get_bot(owner_bot)
+                desktop["kind"] = "per-bot"
+                desktop["bot"] = bot.name if bot else None
+                desktop["bot_id"] = owner_bot
+                desktop["job_id"] = None
+            else:
+                slot = slots.get(name, {})
+                job = slot.get("current_job")
+                bot = store.get_bot(job.bot_id) if job and job.bot_id else None
+                desktop["kind"] = "pool" if name in settings.desktops else "other"
+                desktop["bot"] = bot.name if bot else None
+                desktop["bot_id"] = str(bot.id) if bot else None
+                desktop["job_id"] = str(job.id) if job else None
+            desktop["viewers"] = bot_desks.viewers.get(name, 0)
+            desktop["owner_controlling"] = bot_desks.owner_controlling(name)
         return result
+
+    def _desktop_error(exc: bot_desktops.DesktopError) -> HTTPException:
+        return HTTPException(status_code=409, detail=str(exc))
+
+    @app.post("/v1/desktops/{name}/start", dependencies=[Depends(auth)])
+    async def start_desktop(name: str) -> dict:
+        """Start a stopped per-bot desktop (the owner pressed Connect)."""
+        if bot_desks.bot_of(name) is None:
+            raise HTTPException(status_code=404, detail="not a per-bot desktop")
+        try:
+            return {"name": await bot_desks.start(name)}
+        except bot_desktops.DesktopError as exc:
+            raise _desktop_error(exc) from exc
+
+    @app.post("/v1/bots/{bot_id}/desktop", dependencies=[Depends(auth)])
+    async def open_bot_desktop(bot_id: UUID) -> dict:
+        """The owner opens a bot's own desktop (created on first use)."""
+        _bot(bot_id)
+        try:
+            return {"name": await bot_desks.ensure(str(bot_id))}
+        except bot_desktops.DesktopError as exc:
+            raise _desktop_error(exc) from exc
 
     @app.post("/v1/desktops/{name}/ticket", dependencies=[Depends(auth)])
     async def desktop_ticket(name: str, mode: str = Query(default="view", pattern="^(view|control)$")) -> dict:
@@ -1627,7 +1669,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="desktop not found") from exc
         if not any(item["name"] == name and item["status"] == "running" for item in await vnc.desktops()):
             raise HTTPException(status_code=404, detail="desktop is not running")
-        return {"ticket": tickets.issue(name, mode), "expires_in": vnc.TICKET_TTL}
+        # bound to who asked: a remote owner's ticket only opens a socket from that same verified person
+        binding = vnc.binding_for(remote_access.current_remote_identity.get())
+        return {"ticket": tickets.issue(name, mode, binding), "expires_in": vnc.TICKET_TTL}
 
     @app.websocket("/v1/desktops/{name}/vnc")
     async def desktop_vnc(ws: WebSocket, name: str) -> None:
@@ -1638,7 +1682,9 @@ def create_app(
             return
         protocols = ws.scope.get("subprotocols", [])
         ticket = next((p[10:] for p in protocols if p.startswith("bo-ticket.")), "")
-        mode = tickets.consume(ticket, name) if vnc.same_origin(ws.headers.get("origin"), ws.headers.get("host", "")) else None
+        binding = vnc.binding_for(remote_access.current_remote_identity.get())
+        mode = (tickets.consume(ticket, name, binding)
+                if vnc.same_origin(ws.headers.get("origin"), ws.headers.get("host", "")) else None)
         if not mode or "binary" not in protocols or proxy_counts.get(name, 0) >= 4 or sum(proxy_counts.values()) >= 8:
             await ws.close(code=1008)
             return
@@ -1678,16 +1724,18 @@ def create_app(
                     if time.monotonic() - last_traffic >= 1800:
                         return
 
-            tasks = [asyncio.create_task(to_desktop()), asyncio.create_task(to_browser()), asyncio.create_task(idle_watch())]
-            try:
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*done, *pending, return_exceptions=True)
-            finally:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            with bot_desks.viewing(name, mode):
+                tasks = [asyncio.create_task(to_desktop()), asyncio.create_task(to_browser()),
+                         asyncio.create_task(idle_watch())]
+                try:
+                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*done, *pending, return_exceptions=True)
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             proxy_counts[name] -= 1
             if writer:
@@ -1711,6 +1759,18 @@ def create_app(
         if not job or not job.bot_id:
             raise HTTPException(status_code=401, detail="a running job's agent token is required")
         return job
+
+    @app.post("/v1/agent/desktop")
+    async def agent_desktop(job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        """remote-desktop: the calling bot's own desktop (from the token, never an argument), started
+        on demand. ``desk`` uses it when it runs inside a turn without --slot."""
+        if not bot_desks.enabled:
+            raise HTTPException(status_code=409, detail="per-bot desktops are off")
+        try:
+            name = await bot_desks.ensure(str(job.bot_id))
+        except bot_desktops.DesktopError as exc:
+            raise _desktop_error(exc) from exc
+        return {"name": name, "owner_controlling": bot_desks.owner_controlling(name)}
 
     def _target_bot(ref: str) -> Bot:
         """Another bot by name, id or alias; the 404 says that only registered bots can hold tasks
@@ -3163,6 +3223,16 @@ def create_app(
     @app.post("/v1/desktops/{name}/hand-back", dependencies=[Depends(auth)])
     async def desktop_hand_back(name: str) -> dict:
         """Joshua finished a step on a desktop: the bot that last used it continues."""
+        own = bot_desks.bot_of(name)
+        if own is not None:
+            bot = store.get_bot(own)
+            if bot is None:
+                raise HTTPException(status_code=404, detail="the bot of this desktop no longer exists")
+            try:
+                _, posted = _post_owner_message(bot, f"The owner finished the step on your desktop ({name}); continue.")
+            except TurnError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {"bot_id": str(bot.id), "job_id": str(posted.id)}
         if name not in settings.desktops:
             raise HTTPException(status_code=404, detail="desktop not found")
         job_id = needs_you.last_desk_job(store, name)

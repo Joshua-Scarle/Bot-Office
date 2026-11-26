@@ -63,20 +63,34 @@ async def desktops() -> list[dict]:
     return found
 
 
-class Tickets:
-    def __init__(self) -> None:
-        self._tickets: dict[str, tuple[str, float, str]] = {}
+LOCAL = ("local",)
 
-    def issue(self, name: str, mode: str = "view") -> str:
-        now = time.monotonic()
+
+def binding_for(identity) -> tuple:
+    """Who a ticket belongs to: a verified remote person (email + public host), or the local side
+    (bearer token on loopback). A ticket is only accepted from the same side it was issued to."""
+    if identity is None:
+        return LOCAL
+    return ("remote", identity.kind, identity.identity, identity.host)
+
+
+class Tickets:
+    def __init__(self, clock=None) -> None:
+        self._clock = clock or (lambda: time.monotonic())
+        self._tickets: dict[str, tuple[str, float, str, tuple]] = {}
+
+    def issue(self, name: str, mode: str = "view", binding: tuple = LOCAL) -> str:
+        now = self._clock()
         self._tickets = {key: value for key, value in self._tickets.items() if value[1] > now}
         ticket = secrets.token_urlsafe(32)
-        self._tickets[ticket] = (name, now + TICKET_TTL, mode)
+        self._tickets[ticket] = (name, now + TICKET_TTL, mode, tuple(binding))
         return ticket
 
-    def consume(self, ticket: str, name: str) -> str | None:
+    def consume(self, ticket: str, name: str, binding: tuple = LOCAL) -> str | None:
         entry = self._tickets.pop(ticket, None)
-        return entry[2] if entry and entry[0] == name and entry[1] > time.monotonic() else None
+        if not entry or entry[0] != name or entry[1] <= self._clock() or entry[3] != tuple(binding):
+            return None
+        return entry[2]
 
 
 class ViewFilter:

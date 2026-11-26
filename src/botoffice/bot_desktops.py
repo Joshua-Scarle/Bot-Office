@@ -1,0 +1,370 @@
+"""Per-bot desktops (docs/REMOTE-DESKTOPS.md).
+
+Each bot gets its own ``desktop-N`` container (N from FIRST to LAST, so port 5900+N and the existing
+ticketed viewer work unchanged), created on demand from the light desktop image, with its home
+directory on a named volume. Desktops start lazily, stop when idle, and at most ``max_running`` run
+at once. Numbers 1-9 and any container we did not create are never touched.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import time
+import uuid
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import isolation
+from .config import Settings
+
+log = logging.getLogger("botoffice.desktops")
+
+FIRST = 10
+LAST = 99
+LABEL_BOT = "bot-office.bot-id"
+LABEL_KIND = "bot-office.kind"
+KIND = "per-bot"
+REGISTRY_NAME = "desktops.json"
+READY_TIMEOUT = 20.0
+REAP_INTERVAL = 60.0
+
+# PID 1 is podman's --init; the shell starts the display stack and waits. Xvfb never listens on TCP;
+# x11vnc listens inside the container's own network namespace, published to the host on 127.0.0.1 only.
+START_SCRIPT = r"""
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+Xvfb :1 -screen 0 "${BO_DESKTOP_GEOMETRY}x24" -nolisten tcp +extension GLX +render -noreset &
+i=0; while [ ! -e /tmp/.X11-unix/X1 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+DISPLAY=:1 openbox >/tmp/openbox.log 2>&1 &
+x11vnc -display :1 -forever -shared -rfbport 5900 -nopw -listen 0.0.0.0 -xkb -quiet >/tmp/x11vnc.log 2>&1 &
+wait
+"""
+
+Runner = Callable[[list[str], float], Awaitable[tuple[int, bytes, bytes]]]
+
+
+class DesktopError(Exception):
+    """A desktop could not be provided. The message is shown to the bot or the owner."""
+
+
+async def podman(argv: list[str], timeout: float = 60.0) -> tuple[int, bytes, bytes]:
+    """Run one podman command as the bots user (isolated layout) or directly."""
+    options, header = isolation.exec_options()
+    proc = await asyncio.create_subprocess_exec(
+        *isolation.wrap(["podman", *argv], env_stdin=True, runtime_dir=True),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **({"stdin": asyncio.subprocess.DEVNULL} | options),
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(header) if header else proc.communicate(), timeout)
+    except TimeoutError:
+        proc.terminate() if isolation.active() else proc.kill()
+        await proc.wait()
+        return 124, b"", b"timed out"
+    return proc.returncode or 0, out, err
+
+
+def desktop_name(number: int) -> str:
+    return f"desktop-{number}"
+
+
+def number_of(name: str) -> int | None:
+    prefix, _, digits = name.partition("-")
+    if prefix != "desktop" or not digits.isdigit() or digits != str(int(digits)):
+        return None
+    number = int(digits)
+    return number if FIRST <= number <= LAST else None
+
+
+def volume_name(bot_id: str) -> str:
+    return f"bo-desktop-home-{uuid.UUID(str(bot_id))}"
+
+
+def run_argv(name: str, bot_id: str, settings: Settings) -> list[str]:
+    """``podman run`` for a new per-bot desktop: locked down, limited, loopback-only publish."""
+    number = number_of(name)
+    if number is None:
+        raise ValueError("not a per-bot desktop name")
+    bot = str(uuid.UUID(str(bot_id)))
+    return [
+        "run", "-d", "--name", name, "--hostname", name,
+        "--init", "--restart", "no",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        "--memory", settings.desktop_memory, "--cpus", f"{settings.desktop_cpus:g}",
+        "--pids-limit", "1024", "--shm-size", "256m",
+        "--publish", f"127.0.0.1:{5900 + number}:5900",
+        "--volume", f"{volume_name(bot)}:/root",
+        "--label", f"{LABEL_BOT}={bot}", "--label", f"{LABEL_KIND}={KIND}",
+        "--env", f"BO_DESKTOP_GEOMETRY={settings.desktop_geometry}",
+        settings.desktop_image, "sh", "-c", START_SCRIPT,
+    ]
+
+
+@dataclass
+class Container:
+    name: str
+    running: bool
+    bot_id: str | None      # set only for containers labelled as our per-bot desktop
+    publish_ok: bool        # every published port is on 127.0.0.1
+
+
+def parse_ps(raw: bytes) -> dict[str, Container]:
+    """``podman ps -a --format json`` -> containers named desktop-N (any N)."""
+    found: dict[str, Container] = {}
+    for item in json.loads(raw or b"[]") or []:
+        names = item.get("Names") or []
+        names = [names] if isinstance(names, str) else names
+        labels = item.get("Labels") or {}
+        ours = labels.get(LABEL_KIND) == KIND and isinstance(labels.get(LABEL_BOT), str)
+        ports = item.get("Ports") or []
+        publish_ok = all(str(p.get("host_ip", "")) == "127.0.0.1" for p in ports if isinstance(p, dict))
+        for name in names:
+            if isinstance(name, str) and name.startswith("desktop-"):
+                found[name] = Container(name, str(item.get("State", "")).lower() == "running",
+                                        labels[LABEL_BOT] if ours else None, publish_ok)
+    return found
+
+
+class Registry:
+    """bot id -> desktop number, in the controller's private dir (bots cannot edit it)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._map: dict[str, int] = {}
+        self.load()
+
+    def load(self) -> None:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raw = {}
+        except (OSError, ValueError) as exc:
+            log.warning("desktop registry unreadable (%s); starting empty", type(exc).__name__)
+            raw = {}
+        bots = raw.get("bots", {}) if isinstance(raw, dict) else {}
+        self._map = {}
+        for bot, number in bots.items() if isinstance(bots, dict) else ():
+            with contextlib.suppress(ValueError, TypeError):
+                if isinstance(number, int) and FIRST <= number <= LAST and number not in self._map.values():
+                    self._map[str(uuid.UUID(bot))] = number
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"bots": self._map}, stream, indent=1, sort_keys=True)
+        os.replace(tmp, self.path)
+
+    def number(self, bot_id: str) -> int | None:
+        return self._map.get(str(uuid.UUID(str(bot_id))))
+
+    def bot(self, name: str) -> str | None:
+        number = number_of(name)
+        return next((bot for bot, n in self._map.items() if n == number), None) if number else None
+
+    def items(self) -> list[tuple[str, int]]:
+        return sorted(self._map.items(), key=lambda item: item[1])
+
+    def allocate(self, bot_id: str, containers: dict[str, Container]) -> int:
+        """The bot's number, or the lowest free one. A number is free when no other bot has it and no
+        container of that name exists that is not this bot's (a hand-made one is never adopted)."""
+        bot = str(uuid.UUID(str(bot_id)))
+        if bot in self._map:
+            return self._map[bot]
+        taken = set(self._map.values())
+        for number in range(FIRST, LAST + 1):
+            existing = containers.get(desktop_name(number))
+            if number in taken or (existing is not None and existing.bot_id != bot):
+                continue
+            self._map[bot] = number
+            self.save()
+            return number
+        raise DesktopError("no free desktop number is left (desktop-10 .. desktop-99 are all taken)")
+
+
+def idle_to_stop(running: Iterable[str], last_used: dict[str, float], viewers: dict[str, int],
+                 busy_bots: set[str], bot_of: Callable[[str], str | None], now: float,
+                 idle_seconds: float) -> list[str]:
+    """Per-bot desktops to stop: idle long enough, no viewer, and their bot has no running turn."""
+    if idle_seconds <= 0:
+        return []
+    return sorted(name for name in running
+                  if not viewers.get(name)
+                  and bot_of(name) not in busy_bots
+                  and now - last_used.get(name, now) >= idle_seconds)
+
+
+def evict_candidate(running: Iterable[str], keep: str, last_used: dict[str, float], viewers: dict[str, int],
+                    busy_bots: set[str], bot_of: Callable[[str], str | None]) -> str | None:
+    """At the cap: the least recently used running desktop that nobody is using (or None)."""
+    free = [name for name in running
+            if name != keep and not viewers.get(name) and bot_of(name) not in busy_bots]
+    return min(free, key=lambda name: (last_used.get(name, 0.0), name)) if free else None
+
+
+async def _rfb_ready(port: int) -> bool:
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 2)
+    except (OSError, TimeoutError):
+        return False
+    try:
+        greeting = await asyncio.wait_for(reader.readexactly(12), 2)
+        return greeting.startswith(b"RFB ")
+    except (OSError, TimeoutError, asyncio.IncompleteReadError):
+        return False
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+
+class DesktopManager:
+    def __init__(self, settings: Settings, *, busy_bots: Callable[[], set[str]] = set,
+                 runner: Runner = podman, clock: Callable[[], float] = time.monotonic,
+                 ready: Callable[[int], Awaitable[bool]] = _rfb_ready, registry_path: Path | None = None):
+        self.settings = settings
+        self.busy_bots = busy_bots
+        self.runner = runner
+        self.clock = clock
+        self.ready = ready
+        self.registry = Registry(registry_path or settings.control_dir / REGISTRY_NAME)
+        self.last_used: dict[str, float] = {}
+        self.viewers: dict[str, int] = {}
+        self.controllers: dict[str, int] = {}
+        self._lock = asyncio.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return self.settings.desktop_mode == "per-bot"
+
+    def bot_of(self, name: str) -> str | None:
+        return self.registry.bot(name)
+
+    def name_of(self, bot_id: str) -> str | None:
+        number = self.registry.number(bot_id)
+        return desktop_name(number) if number else None
+
+    def touch(self, name: str) -> None:
+        self.last_used[name] = self.clock()
+
+    def owner_controlling(self, name: str) -> bool:
+        return self.controllers.get(name, 0) > 0
+
+    @contextlib.contextmanager
+    def viewing(self, name: str, mode: str):
+        """Count a viewer (and a controller) for the lifetime of a websocket."""
+        self.viewers[name] = self.viewers.get(name, 0) + 1
+        if mode == "control":
+            self.controllers[name] = self.controllers.get(name, 0) + 1
+        self.touch(name)
+        try:
+            yield
+        finally:
+            self.viewers[name] -= 1
+            if mode == "control":
+                self.controllers[name] -= 1
+            self.touch(name)
+
+    async def containers(self) -> dict[str, Container]:
+        code, out, err = await self.runner(["ps", "-a", "--format", "json"], 15)
+        if code:
+            raise DesktopError("cannot list desktop containers")
+        try:
+            return parse_ps(out)
+        except ValueError as exc:
+            raise DesktopError("cannot read the desktop container list") from exc
+
+    def _running_ours(self, containers: dict[str, Container]) -> list[str]:
+        return [c.name for c in containers.values()
+                if c.running and c.bot_id and number_of(c.name) and self.registry.bot(c.name) == c.bot_id]
+
+    async def ensure(self, bot_id: str) -> str:
+        """Start (creating if needed) the bot's own desktop and wait until its VNC answers."""
+        if not self.enabled:
+            raise DesktopError("per-bot desktops are off (BOT_OFFICE_DESKTOP_MODE=pool)")
+        bot = str(uuid.UUID(str(bot_id)))
+        async with self._lock:
+            containers = await self.containers()
+            name = desktop_name(self.registry.allocate(bot, containers))
+            current = containers.get(name)
+            if current is not None and current.bot_id != bot:
+                raise DesktopError(f"{name} exists but is not this bot's desktop")
+            if current is not None and not current.publish_ok:
+                raise DesktopError(f"{name} publishes a port beyond 127.0.0.1; refusing to use it")
+            if current is None or not current.running:
+                await self._make_room(name, containers)
+                if current is None:
+                    code, _, err = await self.runner(run_argv(name, bot, self.settings), 120)
+                    action = "create"
+                else:
+                    code, _, err = await self.runner(["start", name], 60)
+                    action = "start"
+                if code:
+                    log.warning("desktop %s %s failed: %s", name, action, err.decode(errors="replace")[-300:])
+                    raise DesktopError(f"could not {action} {name}")
+                log.info("desktop %s %sed for bot %s", name, action.rstrip("e"), bot)
+            self.touch(name)
+        port = 5900 + (number_of(name) or 0)
+        deadline = self.clock() + READY_TIMEOUT
+        while not await self.ready(port):
+            if self.clock() >= deadline:
+                raise DesktopError(f"{name} started but its display did not come up in time")
+            await asyncio.sleep(0.5)
+        return name
+
+    async def start(self, name: str) -> str:
+        """Owner "Connect" on a stopped per-bot desktop."""
+        bot = self.bot_of(name)
+        if bot is None:
+            raise DesktopError("not a per-bot desktop")
+        return await self.ensure(bot)
+
+    async def _make_room(self, name: str, containers: dict[str, Container]) -> None:
+        running = self._running_ours(containers)
+        if len(running) < self.settings.desktop_max_running:
+            return
+        victim = evict_candidate(running, name, self.last_used, self.viewers, self.busy_bots(), self.bot_of)
+        if victim is None:
+            raise DesktopError(f"all {self.settings.desktop_max_running} desktops are in use; try again later")
+        await self.stop(victim, "making room")
+
+    async def stop(self, name: str, why: str) -> bool:
+        if number_of(name) is None:
+            return False
+        code, _, _ = await self.runner(["stop", "--time", "10", name], 60)
+        if not code:
+            log.info("desktop %s stopped (%s)", name, why)
+            self.last_used.pop(name, None)
+        return not code
+
+    async def reap_idle(self) -> list[str]:
+        idle_seconds = self.settings.desktop_idle_minutes * 60
+        if idle_seconds <= 0:
+            return []
+        async with self._lock:
+            try:
+                containers = await self.containers()
+            except DesktopError:
+                return []
+            running = self._running_ours(containers)
+            now = self.clock()
+            for name in running:
+                self.last_used.setdefault(name, now)   # unknown (after a restart): grace from now
+            stopped = []
+            for name in idle_to_stop(running, self.last_used, self.viewers, self.busy_bots(), self.bot_of,
+                                     now, idle_seconds):
+                if await self.stop(name, "idle"):
+                    stopped.append(name)
+            return stopped
+
+    async def run_reaper(self) -> None:
+        while True:
+            await asyncio.sleep(REAP_INTERVAL)
+            try:
+                await self.reap_idle()
+            except Exception as exc:  # noqa: BLE001  the reaper must keep running
+                log.warning("desktop idle check failed: %s", type(exc).__name__)
