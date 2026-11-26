@@ -399,3 +399,13 @@ def test_cancelled_podman_command_is_ended_and_reaped(tmp_path, monkeypatch):
     start = time.monotonic()
     run(main())
     assert calls["cancelled"] and time.monotonic() - start < 10
+
+
+# ---------------------------------------------------------------- review round 11
+def test_configured_pool_names_are_never_per_bot(tmp_path):
+    manager, podman, *_ = make(tmp_path, desktops=("desktop-1", "desktop-10"))
+    assert run(manager.ensure(BOT_A)) == "desktop-11"
+    podman.add("desktop-10", labels={bd.LABEL_KIND: "per-bot", bd.LABEL_BOT: BOT_B})
+    run(manager.refresh())
+    assert manager.bot_of("desktop-10") is None
+    assert bd.Registry(tmp_path / "x.json", ("desktop-12",)).allocate(BOT_C, {}) == 10

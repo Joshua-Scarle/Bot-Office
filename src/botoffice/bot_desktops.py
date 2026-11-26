@@ -143,8 +143,10 @@ def parse_ps(raw: bytes) -> dict[str, Container]:
 class Registry:
     """bot id -> desktop number, in the controller's private dir (bots cannot edit it)."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, excluded: Iterable[str] = ()):
         self.path = path
+        # configured lease-pool names are never a per-bot desktop, even inside 10..99
+        self.excluded = {n for name in excluded if (n := number_of(name))}
         self._map: dict[str, int] = {}
         self.load()
 
@@ -163,7 +165,8 @@ class Registry:
         self._map = {}
         for bot, number in bots.items() if isinstance(bots, dict) else ():
             with contextlib.suppress(ValueError, TypeError):
-                if isinstance(number, int) and FIRST <= number <= LAST and number not in self._map.values():
+                if (isinstance(number, int) and FIRST <= number <= LAST and number not in self._map.values()
+                        and number not in self.excluded):
                     self._map[str(uuid.UUID(bot))] = number
 
     def save(self) -> None:
@@ -192,7 +195,7 @@ class Registry:
         owner_of: dict[int, str] = {}
         for container in containers.values():
             number = number_of(container.name)
-            if not number or not container.bot_id:
+            if not number or not container.bot_id or number in self.excluded:
                 continue
             try:
                 bot = str(uuid.UUID(container.bot_id))
@@ -221,7 +224,7 @@ class Registry:
         taken = set(self._map.values())
         for number in range(FIRST, LAST + 1):
             existing = containers.get(desktop_name(number))
-            if number in taken or (existing is not None and existing.bot_id != bot):
+            if number in taken or number in self.excluded or (existing is not None and existing.bot_id != bot):
                 continue
             self._map[bot] = number
             self.save()
@@ -274,7 +277,7 @@ class DesktopManager:
         self.runner = runner
         self.clock = clock
         self.ready = ready
-        self.registry = Registry(registry_path or settings.control_dir / REGISTRY_NAME)
+        self.registry = Registry(registry_path or settings.control_dir / REGISTRY_NAME, settings.desktops)
         self.last_used: dict[str, float] = {}
         self.viewers: dict[str, int] = {}
         self.controllers: dict[str, int] = {}
