@@ -435,16 +435,62 @@ def test_scope_probe_once_and_warns(monkeypatch, caplog):
     assert run(bd._scopes_available({"XDG_RUNTIME_DIR": "/run/user/1"})) is False
 
 
-def test_aborted_scoped_start_stops_its_scope(monkeypatch):
+def test_aborted_scoped_start_ends_podman_and_stops_the_container(monkeypatch):
     import sys
-    stopped = []
+    calls = []
     monkeypatch.setattr(bd, "_scope_ok", True)
     monkeypatch.setattr(bd.isolation, "active", lambda: None)
     monkeypatch.setattr(bd, "scope_prefix", lambda argv, unit, ok: [sys.executable, "-c",
-                                                                    "import time; time.sleep(30)", "--"])
+                                                                    "import time; time.sleep(30)", "--"] if ok else [])
+    real_once = bd._podman_once
 
-    async def fake_stop(unit):
-        stopped.append(unit)
-    monkeypatch.setattr(bd, "_stop_scope", fake_stop)
-    code, _, _ = run(bd.podman(["start", "x"], 0.5))
-    assert code == 124 and stopped and stopped[0].startswith("bo-desktop-start-")
+    async def once(argv, timeout, scoped):
+        if argv[0] == "stop":
+            calls.append(argv)
+            return 0, b"", b""
+        return await real_once(argv, timeout, scoped)
+    monkeypatch.setattr(bd, "_podman_once", once)
+    code, _, _ = run(bd.podman(["start", "desktop-12"], 0.5))
+    assert code == 124 and calls == [["stop", "--time", "5", "desktop-12"]]
+
+
+def test_scope_failure_falls_back_once(monkeypatch):
+    seen = []
+    monkeypatch.setattr(bd, "_scope_ok", True)
+
+    async def once(argv, timeout, scoped):
+        seen.append(scoped)
+        return (1, b"", b"Failed to start transient scope unit: x") if scoped else (0, b"id\n", b"")
+    monkeypatch.setattr(bd, "_podman_once", once)
+    assert run(bd.podman(["start", "desktop-12"]))[0] == 0
+    assert seen == [True, False] and bd._scope_ok is False
+
+
+def test_double_cancel_waits_for_cleanup(monkeypatch):
+    import sys
+    monkeypatch.setattr(bd, "_scope_ok", False)
+    monkeypatch.setattr(bd.isolation, "active", lambda: None)
+    monkeypatch.setattr(bd.isolation, "wrap", lambda argv, **kw: [sys.executable, "-c", "import time; time.sleep(30)"])
+    state = {}
+    real_once = bd._podman_once
+
+    async def once(argv, timeout, scoped):
+        if argv[0] == "stop":
+            await asyncio.sleep(0.3)
+            state["stopped"] = True
+            return 0, b"", b""
+        return await real_once(argv, timeout, scoped)
+    monkeypatch.setattr(bd, "_podman_once", once)
+
+    async def main():
+        task = asyncio.ensure_future(bd.podman(["start", "desktop-12"], 60))
+        await asyncio.sleep(0.5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            state["cancelled_after_stop"] = state.get("stopped", False)
+    run(main())
+    assert state["cancelled_after_stop"] is True
