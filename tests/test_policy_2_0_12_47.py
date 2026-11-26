@@ -74,7 +74,7 @@ def test_resume_and_deny_prompts():
     assert "check it is still needed" in resume and "run exactly that command now, once" in resume
     assert "carry the task forward" in resume
     denied = deny_prompt(3, "Bash: make x", "not today")
-    assert "The owner's note: not today" in denied and "Keep working" in denied
+    assert "The owner's note: not today" in denied and "Keep working" in denied and "Do not run" in denied
     assert "never say you can't while an allowed way remains" in denied
 
 
@@ -650,3 +650,17 @@ def test_a_cancelled_deny_follow_up_is_reported(tmp_path):
     rules.expire()
     notes = [m.text for m in store.list_messages(bot.id) if "would carry the task on" in m.text]
     assert len(notes) == 1
+
+
+def test_a_denied_command_does_not_run_in_its_follow_up_even_if_now_allowed(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    follow = start(store, rules.deny(approval)["followup_job_id"])
+    with closing(store._connect()) as db:      # an allow rule added after the deny
+        db.execute("INSERT INTO action_rules (bot_id,effect,kind,pattern,scope,note,created_at) VALUES "
+                   "(NULL,'allow','shell','^curl ','all','test','2026-11-26T00:00:00')")
+    decision = rules.decide(follow, bash(ASKS))
+    assert (decision.decision, decision.effect) == ("deny", "never")
+    assert rules.decide(running(store, bot), bash(ASKS)).decision == "allow"   # a later, unrelated turn: the rule

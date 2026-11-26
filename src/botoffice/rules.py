@@ -106,9 +106,8 @@ def resume_prompt(approval: int, summary: str) -> str:
 def deny_prompt(approval: int, summary: str, note: str | None) -> str:
     """The (hidden) prompt of the follow-up turn after the owner denied card #approval."""
     said = f" The owner's note: {note.strip()}" if note and note.strip() else ""
-    return (f"Approval #{approval} was denied by the owner: {summary}.{said} Do not ask for that exact command again "
-            "in this turn (it is refused without a card). If the current policy now runs it without a card, it "
-            f"simply runs. {KEEP_GOING} {STOP_LINE}")
+    return (f"Approval #{approval} was denied by the owner: {summary}.{said} Do not run or ask for that exact command "
+            f"again in this turn (it is refused without a card). {KEEP_GOING} {STOP_LINE}")
 GATE_LOG_PER_JOB = 500
 ALERT_WINDOW = timedelta(hours=72)
 
@@ -1059,6 +1058,15 @@ class Rules:
             refused = self._github_merge_refused(action)
             if refused:  # sec-fixes: above every card, grant and auto-merge (noreply-merge safeguard)
                 effect, why = "never", refused
+        if effect != "never" and job.bot_id:
+            denied = self._owner_denied(job, action)
+            if denied is not None:
+                # 0.12.47 (r9): the owner's no wins in the turn that asked and in the deny's follow-up turn, before
+                # any allow (a sudo auto-review that now answers, a rule added since)
+                self._log(job, provider, "deny", "never", preset, action, denied, note="denied by the owner")
+                return Decision("deny", "never", (
+                    f"Blocked by Bot-Office: the owner denied this exact command (approval #{denied}); it is not run "
+                    f"or asked again in this turn. {KEEP_GOING} {STOP_LINE}"), preset, denied)
         if action.tool == git_guard.PUSH_TOOL and isinstance(action.data, dict) and \
                 action.data.get("default_source") == "remote":
             git_guard.learn_default(action.cwd, str(action.data.get("remote") or ""),
@@ -1217,6 +1225,14 @@ class Rules:
                     del passes[index]
                     return True
         return False
+
+    def _owner_denied(self, job: Job, action: Action) -> int | None:
+        """The owner denied exactly this action of this bot, and this job asked it or is the deny's follow-up."""
+        with closing(self.store._connect()) as db:
+            row = db.execute("SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='denied' AND "
+                             "(followup_job_id=? OR job_id=?) ORDER BY id DESC LIMIT 1",
+                             (str(job.bot_id), action.fingerprint, str(job.id), str(job.id))).fetchone()
+        return int(row["id"]) if row else None
 
     def _push_grant_waiting(self, job: Job, action: Action) -> bool:
         """This resume turn holds an approved pre-push card (an exact update), and *action* is only
