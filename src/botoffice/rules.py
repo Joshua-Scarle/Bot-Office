@@ -106,12 +106,24 @@ def ask_reason(approval: int, summary: str) -> str:
             + WAIT_LINE.format(n=approval))
 
 
-def resume_prompt(approval: int, summary: str) -> str:
-    """The (hidden) prompt of the turn an approval wakes: re-run the approved step, idempotently, then go on."""
+def resume_prompt(approval: int, summary: str, workspace: str | None = None) -> str:
+    """The (hidden) prompt of the turn an approval wakes: re-run the approved step, idempotently, then go on.
+    *workspace*: the asking turn's job workspace; the card names it, but this turn runs in a new one that
+    the grant matches to it, so the bot is told to run the command as written from where it is (live e2e:
+    a `cd <old workspace> &&` prefix made it a different command and raised a second card)."""
+    if workspace and workspace in summary:
+        where = (f"{workspace} on the card was the asking turn's workspace; this turn runs in a new one (your "
+                 "starting directory: `pwd`), which the grant treats as the same. Wherever the card shows the old path "
+                 "(in the command, or as the directory), use the new one, and run from your workspace or the same "
+                 "subfolder of it. Add nothing else (no `cd ... &&` prefix).")
+    else:
+        where = ("If you are not already in the directory the card names, change to it first as a separate step "
+                 "(a `cd` on its own, or the tool's working-directory option), then run the command as written "
+                 "(never as `cd ... && command`).")
     return (f"Approval #{approval} granted by the owner. Bot-Office resumed your task so the approved step runs now: "
             f"{summary}. First check it is still needed (it may have been done another way since, or the state "
-            "may have changed); if it is, run exactly that command now, once (the grant covers only that command, "
-            "in the same directory, within 24 hours). Then carry the task forward to the end.")
+            "may have changed); if it is, run exactly that command now, once (the grant "
+            f"covers only that command, within 24 hours). {where} Then carry the task forward to the end.")
 
 
 def deny_prompt(approval: int, summary: str, note: str | None) -> str:
@@ -1799,7 +1811,8 @@ class Rules:
             raise LookupError("approval not found")
         if item["status"] not in ("pending", "expired") or item["resume_job_id"]:
             raise RuleError(f"approval is {item['status']}")
-        text = resume_prompt(approval_id, item["summary"])
+        text = resume_prompt(approval_id, item["summary"],
+                             str(self.workspaces / str(item["job_id"])) if self.workspaces is not None else None)
         stamp = now()
         bot = self.store.get_bot(item["bot_id"])
         origin = self.store.get(item["job_id"])
