@@ -906,7 +906,7 @@ def test_a_routines_resume_turn_belongs_to_the_routines_task(tmp_path):
 
 
 def test_task_key_backfill_follows_a_resume_turn_to_its_routine(tmp_path):
-    store, bot, rules = setup(tmp_path)
+    store, bot, _ = setup(tmp_path)
     origin = running(store, bot, source="routine")
     resume = running(store, bot, source="routine")
     with closing(store._connect()) as db:
@@ -935,3 +935,23 @@ def test_task_key_follows_a_long_resume_chain_to_its_routine(tmp_path):
         db.execute("UPDATE jobs SET origin_job_id=NULL WHERE id=?", (str(jobs[0].id),))
     with closing(JobStore(tmp_path / "db.sqlite3")._connect()) as db:
         assert db.execute("SELECT task_key FROM approvals").fetchone()[0] == "routine:r9:"
+
+
+def test_an_allow_settles_a_card_whose_resume_turn_ended_unused(tmp_path):
+    # Codex r16: the resume turn ended without the grant, before resume_ended expired the card
+    from botoffice.rules import RuleError
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    store.finish(a.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    resume_id = rules.approve(approval)["resume_job_id"]
+    start(store, resume_id)
+    store.finish(resume_id, JobStatus.SUCCEEDED, outcome="done: x")   # resume_ended has not run yet
+    allow_curl(store)
+    assert rules.decide(running(store, bot), bash(ASKS)).decision == "allow"
+    assert rules.get(approval)["status"] == "settled"
+    assert rules.resume_ended(store.get(resume_id)) == []
+    rules.expire()
+    assert rules.get(approval)["status"] == "settled"
+    with pytest.raises(RuleError):
+        rules.approve(approval)

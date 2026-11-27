@@ -1321,11 +1321,16 @@ class Rules:
         (pending, or timed out and still approvable) are closed as 'settled', so no later approve runs it
         again (caller's transaction)."""
         bot = str(job.bot_id)
-        for row in db.execute("SELECT id, summary, preset FROM approvals WHERE bot_id=? AND input_hash=? AND task_key=? "
-                              "AND status IN ('pending','expired') AND resume_job_id IS NULL",
-                              (bot, action.fingerprint, self._task_key(db, job))).fetchall():
-            db.execute("UPDATE approvals SET status='settled', decided_at=?, consumed_by=?, consumed_at=? WHERE id=?",
-                       (at, str(job.id), at, row["id"]))
+        # open = still approvable later: pending, timed out, or approved for a resume turn that already ended
+        # without using it (resume_ended / _reconcile_ended would make it approvable again)
+        for row in db.execute("SELECT a.id, a.summary, a.preset FROM approvals a LEFT JOIN jobs j ON j.id=a.resume_job_id "
+                              "WHERE a.bot_id=? AND a.input_hash=? AND a.task_key=? AND ((a.status IN "
+                              "('pending','expired') AND a.resume_job_id IS NULL) OR (a.status='approved' AND "
+                              "a.resume_job_id IS NOT NULL AND a.resume_job_id<>? AND "
+                              "COALESCE(j.status,'gone') NOT IN ('queued','running')))",
+                              (bot, action.fingerprint, self._task_key(db, job), str(job.id))).fetchall():
+            db.execute("UPDATE approvals SET status='settled', decided_at=?, consumed_by=?, consumed_at=?, "
+                       "grant_expires_at=NULL WHERE id=?", (at, str(job.id), at, row["id"]))
             db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
                        (bot, "system", "chat", f"Approval #{row['id']} closed: {why}: {_short(row['summary'])}",
                         at, row["id"]))
