@@ -1300,24 +1300,13 @@ class Rules:
             return "denied", int(denied["id"])
         grant = self._take_grant(db, job, action, at)
         if grant is not None:
+            self._settle_open(db, job, action, at, f"it ran under approval #{grant}")
             return "grant", grant
         held = db.execute(self._IN_FLIGHT, (bot, fingerprint, key, at, str(job.id))).fetchone()
         if held is not None:
             return "held", int(held["id"])
         if allowed:
-            for row in db.execute("SELECT id, summary, job_id, preset FROM approvals WHERE bot_id=? AND input_hash=? "
-                                  "AND task_key=? AND status IN ('pending','expired') AND resume_job_id IS NULL",
-                                  (bot, fingerprint, key)).fetchall():
-                db.execute("UPDATE approvals SET status='settled', decided_at=?, consumed_by=?, consumed_at=? WHERE id=?",
-                           (at, str(job.id), at, row["id"]))
-                db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
-                           (bot, "system", "chat", (f"Approval #{row['id']} closed: the policy allows this step now, "
-                                                    f"so it ran without the card: {_short(row['summary'])}"),
-                            at, row["id"]))
-                self.store.policy_audit_insert(db, bot_id=bot, job_id=str(job.id), source=job.source or "api",
-                                               tool="approval settled", summary=f"#{row['id']} {row['summary']}",
-                                               policy="allowed by the policy; the open card was closed unused",
-                                               legacy=row["preset"] or "")
+            self._settle_open(db, job, action, at, "the policy allows this step now, so it ran without the card")
             return "allow", None
         if push_waiting:
             return "push", None
@@ -1325,6 +1314,23 @@ class Rules:
             return "too_long", None
         approval = self._request_in(db, job, action, preset, stamp, plan, unattended)
         return ("card", approval) if approval is not None else ("full", None)
+
+    def _settle_open(self, db: sqlite3.Connection, job: Job, action: Action, at: str, why: str) -> None:
+        """The action runs now (a grant used, or the policy allows it): the task's other open cards for it
+        (pending, or timed out and still approvable) are closed as 'settled', so no later approve runs it
+        again (caller's transaction)."""
+        bot = str(job.bot_id)
+        for row in db.execute("SELECT id, summary, preset FROM approvals WHERE bot_id=? AND input_hash=? AND task_key=? "
+                              "AND status IN ('pending','expired') AND resume_job_id IS NULL",
+                              (bot, action.fingerprint, task_key(job))).fetchall():
+            db.execute("UPDATE approvals SET status='settled', decided_at=?, consumed_by=?, consumed_at=? WHERE id=?",
+                       (at, str(job.id), at, row["id"]))
+            db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
+                       (bot, "system", "chat", f"Approval #{row['id']} closed: {why}: {_short(row['summary'])}",
+                        at, row["id"]))
+            self.store.policy_audit_insert(db, bot_id=bot, job_id=str(job.id), source=job.source or "api",
+                                           tool="approval settled", summary=f"#{row['id']} {row['summary']}",
+                                           policy=f"closed unused: {why}"[:300], legacy=row["preset"] or "")
 
     @staticmethod
     def _denied_row(db: sqlite3.Connection, job: Job, action: Action):
@@ -1554,7 +1560,10 @@ class Rules:
         with closing(self.store._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                grant = self._take_grant(db, job, action, now().isoformat())
+                at = now().isoformat()
+                grant = self._take_grant(db, job, action, at)
+                if grant is not None:
+                    self._settle_open(db, job, action, at, f"it ran under approval #{grant}")
                 db.commit()
             except BaseException:
                 db.rollback()

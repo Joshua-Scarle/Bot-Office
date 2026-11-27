@@ -859,3 +859,20 @@ def test_a_second_card_for_a_step_already_approved_and_in_flight_is_refused(tmp_
     with pytest.raises(RuleError, match="already approved"):
         rules.approve(old)
     assert rules.get(old)["status"] == "expired"
+
+
+def test_using_a_grant_closes_the_tasks_older_card_for_the_same_step(tmp_path):
+    # Codex r13 #1: an old timed-out card must not run the step again after a newer card's grant ran it
+    from botoffice.rules import RuleError
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    old = rules.decide(a, bash(ASKS)).approval_id
+    with closing(store._connect()) as db:
+        db.execute("UPDATE approvals SET status='expired', created_at='2026-01-01T00:00:00+00:00' WHERE id=?", (old,))
+    store.finish(a.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    new = rules.decide(running(store, bot), bash(ASKS)).approval_id
+    resume_id = rules.approve(new)["resume_job_id"]
+    assert rules.decide(store.get(resume_id), bash(ASKS)).decision == "allow"
+    assert rules.get(old)["status"] == "settled"
+    with pytest.raises(RuleError):
+        rules.approve(old)
