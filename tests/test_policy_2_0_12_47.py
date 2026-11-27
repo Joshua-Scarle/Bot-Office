@@ -693,3 +693,17 @@ def test_approve_is_all_or_nothing(tmp_path, monkeypatch):
     assert item["status"] == "pending" and item["resume_job_id"] is None
     with closing(store._connect()) as db:
         assert db.execute("SELECT COUNT(*) FROM jobs WHERE origin_job_id=?", (str(origin.id),)).fetchone()[0] == 0
+
+
+def test_an_in_flight_grant_holds_back_an_allowed_retry_in_a_later_chat_turn(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    store.finish(a.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    b = running(store, bot)
+    rules.approve(approval)
+    with closing(store._connect()) as db:
+        db.execute("INSERT INTO action_rules (bot_id,effect,kind,pattern,scope,note,created_at) VALUES "
+                   "(NULL,'allow','shell','^curl ','all','test','2026-11-26T00:00:00')")
+    retry = rules.decide(b, bash(ASKS))
+    assert retry.decision == "deny" and "already granted" in retry.reason

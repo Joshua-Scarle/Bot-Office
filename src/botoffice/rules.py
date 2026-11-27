@@ -1244,16 +1244,29 @@ class Rules:
                 f"Blocked by Bot-Office: the owner denied this exact command (approval #{denied}); it is not run "
                 f"or asked again in this turn. {KEEP_GOING} {STOP_LINE}"), preset, denied)
         with closing(self.store._connect()) as db:
-            row = db.execute("SELECT a.id FROM approvals a JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
-                             "a.input_hash=? AND a.status='approved' AND a.job_id=? AND a.resume_job_id<>? AND "
-                             "j.status IN ('queued','running') LIMIT 1",
-                             (str(job.bot_id), action.fingerprint, str(job.id), str(job.id))).fetchone()
+            row = self._in_flight(db, job, action)
         if row is None:
             return None
         self._log(job, provider, "deny", "ask", preset, action, int(row["id"]), note="approved; runs in the resume turn")
         return Decision("deny", "ask", (
             f"Approval #{row['id']} for this exact command was already granted: Bot-Office runs it in the resume turn "
             f"that follows this one. Don't repeat it now. {KEEP_GOING}"), preset, int(row["id"]))
+
+    @staticmethod
+    def _in_flight(db: sqlite3.Connection, job: Job, action: Action):
+        """An approved grant for exactly this action of the same task whose resume turn has not run yet (or is
+        being bound): this job's own ask, the same assignment, or the bot's chat turns. A scheduled run
+        (wake-up, routine, watcher, inbox) only for its own asks: it needs a fresh card (0.12.18)."""
+        scheduled = (job.source or "") in ("wakeup", "routine", "trigger", "inbox")
+        return db.execute(
+            "SELECT a.id FROM approvals a LEFT JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
+            "a.input_hash=? AND a.status='approved' AND (a.job_id=? OR (a.assignment_id IS NOT NULL AND "
+            "a.assignment_id=?) OR (a.assignment_id IS NULL AND ? IS NULL AND a.source IN ('chat','api') "
+            "AND ? IN ('chat','api'))) AND "
+            "(a.resume_job_id IS NULL OR (a.resume_job_id<>? AND j.status IN ('queued','running'))) "
+            "ORDER BY a.id DESC LIMIT 1",
+            (str(job.bot_id), action.fingerprint, str(job.id), "" if scheduled else str(job.assignment_id or ""),
+             str(job.assignment_id) if job.assignment_id else None, job.source or "api", str(job.id))).fetchone()
 
     def _owner_denied(self, job: Job, action: Action) -> int | None:
         """The owner denied exactly this action of this bot, and this job asked it or is the deny's follow-up."""
@@ -1405,20 +1418,7 @@ class Rules:
                 if denied:
                     db.commit()
                     return ("denied", int(denied["id"]))
-                granted = db.execute(
-                    "SELECT a.id FROM approvals a LEFT JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
-                    "a.input_hash=? AND a.status='approved' AND (a.job_id=? OR (a.assignment_id IS NOT NULL AND "
-                    "a.assignment_id=?) OR (a.assignment_id IS NULL AND ? IS NULL AND a.source IN ('chat','api') "
-                    "AND ? IN ('chat','api'))) AND "
-                    "(a.resume_job_id IS NULL OR (a.resume_job_id<>? AND j.status IN ('queued','running'))) "
-                    "ORDER BY a.id DESC LIMIT 1",
-                    # the same task: this job, the same assignment, or the bot's chat turns (never a routine,
-                    # wake-up or other unassigned run: a scheduled run gets a fresh card, 0.12.18)
-                    # a scheduled run (wake-up, routine, watcher, inbox) only for its own asks: it needs a fresh card
-                    (str(job.bot_id), action.fingerprint, str(job.id),
-                     "" if (job.source or "") in ("wakeup", "routine", "trigger", "inbox") else str(job.assignment_id or ""),
-                     str(job.assignment_id) if job.assignment_id else None, job.source or "api",
-                     str(job.id))).fetchone()
+                granted = self._in_flight(db, job, action)
                 if granted:
                     db.commit()
                     return ("granted", int(granted["id"]))
