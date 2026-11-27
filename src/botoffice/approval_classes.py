@@ -333,10 +333,12 @@ def self_note(store: JobStore, provider: str, cli_access: str) -> str:
     kinds = "; ".join(labels)
     if can_pause(provider, cli_access):
         return (f"- Approvals: the user wants these done only with their yes: {kinds}. Don't ask first: go ahead, "
-                "and Bot-Office pauses that one step and asks them.\n")
+                "and Bot-Office pauses that one step, asks them, and runs it for you once approved. Keep working "
+                "meanwhile (rule 10).\n")
     return (f"- Approvals: the user wants these done only with their yes: {kinds}. Your engine can't be paused for "
-            "approval, so never do these yourself. Prepare everything (a draft, the exact command), then end with "
-            "BOT-OFFICE-STATUS: waiting_on_user — needs your approval: <what>. The user will do it or tell you to.\n")
+            "approval, so never do these yourself. Prepare everything (a draft, the exact command), finish the rest "
+            "of the task and any other allowed way to the goal, then end with BOT-OFFICE-STATUS: waiting_on_user — "
+            "needs your approval: <which command, and why>. The user will do it or tell you to.\n")
 
 
 def unpausable_bots(store: JobStore) -> list[dict]:

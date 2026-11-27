@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -15,9 +16,9 @@ SLOTS = ("desktop-1", "desktop-2")
 DISPLAY = "DISPLAY=:1"
 TIMEOUT = 30
 USAGE = (
-    "usage: desk [--slot SLOT] screenshot [outfile] | click X Y | type TEXT | key KEY"
+    "usage: desk [--slot SLOT] screenshot [outfile] | click X Y [--sends WHAT] | type TEXT | key KEY [--sends WHAT]"
     "   (in a turn: your own desktop)"
-    " | open URL | message BOT TEXT | attach FILE\n"
+    " | open URL | message BOT TEXT | attach FILE | extend --reason TEXT\n"
     "       desk grok send --to NAME --kind question|result|blocker|fyi --text TEXT"
     " [--thread ID] [--from NAME]\n"
     "       desk team list | status BOT | read BOT [--limit N] [--since X] | message [--queue] BOT TEXT | ask BOT TEXT [--timeout S]\n"
@@ -70,10 +71,16 @@ def _agent_desktop(environ: dict[str, str], body: dict, transport=None) -> tuple
     return status, data if isinstance(data, dict) else {}
 
 
-def own_desktop(environ: dict[str, str], transport=None) -> tuple[str, bool] | None:
+def own_desktop(environ: dict[str, str], transport=None, command: str | None = None,
+                args: list[str] | None = None) -> tuple[str, bool] | None:
     """Inside a turn: this bot's own desktop (started on demand by the controller) and whether the owner is
-    controlling it. None when per-bot desktops are off (then the leased pool desktop is used)."""
-    status, data = _agent_desktop(environ, {}, transport)
+    controlling it. None when per-bot desktops are off (then the leased pool desktop is used). 0.12.47: the
+    command and a digest of its input go along (session limit, loop stop); the text itself never does."""
+    body: dict = {}
+    if command:
+        body["command"] = command
+        body["input"] = hashlib.sha256("\0".join(args or []).encode()).hexdigest()[:32]
+    status, data = _agent_desktop(environ, body, transport)
     detail = data.get("detail")
     if status == 409 and detail == "per-bot desktops are off":
         return None
@@ -94,7 +101,8 @@ def leased_controlling(environ: dict[str, str], slot: str, transport=None) -> bo
     return bool(data.get("owner_controlling"))
 
 
-def pick_desktop(explicit: str | None, environ: dict[str, str], transport=None) -> tuple[str, bool]:
+def pick_desktop(explicit: str | None, environ: dict[str, str], transport=None, command: str | None = None,
+                 args: list[str] | None = None) -> tuple[str, bool]:
     """(desktop, owner_controlling). In a turn without --slot (or with --slot naming the bot's own desktop)
     the bot's own desktop; --slot <leased pool desktop> and operator shells keep the old rules."""
     in_turn = bool(environ.get("BOT_OFFICE_JOB_ID") and environ.get("BOT_OFFICE_AGENT_TOKEN"))
@@ -102,7 +110,7 @@ def pick_desktop(explicit: str | None, environ: dict[str, str], transport=None) 
     if not in_turn:
         return resolve_slot(explicit, environ), False
     if not (explicit and explicit == leased):
-        own = own_desktop(environ, transport)
+        own = own_desktop(environ, transport, command, args)
         if own is not None:
             if explicit and explicit != own[0]:
                 raise DeskError(f"your own desktop is {own[0]}; --slot {explicit} is not yours"
@@ -233,6 +241,40 @@ def _run(argv: list[str]) -> None:
         raise DeskError((result.stderr or result.stdout).strip() or f"{argv[0]} failed")
 
 
+def _in_turn() -> bool:
+    return bool(os.environ.get("BOT_OFFICE_JOB_ID") and os.environ.get("BOT_OFFICE_AGENT_TOKEN"))
+
+
+def _report_shot(dest: Path, slot_arg: str | None) -> None:
+    """The screenshot's digest to the controller (the no-progress stop of the bot's own desktop); best
+    effort, never the image. Not for the leased pool desktop (--slot)."""
+    leased = os.environ.get("BOT_OFFICE_SLOT") or os.environ.get("AGENTDESK_SLOT") or ""
+    if not _in_turn() or (slot_arg and slot_arg == leased):
+        return
+    try:
+        digest = hashlib.sha256(dest.read_bytes()).hexdigest()[:32]
+        _agent_desktop(dict(os.environ), {"shot": digest})
+    except Exception:  # noqa: BLE001 — a lost report never fails the screenshot
+        return
+
+
+def _extend(rest: list[str]) -> int:
+    """desk extend --reason TEXT: one more step for this bot's desktop session (asked, never automatic)."""
+    if len(rest) < 2 or rest[0] != "--reason":
+        raise DeskError('extend needs --reason "<why, and what is left>"')
+    if not _in_turn():
+        raise DeskError("desk extend works only inside a bot's turn")
+    from . import grok_bridge
+
+    status, data = grok_bridge._transport(grok_bridge._api_url(dict(os.environ)) + "/v1/agent/desktop/extend",
+                                          {"reason": " ".join(rest[1:])[:300]}, os.environ["BOT_OFFICE_AGENT_TOKEN"])
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if status != 200:
+        raise DeskError(detail if isinstance(detail, str) else f"extend failed (Bot-Office API HTTP {status})")
+    print(f"Desktop {data.get('name')}: {detail}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -302,9 +344,16 @@ def main(argv: list[str] | None = None) -> int:
             if command == "grok":
                 return grok_bridge.desk_grok(rest, data_dir=data_dir)
             return grok_bridge.desk_inbox(rest, data_dir=data_dir)
+        if command == "extend":
+            return _extend(rest)
+        if command in ("click", "key") and "--sends" in rest:
+            # 0.12.47: the bot marked this click or key as sending or posting on a website; the gate asked the
+            # owner (policy.py) and only then is it run; the flag and its text are not part of the input
+            index = rest.index("--sends")
+            rest = rest[:index] + rest[index + 2:]
         if command not in ("screenshot", "click", "type", "key", "open"):
             raise DeskError(f"unknown command {command!r}")
-        slot, controlling = pick_desktop(slot_arg, dict(os.environ))
+        slot, controlling = pick_desktop(slot_arg, dict(os.environ), command=command, args=rest)
         if controlling and command in ("click", "type", "key"):
             raise DeskError(OWNER_CONTROLLING)
         if command == "screenshot":
@@ -317,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
                 _run(commands[1])
             finally:
                 subprocess.run(commands[2], capture_output=True, timeout=TIMEOUT, check=False)
+            _report_shot(dest, slot_arg)
             print(f"Screenshot of {slot} saved to {dest}")
         else:
             before = browser_title(slot) if command == "open" else None

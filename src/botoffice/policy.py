@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 
 from . import git_guard
 
-VERSION = "0.12.45"
+VERSION = "0.12.47"
 
 # key -> (label, what it covers); every key is also the card's preset
 ASK_CLASSES: dict[str, tuple[str, str]] = {
@@ -53,7 +53,8 @@ ASK_CLASSES: dict[str, tuple[str, str]] = {
     "deploy": ("Deploys and services", "deploy scripts, railway up, kubectl apply, terraform apply, gh workflow run, "
                                        "systemctl start/stop/restart, systemd-run, crontab edits (a saved allow rule "
                                        "for the exact command lets a routine deploy run)"),
-    "devices": ("Desktop and printers", "desk click/type/key and 3D printer control"),
+    "devices": ("Desktop and printers", ("typing what may be a secret or password with desk type, desk input on a "
+                                         "shared pool desktop (--slot), and 3D printer control")),
     "connector": ("Connector writes", "an MCP tool that changes something (reads never ask)"),
     "credentials": ("Credentials", "deleting, moving or overwriting a credential or key file"),
     "scope": ("Outside the bot's scope", "writes to the Bot-Office live checkout, another bot's work dir, ~/.ssh, "
@@ -176,6 +177,7 @@ def slugs(name: str) -> set[str]:
 class Cmd:
     words: list[str]
     cwd: str | None  # where it runs (None: not known)
+    fed: bool = False  # 0.12.47: run by xargs/parallel, which add or substitute arguments at run time
 
 
 @dataclass
@@ -416,9 +418,11 @@ def _unwrap(words: list[str], cwd: str | None, scope: Scope, out: Parsed, depth:
     while i < len(words) and _ASSIGN.match(words[i]):
         i += 1
     words = words[i:]
+    fed = False
     while words:
         program = git_guard._base(words[0])
         if program in _RUNNER_VALUE_OPTS:
+            fed = fed or program == "xargs"
             if program in ("sudo", "doas"):
                 out.sudo = True
             values = _RUNNER_VALUE_OPTS[program]
@@ -475,7 +479,7 @@ def _unwrap(words: list[str], cwd: str | None, scope: Scope, out: Parsed, depth:
         return cwd
     if git_guard.INTERPRETERS.match(program):
         out.code += git_guard.inline_code(program, words[1:])
-    out.commands.append(Cmd(words, cwd))
+    out.commands.append(Cmd(words, cwd, fed))
     return cwd
 
 
@@ -593,7 +597,13 @@ def _command(cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | None:
         notes.append("bot-to-bot")
         return None
     if program == "desk" or (git_guard.INTERPRETERS.match(program) and args and git_guard._base(args[0]) == "desk"):
-        return _desk(args[1:] if program != "desk" else args, notes)
+        return _desk(args[1:] if program != "desk" else args, notes, fed=cmd.fed)
+    for index, word in enumerate(args if program in ("find", "parallel", "watch", "unbuffer", "script") else ()):
+        # desk run by another program (find -exec, parallel, watch ...): its words may be filled in at run time
+        if git_guard._base(word) == "desk" and index + 1 < len(args):
+            found = _desk(args[index + 1:], notes, fed=True)
+            if found:
+                return found
     if program == "git":
         return _git(args, cmd, scope, notes)
     if program == "gh":
@@ -624,11 +634,71 @@ def _command(cmd: Cmd, scope: Scope, notes: list[str]) -> Verdict | None:
     return None
 
 
-def _desk(args: list[str], notes: list[str]) -> Verdict | None:
-    positional = [a for a in args if not a.startswith("-")]
+# 0.12.47 (owner, Nov 26): input on the bot's OWN sandbox desktop runs without a card. Typing that looks like a
+# secret or password still asks, and so does input on a shared pool desktop (--slot: it holds the owner's logins).
+_SECRET_WORDS = re.compile(r"(?i)pass(?:word|wd|phrase)?\b|\bpwd\b|secret|token|api[_-]?key|private[_ -]?key|"
+                           r"\botp\b|\b2fa\b|\bpin\b|credential|\bauth\b|bearer|ssh-(?:rsa|ed25519)|BEGIN [A-Z ]*KEY")
+_SECRET_PREFIX = re.compile(r"^(?:gh[pousr]_|github_pat_|sk-|sk_live_|rk_live_|xox[abprs]-|AKIA|ASIA|AIza|eyJ|glpat-|"
+                            r"npm_|pypi-|hf_|SG\.)")
+
+
+def own_desktops_on() -> bool:
+    """Per-bot desktops (the default) are on: `desk` without --slot drives the bot's own sandbox desktop."""
+    return (os.environ.get("BOT_OFFICE_DESKTOP_MODE") or "per-bot").strip().lower() == "per-bot"
+
+
+def secret_like(text: str) -> bool:
+    """Typed text that may be a secret: a variable, command substitution or file read (the value is not
+    visible here), a secret word, a known token prefix, or one long word mixing letters with digits or symbols."""
+    if not text.strip():
+        return False
+    if re.search(r"\$[{(A-Za-z_0-9@*#?!-]|`|<\(|@/|@~", text) or _SECRET_WORDS.search(text):
+        return True
+    words = text.split()
+    plain = re.compile(r"(?i)https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+|[a-z][a-z-]*\.[a-z]{2,5}|(?:~|\.{1,2})?/[\w.-]+(?:/[\w.-]+)+/?|"
+                       r"\d[\d.,:/ -]*")
+    if len(words) == 1 and len(words[0]) >= 6 and not plain.fullmatch(words[0]) and re.search(r"[A-Za-z]", words[0]) \
+            and re.search(r"[\d\W_]", words[0]):
+        return True   # one word mixing letters with digits or symbols, typed alone: what a password looks like
+    for word in words:
+        if _SECRET_PREFIX.match(word):
+            return True
+        bare = word.strip("'\"()[]")
+        trimmed = bare.rstrip(".,;:")
+        if len(trimmed) >= 6 and not plain.fullmatch(trimmed) and re.search(r"[A-Za-z]", trimmed) \
+                and re.search(r"[\d\W_]", trimmed):
+            return True   # a password-like word inside longer text ("hello hunter2!")
+        if len(word) >= 12 and not re.fullmatch(r"(?i)[a-z]+|\d+|https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+|[\w./-]+\.\w{1,5}",
+                                                word):
+            kinds = sum(bool(re.search(pattern, word)) for pattern in (r"[a-z]", r"[A-Z]", r"\d", r"[^\w]"))
+            if kinds >= 3:
+                return True
+    return False
+
+
+def _desk(args: list[str], notes: list[str], fed: bool = False) -> Verdict | None:
+    slot = any(a == "--slot" or a.startswith("--slot=") for a in args)
+    rest = list(args)
+    while rest and rest[0].startswith("-"):   # desk's own leading options (--slot NAME): never the subcommand
+        rest = rest[2:] if rest[0] == "--slot" else rest[1:]
+    positional = [a for a in rest if not a.startswith("-")]
     sub = positional[0] if positional else ""
     if sub in ("click", "type", "key", "drag", "scroll", "paste"):
-        return _ask("devices", f"desk {sub} (controls a desktop)")
+        if slot or not own_desktops_on():
+            return _ask("devices", f"desk {sub} on a shared desktop (--slot or the pool)")
+        if "--sends" in rest or any(a.startswith("--sends=") for a in rest):
+            # the bot says this click or key sends or posts on a website: the web-action policy for sends
+            # and posts applies (the owner's card), as for a send or post made any other way
+            return _ask("post", f"desk {sub} that sends or posts on a website: {_option(rest, '--sends') or ''}"[:200])
+        if sub == "type":
+            text = " ".join(rest[rest.index("type") + 1:])
+            if fed or not text.strip() or secret_like(text):
+                # no text here (it comes from xargs, a pipe...) or it may be a secret: the owner decides
+                return _ask("devices", "desk type of what may be a secret or password")
+        if sub not in ("click", "type", "key"):
+            return _ask("devices", f"desk {sub} (not a desk command)")
+        notes.append("own sandbox desktop input")
+        return None
     if sub == "grok" and len(positional) > 1 and positional[1] == "send":
         kind = _option(args, "--kind")
         if kind is None:

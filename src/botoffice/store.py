@@ -6,6 +6,7 @@ import json
 import secrets
 import sqlite3
 import threading
+import types
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
@@ -239,6 +240,22 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS approvals_grant ON approvals(bot_id, input_hash, status)")
     # 0.12.4 fix3: the exact updates (repo, ref, operation, old/new sha) a push approval covers
     add_columns(db, "approvals", (("push_plan", "TEXT"),))
+    # 0.12.47: the owner's note on a decision, and the follow-up turn a deny wakes (the bot carries on
+    # without the action; the same action is not carded again in that turn)
+    add_columns(db, "approvals", (("owner_note", "TEXT"), ("followup_job_id", "TEXT")))
+    # 0.12.47: the task a card belongs to (rules.task_key): one assignment, the bot's chat (chat, API and
+    # wake-up turns), or one routine/watcher. Card reuse, the in-flight hold and settling all key on it. A
+    # resume turn's card belongs to the task of the turn the resumes started from (task_root).
+    add_columns(db, "approvals", (("task_key", "TEXT"),))
+    rows = db.execute("SELECT id, job_id, assignment_id, source FROM approvals WHERE task_key IS NULL").fetchall()
+    if rows:
+        from .rules import task_key  # rules imports store; needed for old rows only
+        for row in rows:
+            root = task_root(db, row[1]) or {}
+            db.execute("UPDATE approvals SET task_key=? WHERE id=? AND task_key IS NULL", (task_key(types.SimpleNamespace(
+                assignment_id=row[2] or root.get("assignment_id"), source=row[3] or root.get("source"),
+                routine_id=root.get("routine_id"), watcher_id=root.get("watcher_id"))), row[0]))
+    db.execute("CREATE INDEX IF NOT EXISTS approvals_task ON approvals(bot_id, input_hash, task_key, status)")
     db.execute(
         """CREATE TABLE IF NOT EXISTS gate_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, job_id TEXT, provider TEXT, decision TEXT NOT NULL,
@@ -555,6 +572,25 @@ def _read_json(path: Path) -> object:
 
 def _minute(moment: datetime) -> datetime:
     return moment.astimezone(UTC).replace(second=0, microsecond=0)
+
+
+def task_root(db: sqlite3.Connection, job_id) -> dict | None:
+    """0.12.47: the turn a chain of resume turns started from (origin_job_id followed to its root, with
+    cycle detection): its assignment_id, source, routine_id and watcher_id. None when the job is unknown."""
+    seen: set[str] = set()
+    current, found = str(job_id) if job_id else None, None
+    while current and current not in seen:
+        seen.add(current)
+        try:
+            row = db.execute("SELECT assignment_id, source, routine_id, watcher_id, origin_job_id FROM jobs WHERE id=?",
+                             (current,)).fetchone()
+        except sqlite3.OperationalError:   # no jobs table yet (a bare control DB)
+            return found
+        if row is None:
+            break
+        found = {"assignment_id": row[0], "source": row[1], "routine_id": row[2], "watcher_id": row[3]}
+        current = row[4]
+    return found
 
 
 def add_columns(db: sqlite3.Connection, table: str, specs: Sequence[tuple[str, str]]) -> set[str]:
@@ -1496,6 +1532,30 @@ class JobStore:
                               "AND status NOT IN ('queued','running') ORDER BY created_at, continue_count",
                               (str(root), str(root), until.isoformat())).fetchall()
         return [(row["reply_text"] or "", (row["outcome"] or "").partition(": ")[2]) for row in rows]
+
+    def policy_audit_insert(self, db: sqlite3.Connection, *, bot_id: str | None, job_id: str | None, source: str,
+                            tool: str, summary: str, policy: str, legacy: str = "") -> None:
+        """policy_audit_event inside the caller's transaction: raises, so the decision fails with it."""
+        bot = db.execute("SELECT name FROM bots WHERE id=?", (bot_id,)).fetchone() if bot_id else None
+        db.execute("INSERT INTO policy_audit (at,bot_id,bot,job_id,source,provider,tool,summary,policy,legacy) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (now().isoformat(), bot_id, bot[0] if bot else None, job_id, source[:32], "", tool[:80],
+                    summary[:2000], policy[:300], legacy[:300]))
+
+    def policy_audit_event(self, *, bot_id: str | None, job_id: str | None, source: str, tool: str, summary: str,
+                           policy: str, legacy: str = "") -> bool:
+        """0.12.47: one row in the append-only policy_audit table for an owner decision or a desktop
+        session event (approval approved/denied, desk extend, a loop stop). Never raises."""
+        try:
+            bot = self.get_bot(bot_id) if bot_id else None
+            with closing(self._connect()) as db:
+                db.execute("INSERT INTO policy_audit (at,bot_id,bot,job_id,source,provider,tool,summary,policy,legacy) "
+                           "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                           (now().isoformat(), bot_id, getattr(bot, "name", None), job_id, source[:32], "",
+                            tool[:80], summary[:2000], policy[:300], legacy[:300]))
+            return True
+        except Exception:  # noqa: BLE001 — the audit never decides anything
+            return False
 
     def pending_approval(self, job_id: UUID | str) -> bool:
         with closing(self._connect()) as db:

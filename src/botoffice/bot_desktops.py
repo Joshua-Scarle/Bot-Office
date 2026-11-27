@@ -16,7 +16,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import isolation
@@ -32,7 +32,8 @@ KIND = "per-bot"
 REGISTRY_NAME = "desktops.json"
 READY_TIMEOUT = 20.0
 REAP_INTERVAL = 60.0
-RESERVE_SECONDS = 120.0   # a desktop just started for someone is not evicted before they can use it
+RESERVE_SECONDS = 120.0
+SESSION_GRACE = 5 * 60.0  # a desktop over its session limit by this much is stopped even during a turn   # a desktop just started for someone is not evicted before they can use it
 
 # PID 1 is podman's --init; the shell starts the display stack and waits. Xvfb never listens on TCP;
 # x11vnc listens inside the container's own network namespace, published to the host on 127.0.0.1 only.
@@ -396,6 +397,154 @@ async def _rfb_ready(port: int) -> bool:
             await writer.wait_closed()
 
 
+# --- 0.12.47: desktop sessions with explicit, capped extensions and a loop / no-progress stop ---
+
+LOOP_ACTIONS = 8        # the same desk action (command and input) this many times in a row: a loop
+LOOP_KEYS = 20          # ... for `desk key` (paging down a long page repeats one key)
+LOOP_SHOTS = 8          # this many identical screenshots in a row, over at least SHOTS_SPAN: no progress
+SHOTS_SPAN = 120.0
+EXTEND_WINDOW = 15 * 60  # an extension is accepted only in the last 15 minutes of the session (no stacking)
+MIN_REASON = 10
+
+
+@dataclass
+class Session:
+    started: float
+    last_activity: float
+    budget: float               # seconds from started
+    extensions: list = field(default_factory=list)   # (at, reason)
+    actions: list = field(default_factory=list)      # recent action fingerprints
+    shots: list = field(default_factory=list)        # recent (digest, at) of screenshots
+    shot_run: tuple = ("", 0.0, 0)                   # the current identical-screenshot run: (digest, since, count)
+    seen_same: int = 0          # screenshots, since the action streak began, that show the screen unchanged
+    n_actions: int = 0          # desk actions so far in this session
+    same_after: int = -1        # n_actions when the latest unchanged screenshot was taken
+    stopped: str = ""           # "loop" / "no progress": refused until a gap with no desk use
+
+
+class SessionLimits:
+    """Per-desktop session clock. A session is continuous desk use; idle_seconds without any desk command
+    (refused ones count as use) starts a new one. It lasts base seconds; `extend` adds step seconds, only
+    while the bot's turn runs, with a stated reason, in the session's last EXTEND_WINDOW, up to cap seconds
+    in total. LOOP_ACTIONS identical actions (LOOP_KEYS for a key) with no change of screen in between, or
+    LOOP_SHOTS identical screenshots in a row, stop it."""
+
+    def __init__(self, base: float, step: float, cap: float, idle: float, clock: Callable[[], float]):
+        self.base, self.step, self.cap, self.idle, self.clock = base, step, cap, idle, clock
+        self.sessions: dict[str, Session] = {}
+
+    def _current(self, name: str) -> Session:
+        now = self.clock()
+        session = self.sessions.get(name)
+        gap = self.idle if self.idle > 0 else self.base
+        if session is None or now - session.last_activity >= gap:
+            session = self.sessions[name] = Session(started=now, last_activity=now, budget=self.base)
+        return session
+
+    def state(self, name: str) -> dict:
+        session = self.sessions.get(name)
+        if session is None:
+            return {"active": False}
+        now = self.clock()
+        return {"active": True, "minutes_used": round((now - session.started) / 60, 1),
+                "minutes_left": round(max(0.0, session.started + session.budget - now) / 60, 1),
+                "extensions": len(session.extensions), "cap_minutes": round(self.cap / 60),
+                "stopped": session.stopped or None}
+
+    def check(self, name: str, command: str | None, fingerprint: str | None) -> str | None:
+        """Record a desk command; the refusal text, or None when it may run."""
+        session = self._current(name)
+        now = self.clock()
+        session.last_activity = now
+        if session.stopped:
+            return (f"your desktop session was stopped ({session.stopped}): the same thing kept repeating with no "
+                    f"change. Try a different approach without the desktop; desk works again after "
+                    f"{round(self.idle / 60)} minutes with no desk use.")
+        if now - session.started >= session.budget:
+            used = round((now - session.started) / 60)
+            if session.budget >= self.cap:
+                return (f"your desktop session reached its hard limit ({round(self.cap / 60)} minutes in total). "
+                        "Finish without the desktop or report what is left; desk works again after "
+                        f"{round(self.idle / 60)} minutes with no desk use.")
+            return (f"your desktop session reached its time limit ({used} minutes). If the task genuinely needs "
+                    f"more, run `desk extend --reason \"<why, and what is left>\"` (+{round(self.step / 60)} min, "
+                    f"up to {round(self.cap / 60)} min in total); otherwise finish without the desktop.")
+        if command and command != "screenshot":
+            limit = LOOP_KEYS if command == "key" else LOOP_ACTIONS
+            session.actions = (session.actions + [f"{command}:{fingerprint or ''}"])[-LOOP_KEYS:]
+            if len(session.actions) == 1 or session.actions[-1] != session.actions[-2]:
+                session.seen_same = 0   # a new streak: it needs its own proof that the screen did not change
+            recent_proof = session.same_after == session.n_actions   # unchanged right after the previous action
+            session.n_actions += 1
+            recent = session.actions[-limit:]
+            # a loop needs evidence: the same action again and again AND a screenshot during the streak showing
+            # the screen unchanged (unobserved clicks on a Next button are not judged; the time limit bounds them)
+            if len(recent) == limit and len(set(recent)) == 1 and session.seen_same > 0 and recent_proof:
+                session.stopped = "loop: the same action repeated"
+                return "loop"
+        return None
+
+    def screenshot(self, name: str, digest: str) -> str | None:
+        session = self._current(name)
+        session.last_activity = self.clock()
+        now = self.clock()
+        if session.shots and session.shots[-1][0] != digest:
+            session.actions = []   # the screen changed: repeating an action (a Next button) is progress
+            session.seen_same = 0
+        elif session.shots and session.actions:
+            session.seen_same += 1   # unchanged screen during an action streak
+            session.same_after = session.n_actions
+        session.shots = (session.shots + [(digest, now)])[-LOOP_SHOTS:]
+        run_digest, since, count = session.shot_run
+        session.shot_run = (digest, since, count + 1) if run_digest == digest else (digest, now, 1)
+        _, since, count = session.shot_run
+        if count >= LOOP_SHOTS and now - since >= SHOTS_SPAN and not session.stopped:
+            session.stopped = "no progress: the screen did not change"
+            return "no progress"
+        return None
+
+    def extend(self, name: str, reason: str, turn_running: bool) -> tuple[bool, str]:
+        reason = " ".join((reason or "").split())
+        if not turn_running:
+            return False, "an extension needs a running turn of the bot"
+        if len(reason) < MIN_REASON:
+            return False, f"give a reason of at least {MIN_REASON} characters (why, and what is left)"
+        session = self._current(name)
+        now = self.clock()
+        session.last_activity = now
+        if session.stopped:
+            return False, f"the session was stopped ({session.stopped}); an extension cannot restart it"
+        left = session.started + session.budget - now
+        window = min(EXTEND_WINDOW, self.step / 4)   # under one step: an extension can never be stacked on another
+        if left > window:
+            return False, (f"{round(left / 60)} minutes are still left; extend in the last "
+                           f"{max(1, round(window / 60))} minutes of the session")
+        if max(session.budget, now - session.started) + self.step > self.cap + 1e-6:
+            return False, f"the hard limit is {round(self.cap / 60)} minutes in total; no more extensions"
+        # overdue: the step counts from now (and stays within the cap), so a second request finds a full step
+        # left and is refused; extensions can never be stacked
+        session.budget = min(self.cap, max(session.budget, now - session.started) + self.step)
+        session.extensions.append((now, reason[:300]))
+        return True, (f"extended by {round(self.step / 60)} minutes (extension {len(session.extensions)}; "
+                      f"{round((session.started + session.budget - now) / 60)} minutes left, hard limit "
+                      f"{round(self.cap / 60)} minutes in total)")
+
+    def over(self, name: str, grace: float) -> str | None:
+        """Why the reaper should stop this desktop now (stopped by the loop check, over its budget by *grace*,
+        or no desk use for the idle time, also during a turn), else None."""
+        session = self.sessions.get(name)
+        if session is None:
+            return None
+        if session.stopped:
+            return session.stopped
+        now = self.clock()
+        if now - session.started >= session.budget + grace:
+            return "session time limit"
+        if self.idle > 0 and now - session.last_activity >= self.idle:
+            return "no desk activity"
+        return None
+
+
 class DesktopManager:
     def __init__(self, settings: Settings, *, busy_bots: Callable[[], set[str]] = set,
                  runner: Runner = podman, clock: Callable[[], float] = time.monotonic,
@@ -413,6 +562,10 @@ class DesktopManager:
         self.stopping: set[str] = set()         # being stopped: no new viewer is admitted
         self._ids: dict[str, str] = {}          # name -> id of OUR container, from the latest listing
         self._lock = asyncio.Lock()
+        self.limits = SessionLimits(settings.desktop_session_minutes * 60, settings.desktop_extend_minutes * 60,
+                                    settings.desktop_max_session_minutes * 60, settings.desktop_idle_minutes * 60,
+                                    clock)
+        self.audit: Callable[[str, str, str], None] = lambda name, tool, text: None   # set by the app
 
     @property
     def enabled(self) -> bool:
@@ -566,9 +719,24 @@ class DesktopManager:
             self.reserved.pop(name, None)
         return not code
 
+    async def stop_now(self, name: str, why: str) -> bool:
+        """Stop one per-bot desktop at once (the loop / no-progress stop), from a fresh listing, under the lock;
+        only if it is still the same stopped session after the listing (a new session meanwhile keeps it)."""
+        session = self.limits.sessions.get(name)
+        async with self._lock:
+            try:
+                await self.containers()
+            except DesktopError:
+                return False
+            current = self.limits.sessions.get(name)
+            if (name not in self._ids or self.owner_controlling(name) or current is not session
+                    or session is None or not session.stopped):
+                return False
+            return await self.stop(name, why)
+
     async def reap_idle(self) -> list[str]:
         idle_seconds = self.settings.desktop_idle_minutes * 60
-        if idle_seconds <= 0 or not self.enabled:   # pool mode (rollback) leaves per-bot desktops alone
+        if not self.enabled:   # pool mode (rollback) leaves per-bot desktops alone
             return []
         async with self._lock:
             try:
@@ -580,6 +748,17 @@ class DesktopManager:
             for name in running:
                 self.last_used.setdefault(name, now)   # unknown (after a restart): grace from now
             stopped = []
+            for name in running:
+                # 0.12.47: session limit, loop stop, or no desk use for the idle time (also during a turn); not
+                # while the owner watches or controls it. Re-checked right before the stop.
+                why = self.limits.over(name, SESSION_GRACE)
+                if why and not self.viewers.get(name) and not self.owner_controlling(name) \
+                        and self.limits.over(name, SESSION_GRACE) == why and await self.stop(name, why):
+                    self.audit(name, "desk session stop", f"{name} stopped: {why}")
+                    stopped.append(name)
+            running = [n for n in running if n not in stopped]
+            if idle_seconds <= 0:
+                return stopped
             for name in idle_to_stop(running, self.last_used, self.viewers, self.busy_bots(), self.bot_of,
                                      now, idle_seconds):
                 # re-checked right before each stop: a viewer, a turn or a use may have come during an earlier stop

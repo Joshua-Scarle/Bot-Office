@@ -530,9 +530,27 @@ def _tail(path: str | None, limit: int = 8192) -> str:
 
 
 
+class ApprovalDeny(BaseModel):
+    note: str | None = Field(default=None, max_length=500)
+    follow_up: bool = True
+
+
 class AgentDesktopRequest(BaseModel):
-    """POST /v1/agent/desktop: empty for the bot's own desktop, or the turn's leased pool slot."""
+    """POST /v1/agent/desktop: empty for the bot's own desktop, or the turn's leased pool slot. 0.12.47: desk
+    names the command it is about to run (and a digest of its input), or reports a screenshot's digest, so the
+    session limit and the loop / no-progress stop apply."""
     slot: str | None = Field(default=None, max_length=16)
+    command: str | None = Field(default=None, pattern=r"^(?:screenshot|click|type|key|open)$")
+    input: str | None = Field(default=None, pattern=r"^[0-9a-f]{16,64}$")
+    shot: str | None = Field(default=None, pattern=r"^[0-9a-f]{16,64}$")
+
+
+class AgentDesktopExtend(BaseModel):
+    reason: str = Field(min_length=1, max_length=300)
+
+
+class DesktopViewExtend(BaseModel):
+    reason: str = Field(default="the owner extended the viewing session", min_length=1, max_length=300)
 
 def create_app(
     settings: Settings | None = None,
@@ -629,6 +647,10 @@ def create_app(
     tickets = vnc.Tickets()
     # remote-desktop: each bot's own desktop, started on demand and stopped when idle
     bot_desks = bot_desktops.DesktopManager(settings, busy_bots=store.running_bot_ids)
+    remote_access.VIEW_SESSIONS.configure(settings.desktop_extend_minutes * 60, settings.desktop_max_session_minutes * 60)
+    bot_desks.audit = lambda name, tool, text: store.policy_audit_event(
+        bot_id=bot_desks.bot_of(name), job_id=None, source="desktop", tool=tool, summary=text,
+        policy="desktop session limit / loop stop")
     app.state.bot_desktops = bot_desks
     proxy_counts: dict[str, int] = {}
     attachment_uploads: dict[UUID, list[float]] = {}
@@ -1670,6 +1692,33 @@ def create_app(
         except bot_desktops.DesktopError as exc:
             raise _desktop_error(exc) from exc
 
+    @app.post("/v1/desktops/{name}/extend-view", dependencies=[Depends(auth)])
+    async def extend_desktop_view(name: str, body: DesktopViewExtend | None = None) -> dict:
+        """0.12.47: the owner extends their own open remote viewing session(s) of this desktop by one step
+        (default +60 min) with a reason, up to the hard cap (default 240 min in total). A local session
+        (SSH tunnel) has no time limit. Audited."""
+        try:
+            vnc.desktop_port(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="unknown desktop") from exc
+        who = remote_access.current_remote_identity.get()
+        if who is None:
+            return {"limited": False, "detail": "a local viewing session has no time limit", "sessions": []}
+        if who.kind != "user":
+            raise HTTPException(status_code=403, detail="only the owner can extend a viewing session")
+        reason = " ".join((body or DesktopViewExtend()).reason.split())
+        sessions = remote_access.VIEW_SESSIONS.extend(who.identity, f"/v1/desktops/{name}/vnc", time.time())
+        if not sessions:
+            raise HTTPException(status_code=409, detail="no open remote viewing session of this desktop")
+        ok = any(item["extended"] for item in sessions)
+        store.policy_audit_event(bot_id=bot_desks.bot_of(name), job_id=None, source="owner", tool="view extend",
+                                 summary=f"{name}: {reason}"[:300],
+                                 policy=("extended" if ok else "refused: hard limit reached")
+                                 + f" ({sessions[0]['minutes_left']} min left, cap {sessions[0]['cap_minutes']} min)")
+        detail = (f"extended: {sessions[0]['minutes_left']} minutes left (hard limit {sessions[0]['cap_minutes']} "
+                  "minutes in total)") if ok else f"the hard limit of {sessions[0]['cap_minutes']} minutes is reached"
+        return {"limited": True, "extended": ok, "detail": detail, "sessions": sessions}
+
     @app.post("/v1/desktops/{name}/ticket", dependencies=[Depends(auth)])
     async def desktop_ticket(name: str, mode: str = Query(default="view", pattern="^(view|control)$"),
                              bot: UUID | None = None) -> dict:
@@ -1801,11 +1850,52 @@ def create_app(
             return {"name": job.slot, "owner_controlling": bot_desks.owner_controlling(job.slot)}
         if not bot_desks.enabled:
             raise HTTPException(status_code=409, detail="per-bot desktops are off")
+        known = bot_desks.name_of(str(job.bot_id))
+        if known and body is not None and body.shot:
+            if bot_desks.limits.screenshot(known, body.shot):
+                await _desk_session_stop(job, known)
+            return {"name": known, "owner_controlling": bot_desks.owner_controlling(known),
+                    "session": bot_desks.limits.state(known)}
+        if known:
+            refusal = bot_desks.limits.check(known, body.command if body else None, body.input if body else None)
+            if refusal == "loop":
+                await _desk_session_stop(job, known)
+                refusal = bot_desks.limits.check(known, None, None)
+            if refusal:
+                raise HTTPException(status_code=429, detail=refusal)
         try:
             name = await bot_desks.ensure(str(job.bot_id))
         except bot_desktops.DesktopError as exc:
             raise _desktop_error(exc) from exc
-        return {"name": name, "owner_controlling": bot_desks.owner_controlling(name)}
+        if not known:
+            bot_desks.limits.check(name, body.command if body else None, body.input if body else None)
+        return {"name": name, "owner_controlling": bot_desks.owner_controlling(name),
+                "session": bot_desks.limits.state(name)}
+
+    async def _desk_session_stop(job: Job, name: str) -> None:
+        """The loop / no-progress detector fired: audited, and the desktop stopped (not while the owner drives it)."""
+        why = (bot_desks.limits.state(name).get("stopped") or "loop")
+        store.policy_audit_event(bot_id=str(job.bot_id), job_id=str(job.id), source=job.source or "",
+                                 tool="desk session stop", summary=f"{name}: {why}", policy="loop / no-progress stop")
+        with contextlib.suppress(Exception):
+            await bot_desks.stop_now(name, why)
+
+    @app.post("/v1/agent/desktop/extend")
+    async def agent_desktop_extend(body: AgentDesktopExtend, job: Job = Depends(agent_scope)) -> dict:  # noqa: B008
+        """0.12.47 `desk extend --reason`: one step more for the calling bot's desktop session; only while this
+        turn runs, with a reason, near the end of the session, up to the hard cap. Audited."""
+        name = bot_desks.name_of(str(job.bot_id)) if bot_desks.enabled else None
+        if not name:
+            raise HTTPException(status_code=409, detail="you have no desktop session to extend")
+        current = store.get(job.id)
+        running = current is not None and getattr(current.status, "value", current.status) == "running"
+        ok, text = bot_desks.limits.extend(name, body.reason, running)
+        store.policy_audit_event(bot_id=str(job.bot_id), job_id=str(job.id), source=job.source or "",
+                                 tool="desk extend", summary=f"{name}: {' '.join(body.reason.split())[:300]}",
+                                 policy=("extended: " if ok else "refused: ") + text)
+        if not ok:
+            raise HTTPException(status_code=409, detail=text)
+        return {"name": name, "detail": text, "session": bot_desks.limits.state(name)}
 
     def _target_bot(ref: str) -> Bot:
         """Another bot by name, id or alias; the 404 says that only registered bots can hold tasks
@@ -3141,8 +3231,11 @@ def create_app(
         return _approval_call(rules.approve, approval_id, assignments)
 
     @app.post("/v1/approvals/{approval_id}/deny", dependencies=[Depends(auth)])
-    async def deny(approval_id: int) -> dict:
-        return _approval_call(rules.deny, approval_id)
+    async def deny(approval_id: int, body: ApprovalDeny | None = None) -> dict:
+        """Deny (0.12.47: with an optional note for the bot; the bot is woken to carry on without the action
+        when its task is still open, unless follow_up is false). Recorded in policy_audit."""
+        body = body or ApprovalDeny()
+        return _approval_call(rules.deny, approval_id, assignments, body.note, body.follow_up)
 
     @app.post("/v1/gate-alerts/{alert_id}/dismiss", status_code=204, dependencies=[Depends(auth)])
     async def dismiss_alert(alert_id: int) -> None:

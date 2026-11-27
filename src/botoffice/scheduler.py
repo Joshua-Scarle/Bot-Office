@@ -942,6 +942,9 @@ class Scheduler:
                         self.store.set_auto_decision(job.id, "error")
                         self.store.add_message(job.bot_id, "system", AUTO_CONTINUE_FAILED, source=job.source)
         self._settle(job)
+        if job.bot_id and job.origin_job_id:
+            with contextlib.suppress(Exception):
+                self.rules.resume_ended(job)
         if job.bot_id:
             self._wake_for_replies(job.bot_id)
         if sink is not None:

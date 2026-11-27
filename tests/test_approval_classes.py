@@ -84,7 +84,7 @@ def test_default_classes(tmp_path, event, expected):
         assert decision.decision == "allow", decision
     else:
         assert (decision.decision, decision.effect, decision.preset) == ("deny", "ask", expected)
-        assert "waiting_on_user" in decision.reason and "Do not run it another way" in decision.reason
+        assert "waiting_on_user" in decision.reason and "Never repackage the refused action" in decision.reason
 
 
 def test_settings_lists_defaults_and_switches_classes(tmp_path):
@@ -165,7 +165,7 @@ def test_deny_and_timeout_leave_a_short_note(tmp_path):
     denied = rules.decide(job, bash(f"sudo echo {long}")).approval_id
     rules.deny(denied)
     note = store.list_messages(bot.id)[-1]
-    assert note.role == "system" and note.text.startswith(f"Approval #{denied} denied, so the task is stopped")
+    assert note.role == "system" and note.text.startswith(f"Approval #{denied} denied: ")
     assert len(note.text) < 300
     timed = rules.decide(job, bash("sudo reboot")).approval_id
     with closing(store._connect()) as db:

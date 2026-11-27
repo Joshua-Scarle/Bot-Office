@@ -9,7 +9,10 @@ the owner's own rules, never rules, other bots' settings. General Worker is the 
 their rules from (bo-runs/bo-intel/ops.py), so it gets the same treatment: new bots start with the policy
 alone.
 
-  python3 scripts/migrate_rules_0_12_45.py [--dry-run] [--backup-dir DIR] [--skip NAME ...]
+  python3 scripts/migrate_rules_0_12_45.py [--dry-run] [--backup-dir DIR] [--skip NAME ...] [--only NAME ...]
+
+0.12.47: ``--only NAME`` limits the run to the named bots (the owner, Nov 26: "MPG DevOps (BO): remove its
+6 old E8 ask rules the same way"); --skip is then ignored.
 
 The token is read from BOT_OFFICE_TOKEN_FILE (or data/token) and never printed.
 """
@@ -35,9 +38,10 @@ def main(argv: list[str]) -> int:
                         or str(Path(__file__).resolve().parents[1] / "data" / "token"))
     parser.add_argument("--backup-dir", default=os.path.expanduser("~/backups"))
     parser.add_argument("--skip", action="append", default=None, help="bot name to leave alone (repeatable)")
+    parser.add_argument("--only", action="append", default=None, help="only this bot (repeatable)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    skip_names = tuple(args.skip) if args.skip else DEFAULT_SKIP
+    skip_names = () if args.only else (tuple(args.skip) if args.skip else DEFAULT_SKIP)
     token = Path(args.token_file).read_text(encoding="utf-8").strip()
 
     def call(method: str, path: str):
@@ -57,6 +61,11 @@ def main(argv: list[str]) -> int:
     bots = bots.get("bots", bots) if isinstance(bots, dict) else bots
     names = {bot["id"]: bot["name"] for bot in bots}
     skip_ids = {bot_id for bot_id, name in names.items() if name in skip_names}
+    if args.only:
+        skip_ids = {bot_id for bot_id, name in names.items() if name not in args.only}
+        if not set(args.only) & set(names.values()):
+            print(f"no bot named {sorted(args.only)}", file=sys.stderr)
+            return 2
     missing = set(skip_names) - set(names.values())
     if missing:
         print(f"note: no bot named {sorted(missing)}", file=sys.stderr)
@@ -66,7 +75,7 @@ def main(argv: list[str]) -> int:
         return 2
     rules = listing["rules"]
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup = Path(args.backup_dir) / f"rules-before-0.12.45-{stamp}.json"
+    backup = Path(args.backup_dir) / f"rules-before-{'0.12.47' if args.only else '0.12.45'}-{stamp}.json"
     backup.parent.mkdir(parents=True, exist_ok=True)
     backup.write_text(json.dumps(listing, indent=1), encoding="utf-8")
     backup.chmod(0o600)
@@ -74,7 +83,8 @@ def main(argv: list[str]) -> int:
                and rule.get("effect") == "ask" and str(rule.get("note") or "").startswith(NOTE_PREFIXES)]
     print(f"backup: {backup} ({len(rules)} rules)")
     print(f"{len(targets)} E8/interim ask rules to remove across "
-          f"{len({rule['bot_id'] for rule in targets})} bots; skipped: {', '.join(skip_names)}")
+          f"{len({rule['bot_id'] for rule in targets})} bots; "
+          + (f"only: {', '.join(args.only)}" if args.only else f"skipped: {', '.join(skip_names)}"))
     removed = 0
     for rule in targets:
         if args.dry_run:

@@ -113,8 +113,13 @@ middleware allows exactly one kind of remote websocket:
    The ticket POST itself goes through the normal owner checks (JWT + Origin for a POST).
 5. While the socket is open the middleware re-checks every 15 s that the identity is still allowed
    (config still on, host still listed, email still an owner, team/audience unchanged) and closes the
-   socket (code 1008) at the JWT's `exp`, on revocation, or at a hard maximum of 1 hour, whichever
-   comes first. Closing means: the client gets a close frame, the app's receive side gets a
+   socket (code 1008) at the JWT's `exp`, on revocation, or at the session's end, whichever comes
+   first. The session ends 1 hour after it opened unless the owner extends it (0.12.47): **Extend
+   session** in the Desktop panel (shown only through remote access) asks for a reason and calls
+   `POST /v1/desktops/desktop-N/extend-view`, which adds one step (default +60 min) to that person's
+   open sessions of that desktop, up to a hard cap (default 240 min in total). Never automatic; each
+   extension is a row in `policy_audit` (tool `view extend`, source `owner`). A local session (SSH
+   tunnel) has no time limit. Closing means: the client gets a close frame, the app's receive side gets a
    disconnect, and the app task is cancelled; nothing more is forwarded in either direction.
    Residual: ASGI has no way to abort a websocket transport, so a frame the app had already handed to
    the server before the cut may still be flushed to the client. Such a frame was produced while the
@@ -153,6 +158,40 @@ allowlist) or any websocket.
 | `BOT_OFFICE_DESKTOP_MEMORY` | `1536m` | per container |
 | `BOT_OFFICE_DESKTOP_CPUS` | `1.5` | per container |
 | `BOT_OFFICE_DESKTOP_GEOMETRY` | `1280x800` | screen size |
+| `BOT_OFFICE_DESKTOP_SESSION_MINUTES` | `60` | a bot's desktop session (continuous desk use) before it must extend |
+| `BOT_OFFICE_DESKTOP_EXTEND_MINUTES` | `60` | one extension step (bot `desk extend`, owner Extend session) |
+| `BOT_OFFICE_DESKTOP_MAX_SESSION_MINUTES` | `240` | hard cap in total, for bot sessions and the owner's remote viewing session |
+
+## 7a. Session limits, extensions and the loop stop (0.12.47)
+
+Approved defaults (Nov 26): per-bot desktops, at most 4 running, 20-minute idle stop, 1280x800, no
+browser-state copying. A bot's desktop **session** is continuous desk use; 20 minutes with no desk
+command (refused ones count as use) start a new one. Every `desk` command inside a turn tells the
+controller what it is about to do (`POST /v1/agent/desktop` with the command and a digest of its input,
+never the text) and reports each screenshot's digest.
+
+- After `SESSION_MINUTES` the bot's desk commands are refused (429) with the way out:
+  `desk extend --reason "<why, and what is left>"` (`POST /v1/agent/desktop/extend`). An extension is
+  accepted only while the bot's turn runs, with a reason of at least 10 characters, in the last
+  15 minutes of the session (no stacking), one step at a time, up to the hard cap. Nothing extends by
+  itself. Every request, granted or refused, is a `policy_audit` row (tool `desk extend`).
+- 5 minutes past the limit the reaper stops the desktop even during a turn (not while the owner
+  controls it). The idle stop still applies.
+- **Loop / no-progress stop**: the same action 8 times in a row (20 for `desk key`) while a screenshot
+  during that streak shows the screen unchanged, or 8 identical screenshots in a row over at least
+  2 minutes, stops the session and the desktop at once. Repeated clicks the bot never looks at are not
+  judged a loop (the session limit bounds them); no desk use for the idle time stops the desktop even
+  during a turn
+  (`policy_audit` tool `desk session stop`). An extension cannot restart it; desk works again after the
+  idle gap. A Next button clicked with the screen changing each time is progress, not a loop.
+- The counters live in the controller's memory: a Bot-Office restart starts every session afresh.
+
+## 7b. Desktop input without a card (0.12.47)
+
+`desk click/type/key` on the bot's own desktop run without a card. Typing what may be a secret or
+password, input on a shared pool desktop (`--slot`) and printers keep the card (docs/permissions.md).
+There is no desk path to the owner's own computer. A click or key that sends, posts, publishes or buys on
+a website is marked by the bot with `--sends "<what>"` and asks like any send or post.
 
 ## 8. Tests
 
