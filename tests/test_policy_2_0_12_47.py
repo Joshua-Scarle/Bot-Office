@@ -664,3 +664,32 @@ def test_a_denied_command_does_not_run_in_its_follow_up_even_if_now_allowed(tmp_
     decision = rules.decide(follow, bash(ASKS))
     assert (decision.decision, decision.effect) == ("deny", "never")
     assert rules.decide(running(store, bot), bash(ASKS)).decision == "allow"   # a later, unrelated turn: the rule
+
+
+def test_an_approved_step_does_not_also_run_in_the_asking_turn_when_now_allowed(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    rules.approve(approval)                    # the asking turn is still running
+    with closing(store._connect()) as db:      # and an allow rule appears
+        db.execute("INSERT INTO action_rules (bot_id,effect,kind,pattern,scope,note,created_at) VALUES "
+                   "(NULL,'allow','shell','^curl ','all','test','2026-11-26T00:00:00')")
+    retry = rules.decide(origin, bash(ASKS))
+    assert retry.decision == "deny" and "already granted" in retry.reason
+
+
+def test_approve_is_all_or_nothing(tmp_path, monkeypatch):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot)
+    approval = rules.decide(origin, bash(ASKS)).approval_id
+    store.finish(origin.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+
+    def broken(*a, **k):
+        raise sqlite3.OperationalError("audit table locked")
+    monkeypatch.setattr(store, "policy_audit_insert", broken)
+    with pytest.raises(sqlite3.OperationalError):
+        rules.approve(approval)
+    item = rules.get(approval)
+    assert item["status"] == "pending" and item["resume_job_id"] is None
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs WHERE origin_job_id=?", (str(origin.id),)).fetchone()[0] == 0

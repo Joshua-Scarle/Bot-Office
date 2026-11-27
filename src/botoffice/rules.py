@@ -1075,6 +1075,9 @@ class Rules:
             verdict, reason = self._sudo_review(job, action)
             if verdict == "allow" and self._sudo_log(job, action, "allowed", "auto-review", verdict, reason):
                 self._log(job, provider, "allow", "review", preset, action, None, note=f"auto-review allowed: {reason}")
+                held = self._held_back(job, provider, preset, action)   # r10: a deny or grant that came meanwhile
+                if held is not None:
+                    return held
                 if getattr(job, "origin_job_id", None):   # 0.12.47: an approved sudo step the review now allows still uses its grant
                     with contextlib.suppress(Exception):
                         self.consume_grant(job, action)
@@ -1096,6 +1099,9 @@ class Rules:
         if effect == "auto-merge":
             effect, why = self._auto_merge(job, provider, action, preset)
         if effect == "allow":
+            held = self._held_back(job, provider, preset, action)
+            if held is not None:
+                return held
             self._audit(job, provider, action, why)
             if getattr(job, "origin_job_id", None):
                 # 0.12.47: the resume turn runs an approved step the policy now allows anyway: the grant is used
@@ -1225,6 +1231,29 @@ class Rules:
                     del passes[index]
                     return True
         return False
+
+    def _held_back(self, job: Job, provider: str, preset: str | None, action: Action) -> Decision | None:
+        """0.12.47 (r10), right before an allow: the owner denied this exact action for this turn, or approved
+        it for a resume turn that has not run yet (so it runs once, there, not also here)."""
+        if not job.bot_id:
+            return None
+        denied = self._owner_denied(job, action)
+        if denied is not None:
+            self._log(job, provider, "deny", "never", preset, action, denied, note="denied by the owner")
+            return Decision("deny", "never", (
+                f"Blocked by Bot-Office: the owner denied this exact command (approval #{denied}); it is not run "
+                f"or asked again in this turn. {KEEP_GOING} {STOP_LINE}"), preset, denied)
+        with closing(self.store._connect()) as db:
+            row = db.execute("SELECT a.id FROM approvals a JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
+                             "a.input_hash=? AND a.status='approved' AND a.job_id=? AND a.resume_job_id<>? AND "
+                             "j.status IN ('queued','running') LIMIT 1",
+                             (str(job.bot_id), action.fingerprint, str(job.id), str(job.id))).fetchone()
+        if row is None:
+            return None
+        self._log(job, provider, "deny", "ask", preset, action, int(row["id"]), note="approved; runs in the resume turn")
+        return Decision("deny", "ask", (
+            f"Approval #{row['id']} for this exact command was already granted: Bot-Office runs it in the resume turn "
+            f"that follows this one. Don't repeat it now. {KEEP_GOING}"), preset, int(row["id"]))
 
     def _owner_denied(self, job: Job, action: Action) -> int | None:
         """The owner denied exactly this action of this bot, and this job asked it or is the deny's follow-up."""
@@ -1718,42 +1747,47 @@ class Rules:
         """Approve once: a 24 h one-shot grant and a priority-1 resume turn that names the
         originating job (only that turn can consume the grant). An open assignment resumes as
         a reply in that assignment."""
-        item = self.mark_approved(approval_id)
+        item = self.get(approval_id)
+        if item is None:
+            raise LookupError("approval not found")
+        if item["status"] not in ("pending", "expired") or item["resume_job_id"]:
+            raise RuleError(f"approval is {item['status']}")
         text = resume_prompt(approval_id, item["summary"])
-        try:
-            bot = self.store.get_bot(item["bot_id"])
-            origin = self.store.get(item["job_id"])
-            if bot is None:
-                raise LookupError("bot not found")
-            job_id = None
+        stamp = now()
+        bot = self.store.get_bot(item["bot_id"])
+        origin = self.store.get(item["job_id"])
+        if bot is None:
+            raise LookupError("bot not found")
+        job_id = None
 
-            def bind(db: sqlite3.Connection, resume_job_id: str) -> None:
-                # inside the enqueue transaction (gen 10): the turn is never claimable unbound
-                db.execute("UPDATE jobs SET origin_job_id=? WHERE id=?", (item["job_id"], resume_job_id))
-                db.execute("UPDATE approvals SET resume_job_id=? WHERE id=?", (resume_job_id, approval_id))
-                # 0.12.47: the decision's audit row commits with the resume turn
-                self.store.policy_audit_insert(db, bot_id=item["bot_id"], job_id=item["job_id"], source="owner",
-                                               tool="approval approve", summary=f"#{approval_id} {item['summary']}",
-                                               policy="approved by the owner: one-time grant, resume turn queued",
-                                               legacy=item.get("preset") or "")
-                # 0.11.10: the resume prompt is machinery, not the owner's words; the card shows "Approved"
-                db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='user'", (resume_job_id,))
+        def bind(db: sqlite3.Connection, resume_job_id: str) -> None:
+            # inside the enqueue transaction (gen 10): the turn is never claimable unbound. 0.12.47 (r10): the
+            # decision itself commits here too, with the resume turn and the audit row (all or nothing)
+            if not db.execute("UPDATE approvals SET status='approved', decided_at=?, grant_expires_at=?, "
+                              "resume_job_id=? WHERE id=? AND status IN ('pending','expired') AND "
+                              "resume_job_id IS NULL AND job_id=?",
+                              (stamp.isoformat(), (stamp + timedelta(hours=GRANT_HOURS)).isoformat(),
+                               resume_job_id, approval_id, item["job_id"])).rowcount:
+                raise RuleError("the card was decided or moved meanwhile; reload and decide again")
+            db.execute("UPDATE jobs SET origin_job_id=? WHERE id=?", (item["job_id"], resume_job_id))
+            # 0.12.47: the decision's audit row commits with the resume turn
+            self.store.policy_audit_insert(db, bot_id=item["bot_id"], job_id=item["job_id"], source="owner",
+                                           tool="approval approve", summary=f"#{approval_id} {item['summary']}",
+                                           policy="approved by the owner: one-time grant, resume turn queued",
+                                           legacy=item.get("preset") or "")
+            # 0.11.10: the resume prompt is machinery, not the owner's words; the card shows "Approved"
+            db.execute("UPDATE messages SET hidden=1 WHERE job_id=? AND role='user'", (resume_job_id,))
 
-            if item["assignment_id"] and assignments is not None:
-                current = assignments.get(item["assignment_id"])
-                if current is not None and current.status not in ("done", "dropped"):
-                    job_id = assignments.reply(item["assignment_id"], text, hook=bind)
-            if job_id is None:
-                source = origin.source if origin is not None else "chat"
-                _, job = self.store.enqueue_message(bot, text, text, origin.reason if origin else None, source, None,
-                                                    None, None, priority=1,
-                                                    hook=lambda db, queued: bind(db, str(queued.id)))
-                job_id = str(job.id)
-        except BaseException:
-            with closing(self.store._connect()) as db:
-                db.execute("UPDATE approvals SET status='pending', decided_at=NULL, grant_expires_at=NULL "
-                           "WHERE id=? AND resume_job_id IS NULL", (approval_id,))
-            raise
+        if item["assignment_id"] and assignments is not None:
+            current = assignments.get(item["assignment_id"])
+            if current is not None and current.status not in ("done", "dropped"):
+                job_id = assignments.reply(item["assignment_id"], text, hook=bind)
+        if job_id is None:
+            source = origin.source if origin is not None else "chat"
+            _, job = self.store.enqueue_message(bot, text, text, origin.reason if origin else None, source, None,
+                                                None, None, priority=1,
+                                                hook=lambda db, queued: bind(db, str(queued.id)))
+            job_id = str(job.id)
         return self.get(approval_id) or item
 
     def alerts(self) -> list[dict]:
