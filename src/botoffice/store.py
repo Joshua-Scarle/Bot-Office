@@ -247,7 +247,9 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
     if add_columns(db, "approvals", (("task_key", "TEXT"),)) or db.execute(
             "SELECT 1 FROM approvals WHERE task_key IS NULL LIMIT 1").fetchone():
         has_jobs = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
-        of_job = ("COALESCE((SELECT {c} FROM jobs WHERE jobs.id=approvals.job_id),'')" if has_jobs else "''")
+        # a resume turn's card belongs to the task of the turn it resumed (rules.Rules._task_key)
+        of_job = ("COALESCE((SELECT {c} FROM jobs WHERE jobs.id=COALESCE((SELECT o.origin_job_id FROM jobs o WHERE "
+                  "o.id=approvals.job_id), approvals.job_id)),'')" if has_jobs else "''")
         db.execute(
             "UPDATE approvals SET task_key=CASE WHEN assignment_id IS NOT NULL THEN 'assignment:'||assignment_id "
             "WHEN COALESCE(source,'api') IN ('chat','api','wakeup') THEN 'chat' "

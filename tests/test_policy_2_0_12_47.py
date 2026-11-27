@@ -876,3 +876,44 @@ def test_using_a_grant_closes_the_tasks_older_card_for_the_same_step(tmp_path):
     assert rules.get(old)["status"] == "settled"
     with pytest.raises(RuleError):
         rules.approve(old)
+
+
+def test_a_routines_resume_turn_belongs_to_the_routines_task(tmp_path):
+    # Codex r14: the resume turn carries no routine id; it still settles that routine's older card
+    from botoffice.rules import RuleError
+    store, bot, rules = setup(tmp_path)
+    rid = "55555555-5555-4555-8555-555555555555"
+
+    def routine_run():
+        job = running(store, bot, source="routine")
+        with closing(store._connect()) as db:
+            db.execute("UPDATE jobs SET routine_id=? WHERE id=?", (rid, str(job.id)))
+        return store.get(job.id)
+    first = routine_run()
+    old = rules.decide(first, bash(ASKS)).approval_id
+    with closing(store._connect()) as db:
+        db.execute("UPDATE approvals SET status='expired', created_at='2026-01-01T00:00:00+00:00' WHERE id=?", (old,))
+    store.finish(first.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    second = routine_run()
+    new = rules.decide(second, bash(ASKS)).approval_id
+    store.finish(second.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    resume = store.get(rules.approve(new)["resume_job_id"])
+    assert resume.routine_id is None
+    assert rules.decide(resume, bash(ASKS)).decision == "allow"
+    assert rules.get(old)["status"] == "settled"
+    with pytest.raises(RuleError):
+        rules.approve(old)
+
+
+def test_task_key_backfill_follows_a_resume_turn_to_its_routine(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    origin = running(store, bot, source="routine")
+    resume = running(store, bot, source="routine")
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET routine_id='r1' WHERE id=?", (str(origin.id),))
+        db.execute("UPDATE jobs SET origin_job_id=? WHERE id=?", (str(origin.id), str(resume.id)))
+        db.execute("INSERT INTO approvals (bot_id,job_id,tool,summary,input_hash,scope,source,status,created_at) "
+                   "VALUES (?,?,'Bash','x','h','attended','routine','pending','2026-11-26')", (str(bot.id), str(resume.id)))
+    store2 = JobStore(tmp_path / "db.sqlite3")
+    with closing(store2._connect()) as db:
+        assert db.execute("SELECT task_key FROM approvals").fetchone()[0] == "routine:r1:"

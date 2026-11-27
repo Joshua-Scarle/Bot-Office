@@ -40,6 +40,7 @@ import sqlite3
 import stat
 import threading
 import time
+import types
 import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -1294,7 +1295,7 @@ class Rules:
 
     def _reserve_in(self, db: sqlite3.Connection, job: Job, action: Action, preset: str | None, allowed: bool,
                     push_waiting: bool, too_long: bool, stamp: datetime, plan, unattended: bool):
-        bot, key, fingerprint, at = str(job.bot_id), task_key(job), action.fingerprint, stamp.isoformat()
+        bot, key, fingerprint, at = str(job.bot_id), self._task_key(db, job), action.fingerprint, stamp.isoformat()
         denied = self._denied_row(db, job, action)
         if denied is not None:
             return "denied", int(denied["id"])
@@ -1322,7 +1323,7 @@ class Rules:
         bot = str(job.bot_id)
         for row in db.execute("SELECT id, summary, preset FROM approvals WHERE bot_id=? AND input_hash=? AND task_key=? "
                               "AND status IN ('pending','expired') AND resume_job_id IS NULL",
-                              (bot, action.fingerprint, task_key(job))).fetchall():
+                              (bot, action.fingerprint, self._task_key(db, job))).fetchall():
             db.execute("UPDATE approvals SET status='settled', decided_at=?, consumed_by=?, consumed_at=? WHERE id=?",
                        (at, str(job.id), at, row["id"]))
             db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
@@ -1331,6 +1332,19 @@ class Rules:
             self.store.policy_audit_insert(db, bot_id=bot, job_id=str(job.id), source=job.source or "api",
                                            tool="approval settled", summary=f"#{row['id']} {row['summary']}",
                                            policy=f"closed unused: {why}"[:300], legacy=row["preset"] or "")
+
+    @staticmethod
+    def _task_key(db: sqlite3.Connection, job: Job) -> str:
+        """task_key of *job*; a resume turn belongs to the task of the turn it resumes (it does not carry
+        that turn's routine or watcher id), followed back through resumes of resumes."""
+        current, hops = job, 0
+        while getattr(current, "origin_job_id", None) and hops < 8:
+            row = db.execute("SELECT assignment_id, source, routine_id, watcher_id, origin_job_id FROM jobs WHERE id=?",
+                             (str(current.origin_job_id),)).fetchone()
+            if row is None:
+                break
+            current, hops = types.SimpleNamespace(**dict(row)), hops + 1
+        return task_key(current)
 
     @staticmethod
     def _denied_row(db: sqlite3.Connection, job: Job, action: Action):
@@ -1484,7 +1498,7 @@ class Rules:
         has APPROVALS_PER_JOB approvals (Sec 10). The summary is the whole command (at most APPROVAL_LIMIT
         characters), never a shortened form."""
         summary = f"{action.tool}: {action.detail}"
-        bot, key = str(job.bot_id), task_key(job)
+        bot, key = str(job.bot_id), self._task_key(db, job)
         assignment = str(job.assignment_id) if job.assignment_id else None
         plan_json = json.dumps(plan) if plan else None
         scope = "unattended" if unattended else "attended"
