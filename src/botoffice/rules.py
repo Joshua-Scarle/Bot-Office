@@ -111,16 +111,18 @@ def resume_prompt(approval: int, summary: str, workspace: str | None = None) -> 
     *workspace*: the asking turn's job workspace; the card names it, but this turn runs in a new one that
     the grant matches to it, so the bot is told to run the command as written from where it is (live e2e:
     a `cd <old workspace> &&` prefix made it a different command and raised a second card)."""
-    where = ("Run it as written from your current working directory: this turn's new workspace stands for the "
-             "one on the card (no cd, no prefix).")
-    if workspace and summary.endswith(f" (in {workspace})"):
-        summary = summary[:-len(f" (in {workspace})")] + " (in your workspace)"
-    elif summary.endswith(")") and " (in " in summary:
-        where = ("If you are not already in the directory the card names, change to it first with a separate "
-                 "`cd` command, then run the command as written (never as `cd ... && command`).")
+    if workspace and workspace in summary:
+        where = (f"{workspace} on the card was the asking turn's workspace; this turn runs in a new one (your "
+                 "starting directory: `pwd`), which the grant treats as the same. Wherever the card shows the old path "
+                 "(in the command, or as the directory), use the new one, and run from your workspace or the same "
+                 "subfolder of it. Add nothing else (no `cd ... &&` prefix).")
+    else:
+        where = ("If you are not already in the directory the card names, change to it first as a separate step "
+                 "(a `cd` on its own, or the tool's working-directory option), then run the command as written "
+                 "(never as `cd ... && command`).")
     return (f"Approval #{approval} granted by the owner. Bot-Office resumed your task so the approved step runs now: "
             f"{summary}. First check it is still needed (it may have been done another way since, or the state "
-            "may have changed); if it is, run exactly that command now, once, character for character (the grant "
+            "may have changed); if it is, run exactly that command now, once (the grant "
             f"covers only that command, within 24 hours). {where} Then carry the task forward to the end.")
 
 

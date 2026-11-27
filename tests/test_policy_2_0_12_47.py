@@ -961,10 +961,10 @@ def test_the_resume_prompt_says_to_run_the_command_as_written_from_the_new_works
     # live e2e (policy-3): the bot prefixed `cd <old workspace> &&`, a different command, so a second card
     ws = "/srv/bo/data/workspaces/0cd045a4-7b0a-4aaf-9db8-8157a0af36db"
     text = resume_prompt(9, f"Bash: curl -X POST http://192.0.2.1:9/x (in {ws})", ws)
-    assert ws not in text and "(in your workspace)" in text and "no cd, no prefix" in text
+    assert "use the new one" in text and "no `cd ... &&` prefix" in text and "same subfolder" in text
     assert "run exactly that command now, once" in text
     other = resume_prompt(9, "Bash: make (in /home/u/repo)", ws)
-    assert "/home/u/repo" in other and "separate `cd` command" in other and "never as `cd ... && command`" in other
+    assert "/home/u/repo" in other and "a `cd` on its own" in other and "never as `cd ... && command`" in other
 
 
 def test_the_approved_command_matches_from_the_resume_turns_new_workspace(tmp_path):
@@ -978,4 +978,4 @@ def test_the_approved_command_matches_from_the_resume_turns_new_workspace(tmp_pa
     resume = store.get(rules.approve(approval)["resume_job_id"])
     again = {**bash(ASKS), "cwd": str(tmp_path / "workspaces" / str(resume.id))}
     assert rules.decide(resume, again).decision == "allow"
-    assert old_ws not in resume.prompt and "(in your workspace)" in resume.prompt
+    assert "use the new one" in resume.prompt
