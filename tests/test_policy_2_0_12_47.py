@@ -917,3 +917,21 @@ def test_task_key_backfill_follows_a_resume_turn_to_its_routine(tmp_path):
     store2 = JobStore(tmp_path / "db.sqlite3")
     with closing(store2._connect()) as db:
         assert db.execute("SELECT task_key FROM approvals").fetchone()[0] == "routine:r1:"
+
+
+def test_task_key_follows_a_long_resume_chain_to_its_routine(tmp_path):
+    # Codex r15: no hop limit, in the rules and in the backfill; a cycle ends the walk
+    store, bot, rules = setup(tmp_path)
+    jobs = [running(store, bot, source="routine") for _ in range(12)]
+    with closing(store._connect()) as db:
+        db.execute("UPDATE jobs SET routine_id='r9' WHERE id=?", (str(jobs[0].id),))
+        for prev, nxt in zip(jobs, jobs[1:]):
+            db.execute("UPDATE jobs SET origin_job_id=? WHERE id=?", (str(prev.id), str(nxt.id)))
+        db.execute("INSERT INTO approvals (bot_id,job_id,tool,summary,input_hash,scope,source,status,created_at) "
+                   "VALUES (?,?,'Bash','x','h','attended','routine','pending','2026-11-26')", (str(bot.id), str(jobs[-1].id)))
+        assert rules._task_key(db, store.get(jobs[-1].id)) == "routine:r9:"
+        db.execute("UPDATE jobs SET origin_job_id=? WHERE id=?", (str(jobs[-1].id), str(jobs[0].id)))   # a cycle
+        assert rules._task_key(db, store.get(jobs[-1].id)).startswith("routine:")
+        db.execute("UPDATE jobs SET origin_job_id=NULL WHERE id=?", (str(jobs[0].id),))
+    with closing(JobStore(tmp_path / "db.sqlite3")._connect()) as db:
+        assert db.execute("SELECT task_key FROM approvals").fetchone()[0] == "routine:r9:"

@@ -51,7 +51,7 @@ from uuid import UUID
 
 from . import auto_merge, git_guard, github_access, nested_agents, policy, sudo_review, team
 from .domain import Job
-from .store import JobStore, now
+from .store import JobStore, now, task_root
 
 # always the strict profile; the scheduled sources only for a bot with scheduled_runs "gated"
 STRICT_SOURCES = ("trigger",)
@@ -1335,16 +1335,12 @@ class Rules:
 
     @staticmethod
     def _task_key(db: sqlite3.Connection, job: Job) -> str:
-        """task_key of *job*; a resume turn belongs to the task of the turn it resumes (it does not carry
-        that turn's routine or watcher id), followed back through resumes of resumes."""
-        current, hops = job, 0
-        while getattr(current, "origin_job_id", None) and hops < 8:
-            row = db.execute("SELECT assignment_id, source, routine_id, watcher_id, origin_job_id FROM jobs WHERE id=?",
-                             (str(current.origin_job_id),)).fetchone()
-            if row is None:
-                break
-            current, hops = types.SimpleNamespace(**dict(row)), hops + 1
-        return task_key(current)
+        """task_key of *job*; a resume turn (which carries no routine or watcher id) belongs to the task of
+        the turn its chain of resumes started from (store.task_root)."""
+        if not getattr(job, "origin_job_id", None):
+            return task_key(job)
+        root = task_root(db, job.origin_job_id)
+        return task_key(types.SimpleNamespace(**root)) if root else task_key(job)
 
     @staticmethod
     def _denied_row(db: sqlite3.Connection, job: Job, action: Action):

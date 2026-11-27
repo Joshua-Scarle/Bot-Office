@@ -6,6 +6,7 @@ import json
 import secrets
 import sqlite3
 import threading
+import types
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
@@ -243,18 +244,17 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
     # without the action; the same action is not carded again in that turn)
     add_columns(db, "approvals", (("owner_note", "TEXT"), ("followup_job_id", "TEXT")))
     # 0.12.47: the task a card belongs to (rules.task_key): one assignment, the bot's chat (chat, API and
-    # wake-up turns), or one routine/watcher. Card reuse, the in-flight hold and settling all key on it.
-    if add_columns(db, "approvals", (("task_key", "TEXT"),)) or db.execute(
-            "SELECT 1 FROM approvals WHERE task_key IS NULL LIMIT 1").fetchone():
-        has_jobs = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
-        # a resume turn's card belongs to the task of the turn it resumed (rules.Rules._task_key)
-        of_job = ("COALESCE((SELECT {c} FROM jobs WHERE jobs.id=COALESCE((SELECT o.origin_job_id FROM jobs o WHERE "
-                  "o.id=approvals.job_id), approvals.job_id)),'')" if has_jobs else "''")
-        db.execute(
-            "UPDATE approvals SET task_key=CASE WHEN assignment_id IS NOT NULL THEN 'assignment:'||assignment_id "
-            "WHEN COALESCE(source,'api') IN ('chat','api','wakeup') THEN 'chat' "
-            "ELSE COALESCE(source,'api')||':'||" + of_job.format(c="routine_id") + "||':'||"
-            + of_job.format(c="watcher_id") + " END WHERE task_key IS NULL")
+    # wake-up turns), or one routine/watcher. Card reuse, the in-flight hold and settling all key on it. A
+    # resume turn's card belongs to the task of the turn the resumes started from (task_root).
+    add_columns(db, "approvals", (("task_key", "TEXT"),))
+    rows = db.execute("SELECT id, job_id, assignment_id, source FROM approvals WHERE task_key IS NULL").fetchall()
+    if rows:
+        from .rules import task_key  # rules imports store; needed for old rows only
+        for row in rows:
+            root = task_root(db, row[1]) or {}
+            db.execute("UPDATE approvals SET task_key=? WHERE id=? AND task_key IS NULL", (task_key(types.SimpleNamespace(
+                assignment_id=row[2] or root.get("assignment_id"), source=row[3] or root.get("source"),
+                routine_id=root.get("routine_id"), watcher_id=root.get("watcher_id"))), row[0]))
     db.execute("CREATE INDEX IF NOT EXISTS approvals_task ON approvals(bot_id, input_hash, task_key, status)")
     db.execute(
         """CREATE TABLE IF NOT EXISTS gate_log (
@@ -572,6 +572,25 @@ def _read_json(path: Path) -> object:
 
 def _minute(moment: datetime) -> datetime:
     return moment.astimezone(UTC).replace(second=0, microsecond=0)
+
+
+def task_root(db: sqlite3.Connection, job_id) -> dict | None:
+    """0.12.47: the turn a chain of resume turns started from (origin_job_id followed to its root, with
+    cycle detection): its assignment_id, source, routine_id and watcher_id. None when the job is unknown."""
+    seen: set[str] = set()
+    current, found = str(job_id) if job_id else None, None
+    while current and current not in seen:
+        seen.add(current)
+        try:
+            row = db.execute("SELECT assignment_id, source, routine_id, watcher_id, origin_job_id FROM jobs WHERE id=?",
+                             (current,)).fetchone()
+        except sqlite3.OperationalError:   # no jobs table yet (a bare control DB)
+            return found
+        if row is None:
+            break
+        found = {"assignment_id": row[0], "source": row[1], "routine_id": row[2], "watcher_id": row[3]}
+        current = row[4]
+    return found
 
 
 def add_columns(db: sqlite3.Connection, table: str, specs: Sequence[tuple[str, str]]) -> set[str]:
