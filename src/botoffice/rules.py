@@ -28,7 +28,6 @@ its text. Pattern rules are tripwires, not a sandbox: shell indirection can evad
 """
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import functools
 import hashlib
@@ -75,6 +74,17 @@ APPROVAL_LIMIT = 4000
 # Sec 10: a bot cannot flood Needs-you or the gate log from one job
 APPROVALS_PER_JOB = 20
 CHAT_KINDS = ("chat", "api", "wakeup")   # 0.12.47: unassigned runs that are one task for card reuse
+
+
+def task_key(job) -> str:
+    """0.12.47: the task a job's cards belong to. One assignment; else the bot's chat (chat, API and wake-up
+    turns are one task: 0.12.45); else one routine or watcher of one source. Stored on approvals.task_key."""
+    if job.assignment_id:
+        return f"assignment:{job.assignment_id}"
+    source = job.source or "api"
+    if source in CHAT_KINDS:
+        return "chat"
+    return f"{source}:{job.routine_id or ''}:{getattr(job, 'watcher_id', None) or ''}"
 
 # 0.12.47 (owner, Nov 26): a refused or waiting step never ends the work. The bot keeps going, Bot-Office
 # re-runs the step once it is approved (the resume turn holds a one-time grant for exactly that command),
@@ -1061,12 +1071,9 @@ class Rules:
         if effect != "never" and job.bot_id:
             denied = self._owner_denied(job, action)
             if denied is not None:
-                # 0.12.47 (r9): the owner's no wins in the turn that asked and in the deny's follow-up turn, before
-                # any allow (a sudo auto-review that now answers, a rule added since)
-                self._log(job, provider, "deny", "never", preset, action, denied, note="denied by the owner")
-                return Decision("deny", "never", (
-                    f"Blocked by Bot-Office: the owner denied this exact command (approval #{denied}); it is not run "
-                    f"or asked again in this turn. {KEEP_GOING} {STOP_LINE}"), preset, denied)
+                # 0.12.47: the owner's no wins in the turn that asked and in the deny's follow-up turn; checked
+                # here too so a denied sudo step is not sent to the auto-review (_reserve has the final word)
+                return self._refusal(job, provider, preset, action, "denied", denied)
         if action.tool == git_guard.PUSH_TOOL and isinstance(action.data, dict) and \
                 action.data.get("default_source") == "remote":
             git_guard.learn_default(action.cwd, str(action.data.get("remote") or ""),
@@ -1075,12 +1082,11 @@ class Rules:
             verdict, reason = self._sudo_review(job, action)
             if verdict == "allow" and self._sudo_log(job, action, "allowed", "auto-review", verdict, reason):
                 self._log(job, provider, "allow", "review", preset, action, None, note=f"auto-review allowed: {reason}")
-                held = self._held_back(job, provider, preset, action)   # r10: a deny or grant that came meanwhile
+                held = self._reserve_allow(job, provider, preset, action)   # after the (slow) review
                 if held is not None:
+                    self._sudo_log(job, action, "card" if held.effect == "ask" else "blocked", "approval",
+                                   "held", held.reason[:160])
                     return held
-                if getattr(job, "origin_job_id", None):   # 0.12.47: an approved sudo step the review now allows still uses its grant
-                    with contextlib.suppress(Exception):
-                        self.consume_grant(job, action)
                 return Decision("allow", "allow", f"auto-review allowed it: {reason}", preset)
             if verdict == "allow":  # the sudo log could not be written: no unlogged sudo, the card instead
                 verdict, reason = "error", "the sudo log could not be written"
@@ -1099,15 +1105,10 @@ class Rules:
         if effect == "auto-merge":
             effect, why = self._auto_merge(job, provider, action, preset)
         if effect == "allow":
-            held = self._held_back(job, provider, preset, action)
+            held = self._reserve_allow(job, provider, preset, action)
             if held is not None:
                 return held
             self._audit(job, provider, action, why)
-            if getattr(job, "origin_job_id", None):
-                # 0.12.47: the resume turn runs an approved step the policy now allows anyway: the grant is used
-                # (so the card reads consumed, not "ended without running the approved step")
-                with contextlib.suppress(Exception):
-                    self.consume_grant(job, action)
             return Decision("allow", "allow", why, preset)
         if effect == "never":
             reason = f"Blocked by Bot-Office: {why}. Do not retry this or work around it. {KEEP_GOING} {STOP_LINE}"
@@ -1123,44 +1124,35 @@ class Rules:
             # the exact update the owner approved (as a command, or as this push), seen by the pre-push check
             self._log(job, provider, "allow", "grant", preset, action, None)
             return Decision("allow", "ask", "approved push", preset)
-        grant = self.consume_grant(job, action)
-        if grant is not None:
-            self._log(job, provider, "allow", "grant", preset, action, grant)
-            self._granted(job, action, grant, preset)
-            return Decision("allow", "ask", f"approval #{grant} granted", preset, grant)
-        if preset == git_guard.PRESET and action.command and self._push_grant_waiting(job, action):
-            # the owner approved the exact update git's pre-push check reported; the push command may
-            # run, and the pre-push check lets only that update through (the grant is used there)
+        # the owner approved the exact update git's pre-push check reported: the push command may run, and the
+        # pre-push check lets only that update through (the grant is used there)
+        push_waiting = preset == git_guard.PRESET and bool(action.command) and self._push_grant_waiting(job, action)
+        outcome, approval = self._reserve(job, action, preset, allowed=False, push_waiting=push_waiting,
+                                          too_long=len(action.detail) > APPROVAL_LIMIT)
+        if outcome == "grant":
+            self._log(job, provider, "allow", "grant", preset, action, approval)
+            self._granted(job, action, approval, preset)
+            return Decision("allow", "ask", f"approval #{approval} granted", preset, approval)
+        if outcome == "push":
             self._log(job, provider, "allow", "grant", preset, action, None)
             return Decision("allow", "ask", "approved push (exact update)", preset)
-        if len(action.detail) > APPROVAL_LIMIT:
+        if outcome == "too_long":
             # the card must show the whole command; one this long cannot be reviewed, so not asked
             self._log(job, provider, "deny", "never", preset, action, None)
             return Decision("deny", "never", (
                 f"Blocked by Bot-Office: this {preset or 'gated'} action is {len(action.detail)} characters, over the "
                 f"{APPROVAL_LIMIT} the user can review in an approval. Split it into smaller steps (e.g. write a "
                 "script file first, then run it) or leave a draft for the user."), preset)
-        approval = self.request(job, action, preset)
-        if isinstance(approval, tuple) and approval[0] == "granted":
-            # 0.12.47: approved while this turn was still working: the resume turn runs it; no second card
-            self._log(job, provider, "deny", "ask", preset, action, approval[1], note="approved; runs in the resume turn")
-            return Decision("deny", "ask", (
-                f"Approval #{approval[1]} for this exact command was already granted: Bot-Office runs it in the resume "
-                f"turn that follows this one. Don't repeat it now. {KEEP_GOING} Ending this turn starts the resume "
-                "turn sooner."), preset, approval[1])
-        if isinstance(approval, tuple):
-            self._log(job, provider, "deny", "never", preset, action, approval[1], note="denied by the owner")
-            return Decision("deny", "never", (
-                f"Blocked by Bot-Office: the owner denied this exact command (approval #{approval[1]}); it is not asked "
-                f"again in this turn. {KEEP_GOING} {STOP_LINE}"), preset, approval[1])
-        if approval is None:
+        if outcome == "full":
             self._log(job, provider, "deny", "never", preset, action, None)
             return Decision("deny", "never", (
                 f"Blocked by Bot-Office: this turn already has {APPROVALS_PER_JOB} approvals waiting. {KEEP_GOING} "
                 "When nothing allowed is left, end the turn with BOT-OFFICE-STATUS: waiting_on_user naming the "
                 "approvals that wait."), preset)
-        self._log(job, provider, "deny", "ask", preset, action, approval)
-        return Decision("deny", "ask", ask_reason(approval, action.summary), preset, approval)
+        if outcome == "card":
+            self._log(job, provider, "deny", "ask", preset, action, approval)
+            return Decision("deny", "ask", ask_reason(approval, action.summary), preset, approval)
+        return self._refusal(job, provider, preset, action, outcome, approval)
 
     # --- 0.12.45: the append-only audit of what the policy now lets run without a card ---
 
@@ -1232,49 +1224,135 @@ class Rules:
                     return True
         return False
 
-    def _held_back(self, job: Job, provider: str, preset: str | None, action: Action) -> Decision | None:
-        """0.12.47 (r10), right before an allow: the owner denied this exact action for this turn, or approved
-        it for a resume turn that has not run yet (so it runs once, there, not also here)."""
+    def _refusal(self, job: Job, provider: str, preset: str | None, action: Action, outcome: str,
+                 approval: int | None) -> Decision | None:
+        """The Decision for a _reserve outcome that stops the action here (None for one that lets it run)."""
+        if outcome == "denied":
+            self._log(job, provider, "deny", "never", preset, action, approval, note="denied by the owner")
+            return Decision("deny", "never", (
+                f"Blocked by Bot-Office: the owner denied this exact command (approval #{approval}); it is not run "
+                f"or asked again in this turn. {KEEP_GOING} {STOP_LINE}"), preset, approval)
+        if outcome == "held":
+            self._log(job, provider, "deny", "ask", preset, action, approval, note="approved; runs in the resume turn")
+            return Decision("deny", "ask", (
+                f"Approval #{approval} for this exact command was already granted: Bot-Office runs it in the resume "
+                f"turn that follows. Don't repeat it now. {KEEP_GOING} Ending this turn starts the resume turn "
+                "sooner."), preset, approval)
+        return None
+
+    def _reserve_allow(self, job: Job, provider: str, preset: str | None, action: Action) -> Decision | None:
+        """The policy (or the sudo auto-review) allows *action*: settle it against its cards first (_reserve).
+        None: it runs; else the refusal (the owner denied it for this turn, or a resume turn runs it)."""
         if not job.bot_id:
             return None
-        denied = self._owner_denied(job, action)
-        if denied is not None:
-            self._log(job, provider, "deny", "never", preset, action, denied, note="denied by the owner")
-            return Decision("deny", "never", (
-                f"Blocked by Bot-Office: the owner denied this exact command (approval #{denied}); it is not run "
-                f"or asked again in this turn. {KEEP_GOING} {STOP_LINE}"), preset, denied)
+        outcome, approval = self._reserve(job, action, preset, allowed=True)
+        if outcome == "grant":   # the resume turn runs its approved step, which the policy now allows anyway
+            self._log(job, provider, "allow", "grant", preset, action, approval)
+            self._granted(job, action, approval, preset)
+        return self._refusal(job, provider, preset, action, outcome, approval)
+
+    # 0.12.47: an approved card whose grant is still usable by a resume turn that has not ended
+    _IN_FLIGHT = ("SELECT a.id FROM approvals a LEFT JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
+                  "a.input_hash=? AND a.task_key=? AND a.status='approved' AND a.grant_expires_at>? AND "
+                  "(a.resume_job_id IS NULL OR (a.resume_job_id<>? AND j.status IN ('queued','running'))) "
+                  "ORDER BY a.id DESC LIMIT 1")
+
+    def _reserve(self, job: Job, action: Action, preset: str | None, *, allowed: bool, push_waiting: bool = False,
+                 too_long: bool = False) -> tuple[str, int | None]:
+        """0.12.47: the one per-action reservation. Every step that touches a card for *action* (this bot,
+        this fingerprint) runs here in one write transaction, and the owner's approve and deny commit with
+        the same lock, so a decision lands either before this (and is seen) or after (and finds the card
+        settled). In order:
+          denied   the owner denied it and this is the asking turn or the deny's follow-up turn: never runs;
+          grant    this is the resume turn holding the grant: consumed now, runs here once;
+          held     the same task has an approved grant whose resume turn has not ended: runs there, not here;
+          allow    (allowed=True) runs here; the task's open cards for it (pending, timed out) are settled,
+                   so a later approve cannot run it a second time;
+          push / too_long / full / card   (allowed=False) the rest of the ask path; card = reused or new.
+        Task = task_key (one assignment, the bot's chat turns, or one routine or watcher). A scheduled run is
+        held back by a grant in flight but never uses one: only the resume turn bound to it does (0.12.18)."""
+        stamp = now()
+        if allowed and not job.origin_job_id:
+            with closing(self.store._connect()) as db:
+                if db.execute("SELECT 1 FROM approvals WHERE bot_id=? AND input_hash=? AND status IN "
+                              "('pending','expired','approved','denied') LIMIT 1",
+                              (str(job.bot_id), action.fingerprint)).fetchone() is None:
+                    return "allow", None   # no card for this action at all: nothing to coordinate with
+        asks = not (allowed or push_waiting or too_long)
+        plan = self._push_plan(action, preset) if asks else None
+        unattended = self.strict(job) if asks else False
         with closing(self.store._connect()) as db:
-            row = self._in_flight(db, job, action)
-        if row is None:
-            return None
-        self._log(job, provider, "deny", "ask", preset, action, int(row["id"]), note="approved; runs in the resume turn")
-        return Decision("deny", "ask", (
-            f"Approval #{row['id']} for this exact command was already granted: Bot-Office runs it in the resume turn "
-            f"that follows this one. Don't repeat it now. {KEEP_GOING}"), preset, int(row["id"]))
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                result = self._reserve_in(db, job, action, preset, allowed, push_waiting, too_long, stamp, plan,
+                                          unattended)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        return result
+
+    def _reserve_in(self, db: sqlite3.Connection, job: Job, action: Action, preset: str | None, allowed: bool,
+                    push_waiting: bool, too_long: bool, stamp: datetime, plan, unattended: bool):
+        bot, key, fingerprint, at = str(job.bot_id), task_key(job), action.fingerprint, stamp.isoformat()
+        denied = self._denied_row(db, job, action)
+        if denied is not None:
+            return "denied", int(denied["id"])
+        grant = self._take_grant(db, job, action, at)
+        if grant is not None:
+            return "grant", grant
+        held = db.execute(self._IN_FLIGHT, (bot, fingerprint, key, at, str(job.id))).fetchone()
+        if held is not None:
+            return "held", int(held["id"])
+        if allowed:
+            for row in db.execute("SELECT id, summary, job_id, preset FROM approvals WHERE bot_id=? AND input_hash=? "
+                                  "AND task_key=? AND status IN ('pending','expired') AND resume_job_id IS NULL",
+                                  (bot, fingerprint, key)).fetchall():
+                db.execute("UPDATE approvals SET status='settled', decided_at=?, consumed_by=?, consumed_at=? WHERE id=?",
+                           (at, str(job.id), at, row["id"]))
+                db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
+                           (bot, "system", "chat", (f"Approval #{row['id']} closed: the policy allows this step now, "
+                                                    f"so it ran without the card: {_short(row['summary'])}"),
+                            at, row["id"]))
+                self.store.policy_audit_insert(db, bot_id=bot, job_id=str(job.id), source=job.source or "api",
+                                               tool="approval settled", summary=f"#{row['id']} {row['summary']}",
+                                               policy="allowed by the policy; the open card was closed unused",
+                                               legacy=row["preset"] or "")
+            return "allow", None
+        if push_waiting:
+            return "push", None
+        if too_long:
+            return "too_long", None
+        approval = self._request_in(db, job, action, preset, stamp, plan, unattended)
+        return ("card", approval) if approval is not None else ("full", None)
 
     @staticmethod
-    def _in_flight(db: sqlite3.Connection, job: Job, action: Action):
-        """An approved grant for exactly this action of the same task whose resume turn has not run yet (or is
-        being bound): this job's own ask, the same assignment, or the bot's chat turns. A scheduled run
-        (wake-up, routine, watcher, inbox) only for its own asks: it needs a fresh card (0.12.18)."""
-        scheduled = (job.source or "") in ("wakeup", "routine", "trigger", "inbox")
-        return db.execute(
-            "SELECT a.id FROM approvals a LEFT JOIN jobs j ON j.id=a.resume_job_id WHERE a.bot_id=? AND "
-            "a.input_hash=? AND a.status='approved' AND (a.job_id=? OR (a.assignment_id IS NOT NULL AND "
-            "a.assignment_id=?) OR (a.assignment_id IS NULL AND ? IS NULL AND a.source IN ('chat','api') "
-            "AND ? IN ('chat','api'))) AND "
-            "(a.resume_job_id IS NULL OR (a.resume_job_id<>? AND j.status IN ('queued','running'))) "
-            "ORDER BY a.id DESC LIMIT 1",
-            (str(job.bot_id), action.fingerprint, str(job.id), "" if scheduled else str(job.assignment_id or ""),
-             str(job.assignment_id) if job.assignment_id else None, job.source or "api", str(job.id))).fetchone()
+    def _denied_row(db: sqlite3.Connection, job: Job, action: Action):
+        """The owner denied exactly this action of this bot, and this job asked it or is the deny's follow-up."""
+        return db.execute("SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='denied' AND "
+                          "(followup_job_id=? OR job_id=?) ORDER BY id DESC LIMIT 1",
+                          (str(job.bot_id), action.fingerprint, str(job.id), str(job.id))).fetchone()
 
     def _owner_denied(self, job: Job, action: Action) -> int | None:
-        """The owner denied exactly this action of this bot, and this job asked it or is the deny's follow-up."""
         with closing(self.store._connect()) as db:
-            row = db.execute("SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='denied' AND "
-                             "(followup_job_id=? OR job_id=?) ORDER BY id DESC LIMIT 1",
-                             (str(job.bot_id), action.fingerprint, str(job.id), str(job.id))).fetchone()
+            row = self._denied_row(db, job, action)
         return int(row["id"]) if row else None
+
+    @staticmethod
+    def _take_grant(db: sqlite3.Connection, job: Job, action: Action, at: str) -> int | None:
+        """Consume the one-shot grant for *action* if *job* is the resume turn it is bound to (caller's
+        transaction). Returns the approval id."""
+        if not job.origin_job_id or not job.bot_id:
+            return None
+        row = db.execute("SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='approved' AND job_id=? "
+                         "AND resume_job_id=? AND grant_expires_at>? ORDER BY id LIMIT 1",
+                         (str(job.bot_id), action.fingerprint, str(job.origin_job_id), str(job.id), at)).fetchone()
+        if row is None:
+            return None
+        if not db.execute("UPDATE approvals SET status='consumed', consumed_by=?, consumed_at=? WHERE id=? AND "
+                          "status='approved'", (str(job.id), at, row["id"])).rowcount:
+            return None
+        return int(row["id"])
 
     def _push_grant_waiting(self, job: Job, action: Action) -> bool:
         """This resume turn holds an approved pre-push card (an exact update), and *action* is only
@@ -1393,98 +1471,52 @@ class Rules:
 
     # --- approvals ---
 
-    def request(self, job: Job, action: Action, preset: str | None) -> int | None | tuple[str, int]:
-        """Pending approval for this exact action of this job (reused if already asked); None
-        when the job already has APPROVALS_PER_JOB approvals (Sec 10). The row's summary is the
-        whole command (at most APPROVAL_LIMIT characters), never a shortened form. 0.12.47, in the same
-        transaction (so an owner decision cannot slip in between): ("denied", id) when the owner denied
-        exactly this action and this job asked it or is the deny's follow-up turn; ("granted", id) when this
-        job asked it and the approval is granted but its resume turn has not run yet (or is being bound)."""
-        stamp = now()
-        unattended = self.strict(job)
+    def _request_in(self, db: sqlite3.Connection, job: Job, action: Action, preset: str | None, stamp: datetime,
+                    plan, unattended: bool) -> int | None:
+        """The pending card for this exact action of this task (caller's transaction, from _reserve): reused
+        if already asked, re-raised if it timed out within REUSE_HOURS, else new; None when the job already
+        has APPROVALS_PER_JOB approvals (Sec 10). The summary is the whole command (at most APPROVAL_LIMIT
+        characters), never a shortened form."""
         summary = f"{action.tool}: {action.detail}"
-        plan = self._push_plan(action, preset)
-        with closing(self.store._connect()) as db:
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                # 0.12.45: the same action asked again (this turn or a later one of the same bot) reuses
-                # the card that is still waiting, and one that timed out unanswered within REUSE_HOURS is
-                # raised again instead of a duplicate (#205/#214/#220 were one gh issue comment)
-                # The card follows the latest turn that asked (approving it resumes that turn, which has the
-                # newest context); the earlier turn already ended waiting on the owner.
-                denied = db.execute("SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='denied' AND "
-                                    "(followup_job_id=? OR job_id=?) ORDER BY id DESC LIMIT 1",
-                                    (str(job.bot_id), action.fingerprint, str(job.id), str(job.id))).fetchone()
-                if denied:
-                    db.commit()
-                    return ("denied", int(denied["id"]))
-                granted = self._in_flight(db, job, action)
-                if granted:
-                    db.commit()
-                    return ("granted", int(granted["id"]))
-                assignment = str(job.assignment_id) if job.assignment_id else None
-                plan_json = json.dumps(plan) if plan else None
-                # 0.12.47: only within the same task (the same assignment, or chat turns with none): a card
-                # never moves to another assignment, whose approval would resume the wrong task
-                # unassigned runs: only of the same kind (chat/API turns and the bot's own wake-ups together, a
-                # routine's runs together...), so a card never moves from a routine to a chat turn or back
-                # (0.12.45 de-duplication kept)
-                # the same routine or watcher too: two routines of one bot are two tasks (r6)
-                same_task = ("(job_id=? OR (assignment_id IS NOT NULL AND assignment_id=?) OR (assignment_id IS NULL "
-                             "AND ? IS NULL AND (CASE WHEN source IN ('chat','api','wakeup') THEN 'chat' ELSE source END)"
-                             "=? AND (? = 'chat' OR EXISTS (SELECT 1 FROM jobs o WHERE o.id=approvals.job_id AND "
-                             "o.routine_id IS ? AND o.watcher_id IS ?))))")
-                kind = "chat" if (job.source or "api") in CHAT_KINDS else job.source
-                task_args = (str(job.id), str(job.assignment_id or ""),
-                             str(job.assignment_id) if job.assignment_id else None, kind, kind,
-                             str(job.routine_id) if job.routine_id else None,
-                             str(job.watcher_id) if job.watcher_id else None)
-                row = db.execute("SELECT id, job_id FROM approvals WHERE bot_id=? AND input_hash=? AND status='pending' "
-                                 f"AND {same_task} ORDER BY job_id=? DESC, id DESC LIMIT 1",
-                                 (str(job.bot_id), action.fingerprint, *task_args, str(job.id))).fetchone()
-                if row:
-                    if row["job_id"] != str(job.id):
-                        db.execute("UPDATE approvals SET job_id=?, assignment_id=?, source=?, scope=?, push_plan=? "
-                                   "WHERE id=? AND status='pending' AND resume_job_id IS NULL",
-                                   (str(job.id), assignment, job.source or "api", "unattended" if unattended else "attended",
-                                    plan_json, row["id"]))
-                    db.commit()
-                    return int(row["id"])
-                old = db.execute("SELECT id, summary FROM approvals WHERE bot_id=? AND input_hash=? AND status='expired' "
-                                 f"AND resume_job_id IS NULL AND {same_task} AND created_at>=? ORDER BY id DESC LIMIT 1",
-                                 (str(job.bot_id), action.fingerprint, *task_args,
-                                  (stamp - timedelta(hours=REUSE_HOURS)).isoformat())).fetchone()
-                if old and db.execute("UPDATE approvals SET status='pending', decided_at=NULL, expires_at=?, job_id=?, "
-                                      "assignment_id=?, source=?, scope=?, push_plan=? "
-                                      "WHERE id=? AND status='expired' AND resume_job_id IS NULL",
-                                      (self._expiry(stamp, unattended), str(job.id), assignment, job.source or "api",
-                                       "unattended" if unattended else "attended", plan_json, old["id"])).rowcount:
-                    db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
-                               (str(job.bot_id), "system", "chat",
-                                f"Approval #{old['id']} asked again (it had timed out): {_short(old['summary'])}",
-                                stamp.isoformat(), old["id"]))
-                    db.commit()
-                    return int(old["id"])
-                if db.execute("SELECT COUNT(*) FROM approvals WHERE job_id=?",
-                              (str(job.id),)).fetchone()[0] >= APPROVALS_PER_JOB:
-                    db.commit()
-                    return None
-                cursor = db.execute(
-                    "INSERT INTO approvals (bot_id,job_id,assignment_id,tool,summary,input_hash,scope,source,preset,"
-                    "status,expires_at,created_at,push_plan) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?)",
-                    (str(job.bot_id), str(job.id), str(job.assignment_id) if job.assignment_id else None,
-                     action.tool[:80], summary, action.fingerprint,
-                     "unattended" if unattended else "attended", job.source or "api", preset,
-                     self._expiry(stamp, unattended), stamp.isoformat(), json.dumps(plan) if plan else None))
-                # 0.11.10: the Approve / Deny card in the bot's chat
-                db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
-                           (str(job.bot_id), "system", "chat",
-                            f"Approval #{cursor.lastrowid} requested: {_short(summary)}",
-                            stamp.isoformat(), cursor.lastrowid))
-                db.commit()
-            except BaseException:
-                db.rollback()
-                raise
+        bot, key = str(job.bot_id), task_key(job)
+        assignment = str(job.assignment_id) if job.assignment_id else None
+        plan_json = json.dumps(plan) if plan else None
+        scope = "unattended" if unattended else "attended"
+        # 0.12.45: the same action asked again reuses the card still waiting (#205/#214/#220 were one gh issue
+        # comment). 0.12.47: only within the same task, and the card follows the latest turn that asked
+        # (approving it resumes that turn, which has the newest context; the earlier one ended waiting)
+        row = db.execute("SELECT id, job_id FROM approvals WHERE bot_id=? AND input_hash=? AND task_key=? AND "
+                         "status='pending' ORDER BY job_id=? DESC, id DESC LIMIT 1",
+                         (bot, action.fingerprint, key, str(job.id))).fetchone()
+        if row:
+            if row["job_id"] != str(job.id):
+                db.execute("UPDATE approvals SET job_id=?, assignment_id=?, source=?, scope=?, push_plan=? "
+                           "WHERE id=? AND status='pending' AND resume_job_id IS NULL",
+                           (str(job.id), assignment, job.source or "api", scope, plan_json, row["id"]))
+            return int(row["id"])
+        old = db.execute("SELECT id, summary FROM approvals WHERE bot_id=? AND input_hash=? AND task_key=? AND "
+                         "status='expired' AND resume_job_id IS NULL AND created_at>=? ORDER BY id DESC LIMIT 1",
+                         (bot, action.fingerprint, key, (stamp - timedelta(hours=REUSE_HOURS)).isoformat())).fetchone()
+        if old and db.execute("UPDATE approvals SET status='pending', decided_at=NULL, expires_at=?, job_id=?, "
+                              "assignment_id=?, source=?, scope=?, push_plan=? "
+                              "WHERE id=? AND status='expired' AND resume_job_id IS NULL",
+                              (self._expiry(stamp, unattended), str(job.id), assignment, job.source or "api", scope,
+                               plan_json, old["id"])).rowcount:
+            db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
+                       (bot, "system", "chat", (f"Approval #{old['id']} asked again (it had timed out): "
+                                                f"{_short(old['summary'])}"), stamp.isoformat(), old["id"]))
+            return int(old["id"])
+        if db.execute("SELECT COUNT(*) FROM approvals WHERE job_id=?", (str(job.id),)).fetchone()[0] >= APPROVALS_PER_JOB:
+            return None
+        cursor = db.execute(
+            "INSERT INTO approvals (bot_id,job_id,assignment_id,tool,summary,input_hash,scope,source,preset,"
+            "status,expires_at,created_at,push_plan,task_key) VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)",
+            (bot, str(job.id), assignment, action.tool[:80], summary, action.fingerprint, scope, job.source or "api",
+             preset, self._expiry(stamp, unattended), stamp.isoformat(), plan_json, key))
+        # 0.11.10: the Approve / Deny card in the bot's chat
+        db.execute("INSERT INTO messages (bot_id,role,source,text,created_at,approval_id) VALUES (?,?,?,?,?,?)",
+                   (bot, "system", "chat", f"Approval #{cursor.lastrowid} requested: {_short(summary)}",
+                    stamp.isoformat(), cursor.lastrowid))
         return int(cursor.lastrowid)
 
     @staticmethod
@@ -1519,24 +1551,15 @@ class Rules:
         the grant was issued to (it names the originating job). Returns the approval id."""
         if not job.origin_job_id or not job.bot_id:
             return None
-        stamp = now().isoformat()
         with closing(self.store._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                row = db.execute(
-                    "SELECT id FROM approvals WHERE bot_id=? AND input_hash=? AND status='approved' AND job_id=? "
-                    "AND resume_job_id=? AND grant_expires_at>? ORDER BY id LIMIT 1",
-                    (str(job.bot_id), action.fingerprint, str(job.origin_job_id), str(job.id), stamp)).fetchone()
-                if row is None:
-                    db.commit()
-                    return None
-                changed = db.execute("UPDATE approvals SET status='consumed', consumed_by=?, consumed_at=? "
-                                     "WHERE id=? AND status='approved'", (str(job.id), stamp, row["id"])).rowcount
+                grant = self._take_grant(db, job, action, now().isoformat())
                 db.commit()
             except BaseException:
                 db.rollback()
                 raise
-        return int(row["id"]) if changed else None
+        return grant
 
     def expire(self) -> int:
         """Time out unanswered requests (with a short note in the bot's chat: the task stays
@@ -1769,6 +1792,13 @@ class Rules:
                               (stamp.isoformat(), (stamp + timedelta(hours=GRANT_HOURS)).isoformat(),
                                resume_job_id, approval_id, item["job_id"])).rowcount:
                 raise RuleError("the card was decided or moved meanwhile; reload and decide again")
+            other = db.execute(self._IN_FLIGHT, (item["bot_id"], item["input_hash"], item.get("task_key") or "",
+                                                 stamp.isoformat(), resume_job_id)).fetchone()
+            if other is not None and int(other["id"]) != approval_id:
+                # one reservation per action: the same step of the same task is already approved and waiting
+                # for its resume turn, so this one would run it a second time
+                raise RuleError(f"approval #{other['id']} for this exact step is already approved and runs in its "
+                                "resume turn")
             db.execute("UPDATE jobs SET origin_job_id=? WHERE id=?", (item["job_id"], resume_job_id))
             # 0.12.47: the decision's audit row commits with the resume turn
             self.store.policy_audit_insert(db, bot_id=item["bot_id"], job_id=item["job_id"], source="owner",

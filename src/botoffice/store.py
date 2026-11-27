@@ -242,6 +242,18 @@ def _init_control_tables(db: sqlite3.Connection) -> None:
     # 0.12.47: the owner's note on a decision, and the follow-up turn a deny wakes (the bot carries on
     # without the action; the same action is not carded again in that turn)
     add_columns(db, "approvals", (("owner_note", "TEXT"), ("followup_job_id", "TEXT")))
+    # 0.12.47: the task a card belongs to (rules.task_key): one assignment, the bot's chat (chat, API and
+    # wake-up turns), or one routine/watcher. Card reuse, the in-flight hold and settling all key on it.
+    if add_columns(db, "approvals", (("task_key", "TEXT"),)) or db.execute(
+            "SELECT 1 FROM approvals WHERE task_key IS NULL LIMIT 1").fetchone():
+        has_jobs = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
+        of_job = ("COALESCE((SELECT {c} FROM jobs WHERE jobs.id=approvals.job_id),'')" if has_jobs else "''")
+        db.execute(
+            "UPDATE approvals SET task_key=CASE WHEN assignment_id IS NOT NULL THEN 'assignment:'||assignment_id "
+            "WHEN COALESCE(source,'api') IN ('chat','api','wakeup') THEN 'chat' "
+            "ELSE COALESCE(source,'api')||':'||" + of_job.format(c="routine_id") + "||':'||"
+            + of_job.format(c="watcher_id") + " END WHERE task_key IS NULL")
+    db.execute("CREATE INDEX IF NOT EXISTS approvals_task ON approvals(bot_id, input_hash, task_key, status)")
     db.execute(
         """CREATE TABLE IF NOT EXISTS gate_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT, job_id TEXT, provider TEXT, decision TEXT NOT NULL,

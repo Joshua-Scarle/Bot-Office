@@ -276,7 +276,10 @@ def test_wake_cannot_use_the_scheduling_jobs_approval(tmp_path, consumed, SEND):
     assert woken.origin_job_id is None and "approved update" in woken.prompt
     again = rules.decide(woken, bash(SEND))
     assert again.decision == "deny" and again.effect == "ask"
-    assert again.approval_id and again.approval_id != first.approval_id
+    if consumed:   # a fresh card: the wake never uses another turn's grant
+        assert again.approval_id and again.approval_id != first.approval_id
+    else:          # policy-3: held back while the resume turn still holds the grant (it runs once, there)
+        assert again.approval_id == first.approval_id and "resume turn" in again.reason
     assert rules.consume_grant(woken, parse_event(bash(SEND))) is None
     # the in-memory approved commands and push passes are per job
     assert not rules._approved_command(woken, ["desk", "grok", "send"])

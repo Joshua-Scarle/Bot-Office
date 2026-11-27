@@ -609,7 +609,9 @@ def test_two_routines_do_not_share_a_card(tmp_path):
     assert other != first and same == first
 
 
-def test_an_assignment_wake_up_gets_a_fresh_card(tmp_path):
+def test_an_assignment_wake_up_is_held_back_by_a_grant_in_flight_and_never_uses_it(tmp_path):
+    # policy-3: a wake-up of the same task neither runs the approved step (the resume turn does, once) nor
+    # gets a second card for it (approving that would run it twice); it never consumes the grant (0.12.18)
     store, bot, rules = setup(tmp_path)
     task = "77777777-7777-4777-8777-777777777777"
     first, wake = running(store, bot, source="assignment"), running(store, bot, source="wakeup")
@@ -618,9 +620,12 @@ def test_an_assignment_wake_up_gets_a_fresh_card(tmp_path):
     first, wake = store.get(first.id), store.get(wake.id)
     approval = rules.decide(first, bash(ASKS)).approval_id
     store.finish(first.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
-    rules.approve(approval)
+    resume_id = rules.approve(approval)["resume_job_id"]
     again = rules.decide(wake, bash(ASKS))
-    assert again.effect == "ask" and again.approval_id != approval
+    assert again.decision == "deny" and again.approval_id == approval and "resume turn" in again.reason
+    assert rules.get(approval)["status"] == "approved"
+    assert rules.decide(store.get(resume_id), bash(ASKS)).decision == "allow"
+    assert rules.get(approval)["status"] == "consumed"
 
 
 def test_a_cancelled_resume_turn_leaves_the_card_approvable(tmp_path):
@@ -707,3 +712,150 @@ def test_an_in_flight_grant_holds_back_an_allowed_retry_in_a_later_chat_turn(tmp
                    "(NULL,'allow','shell','^curl ','all','test','2026-11-26T00:00:00')")
     retry = rules.decide(b, bash(ASKS))
     assert retry.decision == "deny" and "already granted" in retry.reason
+
+
+# --- policy-3: one per-action reservation (rules._reserve) for allow, approve, deny and the resume turn ---
+
+def allow_curl(store):
+    with closing(store._connect()) as db:
+        db.execute("INSERT INTO action_rules (bot_id,effect,kind,pattern,scope,note,created_at) VALUES "
+                   "(NULL,'allow','shell','^curl ','all','test','2026-11-26T00:00:00')")
+
+
+def test_a_chat_card_moved_to_a_wake_up_still_holds_back_later_chat_turns(tmp_path):
+    # Codex r12 #1: the card's latest asking turn was a wake-up; it is still the chat task's card
+    store, bot, rules = setup(tmp_path)
+    chat = running(store, bot)
+    approval = rules.decide(chat, bash(ASKS)).approval_id
+    store.finish(chat.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    wake = running(store, bot, source="wakeup")
+    assert rules.decide(wake, bash(ASKS)).approval_id == approval        # reused: one task
+    assert rules.get(approval)["source"] == "wakeup"
+    store.finish(wake.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    later = running(store, bot)
+    resume_id = rules.approve(approval)["resume_job_id"]
+    asked = rules.decide(later, bash(ASKS))
+    assert asked.decision == "deny" and asked.approval_id == approval and "resume turn" in asked.reason
+    allow_curl(store)
+    allowed = rules.decide(later, bash(ASKS))
+    assert allowed.decision == "deny" and allowed.approval_id == approval
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0] == 1
+    assert rules.decide(store.get(resume_id), bash(ASKS)).decision == "allow"
+    assert rules.get(approval)["status"] == "consumed"
+
+
+def test_an_allow_settles_the_tasks_open_card_so_a_later_approve_cannot_run_it_twice(tmp_path):
+    # Codex r12 #2, allow first: the card is closed in the allow's transaction; approve and deny then refuse
+    from botoffice.rules import RuleError
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    allow_curl(store)
+    assert rules.decide(a, bash(ASKS)).decision == "allow"
+    assert rules.get(approval)["status"] == "settled"
+    with pytest.raises(RuleError):
+        rules.approve(approval)
+    with pytest.raises(RuleError):
+        rules.deny(approval)
+    with closing(store._connect()) as db:
+        assert db.execute("SELECT COUNT(*) FROM jobs WHERE origin_job_id IS NOT NULL").fetchone()[0] == 0
+    assert any(r["tool"] == "approval settled" for r in audit(store))
+    assert any("ran without the card" in m.text for m in store.list_messages(bot.id))
+
+
+def test_another_tasks_card_is_not_settled_by_an_allow(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    routine = running(store, bot, source="routine")
+    approval = rules.decide(routine, bash(ASKS)).approval_id
+    allow_curl(store)
+    assert rules.decide(running(store, bot), bash(ASKS)).decision == "allow"
+    assert rules.get(approval)["status"] == "pending"
+
+
+def test_approve_first_then_an_allow_in_the_asking_turn_is_held_back(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    resume_id = rules.approve(approval)["resume_job_id"]
+    allow_curl(store)
+    held = rules.decide(a, bash(ASKS))
+    assert held.decision == "deny" and held.approval_id == approval
+    assert rules.decide(store.get(resume_id), bash(ASKS)).decision == "allow"   # exactly once, there
+    assert rules.get(approval)["status"] == "consumed"
+
+
+def test_deny_first_then_an_allow_in_the_asking_turn_never_runs(tmp_path):
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    rules.deny(approval, follow_up=False)
+    allow_curl(store)
+    assert rules.decide(a, bash(ASKS)).decision == "deny"
+
+
+@pytest.mark.parametrize("owner", ["approve", "deny"])
+def test_an_owner_decision_during_a_slow_sudo_review_is_seen_before_the_allow(tmp_path, monkeypatch, owner):
+    # Codex r12 #2 on the sudo path: the decision lands while the review runs; the allow comes after it
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    monkeypatch.setattr(rules, "evaluate", lambda job, action: ("review", "sudo-review", "sudo"))
+    monkeypatch.setattr(rules, "_sudo_log", lambda *args, **kw: True)
+
+    def review(job, action):
+        (rules.approve(approval) if owner == "approve" else rules.deny(approval, follow_up=False))
+        return "allow", "fine"
+    monkeypatch.setattr(rules, "_sudo_review", review)
+    decision = rules.decide(a, bash(ASKS))
+    assert decision.decision == "deny" and decision.approval_id == approval
+    assert rules.get(approval)["status"] == ("approved" if owner == "approve" else "denied")
+
+
+def race_allow_and_approve(path):
+    import threading
+
+    from botoffice.rules import RuleError
+    store, bot, rules = setup(path)
+    a = running(store, bot)
+    approval = rules.decide(a, bash(ASKS)).approval_id
+    allow_curl(store)
+    out = {}
+
+    def approve():
+        try:
+            out["approve"] = rules.approve(approval)["resume_job_id"]
+        except RuleError:
+            out["approve"] = None
+
+    def allow():
+        out["allow"] = rules.decide(a, bash(ASKS)).decision
+    threads = [threading.Thread(target=approve), threading.Thread(target=allow)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return out
+
+
+def test_concurrent_allow_and_approve_run_the_action_once(tmp_path):
+    # either the allow ran (and approve was refused), or the approve won (and the allow was held back); never both
+    for n in range(8):
+        out = race_allow_and_approve(tmp_path / str(n))
+        assert (out["allow"] == "allow") != bool(out["approve"])
+
+
+def test_a_second_card_for_a_step_already_approved_and_in_flight_is_refused(tmp_path):
+    from botoffice.rules import RuleError
+    store, bot, rules = setup(tmp_path)
+    a = running(store, bot)
+    old = rules.decide(a, bash(ASKS)).approval_id
+    with closing(store._connect()) as db:   # timed out long ago: not reused, so a new card comes
+        db.execute("UPDATE approvals SET status='expired', created_at='2026-01-01T00:00:00+00:00' WHERE id=?", (old,))
+    store.finish(a.id, JobStatus.INCOMPLETE, outcome="waiting_on_user: x")
+    new = rules.decide(running(store, bot), bash(ASKS)).approval_id
+    assert new != old
+    rules.approve(new)
+    with pytest.raises(RuleError, match="already approved"):
+        rules.approve(old)
+    assert rules.get(old)["status"] == "expired"

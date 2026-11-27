@@ -2955,6 +2955,7 @@ function approvalState(a) {
   if (a.status === "pending") return "Waiting for you" + (a.expires_at ? " · until " + new Date(a.expires_at).toLocaleTimeString([], { timeStyle: "short" }) : "");
   if (a.status === "approved") return "Approved · the bot runs it once";
   if (a.status === "consumed") return "Approved · run once";
+  if (a.status === "settled") return "Not needed · the policy allowed it, it ran without the card";
   if (a.status === "denied") return "Denied · the task is stopped";
   return a.resumed ? "Approved · the bot didn't use it within a day" : "No answer in time · the task is stopped";
 }
