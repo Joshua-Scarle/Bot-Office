@@ -419,6 +419,8 @@ def test_to_default_goes_to_the_default_bot(spaced, value):
     ("id=D-B8 to=" + "Test Bot" + "x" * 200, "to_too_long"),
     ('id=D-1 note="unfinished to=Lead', "header_unclosed_quote"),
     ("\u201d \u201c id=D-2 to=Lead", "header_unclosed_quote"),
+    ("id=D-Z1 to=def\u200bault", "to_invisible_chars"),
+    ('id=D-Z2 to="Test\u00adBot"', "to_invisible_chars"),
     ("id=D-B9 to=\u201cTest Bot kind=task", "header_unclosed_quote"),
 ])
 def test_unclear_to_is_undeliverable_not_guessed(spaced, line, code):

@@ -30,6 +30,7 @@ import secrets
 import stat as stat_mod
 import sys
 import tempfile
+import unicodedata
 import threading
 import time
 import urllib.error
@@ -422,18 +423,24 @@ MAX_TARGET = 200
 TARGET_HEADER_ERRORS = {"header_unclosed_quote": "a quote in the header was not closed",
                         "to_too_long": f"it is longer than {MAX_TARGET} characters",
                         "to_conflict": "it was given twice",
+                        "to_invisible_chars": "it has control or invisible characters",
                         "to_empty": "it was empty", "to_trailing_text": "text followed the closing quote"}
 # a known key at a word start: an unquoted value runs up to the next one (so "to=Test Bot kind=task" reads
 # to="Test Bot"); a quoted value ("..." or curly double quotes) runs to its closing quote
 _HEADER_KEY = re.compile(r"(?<!\S)(" + "|".join(HEADER_KEYS) + r")=", re.I)
 # double quotes only: a single quote is an apostrophe as often as not (O'Neil), so it is a plain character
 _QUOTES = {'"': '"', "\u201c": "\u201d"}
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
+_FILLERS = frozenset("\u115f\u1160\u3164\uffa0\u2800")  # blank-looking letters
+
+
+def _invisible(char: str) -> bool:
+    """A control, format (zero-width, bidi, soft hyphen...), private-use or unassigned character, or a filler."""
+    return unicodedata.category(char) in ("Cc", "Cf", "Co", "Cn", "Cs") or char in _FILLERS
 
 
 def _norm_value(value: str) -> str:
     """A header value as text: control and invisible format characters dropped, runs of spaces collapsed."""
-    return " ".join(_CONTROL.sub("", value).split())
+    return " ".join("".join(c for c in value if not _invisible(c) or c in " \t").split())
 
 
 class Inbound(NamedTuple):
@@ -484,6 +491,9 @@ def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
                 problems.setdefault(key, "trailing_text")  # to="Test" Bot: neither half is a safe reading
         else:
             value = rest[start:following]
+        if any(_invisible(c) and c not in " \t" for c in value):
+            problems.setdefault(key, "invisible_chars")  # to=def<zero-width>ault is not "default": not read
+            continue
         value = _norm_value(value)
         if not value:
             problems.setdefault(key, "empty")
