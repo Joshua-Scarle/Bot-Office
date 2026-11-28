@@ -507,8 +507,10 @@ def test_header_values_with_spaces_in_other_fields():
     # a key inside a quoted value is part of the value; keys are matched case-insensitively at word starts
     fields, _, problems = duet_bridge.parse_inbound(f'{HEADER} TO="a kind=task b" Kind=result notto=x\nx')
     assert fields == {"to": "a kind=task b", "kind": "result notto=x"} and problems == {}
-    fields, _, problems = duet_bridge.parse_inbound(f"{HEADER} to=Test Bot to=test  bot\nx")
+    fields, _, problems = duet_bridge.parse_inbound(f"{HEADER} to=Test Bot to=Test  Bot\nx")
     assert fields["to"] == "Test Bot" and problems == {}  # the same name twice is not a conflict
+    _, _, problems = duet_bridge.parse_inbound(f'{HEADER} to="Test Bot" to="TEST BOT"\nx')
+    assert problems == {"to": "conflict"}  # two spellings may be two bots
 
 
 def test_spaced_thread_is_canonical_and_outbound_from_name_is_quoted(spaced):

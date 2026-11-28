@@ -412,7 +412,8 @@ HEADER_KEYS = ("id", "to", "thread", "kind", "reply_to")
 # fixed codes for a to= the header could not say clearly (stored as the row's error until _drain reports it)
 # a "not delivered" notice held back by a send limit waits for a later poll (NOTICE_WAIT, not charged); one
 # that failed in passing is tried again up to NOTICE_ATTEMPTS times (NOTICE_RETRY)
-NOTICE_WAIT = frozenset({"rate_attempts", "rate_bot", "rate_minute", "rate_limited", "stopping"})  # not charged
+NOTICE_WAIT = frozenset({"rate_attempts", "rate_bot", "rate_minute", "rate_day", "rate_limited",
+                         "stopping"})  # not charged
 NOTICE_RETRY = frozenset({"repo_check_failed", "network"})
 NOTICE_ATTEMPTS = 30
 MAX_TARGET = 200
@@ -441,7 +442,7 @@ class Inbound(NamedTuple):
 def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
     """(fields, problems) for the header after the "[Duet -> Bot Office]" prefix. A value is quoted, or runs up
     to the next known key; unknown words before the first key are ignored. A key given twice with different
-    values, an unclosed quote or an empty value is a problem, never a guess."""
+    values (compared exactly, after spacing), an unclosed quote or an empty value is a problem, never a guess."""
     fields: dict[str, str] = {}
     problems: dict[str, str] = {}
     marks = list(_HEADER_KEY.finditer(rest))
@@ -468,7 +469,7 @@ def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
         value = _norm_value(value)
         if not value:
             problems.setdefault(key, "empty")
-        elif key in fields and fields[key].casefold() != value.casefold():
+        elif key in fields and fields[key] != value:  # exact: two spellings may name two different bots
             problems[key] = "conflict"
         else:
             fields.setdefault(key, value)
