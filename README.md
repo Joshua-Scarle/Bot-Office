@@ -143,6 +143,14 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.48
+
+**Duet bridge: bot names with spaces, and no silent fallback.**
+
+- **`to=` with spaces works.** A header value runs up to the next known key, or can be quoted, so `to=Test Bot kind=task` and `to="Test Bot"` both reach the bot "Test Bot". `to=` takes a bot id, name or alias; the same parsing applies to the other header fields.
+- **An unknown target is reported, never guessed.** Only a missing `to=` or `to=default` goes to `default_bot`. A `to=` that matches no bot or several, or a header that cannot be read safely (unmatched quote, control or invisible characters, a `to=` given twice with different values), is not delivered: the log records the code and Duet gets a `kind=error` review saying why. That notice is retried past the send limits and posted once.
+- **Docs corrected.** The controller's GitHub token is handed to bot runs for ticketed git and `gh` calls, so it must stay a fine-grained token limited to the mailbox repository ([docs/DUET-BRIDGE.md](docs/DUET-BRIDGE.md), "GitHub token").
+
 ## What changed in 0.12.46
 
 **Security fixes: auto-merge evidence, sudo-review prompt injection, and no personal email in public commits.**
@@ -1336,16 +1344,16 @@ desk inbox post --to "Ops Bot" --from "Grok Lead" --thread THREAD --text "Please
 
 A two-way message channel between Bot-Office and Claude Duet, with no public endpoint on the host and no model tokens spent while idle. Design and trade-offs: [docs/DUET-BRIDGE.md](docs/DUET-BRIDGE.md). The mailbox is one long-lived pull request in a **private** repository (never this public one):
 
-- **Duet to Bot-Office:** Duet posts a PR conversation comment whose first line is `[Duet -> Bot Office] id=... to=<bot> thread=<id> kind=task|question|result|fyi` (the arrow may also be written as a Unicode arrow). A controller thread polls the PR's comments with a conditional request (`If-None-Match`; an unchanged list answers `304`, which GitHub does not count against the rate limit). An unedited comment (`updated_at` equal to `created_at`) from an allowed GitHub account is recorded as pending, then delivered once to the named bot (else `default_bot`) as untrusted data with its sender, id, thread and a reply hint: steered into the bot's running or queued turn if it has one, else a new turn. The controller adds an `eyes` reaction as a read receipt. Other comments, and the controller's own, are ignored.
+- **Duet to Bot-Office:** Duet posts a PR conversation comment whose first line is `[Duet -> Bot Office] id=... to=<bot> thread=<id> kind=task|question|result|fyi` (the arrow may also be written as a Unicode arrow). A value runs to the next known key or can be quoted, so `to=Test Bot` and `to="Test Bot"` both name the bot "Test Bot"; `to=` takes a bot id, name or alias. Only a missing `to=` or `to=default` goes to `default_bot`; an unknown, ambiguous or unreadable `to=` is not delivered and is answered with a `kind=error` review giving the reason ([details](docs/DUET-BRIDGE.md)). A controller thread polls the PR's comments with a conditional request (`If-None-Match`; an unchanged list answers `304`, which GitHub does not count against the rate limit). An unedited comment (`updated_at` equal to `created_at`) from an allowed GitHub account is recorded as pending, then delivered once to the named bot as untrusted data with its sender, id, thread and a reply hint: steered into the bot's running or queued turn if it has one, else a new turn. The controller adds an `eyes` reaction as a read receipt. Other comments, and the controller's own, are ignored.
 - **Bot-Office to Duet:** a bot runs `desk duet send`; the controller posts a pull request review (`event: COMMENT`) headed `[Bot Office -> Duet] id=BO-xxxxxxxx from=<bot> to=<to> thread=<id> reply_to=<id> kind=<kind>`. It is a review, not a conversation comment, because only review events wake the subscribed Duet session.
 
-Setup: the controller's own GitHub token (`github-token` in the control directory, the one already used for GitHub access, never handed to a bot) needs read access and comment/review access on the mailbox repository. Put the config in the control directory as `duet_mailbox.json` (mode `0600`; a file readable by group or others is refused). Never commit it. Fields:
+Setup: the controller's own GitHub token (`github-token` in the control directory, the one already used for GitHub access) needs read access and comment/review access on the mailbox repository. That token is also handed to bot runs for ticketed git and `gh` calls ([GitHub credentials](docs/APPROVALS.md)), so any bot can use it: keep it a fine-grained token limited to the mailbox repository (see "GitHub token" in [docs/DUET-BRIDGE.md](docs/DUET-BRIDGE.md)). Put the config in the control directory as `duet_mailbox.json` (mode `0600`; a file readable by group or others is refused). Never commit it. Fields:
 
 | Field | Meaning |
 |---|---|
 | `repo` | `owner/mailbox-repo` (private) |
 | `pr` | pull request number |
-| `default_bot` | bot that gets messages with no or an unknown `to` |
+| `default_bot` | bot that gets messages with no `to` or `to=default` (an unknown `to` is reported back, never sent here) |
 | `interval` | poll seconds, default 4, clamped to 2..60 |
 | `allowed_authors` | GitHub logins whose comments are accepted, resolved once to numeric account ids and pinned; empty means the token's own account |
 | `senders` | bots (names or ids) a job token may send as, besides `default_bot`; the master token may send as any bot |

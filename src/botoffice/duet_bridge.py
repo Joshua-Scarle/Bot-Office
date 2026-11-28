@@ -13,7 +13,9 @@
   why Duet's own sends (conversation comments) do not wake Duet and are read by the poller instead.
 
 Stdlib only; HTTP goes through an injectable transport so tests never touch the network. The GitHub
-token comes from rules.github_token (the controller's own file) and is never logged or handed out.
+token comes from rules.github_token (the controller's own file) and is never logged here. It is the same token
+bot runs get for ticketed git and gh calls (api /v1/agent/github-token), so it must stay limited to the mailbox
+repository (docs/DUET-BRIDGE.md, "GitHub token").
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ import secrets
 import stat as stat_mod
 import sys
 import tempfile
+import unicodedata
 import threading
 import time
 import urllib.error
@@ -38,7 +41,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote
 
 from . import rules, watchers
@@ -382,6 +385,19 @@ def _clean(value: str, limit: int = 64) -> str:
     return _SAFE.sub("_", value)[:limit]
 
 
+def _display(value: str, limit: int = 80) -> str:
+    """A header value quoted back to the sender: printable, one line, quotes dropped, capped."""
+    shown = _norm_value(str(value or "")).replace("'", "").replace('"', "")
+    return shown[:limit] + ("..." if len(shown) > limit else "")
+
+
+def _header_value(value: str, limit: int = 80) -> str:
+    """An outbound header value: as is when it has only safe characters, else quoted (from_name="Test Bot"), so a
+    reader can tell where it ends."""
+    shown = _norm_value(str(value or "")).replace('"', "")[:limit]  # an apostrophe stays (O'Neil)
+    return shown if not _SAFE.search(shown) else f'"{shown}"'
+
+
 def _stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -393,19 +409,111 @@ def _parse_stamp(value: str) -> datetime | None:
         return None
 
 
-def parse_inbound(body: str) -> tuple[dict[str, str], str] | None:
-    """(header fields, text) for a Duet to Bot Office comment, else None."""
-    lines = _FOOTER.sub("", (body or "").lstrip("﻿")).split("\n", 1)
-    first = lines[0].rstrip("\r").strip()
-    match = _INBOUND_PREFIX.match(first)
+HEADER_KEYS = ("id", "to", "thread", "kind", "reply_to")
+# fixed codes for a to= the header could not say clearly (stored as the row's error until _drain reports it)
+# a "not delivered" notice held back by a send limit waits for a later poll (NOTICE_WAIT, not charged); any
+# other failure but a final one (NOTICE_FINAL) is tried again, up to NOTICE_ATTEMPTS times
+NOTICE_WAIT = frozenset({"rate_attempts", "rate_bot", "rate_minute", "rate_day", "rate_limited",
+                         "stopping"})  # not charged
+# a notice refused for one of these never will be posted (its text, or its id's earlier outcome): final
+NOTICE_FINAL = frozenset({"secret", "denylist", "send_unknown", "thread_cap", "reply_ambiguous",
+                          "sender_not_allowed", "id_alloc"})
+NOTICE_ATTEMPTS = 30
+MAX_TARGET = 200
+TARGET_HEADER_ERRORS = {"header_unclosed_quote": "a quote in the header was not closed",
+                        "header_invisible_chars": "the header line has control or invisible characters",
+                        "to_too_long": f"it is longer than {MAX_TARGET} characters",
+                        "to_conflict": "it was given twice",
+                        "to_empty": "it was empty", "to_trailing_text": "text followed the closing quote"}
+# a known key at a word start: an unquoted value runs up to the next one (so "to=Test Bot kind=task" reads
+# to="Test Bot"); a quoted value ("..." or curly double quotes) runs to its closing quote
+_HEADER_KEY = re.compile(r"(?<!\S)(" + "|".join(HEADER_KEYS) + r")=", re.I)
+# double quotes only: a single quote is an apostrophe as often as not (O'Neil), so it is a plain character
+_QUOTES = {'"': '"', "\u201c": "\u201d"}
+_FILLERS = frozenset("\u115f\u1160\u3164\uffa0\u2800")  # blank-looking letters
+
+
+def _invisible(char: str) -> bool:
+    """A control, format (zero-width, bidi, soft hyphen...), private-use or unassigned character, or a filler."""
+    return unicodedata.category(char) in ("Cc", "Cf", "Co", "Cn", "Cs") or char in _FILLERS
+
+
+def _norm_value(value: str) -> str:
+    """A header value as text: control and invisible format characters dropped, runs of spaces collapsed."""
+    return " ".join("".join(c for c in value if not _invisible(c) or c in " \t").split())
+
+
+class Inbound(NamedTuple):
+    fields: dict[str, str]  # known header keys (lower case) with their values, spaces kept
+    text: str
+    problems: dict[str, str]  # key -> fixed code ("unclosed_quote", "conflict", "empty") for unusable fields
+
+
+def _quote_spans(rest: str) -> list[tuple[int, int]] | None:
+    """(open, close) offsets of every quoted span in the header, left to right, or None when a quote never
+    closes or a closing curly quote has no opener: such a header cannot be read safely."""
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    while pos < len(rest):
+        char = rest[pos]
+        if char in _QUOTES:
+            close = rest.find(_QUOTES[char], pos + 1)
+            if close < 0:
+                return None
+            spans.append((pos, close))
+            pos = close + 1
+            continue
+        if char == "\u201d":
+            return None
+        pos += 1
+    return spans
+
+
+def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
+    """(fields, problems) for the header after the "[Duet -> Bot Office]" prefix. Quoted spans are found first,
+    across the whole header; a key inside one is text, never a field. A value is quoted, or runs up to the next
+    known key; unknown words before the first key are ignored. A key given twice with different values
+    (compared exactly, after spacing), an unmatched quote or an empty value is a problem, never a guess."""
+    if any(_invisible(c) and c not in " \t" for c in rest):
+        return {}, {"header": "invisible_chars"}  # anywhere in the line, quoted or not: nothing in it is read
+    spans = _quote_spans(rest)
+    if spans is None:
+        return {}, {"header": "unclosed_quote"}  # nothing in it is read: never delivered by a guess
+    opened = {start: close for start, close in spans}
+    marks = [m for m in _HEADER_KEY.finditer(rest) if not any(a < m.start() <= b for a, b in spans)]
+    fields: dict[str, str] = {}
+    problems: dict[str, str] = {}
+    for index, mark in enumerate(marks):
+        key = mark.group(1).lower()
+        start = mark.end()
+        following = marks[index + 1].start() if index + 1 < len(marks) else len(rest)
+        if start in opened:
+            value = rest[start + 1:opened[start]]
+            if rest[opened[start] + 1:following].strip():
+                problems.setdefault(key, "trailing_text")  # to="Test" Bot: neither half is a safe reading
+        else:
+            value = rest[start:following]
+        value = _norm_value(value)
+        if not value:
+            problems.setdefault(key, "empty")
+        elif key in fields and fields[key] != value:  # exact: two spellings may name two different bots
+            problems[key] = "conflict"
+        else:
+            fields.setdefault(key, value)
+    for key in problems:
+        fields.pop(key, None)
+    return fields, problems
+
+
+def parse_inbound(body: str) -> Inbound | None:
+    """(header fields, text, header problems) for a Duet to Bot Office comment, else None."""
+    lines = _FOOTER.sub("", (body or "").lstrip("\ufeff")).split("\n", 1)
+    first = lines[0].removesuffix("\r").strip(" \t")  # only the line ending and spaces: any other character
+    match = _INBOUND_PREFIX.match(first)               # stays, so the header check sees it
     if not match:
         return None
-    fields: dict[str, str] = {}
-    for token in first[match.end():].split():
-        key, sep, value = token.partition("=")
-        if sep and key.lower() in ("id", "to", "thread", "kind", "reply_to") and value:
-            fields[key.lower()] = value
-    return fields, (lines[1] if len(lines) > 1 else "").strip()[:MAX_TEXT]
+    fields, problems = parse_header(first[match.end():])
+    return Inbound(fields, (lines[1] if len(lines) > 1 else "").strip()[:MAX_TEXT], problems)
 
 
 @dataclass
@@ -795,13 +903,23 @@ class DuetBridge:
             return
         if created < floor:
             return  # older than the first start
-        fields, text = parsed
+        fields, problems = parsed.fields, parsed.problems
         msg_id = _clean(fields.get("id", "")) or f"GH-{comment_id}"
         reply_to = _clean(fields.get("reply_to", ""))
         kind_name = fields.get("kind", "fyi").lower()
         if kind_name not in IN_KINDS:
             kind_name = "fyi"
-        target = _clean(fields.get("to", ""), 200)
+        # the target keeps its spaces (bot names have them); a to= the header cannot say clearly is recorded
+        # with a fixed code, and _drain reports it as undeliverable instead of guessing a bot
+        target = fields.get("to", "")
+        if "header" in problems:
+            header_error = f"header_{problems['header']}"  # the whole header line is unreadable, to= too
+        elif "to" in problems:
+            header_error = f"to_{problems['to']}"
+        elif len(target) > MAX_TARGET:
+            header_error, target = "to_too_long", ""  # never resolved by a prefix
+        else:
+            header_error = None
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -810,7 +928,7 @@ class DuetBridge:
                     return  # already seen: recorded once only
                 thread = self._thread_for(db, config.mailbox, fields.get("thread", ""), reply_to, msg_id)
                 used = self._thread_used(db, config.mailbox, thread)
-                state, error = ("pending", None) if used < THREAD_CAP else ("refused", "thread_cap")
+                state, error = ("pending", header_error) if used < THREAD_CAP else ("refused", "thread_cap")
                 node_id = comment.get("node_id") if isinstance(comment.get("node_id"), str) else None
                 # the text itself is not stored: delivery reads it again over GraphQL with its edit state
                 db.execute(
@@ -913,9 +1031,9 @@ class DuetBridge:
                 or str(author.get("login") or "").lower() != row["author_login"] or not isinstance(node["body"], str):
             raise DuetError("the comment does not match what was recorded", 409, "comment_mismatch")
         parsed = parse_inbound(node["body"])
-        if parsed is None or (_clean(parsed[0].get("id", "")) or f"GH-{row['comment_id']}") != row["msg_id"]:
+        if parsed is None or (_clean(parsed.fields.get("id", "")) or f"GH-{row['comment_id']}") != row["msg_id"]:
             raise DuetError("the comment does not match what was recorded", 409, "comment_mismatch")
-        return parsed[1]
+        return parsed.text
 
     def _drain(self, config: DuetConfig, token: str, allowed: dict[int, str]) -> None:
         """Deliver pending inbound messages in order. Each batch starts with a fresh repository check, and stops
@@ -928,10 +1046,12 @@ class DuetBridge:
             self._recovered = True
         with self._db() as db:
             rows = db.execute("SELECT comment_id, msg_id, thread, kind, target, attempts, author_id, author_login, "
-                              "node_id FROM duet_messages WHERE direction='in' AND state='pending' AND mailbox=? "
+                              "node_id, error, state FROM duet_messages WHERE direction='in' AND state IN "
+                              "('pending','undeliverable') AND mailbox=? "
                               "ORDER BY comment_id", (config.mailbox,)).fetchall()
         if not rows:
             return
+        notices_held = False  # a send limit held a notice back: the others wait for a later poll too
         with self._gate:
             generation = self._repo_failures
         self.verify_repo(config, token, fresh=True)
@@ -940,16 +1060,21 @@ class DuetBridge:
             self._batch_still_valid(config, generation)
             allowed = self.allowed_authors(config, token)  # the current allowlist (resolved ids are cached)
             comment_id, msg_id, thread, target = row["comment_id"], row["msg_id"], row["thread"], row["target"] or ""
+            if row["state"] == "undeliverable":
+                if not notices_held:  # its notice was not posted yet: try again
+                    notices_held = not self._report_undeliverable(config, token, row)
+                continue
             if row["author_id"] is None or allowed.get(int(row["author_id"])) != row["author_login"]:
                 self._finish(comment_id, state="failed", error="author_not_allowed")
                 continue  # the author was removed from the allowlist since (or the row predates pinning)
-            bot = (self.store.find_bot(target) if target and target.lower() != "default" else None) \
-                or self.store.find_bot(config.default_bot)
+            bot, code, _why = self.resolve_target(config, target, row["error"])
             if bot is None:
-                self._finish(comment_id, state="failed", error="no_bot")
-                self._notice(config, token, thread=thread, reply_to=msg_id,
-                             text=f"Message {msg_id} was not delivered: bot '{_clean(target or config.default_bot)}' "
-                                  "was not found, and there is no usable default bot.")
+                # never a guess: an unknown, ambiguous or unclear to= is reported back, not sent to the default bot
+                self._finish(comment_id, state="undeliverable", error=code, attempts=0)
+                log.info("duet: comment %s undeliverable (%s)", comment_id, code)  # fixed code only, never header text
+                if not notices_held:
+                    notices_held = not self._report_undeliverable(config, token, {**dict(row), "error": code,
+                                                                                  "attempts": 0})
                 continue
             attempts = int(row["attempts"] or 0) + 1
             try:
@@ -989,6 +1114,60 @@ class DuetBridge:
                 raise
             except Exception as exc:  # noqa: BLE001
                 log.warning("duet reaction failed: %s", type(exc).__name__)
+
+    def _report_undeliverable(self, config: DuetConfig, token: str, row: Any) -> bool:
+        """Post the "not delivered" notice for an undeliverable row (state "undeliverable", error = its code),
+        then mark it failed. A notice held back by a send limit stays due, is not charged an attempt, and is
+        tried again on a later poll; any other failure but a final one is charged, up to NOTICE_ATTEMPTS. Its fixed id means a retry never posts it twice. It may pass the thread cap: the
+        message it answers was admitted under the cap, and each admitted message gets at most this one notice.
+        False when a send limit held it back (the caller stops trying more notices this poll)."""
+        code, target, comment_id = row["error"], row["target"] or "", row["comment_id"]
+        why = self.undeliverable_reason(config, code, target)
+        msg_id = row["msg_id"]
+        problem = self._notice(config, token, thread=row["thread"], reply_to=msg_id, msg_id=f"BO-ND-{comment_id}",
+                               text=f"Message {msg_id} was not delivered (undeliverable): {why}", over_cap=True)
+        if problem in NOTICE_WAIT:
+            return False
+        attempts = int(row["attempts"] or 0) + 1
+        if problem and problem not in NOTICE_FINAL and attempts < NOTICE_ATTEMPTS:
+            self._finish(comment_id, attempts=attempts)
+            return True
+        self._finish(comment_id, state="failed", attempts=attempts)
+        if problem:
+            log.warning("duet: comment %s undeliverable and its notice was not posted (%s)", comment_id, problem)
+        return True
+
+    def undeliverable_reason(self, config: DuetConfig, code: str, target: str) -> str:
+        """The reason told to the sender for an undeliverable code (worked out again: the bots may differ now)."""
+        how = 'Use the bot\'s id, or its exact name (quote a name with spaces: to="Test Bot"), or to=default.'
+        shown = _display(target, 80)
+        if code in TARGET_HEADER_ERRORS:
+            return f"the to= field could not be read ({TARGET_HEADER_ERRORS[code]}). {how}"
+        if code == "no_bot":
+            return f"it was for the default bot (no to= or to=default), and the default bot " \
+                   f"'{_display(config.default_bot, 80)}' was not found."
+        if code == "ambiguous_bot":
+            bots = self.store.match_bots(target)
+            names = ", ".join(f"{_display(b.name, 60)} (id {b.id})" for b in bots[:5])
+            return f"to='{shown}' matches more than one bot" + (f": {names}" if len(bots) > 1 else "") + \
+                ". Use the bot's id."
+        return f"to='{shown}' does not match any bot. {how}"
+
+    def resolve_target(self, config: DuetConfig, target: str, header_error: str | None = None
+                       ) -> tuple[Any, str, str]:
+        """(bot, "", "") for an inbound to=, else (None, fixed code, reason for the sender). Only a missing to=
+        or to=default means the default bot; anything else must name exactly one bot (id, name or alias)."""
+        if header_error in TARGET_HEADER_ERRORS:
+            code = header_error
+        elif not target or target.casefold() == "default":
+            bots = self.store.match_bots(config.default_bot)
+            code = "" if len(bots) == 1 else "no_bot"
+        else:
+            bots = self.store.match_bots(target)
+            code = "" if len(bots) == 1 else "unknown_bot" if not bots else "ambiguous_bot"
+        if not code:
+            return bots[0], "", ""
+        return None, code, self.undeliverable_reason(config, code, target)
 
     def _batch_still_valid(self, config: DuetConfig, generation: int) -> None:
         """Stop the delivery batch when a repository check failed since it began, or the config changed."""
@@ -1103,18 +1282,26 @@ class DuetBridge:
             raise DuetError("GitHub rate limit; try again later", 429, "rate_limited") from None
 
     def _notice(self, config: DuetConfig, token: str, *, thread: str, reply_to: str, text: str,
-                cap_notice: bool = False) -> None:  # noqa: D417
+                cap_notice: bool = False, msg_id: str | None = None, over_cap: bool = False
+                ) -> str | None:  # noqa: D417
         """The bridge's own error message, through the same checks and limits as any send (a thread-cap notice
-        may pass the thread cap, once per thread). Never raises."""
+        may pass the thread cap, once per thread). *msg_id* makes it idempotent. Never raises: None when it
+        was posted (or was before, same *msg_id*), else the fixed code why not."""
         try:
             self._send_limited(config, token, sender=NOTICE_SENDER, to="main", kind="error", thread=thread,
-                               reply_to=reply_to, text=text, msg_id=None, cap_notice=cap_notice)
+                               reply_to=reply_to, text=text, msg_id=msg_id, cap_notice=cap_notice,
+                               over_cap=over_cap)
         except (DuetError, OSError, _RateLimited, _Stopped) as exc:
-            log.warning("duet notice not sent (%s)", getattr(exc, "code", type(exc).__name__))
+            code = exc.code if isinstance(exc, DuetError) else \
+                "stopping" if isinstance(exc, _Stopped) else "rate_limited" if isinstance(exc, _RateLimited) \
+                else "network"
+            log.warning("duet notice not sent (%s)", code)
+            return code
+        return None
 
     def _send_limited(self, config: DuetConfig, token: str, *, sender: tuple[str, str], to: str, kind: str,
                       thread: str, reply_to: str, text: str, msg_id: str | None, cap_notice: bool = False,
-                      authorize: Callable[[DuetConfig], bool] | None = None,
+                      over_cap: bool = False, authorize: Callable[[DuetConfig], bool] | None = None,
                       job_alive: Callable[[], bool] | None = None) -> dict[str, Any]:
         with self._send_lock:
             # a send that waited for the lock is checked again against the config as it is now
@@ -1130,10 +1317,10 @@ class DuetBridge:
             self._check_job(job_alive)
             # limits and the attempt charge come first: no GitHub request before them
             key, msg_id, thread, done = self._reserve(config.mailbox, sender[0], thread, reply_to, kind, msg_id,
-                                                      cap_notice)
+                                                      cap_notice, over_cap)
             if done is not None:
                 return done  # the same id was sent before: idempotent
-            parts = [("id", msg_id), ("from", _clean(sender[0], 80)), ("from_name", _clean(sender[1], 80)),
+            parts = [("id", msg_id), ("from", _clean(sender[0], 80)), ("from_name", _header_value(sender[1])),
                      ("to", to), ("thread", thread), ("reply_to", reply_to), ("kind", kind)]
             header = "[Bot Office → Duet] " + " ".join(f"{k}={v}" for k, v in parts if v)
             body = f"{header}\n\n{text}"
@@ -1174,7 +1361,7 @@ class DuetBridge:
             raise DuetError("the sending job is no longer running", 403, "job_not_running")
 
     def _reserve(self, mailbox: str, sender_id: str, thread: str, reply_to: str, kind: str, msg_id: str | None,
-                 cap_notice: bool = False) -> tuple[int, str, str, dict[str, Any] | None]:
+                 cap_notice: bool = False, over_cap: bool = False) -> tuple[int, str, str, dict[str, Any] | None]:
         """Check the limits and record the send as reserved, in one write transaction, before any HTTP call."""
         moment = self.clock()
         with self._db() as db:
@@ -1231,7 +1418,7 @@ class DuetBridge:
                     if db.execute("SELECT 1 FROM duet_messages WHERE direction='out' AND mailbox=? AND thread=? "
                                   "AND target='cap_notice'", (mailbox, canonical)).fetchone():
                         raise DuetError("the thread-cap notice was already sent", 429, "thread_cap")
-                elif self._thread_used(db, mailbox, canonical) >= THREAD_CAP:
+                elif not over_cap and self._thread_used(db, mailbox, canonical) >= THREAD_CAP:
                     raise DuetError(f"thread cap of {THREAD_CAP} messages reached; start a new thread", 429,
                                     "thread_cap")
                 stamp = self._iso(moment)
@@ -1331,7 +1518,8 @@ class DuetBridge:
                 "last_poll_at": s.last_poll_at, "last_http_status": s.last_http_status, "polls": s.polls,
                 "not_modified": s.not_modified, "last_error": s.last_error, "errors": s.errors,
                 "inbound": counts.get("in", 0), "inbound_pending": states.get(("in", "pending"), 0),
-                "inbound_failed": states.get(("in", "failed"), 0) + states.get(("in", "refused"), 0),
+                "inbound_failed": states.get(("in", "failed"), 0) + states.get(("in", "refused"), 0)
+                + states.get(("in", "undeliverable"), 0),
                 "inbound_unknown": states.get(("in", "unknown"), 0),
                 "outbound": counts.get("out", 0), "outbound_unknown": states.get(("out", "unknown"), 0),
                 "latencies_seconds": latencies}

@@ -2171,6 +2171,32 @@ class JobStore:
                 ).fetchone()
         return _model(Bot, row, BOT_DATES)
 
+    def match_bots(self, ref: str) -> list[Bot]:
+        """Every bot *ref* names, for callers that must not guess: an exact id, name or alias first; when none
+        matches, the same ignoring case and runs of spaces. More than one bot means *ref* is ambiguous."""
+        ref = (ref or "").strip()
+        if not ref:
+            return []
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                "SELECT * FROM bots WHERE id=? OR name=? UNION SELECT bots.* FROM bot_aliases JOIN bots ON "
+                "bots.id = bot_aliases.bot_id WHERE bot_aliases.alias=? ORDER BY name", (ref, ref, ref)).fetchall()
+            if not rows:
+                def norm(value: str) -> str:
+                    return " ".join(str(value or "").split()).casefold()
+                want = norm(ref)
+                aliases: dict[str, set[str]] = {}
+                for alias, bot_id in db.execute("SELECT alias, bot_id FROM bot_aliases"):
+                    aliases.setdefault(str(bot_id), set()).add(norm(alias))
+                rows = [row for row in db.execute("SELECT * FROM bots ORDER BY name")
+                        if want in (norm(row["id"]), norm(row["name"])) or want in aliases.get(str(row["id"]), ())]
+        found: dict[str, Bot] = {}
+        for row in rows:
+            bot = _model(Bot, row, BOT_DATES)
+            if bot is not None:
+                found.setdefault(str(bot.id), bot)
+        return list(found.values())
+
     def list_bots(self) -> list[Bot]:
         with closing(self._connect()) as db:
             rows = db.execute(
