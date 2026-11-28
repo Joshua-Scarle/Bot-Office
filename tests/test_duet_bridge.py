@@ -348,9 +348,11 @@ def test_to_quoted_name_with_spaces(spaced):
     assert row["target"] == "Test Bot" and row["thread"] == "t1" and row["kind"] == "task"
 
 
-def test_to_curly_and_single_quotes(spaced):
+def test_to_curly_quotes_and_a_single_quote_is_plain(spaced):
     turns, _, _ = _deliver_one(spaced, "id=D-Q2 to=“Test Bot” kind=task")
     assert [t[0] for t in turns] == ["Test Bot"]
+    fields, _, problems = duet_bridge.parse_inbound(f"{HEADER} id=D-1 to=O'Neil Bot kind=task\nx")
+    assert fields["to"] == "O'Neil Bot" and problems == {}
 
 
 def test_to_unquoted_multi_word_name_runs_to_the_next_key(spaced):
@@ -454,7 +456,7 @@ def test_undeliverable_notice_waits_out_send_limits_and_gives_up_on_failures(spa
     b, _ = bridge(spaced, fake, clock=clock)
     b.poll_once()
     fake.add(f"{HEADER} id=D-G1 to=Nobody\none")
-    answers = ["rate_minute"] * 5 + ["network"] * 5
+    answers = ["rate_minute"] * 5 + ["repo_check_stale"] * 5
     monkeypatch.setattr(b, "_notice", lambda *a, **k: answers.pop(0))
     for _ in range(5):  # held back by a send limit: due, never charged
         b.poll_once()
@@ -466,6 +468,19 @@ def test_undeliverable_notice_waits_out_send_limits_and_gives_up_on_failures(spa
     assert rows(b, "in")[-1]["attempts"] == 1
     b.poll_once()
     assert rows(b, "in")[-1]["state"] == "failed" and rows(b, "in")[-1]["error"] == "unknown_bot"
+
+
+def test_a_final_notice_refusal_is_not_retried(spaced, monkeypatch):
+    write_config(spaced)
+    fake = Fake()
+    b, _ = bridge(spaced, fake)
+    b.poll_once()
+    fake.add(f"{HEADER} id=D-H1 to=Nobody\none")
+    calls = []
+    monkeypatch.setattr(b, "_notice", lambda *a, **k: calls.append(1) or "secret")
+    b.poll_once()
+    b.poll_once()
+    assert rows(b, "in")[-1]["state"] == "failed" and len(calls) == 1
 
 
 def test_a_burst_of_undeliverable_messages_is_reported_in_full(spaced):

@@ -410,11 +410,13 @@ def _parse_stamp(value: str) -> datetime | None:
 
 HEADER_KEYS = ("id", "to", "thread", "kind", "reply_to")
 # fixed codes for a to= the header could not say clearly (stored as the row's error until _drain reports it)
-# a "not delivered" notice held back by a send limit waits for a later poll (NOTICE_WAIT, not charged); one
-# that failed in passing is tried again up to NOTICE_ATTEMPTS times (NOTICE_RETRY)
+# a "not delivered" notice held back by a send limit waits for a later poll (NOTICE_WAIT, not charged); any
+# other failure but a final one (NOTICE_FINAL) is tried again, up to NOTICE_ATTEMPTS times
 NOTICE_WAIT = frozenset({"rate_attempts", "rate_bot", "rate_minute", "rate_day", "rate_limited",
                          "stopping"})  # not charged
-NOTICE_RETRY = frozenset({"repo_check_failed", "network"})
+# a notice refused for one of these never will be posted (its text, or its id's earlier outcome): final
+NOTICE_FINAL = frozenset({"secret", "denylist", "send_unknown", "thread_cap", "reply_ambiguous",
+                          "sender_not_allowed", "id_alloc"})
 NOTICE_ATTEMPTS = 30
 MAX_TARGET = 200
 TARGET_HEADER_ERRORS = {"header_unclosed_quote": "a quote in the header was not closed",
@@ -422,9 +424,10 @@ TARGET_HEADER_ERRORS = {"header_unclosed_quote": "a quote in the header was not 
                         "to_conflict": "it was given twice",
                         "to_empty": "it was empty", "to_trailing_text": "text followed the closing quote"}
 # a known key at a word start: an unquoted value runs up to the next one (so "to=Test Bot kind=task" reads
-# to="Test Bot"); a quoted value ("...", '...' or curly quotes) runs to its closing quote
+# to="Test Bot"); a quoted value ("..." or curly double quotes) runs to its closing quote
 _HEADER_KEY = re.compile(r"(?<!\S)(" + "|".join(HEADER_KEYS) + r")=", re.I)
-_QUOTES = {'"': '"', "'": "'", "\u201c": "\u201d", "\u2018": "\u2019"}
+# double quotes only: a single quote is an apostrophe as often as not (O'Neil), so it is a plain character
+_QUOTES = {'"': '"', "\u201c": "\u201d"}
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
 
 
@@ -1093,8 +1096,7 @@ class DuetBridge:
     def _report_undeliverable(self, config: DuetConfig, token: str, row: Any) -> bool:
         """Post the "not delivered" notice for an undeliverable row (state "undeliverable", error = its code),
         then mark it failed. A notice held back by a send limit stays due, is not charged an attempt, and is
-        tried again on a later poll; a passing failure (network, repository check) is charged, up to
-        NOTICE_ATTEMPTS. Its fixed id means a retry never posts it twice. It may pass the thread cap: the
+        tried again on a later poll; any other failure but a final one is charged, up to NOTICE_ATTEMPTS. Its fixed id means a retry never posts it twice. It may pass the thread cap: the
         message it answers was admitted under the cap, and each admitted message gets at most this one notice.
         False when a send limit held it back (the caller stops trying more notices this poll)."""
         code, target, comment_id = row["error"], row["target"] or "", row["comment_id"]
@@ -1105,7 +1107,7 @@ class DuetBridge:
         if problem in NOTICE_WAIT:
             return False
         attempts = int(row["attempts"] or 0) + 1
-        if problem in NOTICE_RETRY and attempts < NOTICE_ATTEMPTS:
+        if problem and problem not in NOTICE_FINAL and attempts < NOTICE_ATTEMPTS:
             self._finish(comment_id, attempts=attempts)
             return True
         self._finish(comment_id, state="failed", attempts=attempts)
