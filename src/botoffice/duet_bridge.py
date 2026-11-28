@@ -421,9 +421,9 @@ NOTICE_FINAL = frozenset({"secret", "denylist", "send_unknown", "thread_cap", "r
 NOTICE_ATTEMPTS = 30
 MAX_TARGET = 200
 TARGET_HEADER_ERRORS = {"header_unclosed_quote": "a quote in the header was not closed",
+                        "header_invisible_chars": "the header line has control or invisible characters",
                         "to_too_long": f"it is longer than {MAX_TARGET} characters",
                         "to_conflict": "it was given twice",
-                        "to_invisible_chars": "it has control or invisible characters",
                         "to_empty": "it was empty", "to_trailing_text": "text followed the closing quote"}
 # a known key at a word start: an unquoted value runs up to the next one (so "to=Test Bot kind=task" reads
 # to="Test Bot"); a quoted value ("..." or curly double quotes) runs to its closing quote
@@ -474,6 +474,8 @@ def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
     across the whole header; a key inside one is text, never a field. A value is quoted, or runs up to the next
     known key; unknown words before the first key are ignored. A key given twice with different values
     (compared exactly, after spacing), an unmatched quote or an empty value is a problem, never a guess."""
+    if any(_invisible(c) and c not in " \t" for c in rest):
+        return {}, {"header": "invisible_chars"}  # anywhere in the line, quoted or not: nothing in it is read
     spans = _quote_spans(rest)
     if spans is None:
         return {}, {"header": "unclosed_quote"}  # nothing in it is read: never delivered by a guess
@@ -491,9 +493,6 @@ def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
                 problems.setdefault(key, "trailing_text")  # to="Test" Bot: neither half is a safe reading
         else:
             value = rest[start:following]
-        if any(_invisible(c) and c not in " \t" for c in value):
-            problems.setdefault(key, "invisible_chars")  # to=def<zero-width>ault is not "default": not read
-            continue
         value = _norm_value(value)
         if not value:
             problems.setdefault(key, "empty")
@@ -913,8 +912,8 @@ class DuetBridge:
         # the target keeps its spaces (bot names have them); a to= the header cannot say clearly is recorded
         # with a fixed code, and _drain reports it as undeliverable instead of guessing a bot
         target = fields.get("to", "")
-        if "unclosed_quote" in problems.values():
-            header_error = "header_unclosed_quote"  # nothing after an unclosed quote can be read, to= neither
+        if "header" in problems:
+            header_error = f"header_{problems['header']}"  # the whole header line is unreadable, to= too
         elif "to" in problems:
             header_error = f"to_{problems['to']}"
         elif len(target) > MAX_TARGET:

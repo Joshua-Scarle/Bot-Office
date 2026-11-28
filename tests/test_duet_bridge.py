@@ -419,10 +419,13 @@ def test_to_default_goes_to_the_default_bot(spaced, value):
     ("id=D-B8 to=" + "Test Bot" + "x" * 200, "to_too_long"),
     ('id=D-1 note="unfinished to=Lead', "header_unclosed_quote"),
     ("\u201d \u201c id=D-2 to=Lead", "header_unclosed_quote"),
-    ("id=D-Z1 to=def\u200bault", "to_invisible_chars"),
-    ("id=D-Z3 to=default\v", "to_invisible_chars"),
-    ("id=D-Z4 to=default\x1c", "to_invisible_chars"),
-    ('id=D-Z2 to="Test\u00adBot"', "to_invisible_chars"),
+    ("id=D-Z1 to=def\u200bault", "header_invisible_chars"),
+    ("id=D-Z3 to=default\v", "header_invisible_chars"),
+    ("id=D-Z4 to=default\x1c", "header_invisible_chars"),
+    ('id=D-Z5 to="default"\v', "header_invisible_chars"),
+    ('id=D-Z6 to="default"\v kind=task', "header_invisible_chars"),
+    ('id=D-Z7 kind=task\u200b to=default', "header_invisible_chars"),
+    ('id=D-Z2 to="Test\u00adBot"', "header_invisible_chars"),
     ("id=D-B9 to=\u201cTest Bot kind=task", "header_unclosed_quote"),
 ])
 def test_unclear_to_is_undeliverable_not_guessed(spaced, line, code):
@@ -460,7 +463,7 @@ def test_undeliverable_notice_waits_out_send_limits_and_gives_up_on_failures(spa
     clock = Clock()
     b, _ = bridge(spaced, fake, clock=clock)
     b.poll_once()
-    fake.add(f"{HEADER} id=D-G1 to=Nobody\none")
+    fake.add(f"{HEADER} id=D-W1 to=Nobody\none")
     answers = ["rate_minute"] * 5 + ["repo_check_stale"] * 5
     monkeypatch.setattr(b, "_notice", lambda *a, **k: answers.pop(0))
     for _ in range(5):  # held back by a send limit: due, never charged
