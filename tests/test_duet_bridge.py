@@ -301,23 +301,144 @@ def test_allowed_authors_from_config_overrides_token_login_and_pins_ids(env):
     assert rec2.turns_posted == []
 
 
-def test_unknown_bot_falls_back_to_default_then_errors_without_one(env):
+def test_unknown_bot_is_undeliverable_never_the_default_and_missing_default_errors(env):
+    write_config(env)
+    fake = Fake()
+    clock = Clock()
+    b, rec = bridge(env, fake, clock=clock)
+    b.poll_once()
+    fake.add(f"{HEADER} id=D-8 to=Nobody\nhello")
+    b.poll_once()
+    assert rec.turns_posted == []  # no silent fallback to the default bot
+    err = fake.posted[-1]["body"]
+    assert err.startswith("[Bot Office → Duet]") and "kind=error" in err and "reply_to=D-8" in err
+    assert "undeliverable" in err and "to='Nobody' does not match any bot" in err
+    assert [r["error"] for r in rows(b, "in") if r["msg_id"] == "D-8"] == ["unknown_bot"]
+    write_config(env, default_bot="Missing")
+    clock.advance(120)  # past the per-sender notice limit
+    fake.add(f"{HEADER} id=D-9\nhello again", stamp="2026-01-01T12:02:01Z")
+    b.poll_once()
+    assert rec.turns_posted == []
+    err = fake.posted[-1]["body"]
+    assert "reply_to=D-9" in err and "not found" in err and "from=bot-office" in err
+    failed = [r for r in rows(b, "in") if r["msg_id"] == "D-9"][0]
+    assert failed["state"] == "failed" and failed["error"] == "no_bot"
+
+
+def _deliver_one(env, line, *, cid=None):
+    """Poll one inbound comment whose header line is *line*; (turns posted, notices posted, its row)."""
     write_config(env)
     fake = Fake()
     b, rec = bridge(env, fake)
     b.poll_once()
-    fake.add(f"{HEADER} id=D-8 to=Nobody\nhello")
+    fake.add(f"{HEADER} {line}\nbody text", cid=cid)
     b.poll_once()
-    assert [t[0] for t in rec.turns_posted] == ["Lead"]
-    write_config(env, default_bot="Missing")
-    fake.add(f"{HEADER} id=D-9 to=Nobody\nhello again")
-    b.poll_once()
-    assert len(rec.turns_posted) == 1
-    err = fake.posted[-1]["body"]
-    assert err.startswith("[Bot Office → Duet]") and "kind=error" in err and "reply_to=D-9" in err
-    assert "not found" in err and "from=bot-office" in err
-    failed = [r for r in rows(b, "in") if r["msg_id"] == "D-9"][0]
-    assert failed["state"] == "failed" and failed["error"] == "no_bot"
+    return rec.turns_posted, [p["body"] for p in fake.posted], rows(b, "in")[-1]
+
+
+@pytest.fixture
+def spaced(env):
+    env.test_bot = env.store.create_bot("Test Bot", "", "codex", None)
+    return env
+
+
+def test_to_quoted_name_with_spaces(spaced):
+    turns, notices, row = _deliver_one(spaced, 'id=D-Q1 to="Test Bot" thread=t1 kind=task')
+    assert [t[0] for t in turns] == ["Test Bot"] and notices == []
+    assert row["target"] == "Test Bot" and row["thread"] == "t1" and row["kind"] == "task"
+
+
+def test_to_curly_and_single_quotes(spaced):
+    turns, _, _ = _deliver_one(spaced, "id=D-Q2 to=“Test Bot” kind=task")
+    assert [t[0] for t in turns] == ["Test Bot"]
+
+
+def test_to_unquoted_multi_word_name_runs_to_the_next_key(spaced):
+    turns, notices, row = _deliver_one(spaced, "id=D-U1 to=Test Bot thread=t2 kind=question")
+    assert [t[0] for t in turns] == ["Test Bot"] and notices == []
+    assert row["target"] == "Test Bot" and row["thread"] == "t2" and row["kind"] == "question"
+
+
+def test_to_unquoted_name_as_the_last_field_and_case_and_spacing(spaced):
+    turns, _, _ = _deliver_one(spaced, "id=D-U2 kind=fyi to=test   bot ")
+    assert [t[0] for t in turns] == ["Test Bot"]
+
+
+def test_to_bot_id(spaced):
+    turns, notices, _ = _deliver_one(spaced, f"id=D-I9 to={spaced.test_bot.id} kind=task")
+    assert [t[0] for t in turns] == ["Test Bot"] and notices == []
+
+
+def test_to_unknown_name_is_reported_undeliverable(spaced, caplog):
+    caplog.set_level("INFO", logger="botoffice.duet")
+    turns, notices, row = _deliver_one(spaced, 'id=D-N1 to="Test Bott" kind=task')
+    assert turns == []
+    assert len(notices) == 1 and "reply_to=D-N1" in notices[0] and "kind=error" in notices[0]
+    assert "undeliverable" in notices[0] and "to='Test Bott' does not match any bot" in notices[0]
+    assert row["state"] == "failed" and row["error"] == "unknown_bot"
+    assert any("undeliverable (unknown_bot)" in r.getMessage() for r in caplog.records)
+
+
+def test_to_ambiguous_name_is_reported_undeliverable(spaced):
+    spaced.store.create_bot("TEST BOT", "", "codex", None)  # names are unique only with case
+    turns, notices, row = _deliver_one(spaced, "id=D-A1 to=test bot kind=task")
+    assert turns == []
+    assert len(notices) == 1 and "matches more than one bot" in notices[0] and str(spaced.test_bot.id) in notices[0]
+    assert row["state"] == "failed" and row["error"] == "ambiguous_bot"
+
+
+def test_to_ambiguous_when_one_bots_alias_is_another_bots_name(spaced):
+    with closing(spaced.store._connect()) as db:
+        db.execute("INSERT INTO bot_aliases (alias, bot_id) VALUES (?,?)", ("Test Bot", str(spaced.target.id)))
+        db.commit()
+    turns, notices, row = _deliver_one(spaced, 'id=D-A2 to="Test Bot"')
+    assert turns == [] and row["error"] == "ambiguous_bot" and "more than one bot" in notices[0]
+
+
+def test_to_missing_goes_to_the_default_bot(spaced):
+    turns, notices, row = _deliver_one(spaced, "id=D-M1 kind=task")
+    assert [t[0] for t in turns] == ["Lead"] and notices == [] and row["state"] == "delivered"
+
+
+@pytest.mark.parametrize("value", ["default", "DEFAULT", '"default"'])
+def test_to_default_goes_to_the_default_bot(spaced, value):
+    turns, notices, _ = _deliver_one(spaced, f"id=D-DF to={value} kind=task")
+    assert [t[0] for t in turns] == ["Lead"] and notices == []
+
+
+@pytest.mark.parametrize("line, code", [
+    ('id=D-B1 to="Test Bot kind=task', "to_unclosed_quote"),
+    ("id=D-B2 to=Test Bot to=Lead", "to_conflict"),
+    ('id=D-B3 to="" kind=task', "to_empty"),
+    ("id=D-B4 to= kind=task", "to_empty"),
+    ('id=D-B5 to="Test" Bot', "to_trailing_text"),
+])
+def test_unclear_to_is_undeliverable_not_guessed(spaced, line, code):
+    turns, notices, row = _deliver_one(spaced, line)
+    assert turns == [] and row["state"] == "failed" and row["error"] == code
+    assert len(notices) == 1 and "could not be read" in notices[0]
+
+
+def test_header_values_with_spaces_in_other_fields():
+    fields, _, problems = duet_bridge.parse_inbound(
+        f'{HEADER} junk id="D 7" to=Test Bot thread=my thread reply_to=BO-1 kind=task\nx')
+    assert problems == {}
+    assert fields == {"id": "D 7", "to": "Test Bot", "thread": "my thread", "reply_to": "BO-1", "kind": "task"}
+    # a key inside a quoted value is part of the value; keys are matched case-insensitively at word starts
+    fields, _, problems = duet_bridge.parse_inbound(f'{HEADER} TO="a kind=task b" Kind=result notto=x\nx')
+    assert fields == {"to": "a kind=task b", "kind": "result notto=x"} and problems == {}
+    fields, _, problems = duet_bridge.parse_inbound(f"{HEADER} to=Test Bot to=test  bot\nx")
+    assert fields["to"] == "Test Bot" and problems == {}  # the same name twice is not a conflict
+
+
+def test_spaced_thread_is_canonical_and_outbound_from_name_is_quoted(spaced):
+    turns, _, row = _deliver_one(spaced, "id=D-T1 to=Test Bot thread=my thread")
+    assert row["thread"] == "my_thread" and "thread=my_thread" in turns[0][1]
+    fake = Fake()
+    b, _ = bridge(spaced, fake)
+    b.send(text="hi", bot=spaced.test_bot, kind="fyi")
+    first = fake.posted[-1]["body"].split("\n", 1)[0]
+    assert f'from={spaced.test_bot.id} from_name="Test Bot" to=main' in first
 
 
 def test_missing_bot_notice_is_secret_scanned_and_rate_limited(env):
@@ -955,7 +1076,7 @@ def test_worker_records_fixed_error_codes(env):
 
 def test_generated_footer_is_stripped_from_inbound_text():
     body = f"{HEADER} id=D-1 to=Target\nreal text\n\n---\n_Generated by SomeTool_\nmore footer"
-    fields, text = duet_bridge.parse_inbound(body)
+    fields, text, _ = duet_bridge.parse_inbound(body)
     assert fields["id"] == "D-1" and text == "real text"
     assert duet_bridge.parse_inbound(f"{HEADER} id=D-2\n---\n_Generated by X_")[1] == ""
     assert duet_bridge.parse_inbound(f"{HEADER} id=D-3\nkeep\n---\nnot a footer")[1] == "keep\n---\nnot a footer"
