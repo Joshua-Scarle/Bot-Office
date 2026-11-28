@@ -394,7 +394,7 @@ def _display(value: str, limit: int = 80) -> str:
 def _header_value(value: str, limit: int = 80) -> str:
     """An outbound header value: as is when it has only safe characters, else quoted (from_name="Test Bot"), so a
     reader can tell where it ends."""
-    shown = _display(value, limit)
+    shown = _norm_value(str(value or "")).replace('"', "")[:limit]  # an apostrophe stays (O'Neil)
     return shown if not _SAFE.search(shown) else f'"{shown}"'
 
 
@@ -1144,7 +1144,8 @@ class DuetBridge:
         if code in TARGET_HEADER_ERRORS:
             return f"the to= field could not be read ({TARGET_HEADER_ERRORS[code]}). {how}"
         if code == "no_bot":
-            return f"no to= was given and the default bot '{_display(config.default_bot, 80)}' was not found."
+            return f"it was for the default bot (no to= or to=default), and the default bot " \
+                   f"'{_display(config.default_bot, 80)}' was not found."
         if code == "ambiguous_bot":
             bots = self.store.match_bots(target)
             names = ", ".join(f"{_display(b.name, 60)} (id {b.id})" for b in bots[:5])
