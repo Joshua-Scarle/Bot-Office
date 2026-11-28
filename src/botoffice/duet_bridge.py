@@ -442,33 +442,48 @@ class Inbound(NamedTuple):
     problems: dict[str, str]  # key -> fixed code ("unclosed_quote", "conflict", "empty") for unusable fields
 
 
+def _quote_spans(rest: str) -> list[tuple[int, int]] | None:
+    """(open, close) offsets of every quoted span in the header, left to right, or None when a quote never
+    closes or a closing curly quote has no opener: such a header cannot be read safely."""
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    while pos < len(rest):
+        char = rest[pos]
+        if char in _QUOTES:
+            close = rest.find(_QUOTES[char], pos + 1)
+            if close < 0:
+                return None
+            spans.append((pos, close))
+            pos = close + 1
+            continue
+        if char == "\u201d":
+            return None
+        pos += 1
+    return spans
+
+
 def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
-    """(fields, problems) for the header after the "[Duet -> Bot Office]" prefix. A value is quoted, or runs up
-    to the next known key; unknown words before the first key are ignored. A key given twice with different
-    values (compared exactly, after spacing), an unclosed quote or an empty value is a problem, never a guess."""
+    """(fields, problems) for the header after the "[Duet -> Bot Office]" prefix. Quoted spans are found first,
+    across the whole header; a key inside one is text, never a field. A value is quoted, or runs up to the next
+    known key; unknown words before the first key are ignored. A key given twice with different values
+    (compared exactly, after spacing), an unmatched quote or an empty value is a problem, never a guess."""
+    spans = _quote_spans(rest)
+    if spans is None:
+        return {}, {"header": "unclosed_quote"}  # nothing in it is read: never delivered by a guess
+    opened = {start: close for start, close in spans}
+    marks = [m for m in _HEADER_KEY.finditer(rest) if not any(a < m.start() <= b for a, b in spans)]
     fields: dict[str, str] = {}
     problems: dict[str, str] = {}
-    marks = list(_HEADER_KEY.finditer(rest))
-    pos = 0
     for index, mark in enumerate(marks):
-        if mark.start() < pos:
-            continue  # inside a quoted value
         key = mark.group(1).lower()
         start = mark.end()
-        close = _QUOTES.get(rest[start:start + 1])
-        if close:
-            end = rest.find(close, start + 1)
-            if end < 0:
-                problems.setdefault(key, "unclosed_quote")
-                break  # the rest of the line is the unclosed value: nothing after it is trusted
-            value, pos = rest[start + 1:end], end + 1
-            following = next((m for m in marks[index + 1:] if m.start() >= pos), None)
-            if rest[pos:following.start() if following else len(rest)].strip():
+        following = marks[index + 1].start() if index + 1 < len(marks) else len(rest)
+        if start in opened:
+            value = rest[start + 1:opened[start]]
+            if rest[opened[start] + 1:following].strip():
                 problems.setdefault(key, "trailing_text")  # to="Test" Bot: neither half is a safe reading
         else:
-            following = next((m for m in marks[index + 1:] if m.start() > start), None)
-            pos = following.start() if following else len(rest)
-            value = rest[start:pos]
+            value = rest[start:following]
         value = _norm_value(value)
         if not value:
             problems.setdefault(key, "empty")
@@ -476,8 +491,6 @@ def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
             problems[key] = "conflict"
         else:
             fields.setdefault(key, value)
-    if rest.count('"') % 2 or rest.count("\u201c") != rest.count("\u201d"):
-        problems.setdefault("header", "unclosed_quote")  # a quote somewhere that never closes: not readable
     for key in problems:
         fields.pop(key, None)
     return fields, problems

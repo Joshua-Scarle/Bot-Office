@@ -418,6 +418,7 @@ def test_to_default_goes_to_the_default_bot(spaced, value):
     ('id=D-B7 thread="open to=Test Bot', "header_unclosed_quote"),
     ("id=D-B8 to=" + "Test Bot" + "x" * 200, "to_too_long"),
     ('id=D-1 note="unfinished to=Lead', "header_unclosed_quote"),
+    ("\u201d \u201c id=D-2 to=Lead", "header_unclosed_quote"),
     ("id=D-B9 to=\u201cTest Bot kind=task", "header_unclosed_quote"),
 ])
 def test_unclear_to_is_undeliverable_not_guessed(spaced, line, code):
@@ -522,6 +523,11 @@ def test_header_values_with_spaces_in_other_fields():
     # a key inside a quoted value is part of the value; keys are matched case-insensitively at word starts
     fields, _, problems = duet_bridge.parse_inbound(f'{HEADER} TO="a kind=task b" Kind=result notto=x\nx')
     assert fields == {"to": "a kind=task b", "kind": "result notto=x"} and problems == {}
+    # a key inside any quoted span is text, also in a value no key owns
+    fields, _, problems = duet_bridge.parse_inbound(f'{HEADER} note="please route to=Lead kind=task" id=D-1\nx')
+    assert fields == {"id": "D-1"} and problems == {}
+    fields, _, problems = duet_bridge.parse_inbound(f'{HEADER} id=D-1 note="to=Lead" kind=task\nx')
+    assert fields == {"id": 'D-1 note="to=Lead"', "kind": "task"} and problems == {}
     fields, _, problems = duet_bridge.parse_inbound(f"{HEADER} to=Test Bot to=Test  Bot\nx")
     assert fields["to"] == "Test Bot" and problems == {}  # the same name twice is not a conflict
     _, _, problems = duet_bridge.parse_inbound(f'{HEADER} to="Test Bot" to="TEST BOT"\nx')
