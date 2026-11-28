@@ -1071,7 +1071,8 @@ class DuetBridge:
             if bot is None:
                 # never a guess: an unknown, ambiguous or unclear to= is reported back, not sent to the default bot
                 self._finish(comment_id, state="undeliverable", error=code, attempts=0)
-                log.info("duet: comment %s undeliverable (%s)", comment_id, code)  # fixed code only, never header text
+                # warning: the service log shows warnings and up; a fixed code only, never header text
+                log.warning("duet: comment %s undeliverable (%s)", comment_id, code)
                 if not notices_held:
                     notices_held = not self._report_undeliverable(config, token, {**dict(row), "error": code,
                                                                                   "attempts": 0})
