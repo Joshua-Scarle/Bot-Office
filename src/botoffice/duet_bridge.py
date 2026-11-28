@@ -410,6 +410,10 @@ def _parse_stamp(value: str) -> datetime | None:
 
 HEADER_KEYS = ("id", "to", "thread", "kind", "reply_to")
 # fixed codes for a to= the header could not say clearly (stored as the row's error until _drain reports it)
+# a "not delivered" notice that hit one of these is tried again on a later poll, up to NOTICE_ATTEMPTS times
+NOTICE_RETRY = frozenset({"rate_attempts", "rate_bot", "rate_minute", "rate_limited", "stopping",
+                          "repo_check_failed", "network"})
+NOTICE_ATTEMPTS = 30
 TARGET_HEADER_ERRORS = {"to_unclosed_quote": "a quote was not closed", "to_conflict": "it was given twice",
                         "to_empty": "it was empty", "to_trailing_text": "text followed the closing quote"}
 # a known key at a word start: an unquoted value runs up to the next one (so "to=Test Bot kind=task" reads
@@ -1003,7 +1007,8 @@ class DuetBridge:
             self._recovered = True
         with self._db() as db:
             rows = db.execute("SELECT comment_id, msg_id, thread, kind, target, attempts, author_id, author_login, "
-                              "node_id, error FROM duet_messages WHERE direction='in' AND state='pending' AND mailbox=? "
+                              "node_id, error, state FROM duet_messages WHERE direction='in' AND state IN "
+                              "('pending','undeliverable') AND mailbox=? "
                               "ORDER BY comment_id", (config.mailbox,)).fetchall()
         if not rows:
             return
@@ -1015,16 +1020,18 @@ class DuetBridge:
             self._batch_still_valid(config, generation)
             allowed = self.allowed_authors(config, token)  # the current allowlist (resolved ids are cached)
             comment_id, msg_id, thread, target = row["comment_id"], row["msg_id"], row["thread"], row["target"] or ""
+            if row["state"] == "undeliverable":
+                self._report_undeliverable(config, token, row)  # its notice was not posted yet: try again
+                continue
             if row["author_id"] is None or allowed.get(int(row["author_id"])) != row["author_login"]:
                 self._finish(comment_id, state="failed", error="author_not_allowed")
                 continue  # the author was removed from the allowlist since (or the row predates pinning)
-            bot, code, why = self.resolve_target(config, target, row["error"])
+            bot, code, _why = self.resolve_target(config, target, row["error"])
             if bot is None:
                 # never a guess: an unknown, ambiguous or unclear to= is reported back, not sent to the default bot
-                self._finish(comment_id, state="failed", error=code)
+                self._finish(comment_id, state="undeliverable", error=code, attempts=0)
                 log.info("duet: comment %s undeliverable (%s): to=%r", comment_id, code, _display(target, 80))
-                self._notice(config, token, thread=thread, reply_to=msg_id,
-                             text=f"Message {msg_id} was not delivered (undeliverable): {why}")
+                self._report_undeliverable(config, token, {**dict(row), "error": code, "attempts": 0})
                 continue
             attempts = int(row["attempts"] or 0) + 1
             try:
@@ -1065,27 +1072,53 @@ class DuetBridge:
             except Exception as exc:  # noqa: BLE001
                 log.warning("duet reaction failed: %s", type(exc).__name__)
 
+    def _report_undeliverable(self, config: DuetConfig, token: str, row: Any) -> None:
+        """Post the "not delivered" notice for an undeliverable row (state "undeliverable", error = its code),
+        then mark it failed. A notice held back by a send limit or a passing check stays due and is tried again
+        on the next poll (up to NOTICE_ATTEMPTS); its fixed id means a retry never posts it twice."""
+        code, target, comment_id = row["error"], row["target"] or "", row["comment_id"]
+        why = self.undeliverable_reason(config, code, target)
+        msg_id = row["msg_id"]
+        problem = self._notice(config, token, thread=row["thread"], reply_to=msg_id, msg_id=f"BO-ND-{comment_id}",
+                               text=f"Message {msg_id} was not delivered (undeliverable): {why}")
+        attempts = int(row["attempts"] or 0) + 1
+        if problem in NOTICE_RETRY and attempts < NOTICE_ATTEMPTS:
+            self._finish(comment_id, attempts=attempts)
+            return
+        self._finish(comment_id, state="failed", attempts=attempts)
+        if problem:
+            log.warning("duet: comment %s undeliverable and its notice was not posted (%s)", comment_id, problem)
+
+    def undeliverable_reason(self, config: DuetConfig, code: str, target: str) -> str:
+        """The reason told to the sender for an undeliverable code (worked out again: the bots may differ now)."""
+        how = 'Use the bot\'s id, or its exact name (quote a name with spaces: to="Test Bot"), or to=default.'
+        shown = _display(target, 80)
+        if code in TARGET_HEADER_ERRORS:
+            return f"the to= field could not be read ({TARGET_HEADER_ERRORS[code]}). {how}"
+        if code == "no_bot":
+            return f"no to= was given and the default bot '{_display(config.default_bot, 80)}' was not found."
+        if code == "ambiguous_bot":
+            bots = self.store.match_bots(target)
+            names = ", ".join(f"{_display(b.name, 60)} (id {b.id})" for b in bots[:5])
+            return f"to='{shown}' matches more than one bot" + (f": {names}" if len(bots) > 1 else "") + \
+                ". Use the bot's id."
+        return f"to='{shown}' does not match any bot. {how}"
+
     def resolve_target(self, config: DuetConfig, target: str, header_error: str | None = None
                        ) -> tuple[Any, str, str]:
         """(bot, "", "") for an inbound to=, else (None, fixed code, reason for the sender). Only a missing to=
         or to=default means the default bot; anything else must name exactly one bot (id, name or alias)."""
-        shown = _display(target, 80)
-        how = 'Use the bot\'s id, or its exact name (quote a name with spaces: to="Test Bot"), or to=default.'
         if header_error in TARGET_HEADER_ERRORS:
-            return None, header_error, f"the to= field could not be read ({TARGET_HEADER_ERRORS[header_error]}). {how}"
-        if not target or target.casefold() == "default":
+            code = header_error
+        elif not target or target.casefold() == "default":
             bots = self.store.match_bots(config.default_bot)
-            if len(bots) == 1:
-                return bots[0], "", ""
-            return None, "no_bot", (f"no to= was given and the default bot '{_display(config.default_bot, 80)}' "
-                                    "was not found.")
-        bots = self.store.match_bots(target)
-        if len(bots) == 1:
+            code = "" if len(bots) == 1 else "no_bot"
+        else:
+            bots = self.store.match_bots(target)
+            code = "" if len(bots) == 1 else "unknown_bot" if not bots else "ambiguous_bot"
+        if not code:
             return bots[0], "", ""
-        if not bots:
-            return None, "unknown_bot", f"to='{shown}' does not match any bot. {how}"
-        names = ", ".join(f"{_display(b.name, 60)} (id {b.id})" for b in bots[:5])
-        return None, "ambiguous_bot", f"to='{shown}' matches more than one bot: {names}. Use the bot's id."
+        return None, code, self.undeliverable_reason(config, code, target)
 
     def _batch_still_valid(self, config: DuetConfig, generation: int) -> None:
         """Stop the delivery batch when a repository check failed since it began, or the config changed."""
@@ -1200,14 +1233,20 @@ class DuetBridge:
             raise DuetError("GitHub rate limit; try again later", 429, "rate_limited") from None
 
     def _notice(self, config: DuetConfig, token: str, *, thread: str, reply_to: str, text: str,
-                cap_notice: bool = False) -> None:  # noqa: D417
+                cap_notice: bool = False, msg_id: str | None = None) -> str | None:  # noqa: D417
         """The bridge's own error message, through the same checks and limits as any send (a thread-cap notice
-        may pass the thread cap, once per thread). Never raises."""
+        may pass the thread cap, once per thread). *msg_id* makes it idempotent. Never raises: None when it
+        was posted (or was before, same *msg_id*), else the fixed code why not."""
         try:
             self._send_limited(config, token, sender=NOTICE_SENDER, to="main", kind="error", thread=thread,
-                               reply_to=reply_to, text=text, msg_id=None, cap_notice=cap_notice)
+                               reply_to=reply_to, text=text, msg_id=msg_id, cap_notice=cap_notice)
         except (DuetError, OSError, _RateLimited, _Stopped) as exc:
-            log.warning("duet notice not sent (%s)", getattr(exc, "code", type(exc).__name__))
+            code = exc.code if isinstance(exc, DuetError) else \
+                "stopping" if isinstance(exc, _Stopped) else "rate_limited" if isinstance(exc, _RateLimited) \
+                else "network"
+            log.warning("duet notice not sent (%s)", code)
+            return code
+        return None
 
     def _send_limited(self, config: DuetConfig, token: str, *, sender: tuple[str, str], to: str, kind: str,
                       thread: str, reply_to: str, text: str, msg_id: str | None, cap_notice: bool = False,
@@ -1428,7 +1467,8 @@ class DuetBridge:
                 "last_poll_at": s.last_poll_at, "last_http_status": s.last_http_status, "polls": s.polls,
                 "not_modified": s.not_modified, "last_error": s.last_error, "errors": s.errors,
                 "inbound": counts.get("in", 0), "inbound_pending": states.get(("in", "pending"), 0),
-                "inbound_failed": states.get(("in", "failed"), 0) + states.get(("in", "refused"), 0),
+                "inbound_failed": states.get(("in", "failed"), 0) + states.get(("in", "refused"), 0)
+                + states.get(("in", "undeliverable"), 0),
                 "inbound_unknown": states.get(("in", "unknown"), 0),
                 "outbound": counts.get("out", 0), "outbound_unknown": states.get(("out", "unknown"), 0),
                 "latencies_seconds": latencies}

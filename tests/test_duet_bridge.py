@@ -419,6 +419,45 @@ def test_unclear_to_is_undeliverable_not_guessed(spaced, line, code):
     assert len(notices) == 1 and "could not be read" in notices[0]
 
 
+def test_every_undeliverable_message_is_reported_even_past_the_send_limit(spaced):
+    write_config(spaced)
+    fake = Fake()
+    clock = Clock()
+    b, rec = bridge(spaced, fake, clock=clock)
+    b.poll_once()
+    fake.add(f"{HEADER} id=D-X1 to=Nobody\none")
+    fake.add(f"{HEADER} id=D-X2 to=Ghost Bot\ntwo")
+    b.poll_once()  # one notice per 3 s per sender: the second waits
+    assert len(fake.posted) == 1 and "D-X1" in fake.posted[0]["body"]
+    assert {r["msg_id"]: r["state"] for r in rows(b, "in")} == {"D-X1": "failed", "D-X2": "undeliverable"}
+    assert b.report()["inbound_failed"] == 2
+    clock.advance(5)
+    b.poll_once()
+    assert len(fake.posted) == 2 and "to='Ghost Bot' does not match any bot" in fake.posted[1]["body"]
+    assert "reply_to=D-X2" in fake.posted[1]["body"] and "id=BO-ND-" in fake.posted[1]["body"]
+    assert {r["msg_id"]: r["state"] for r in rows(b, "in")} == {"D-X1": "failed", "D-X2": "failed"}
+    clock.advance(5)
+    b.poll_once()
+    assert len(fake.posted) == 2 and rec.turns_posted == []  # reported once each, nothing delivered
+
+
+def test_undeliverable_notice_gives_up_after_its_attempts(spaced, monkeypatch):
+    monkeypatch.setattr(duet_bridge, "NOTICE_ATTEMPTS", 2)
+    write_config(spaced)
+    fake = Fake()
+    clock = Clock()
+    b, _ = bridge(spaced, fake, clock=clock)
+    b.poll_once()
+    fake.repo_status = 200
+    fake.add(f"{HEADER} id=D-G1 to=Nobody\none")
+    monkeypatch.setattr(b, "_notice", lambda *a, **k: "rate_minute")
+    b.poll_once()
+    assert rows(b, "in")[-1]["state"] == "undeliverable"
+    clock.advance(5)
+    b.poll_once()
+    assert rows(b, "in")[-1]["state"] == "failed" and rows(b, "in")[-1]["error"] == "unknown_bot"
+
+
 def test_header_values_with_spaces_in_other_fields():
     fields, _, problems = duet_bridge.parse_inbound(
         f'{HEADER} junk id="D 7" to=Test Bot thread=my thread reply_to=BO-1 kind=task\nx')
