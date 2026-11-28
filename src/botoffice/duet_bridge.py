@@ -410,9 +410,10 @@ def _parse_stamp(value: str) -> datetime | None:
 
 HEADER_KEYS = ("id", "to", "thread", "kind", "reply_to")
 # fixed codes for a to= the header could not say clearly (stored as the row's error until _drain reports it)
-# a "not delivered" notice that hit one of these is tried again on a later poll, up to NOTICE_ATTEMPTS times
-NOTICE_RETRY = frozenset({"rate_attempts", "rate_bot", "rate_minute", "rate_limited", "stopping",
-                          "repo_check_failed", "network"})
+# a "not delivered" notice held back by a send limit waits for a later poll (NOTICE_WAIT, not charged); one
+# that failed in passing is tried again up to NOTICE_ATTEMPTS times (NOTICE_RETRY)
+NOTICE_WAIT = frozenset({"rate_attempts", "rate_bot", "rate_minute", "rate_limited", "stopping"})  # not charged
+NOTICE_RETRY = frozenset({"repo_check_failed", "network"})
 NOTICE_ATTEMPTS = 30
 MAX_TARGET = 200
 TARGET_HEADER_ERRORS = {"header_unclosed_quote": "a quote in the header was not closed",
@@ -471,6 +472,8 @@ def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
             problems[key] = "conflict"
         else:
             fields.setdefault(key, value)
+    if rest.count('"') % 2 or rest.count("\u201c") != rest.count("\u201d"):
+        problems.setdefault("header", "unclosed_quote")  # a quote somewhere that never closes: not readable
     for key in problems:
         fields.pop(key, None)
     return fields, problems
@@ -1022,6 +1025,7 @@ class DuetBridge:
                               "ORDER BY comment_id", (config.mailbox,)).fetchall()
         if not rows:
             return
+        notices_held = False  # a send limit held a notice back: the others wait for a later poll too
         with self._gate:
             generation = self._repo_failures
         self.verify_repo(config, token, fresh=True)
@@ -1031,7 +1035,8 @@ class DuetBridge:
             allowed = self.allowed_authors(config, token)  # the current allowlist (resolved ids are cached)
             comment_id, msg_id, thread, target = row["comment_id"], row["msg_id"], row["thread"], row["target"] or ""
             if row["state"] == "undeliverable":
-                self._report_undeliverable(config, token, row)  # its notice was not posted yet: try again
+                if not notices_held:  # its notice was not posted yet: try again
+                    notices_held = not self._report_undeliverable(config, token, row)
                 continue
             if row["author_id"] is None or allowed.get(int(row["author_id"])) != row["author_login"]:
                 self._finish(comment_id, state="failed", error="author_not_allowed")
@@ -1041,7 +1046,9 @@ class DuetBridge:
                 # never a guess: an unknown, ambiguous or unclear to= is reported back, not sent to the default bot
                 self._finish(comment_id, state="undeliverable", error=code, attempts=0)
                 log.info("duet: comment %s undeliverable (%s)", comment_id, code)  # fixed code only, never header text
-                self._report_undeliverable(config, token, {**dict(row), "error": code, "attempts": 0})
+                if not notices_held:
+                    notices_held = not self._report_undeliverable(config, token, {**dict(row), "error": code,
+                                                                                  "attempts": 0})
                 continue
             attempts = int(row["attempts"] or 0) + 1
             try:
@@ -1082,22 +1089,28 @@ class DuetBridge:
             except Exception as exc:  # noqa: BLE001
                 log.warning("duet reaction failed: %s", type(exc).__name__)
 
-    def _report_undeliverable(self, config: DuetConfig, token: str, row: Any) -> None:
+    def _report_undeliverable(self, config: DuetConfig, token: str, row: Any) -> bool:
         """Post the "not delivered" notice for an undeliverable row (state "undeliverable", error = its code),
-        then mark it failed. A notice held back by a send limit or a passing check stays due and is tried again
-        on the next poll (up to NOTICE_ATTEMPTS); its fixed id means a retry never posts it twice."""
+        then mark it failed. A notice held back by a send limit stays due, is not charged an attempt, and is
+        tried again on a later poll; a passing failure (network, repository check) is charged, up to
+        NOTICE_ATTEMPTS. Its fixed id means a retry never posts it twice. It may pass the thread cap: the
+        message it answers was admitted under the cap, and each admitted message gets at most this one notice.
+        False when a send limit held it back (the caller stops trying more notices this poll)."""
         code, target, comment_id = row["error"], row["target"] or "", row["comment_id"]
         why = self.undeliverable_reason(config, code, target)
         msg_id = row["msg_id"]
         problem = self._notice(config, token, thread=row["thread"], reply_to=msg_id, msg_id=f"BO-ND-{comment_id}",
-                               text=f"Message {msg_id} was not delivered (undeliverable): {why}")
+                               text=f"Message {msg_id} was not delivered (undeliverable): {why}", over_cap=True)
+        if problem in NOTICE_WAIT:
+            return False
         attempts = int(row["attempts"] or 0) + 1
         if problem in NOTICE_RETRY and attempts < NOTICE_ATTEMPTS:
             self._finish(comment_id, attempts=attempts)
-            return
+            return True
         self._finish(comment_id, state="failed", attempts=attempts)
         if problem:
             log.warning("duet: comment %s undeliverable and its notice was not posted (%s)", comment_id, problem)
+        return True
 
     def undeliverable_reason(self, config: DuetConfig, code: str, target: str) -> str:
         """The reason told to the sender for an undeliverable code (worked out again: the bots may differ now)."""
@@ -1243,13 +1256,15 @@ class DuetBridge:
             raise DuetError("GitHub rate limit; try again later", 429, "rate_limited") from None
 
     def _notice(self, config: DuetConfig, token: str, *, thread: str, reply_to: str, text: str,
-                cap_notice: bool = False, msg_id: str | None = None) -> str | None:  # noqa: D417
+                cap_notice: bool = False, msg_id: str | None = None, over_cap: bool = False
+                ) -> str | None:  # noqa: D417
         """The bridge's own error message, through the same checks and limits as any send (a thread-cap notice
         may pass the thread cap, once per thread). *msg_id* makes it idempotent. Never raises: None when it
         was posted (or was before, same *msg_id*), else the fixed code why not."""
         try:
             self._send_limited(config, token, sender=NOTICE_SENDER, to="main", kind="error", thread=thread,
-                               reply_to=reply_to, text=text, msg_id=msg_id, cap_notice=cap_notice)
+                               reply_to=reply_to, text=text, msg_id=msg_id, cap_notice=cap_notice,
+                               over_cap=over_cap)
         except (DuetError, OSError, _RateLimited, _Stopped) as exc:
             code = exc.code if isinstance(exc, DuetError) else \
                 "stopping" if isinstance(exc, _Stopped) else "rate_limited" if isinstance(exc, _RateLimited) \
@@ -1260,7 +1275,7 @@ class DuetBridge:
 
     def _send_limited(self, config: DuetConfig, token: str, *, sender: tuple[str, str], to: str, kind: str,
                       thread: str, reply_to: str, text: str, msg_id: str | None, cap_notice: bool = False,
-                      authorize: Callable[[DuetConfig], bool] | None = None,
+                      over_cap: bool = False, authorize: Callable[[DuetConfig], bool] | None = None,
                       job_alive: Callable[[], bool] | None = None) -> dict[str, Any]:
         with self._send_lock:
             # a send that waited for the lock is checked again against the config as it is now
@@ -1276,7 +1291,7 @@ class DuetBridge:
             self._check_job(job_alive)
             # limits and the attempt charge come first: no GitHub request before them
             key, msg_id, thread, done = self._reserve(config.mailbox, sender[0], thread, reply_to, kind, msg_id,
-                                                      cap_notice)
+                                                      cap_notice, over_cap)
             if done is not None:
                 return done  # the same id was sent before: idempotent
             parts = [("id", msg_id), ("from", _clean(sender[0], 80)), ("from_name", _header_value(sender[1])),
@@ -1320,7 +1335,7 @@ class DuetBridge:
             raise DuetError("the sending job is no longer running", 403, "job_not_running")
 
     def _reserve(self, mailbox: str, sender_id: str, thread: str, reply_to: str, kind: str, msg_id: str | None,
-                 cap_notice: bool = False) -> tuple[int, str, str, dict[str, Any] | None]:
+                 cap_notice: bool = False, over_cap: bool = False) -> tuple[int, str, str, dict[str, Any] | None]:
         """Check the limits and record the send as reserved, in one write transaction, before any HTTP call."""
         moment = self.clock()
         with self._db() as db:
@@ -1377,7 +1392,7 @@ class DuetBridge:
                     if db.execute("SELECT 1 FROM duet_messages WHERE direction='out' AND mailbox=? AND thread=? "
                                   "AND target='cap_notice'", (mailbox, canonical)).fetchone():
                         raise DuetError("the thread-cap notice was already sent", 429, "thread_cap")
-                elif self._thread_used(db, mailbox, canonical) >= THREAD_CAP:
+                elif not over_cap and self._thread_used(db, mailbox, canonical) >= THREAD_CAP:
                     raise DuetError(f"thread cap of {THREAD_CAP} messages reached; start a new thread", 429,
                                     "thread_cap")
                 stamp = self._iso(moment)

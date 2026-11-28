@@ -415,6 +415,8 @@ def test_to_default_goes_to_the_default_bot(spaced, value):
     ('id="D-B6 to=Nobody', "header_unclosed_quote"),
     ('id=D-B7 thread="open to=Test Bot', "header_unclosed_quote"),
     ("id=D-B8 to=" + "Test Bot" + "x" * 200, "to_too_long"),
+    ('id=D-1 note="unfinished to=Lead', "header_unclosed_quote"),
+    ("id=D-B9 to=\u201cTest Bot kind=task", "header_unclosed_quote"),
 ])
 def test_unclear_to_is_undeliverable_not_guessed(spaced, line, code):
     turns, notices, row = _deliver_one(spaced, line)
@@ -444,21 +446,57 @@ def test_every_undeliverable_message_is_reported_even_past_the_send_limit(spaced
     assert len(fake.posted) == 2 and rec.turns_posted == []  # reported once each, nothing delivered
 
 
-def test_undeliverable_notice_gives_up_after_its_attempts(spaced, monkeypatch):
+def test_undeliverable_notice_waits_out_send_limits_and_gives_up_on_failures(spaced, monkeypatch):
     monkeypatch.setattr(duet_bridge, "NOTICE_ATTEMPTS", 2)
     write_config(spaced)
     fake = Fake()
     clock = Clock()
     b, _ = bridge(spaced, fake, clock=clock)
     b.poll_once()
-    fake.repo_status = 200
     fake.add(f"{HEADER} id=D-G1 to=Nobody\none")
-    monkeypatch.setattr(b, "_notice", lambda *a, **k: "rate_minute")
+    answers = ["rate_minute"] * 5 + ["network"] * 5
+    monkeypatch.setattr(b, "_notice", lambda *a, **k: answers.pop(0))
+    for _ in range(5):  # held back by a send limit: due, never charged
+        b.poll_once()
+        clock.advance(5)
+    row = rows(b, "in")[-1]
+    assert row["state"] == "undeliverable" and row["attempts"] == 0
     b.poll_once()
-    assert rows(b, "in")[-1]["state"] == "undeliverable"
     clock.advance(5)
+    assert rows(b, "in")[-1]["attempts"] == 1
     b.poll_once()
     assert rows(b, "in")[-1]["state"] == "failed" and rows(b, "in")[-1]["error"] == "unknown_bot"
+
+
+def test_a_burst_of_undeliverable_messages_is_reported_in_full(spaced):
+    write_config(spaced)
+    fake = Fake()
+    clock = Clock()
+    b, _ = bridge(spaced, fake, clock=clock)
+    b.poll_once()
+    for i in range(8):
+        fake.add(f"{HEADER} id=D-Z{i} to=Nobody {i}\nx")
+    for _ in range(40):
+        b.poll_once()
+        clock.advance(4)
+    assert sorted(p["body"].split("reply_to=")[1].split()[0] for p in fake.posted) == [f"D-Z{i}" for i in range(8)]
+    assert {r["state"] for r in rows(b, "in")} == {"failed"}
+
+
+def test_undeliverable_notice_passes_the_thread_cap(spaced, monkeypatch):
+    monkeypatch.setattr(duet_bridge, "THREAD_CAP", 2)
+    write_config(spaced)
+    fake = Fake()
+    clock = Clock()
+    b, rec = bridge(spaced, fake, clock=clock)
+    b.poll_once()
+    fake.add(f"{HEADER} id=D-C1 to=Test Bot thread=capped\nfirst")
+    b.poll_once()
+    clock.advance(5)
+    fake.add(f"{HEADER} id=D-C2 to=Nobody thread=capped\nsecond", stamp="2026-01-01T12:00:06Z")
+    b.poll_once()
+    assert [t[0] for t in rec.turns_posted] == ["Test Bot"]
+    assert len(fake.posted) == 1 and "reply_to=D-C2" in fake.posted[0]["body"] and "undeliverable" in fake.posted[0]["body"]
 
 
 def test_header_values_with_spaces_in_other_fields():
