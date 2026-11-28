@@ -143,6 +143,14 @@ Restricted-mode command lines:
 
 In restricted mode, Claude, Cursor and OpenCode keep the real `HOME` so the OS user's existing sign-in works; Codex gets `HOME=<workspace>` plus `CODEX_HOME`. OpenCode also inherits provider `*_API_KEY` environment variables from the service, without Bot-Office storing them.
 
+## What changed in 0.12.48
+
+**Duet bridge: bot names with spaces, and no silent fallback.**
+
+- **`to=` with spaces works.** A header value runs up to the next known key, or can be quoted, so `to=Test Bot kind=task` and `to="Test Bot"` both reach the bot "Test Bot". `to=` takes a bot id, name or alias; the same parsing applies to the other header fields.
+- **An unknown target is reported, never guessed.** Only a missing `to=` or `to=default` goes to `default_bot`. A `to=` that matches no bot or several, or a header that cannot be read safely (unmatched quote, control or invisible characters, a `to=` given twice with different values), is not delivered: the log records the code and Duet gets a `kind=error` review saying why. That notice is retried past the send limits and posted once.
+- **Docs corrected.** The controller's GitHub token is handed to bot runs for ticketed git and `gh` calls, so it must stay a fine-grained token limited to the mailbox repository ([docs/DUET-BRIDGE.md](docs/DUET-BRIDGE.md), "GitHub token").
+
 ## What changed in 0.12.46
 
 **Security fixes: auto-merge evidence, sudo-review prompt injection, and no personal email in public commits.**
