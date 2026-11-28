@@ -407,11 +407,14 @@ def test_to_default_goes_to_the_default_bot(spaced, value):
 
 
 @pytest.mark.parametrize("line, code", [
-    ('id=D-B1 to="Test Bot kind=task', "to_unclosed_quote"),
+    ('id=D-B1 to="Test Bot kind=task', "header_unclosed_quote"),
     ("id=D-B2 to=Test Bot to=Lead", "to_conflict"),
     ('id=D-B3 to="" kind=task', "to_empty"),
     ("id=D-B4 to= kind=task", "to_empty"),
     ('id=D-B5 to="Test" Bot', "to_trailing_text"),
+    ('id="D-B6 to=Nobody', "header_unclosed_quote"),
+    ('id=D-B7 thread="open to=Test Bot', "header_unclosed_quote"),
+    ("id=D-B8 to=" + "Test Bot" + "x" * 200, "to_too_long"),
 ])
 def test_unclear_to_is_undeliverable_not_guessed(spaced, line, code):
     turns, notices, row = _deliver_one(spaced, line)

@@ -414,7 +414,10 @@ HEADER_KEYS = ("id", "to", "thread", "kind", "reply_to")
 NOTICE_RETRY = frozenset({"rate_attempts", "rate_bot", "rate_minute", "rate_limited", "stopping",
                           "repo_check_failed", "network"})
 NOTICE_ATTEMPTS = 30
-TARGET_HEADER_ERRORS = {"to_unclosed_quote": "a quote was not closed", "to_conflict": "it was given twice",
+MAX_TARGET = 200
+TARGET_HEADER_ERRORS = {"header_unclosed_quote": "a quote in the header was not closed",
+                        "to_too_long": f"it is longer than {MAX_TARGET} characters",
+                        "to_conflict": "it was given twice",
                         "to_empty": "it was empty", "to_trailing_text": "text followed the closing quote"}
 # a known key at a word start: an unquoted value runs up to the next one (so "to=Test Bot kind=task" reads
 # to="Test Bot"); a quoted value ("...", '...' or curly quotes) runs to its closing quote
@@ -879,8 +882,15 @@ class DuetBridge:
             kind_name = "fyi"
         # the target keeps its spaces (bot names have them); a to= the header cannot say clearly is recorded
         # with a fixed code, and _drain reports it as undeliverable instead of guessing a bot
-        target = fields.get("to", "")[:200]
-        header_error = f"to_{problems['to']}" if "to" in problems else None
+        target = fields.get("to", "")
+        if "unclosed_quote" in problems.values():
+            header_error = "header_unclosed_quote"  # nothing after an unclosed quote can be read, to= neither
+        elif "to" in problems:
+            header_error = f"to_{problems['to']}"
+        elif len(target) > MAX_TARGET:
+            header_error, target = "to_too_long", ""  # never resolved by a prefix
+        else:
+            header_error = None
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -1030,7 +1040,7 @@ class DuetBridge:
             if bot is None:
                 # never a guess: an unknown, ambiguous or unclear to= is reported back, not sent to the default bot
                 self._finish(comment_id, state="undeliverable", error=code, attempts=0)
-                log.info("duet: comment %s undeliverable (%s): to=%r", comment_id, code, _display(target, 80))
+                log.info("duet: comment %s undeliverable (%s)", comment_id, code)  # fixed code only, never header text
                 self._report_undeliverable(config, token, {**dict(row), "error": code, "attempts": 0})
                 continue
             attempts = int(row["attempts"] or 0) + 1
