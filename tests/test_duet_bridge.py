@@ -420,6 +420,8 @@ def test_to_default_goes_to_the_default_bot(spaced, value):
     ('id=D-1 note="unfinished to=Lead', "header_unclosed_quote"),
     ("\u201d \u201c id=D-2 to=Lead", "header_unclosed_quote"),
     ("id=D-Z1 to=def\u200bault", "to_invisible_chars"),
+    ("id=D-Z3 to=default\v", "to_invisible_chars"),
+    ("id=D-Z4 to=default\x1c", "to_invisible_chars"),
     ('id=D-Z2 to="Test\u00adBot"', "to_invisible_chars"),
     ("id=D-B9 to=\u201cTest Bot kind=task", "header_unclosed_quote"),
 ])
@@ -515,6 +517,11 @@ def test_undeliverable_notice_passes_the_thread_cap(spaced, monkeypatch):
     b.poll_once()
     assert [t[0] for t in rec.turns_posted] == ["Test Bot"]
     assert len(fake.posted) == 1 and "reply_to=D-C2" in fake.posted[0]["body"] and "undeliverable" in fake.posted[0]["body"]
+
+
+def test_header_line_ending_is_crlf_tolerant():
+    fields, text, problems = duet_bridge.parse_inbound(f"{HEADER} id=D-1 to=Test Bot \t\r\nbody")
+    assert fields["to"] == "Test Bot" and text == "body" and problems == {}
 
 
 def test_header_values_with_spaces_in_other_fields():

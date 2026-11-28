@@ -509,8 +509,8 @@ def parse_header(rest: str) -> tuple[dict[str, str], dict[str, str]]:
 def parse_inbound(body: str) -> Inbound | None:
     """(header fields, text, header problems) for a Duet to Bot Office comment, else None."""
     lines = _FOOTER.sub("", (body or "").lstrip("\ufeff")).split("\n", 1)
-    first = lines[0].rstrip("\r").strip()
-    match = _INBOUND_PREFIX.match(first)
+    first = lines[0].removesuffix("\r").strip(" \t")  # only the line ending and spaces: any other character
+    match = _INBOUND_PREFIX.match(first)               # stays, so the header check sees it
     if not match:
         return None
     fields, problems = parse_header(first[match.end():])
